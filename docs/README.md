@@ -19,6 +19,7 @@ Operator and contributor documentation for **shikigami**.
 | Run the local-queue daemon | [serve.md](serve.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Run metrics export | [metrics.md](metrics.md) |
+| Network egress policy | [network.md](network.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
 | See accepted design decisions | [decisions/](decisions/) |
