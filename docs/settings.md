@@ -104,6 +104,16 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 
 Modes are host policy, not an OS sandbox.
 
+### `[context]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `load_project_rules` | `true` | Load first matching rules file from the **workspace** root |
+| `rules_filenames` | `["AGENTS.md","shikigami.rules.md"]` | Tried in order; flat names only |
+| `max_rules_bytes` | `32768` | Truncate with a marker when larger |
+
+Rules are **untrusted text** injected into the system prompt (not executed). Disable with `load_project_rules = false`.
+
 ### `[run]`
 
 | Field | Default | Description |
