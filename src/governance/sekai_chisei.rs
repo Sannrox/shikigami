@@ -355,9 +355,9 @@ impl GovernancePort for SekaiChiseiGovernance {
             tools: tools
                 .iter()
                 .map(|t| ProtoToolDef {
-                    name: t.name.into(),
-                    description: t.description.into(),
-                    input_schema_json: t.schema.into(),
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    input_schema_json: t.schema.clone(),
                 })
                 .collect(),
             system: system.into(),

@@ -154,6 +154,20 @@ pub struct ToolsSettings {
     pub mode: PermissionMode,
     #[serde(default = "default_bash_timeout")]
     pub bash_timeout_secs: u64,
+    /// MCP servers whose tools are registered as `mcp.<name>.<tool>`.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerSettings>,
+}
+
+/// Stdio MCP server configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerSettings {
+    pub name: String,
+    /// Executable. Special value `mock` registers an offline echo tool for tests.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 fn default_bash_timeout() -> u64 {
@@ -166,6 +180,7 @@ impl Default for ToolsSettings {
             enabled: Vec::new(),
             mode: PermissionMode::Custom,
             bash_timeout_secs: default_bash_timeout(),
+            mcp_servers: Vec::new(),
         }
     }
 }

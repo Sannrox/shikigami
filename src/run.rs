@@ -349,8 +349,11 @@ impl Engine {
         }
 
         let enabled = self.config.tools.effective_enabled();
-        let tools =
+        let mut tools =
             ToolRegistry::with_builtins(&ws.path, enabled, self.config.tools.bash_timeout_secs)?;
+        if !self.config.tools.mcp_servers.is_empty() {
+            crate::mcp::attach_mcp_servers(&mut tools, &self.config).await?;
+        }
         let tool_defs = tools.definitions();
 
         let max_turns = self.config.run.max_turns;
