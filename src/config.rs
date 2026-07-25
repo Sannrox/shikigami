@@ -121,11 +121,29 @@ impl Default for WorkspaceSettings {
     }
 }
 
+/// Host tool authority mode (composes with `enabled` allow-list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Use `enabled` if set, otherwise the safe coding default (no bash).
+    #[default]
+    Custom,
+    /// Read/search only (+ report/escalate).
+    Read,
+    /// Read + write/edit (no bash).
+    Workspace,
+    /// Workspace + bash.
+    WorkspaceExec,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsSettings {
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// Expands to a base tool set; non-empty `enabled` intersects (further restricts).
+    #[serde(default)]
+    pub mode: PermissionMode,
     #[serde(default = "default_bash_timeout")]
     pub bash_timeout_secs: u64,
 }
@@ -138,28 +156,59 @@ impl Default for ToolsSettings {
     fn default() -> Self {
         Self {
             enabled: Vec::new(),
+            mode: PermissionMode::Custom,
             bash_timeout_secs: default_bash_timeout(),
         }
     }
 }
 
 impl ToolsSettings {
-    pub fn effective_enabled(&self) -> Vec<String> {
-        if self.enabled.is_empty() {
-            // Local default: no bash unless explicitly enabled (safety).
-            vec![
+    /// Safe coding default without bash (also used by `custom` when enabled is empty).
+    pub fn default_coding_tools() -> Vec<String> {
+        vec![
+            "read_file".into(),
+            "write_file".into(),
+            "edit".into(),
+            "multi_edit".into(),
+            "glob".into(),
+            "grep".into(),
+            "report".into(),
+            "escalate".into(),
+        ]
+    }
+
+    pub fn tools_for_mode(mode: PermissionMode) -> Vec<String> {
+        match mode {
+            PermissionMode::Custom => Self::default_coding_tools(),
+            PermissionMode::Read => vec![
                 "read_file".into(),
-                "write_file".into(),
-                "edit".into(),
-                "multi_edit".into(),
                 "glob".into(),
                 "grep".into(),
                 "report".into(),
                 "escalate".into(),
-            ]
-        } else {
-            self.enabled.clone()
+            ],
+            PermissionMode::Workspace => Self::default_coding_tools(),
+            PermissionMode::WorkspaceExec => {
+                let mut t = Self::default_coding_tools();
+                t.push("bash".into());
+                t
+            }
         }
+    }
+
+    pub fn effective_enabled(&self) -> Vec<String> {
+        let base = match self.mode {
+            PermissionMode::Custom if self.enabled.is_empty() => Self::default_coding_tools(),
+            PermissionMode::Custom => self.enabled.clone(),
+            other => Self::tools_for_mode(other),
+        };
+        if matches!(self.mode, PermissionMode::Custom) || self.enabled.is_empty() {
+            return base;
+        }
+        // Non-custom mode + explicit enabled → intersect (operator can only remove tools).
+        base.into_iter()
+            .filter(|t| self.enabled.iter().any(|e| e == t))
+            .collect()
     }
 }
 
@@ -577,6 +626,33 @@ unknown_thing = true
             let is_parse = matches!(err, ConfigError::Parse { .. });
             prop_assert!(is_parse, "expected Parse for key {}, got {}", key, err);
         });
+    }
+
+    #[test]
+    fn permission_mode_read_excludes_write_and_bash() {
+        let mut c = Config::default();
+        c.tools.mode = PermissionMode::Read;
+        let e = c.tools.effective_enabled();
+        assert!(e.contains(&"read_file".into()));
+        assert!(e.contains(&"grep".into()));
+        assert!(!e.contains(&"write_file".into()));
+        assert!(!e.contains(&"bash".into()));
+    }
+
+    #[test]
+    fn permission_mode_workspace_exec_includes_bash() {
+        let mut c = Config::default();
+        c.tools.mode = PermissionMode::WorkspaceExec;
+        assert!(c.tools.effective_enabled().contains(&"bash".into()));
+    }
+
+    #[test]
+    fn permission_mode_intersect_with_enabled() {
+        let mut c = Config::default();
+        c.tools.mode = PermissionMode::Workspace;
+        c.tools.enabled = vec!["read_file".into(), "bash".into()];
+        let e = c.tools.effective_enabled();
+        assert_eq!(e, vec!["read_file".to_string()]);
     }
 
     #[test]

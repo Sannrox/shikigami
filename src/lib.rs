@@ -36,7 +36,7 @@ pub mod state;
 pub mod tools;
 pub mod workspace;
 
-pub use config::{Config, ConfigSource};
+pub use config::{Config, ConfigSource, PermissionMode};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};

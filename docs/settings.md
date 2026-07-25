@@ -91,11 +91,18 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `enabled` | `[]` (→ safe defaults) | Allow-list of tool names (default includes `read_file`, `write_file`, `edit`, `glob`, `grep`, `report`, `escalate`; not `bash`) |
+| `mode` | `custom` | `custom` \| `read` \| `workspace` \| `workspace_exec` |
+| `enabled` | `[]` | Allow-list; with non-`custom` mode, **intersects** the mode set |
 | `bash_timeout_secs` | `60` | Default bash timeout (capped at 120s) |
 
-When `enabled` is empty, the effective set is
-`read_file`, `write_file`, `edit`, `report` — **not** `bash`.
+| Mode | Effective tools (before optional `enabled` intersect) |
+| --- | --- |
+| `custom` | `enabled` if set, else coding default (writes/search, **no** bash) |
+| `read` | `read_file`, `glob`, `grep`, `report`, `escalate` |
+| `workspace` | coding default (no bash) |
+| `workspace_exec` | coding default + `bash` |
+
+Modes are host policy, not an OS sandbox.
 
 ### `[run]`
 
