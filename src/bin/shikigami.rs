@@ -50,6 +50,12 @@ enum Command {
         /// Resume a previous run from its local checkpoint.
         #[arg(long)]
         resume: Option<String>,
+        /// Operator answer when resuming a parked (`escalate`) run.
+        #[arg(long)]
+        answer: Option<String>,
+        /// Read operator answer from a file (UTF-8); alternative to --answer.
+        #[arg(long)]
+        answer_file: Option<PathBuf>,
     },
 }
 
@@ -109,21 +115,48 @@ async fn run() -> anyhow::Result<()> {
             keep_workspace,
             timeout_secs,
             resume,
+            answer,
+            answer_file,
         } => {
             if resume.is_none() && task.is_empty() {
                 anyhow::bail!("task is required unless --resume is set");
             }
+            let answer = match (answer, answer_file) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("use only one of --answer or --answer-file");
+                }
+                (Some(a), None) => Some(a),
+                (None, Some(path)) => Some(std::fs::read_to_string(path)?),
+                (None, None) => None,
+            };
             let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
             let mut request = RunRequest::new(task);
             request.keep_workspace = keep_workspace;
             request.timeout = timeout_secs.map(std::time::Duration::from_secs);
             request.resume_run_id = resume;
+            request.resume_answer = answer;
             let result = harness.run(request).await?;
             println!(
-                "run {} turns={} success={} termination={:?} summary={}",
-                result.run_id, result.turns, result.success, result.termination, result.summary
+                "run {} turns={} success={} termination={} summary={}",
+                result.run_id,
+                result.turns,
+                result.success,
+                result.termination.as_str(),
+                result.summary
             );
             println!("workspace {}", result.workspace.display());
+            if let Some(park) = &result.park {
+                println!("parked reason={}", park.reason);
+                println!("parked question={}", park.question);
+                println!(
+                    "resume with: shikigami run --resume {} --answer \"...\"",
+                    result.run_id
+                );
+                // Distinct exit code for park (not silent success).
+                return Err(anyhow::anyhow!(
+                    "run parked awaiting operator answer (exit semantics: non-zero)"
+                ));
+            }
             if !result.success {
                 anyhow::bail!("run reported failure");
             }

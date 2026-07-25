@@ -84,7 +84,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | --- | --- |
 | `version [--json]` | Product identity |
 | `doctor [--json]` | Effective profile, adapters, and health (probes the plane when configured) |
-| `run <task> [--keep-workspace]` | Execute one run |
+| `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
 
 | Flag / env | Purpose |
 | --- | --- |
