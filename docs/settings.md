@@ -111,8 +111,11 @@ Modes are host policy, not an OS sandbox.
 | `load_project_rules` | `true` | Load first matching rules file from the **workspace** root |
 | `rules_filenames` | `["AGENTS.md","shikigami.rules.md"]` | Tried in order; flat names only |
 | `max_rules_bytes` | `32768` | Truncate with a marker when larger |
+| `skills_root` | unset → `.shikigami/skills` under workspace | Root for skill packs |
+| `skills` | `[]` | Skill directory names (`<root>/<id>/SKILL.md`) |
+| `max_skill_bytes` | `32768` | Per-skill size cap |
 
-Rules are **untrusted text** injected into the system prompt (not executed). Disable with `load_project_rules = false`.
+Rules and skills are **untrusted text** injected into the system prompt (not executed). Disable rules with `load_project_rules = false`. Leave `skills` empty for no packs.
 
 ### `[run]`
 
