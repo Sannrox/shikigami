@@ -59,6 +59,15 @@ before changing boundaries.
 Project Skills for repeated workflows live under `.agents/skills/`. Repository
 agent rules: [AGENTS.md](AGENTS.md).
 
+## Dependabot
+
+Dependabot opens weekly cargo and GitHub Actions update PRs.
+
+- Merge green **minor/patch** group PRs after required CI checks pass.
+- Hold **major** version bumps for explicit review (breaking potential).
+- Do not weaken CI or branch protection to land dependency updates.
+- Prefer Dependabot groups already configured in `.github/dependabot.yml`.
+
 ## Pull requests
 
 1. Keep the change focused (one outcome per PR).
