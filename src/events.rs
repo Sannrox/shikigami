@@ -38,6 +38,10 @@ pub enum HarnessEvent {
         success: bool,
         summary: String,
     },
+    /// Prompt attribution for the active run.
+    Prompt {
+        prompt_id: String,
+    },
 }
 
 pub trait EventSink: Send + Sync {

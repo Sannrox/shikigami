@@ -16,7 +16,8 @@ use crate::model::{ChatMessage, ModelError, ModelPort};
 use crate::tools::{ToolError, ToolExecutor, ToolOutput};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 
-pub const SYSTEM_PROMPT: &str = include_str!("prompts/harness-v1.md");
+/// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
+pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
 
 /// How a run ended (success or not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,6 +84,8 @@ pub struct RunResult {
     pub termination: RunTermination,
     /// Set when `termination == Parked`.
     pub park: Option<ParkInfo>,
+    /// Versioned prompt id used for this run (`name:sha256`).
+    pub prompt_id: String,
 }
 
 /// Operator-visible park payload (library + CLI).
@@ -264,11 +267,15 @@ impl Engine {
             )
         };
 
+        let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
         let handle = self
             .governance
             .begin_run(&run_id, &task, request.logical_operation_id.as_deref())
             .await?;
 
+        self.events.emit(HarnessEvent::Prompt {
+            prompt_id: prompt_id.clone(),
+        });
         self.events.emit(HarnessEvent::Message {
             level: "info".into(),
             text: format!("workspace {}", ws.path.display()),
@@ -599,6 +606,7 @@ impl Engine {
             workspace: ws.path,
             termination,
             park: park_info,
+            prompt_id,
         })
     }
 }
