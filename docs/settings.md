@@ -102,6 +102,12 @@ When `enabled` is empty, the effective set is
 | Field | Default | Description |
 | --- | --- | --- |
 | `max_turns` | `50` | Hard stop for the turn loop |
+| `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |
+
+CLI / env override: `shikigami run --timeout-secs N` or `SHIKIGAMI_RUN_TIMEOUT_SECS`.
+Embedders may also pass `RunRequest.timeout` and a cooperative
+`RunRequest.cancel` (`tokio::sync::watch::Receiver<bool>`). Cancel and timeout
+surface as errors (`RunError::Cancelled` / `TimedOut`), never as silent success.
 
 ### `[events]`
 

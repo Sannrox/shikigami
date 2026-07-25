@@ -22,16 +22,15 @@ async fn example() -> Result<(), shikigami::HarnessError> {
         return Err(shikigami::HarnessError::Doctor(report.lines.join("; ")));
     }
 
-    let result = harness
-        .run(RunRequest {
-            task: "implement the change described in the issue".into(),
-            keep_workspace: true,
-        })
-        .await?;
+    let mut request = RunRequest::new("implement the change described in the issue");
+    request.keep_workspace = true;
+    // Optional: request.timeout = Some(std::time::Duration::from_secs(600));
+    // Optional: request.cancel = Some(cancel_rx); // watch::Receiver<bool>
+    let result = harness.run(request).await?;
 
     println!(
-        "run={} success={} turns={} summary={}",
-        result.run_id, result.success, result.turns, result.summary
+        "run={} success={} turns={} termination={:?} summary={}",
+        result.run_id, result.success, result.turns, result.termination, result.summary
     );
     println!("workspace={}", result.workspace.display());
     Ok(())

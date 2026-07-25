@@ -10,12 +10,9 @@
 //! let mut config = Config::default();
 //! config.governance.adapter = "local".into();
 //! let harness = Harness::from_config(config, state)?;
-//! let result = harness
-//!     .run(RunRequest {
-//!         task: "write hello".into(),
-//!         keep_workspace: true,
-//!     })
-//!     .await?;
+//! let mut req = RunRequest::new("write hello");
+//! req.keep_workspace = true;
+//! let result = harness.run(req).await?;
 //! assert!(result.success);
 //! # Ok(())
 //! # }
@@ -38,7 +35,7 @@ pub mod workspace;
 pub use config::{Config, ConfigSource};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
-pub use run::{RunRequest, RunResult, SYSTEM_PROMPT};
+pub use run::{RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use state::{StateError, StateRoot};
 
 /// Library liveness probe.
