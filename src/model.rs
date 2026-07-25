@@ -89,7 +89,7 @@ impl ScriptedModel {
             .model
             .script_json
             .clone()
-            .unwrap_or_else(|| default_script_json());
+            .unwrap_or_else(default_script_json);
         let wire: Vec<ScriptedTurn> = serde_json::from_str(&raw)?;
         let turns = wire
             .into_iter()

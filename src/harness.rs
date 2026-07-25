@@ -126,11 +126,11 @@ impl Harness {
             ok = false;
             lines.push("error: governance unhealthy under fail-closed profile".into());
         }
-        if self.config.governance.adapter == "sekai-chisei" {
-            if let Err(e) = self.config.governance_endpoint_required() {
-                ok = false;
-                lines.push(format!("error: {e}"));
-            }
+        if self.config.governance.adapter == "sekai-chisei"
+            && let Err(e) = self.config.governance_endpoint_required()
+        {
+            ok = false;
+            lines.push(format!("error: {e}"));
         }
 
         DoctorReport {
