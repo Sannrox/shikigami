@@ -34,6 +34,17 @@ Requirements: a recent Rust toolchain with **2024 edition** support.
 | Default | `cargo test` | Nothing external |
 | Live plane | `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored --nocapture` | Local sekai-chisei |
 
+### Supply chain
+
+| Check | When | Local |
+| --- | --- | --- |
+| cargo audit | lockfile / Cargo.toml PRs + weekly | (CI via rustsec/audit-check) |
+| cargo deny | same paths + `deny.toml` changes | `cargo deny check` |
+
+Policy and allowed licenses live in [`deny.toml`](deny.toml). Failures should
+name the crate and license/advisory so they are actionable — add an exception
+only with a short comment in `deny.toml`.
+
 **PR rule:** offline `cargo test` must pass. Do not require a control plane for
 the default suite.
 
