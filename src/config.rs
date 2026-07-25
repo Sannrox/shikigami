@@ -317,10 +317,10 @@ impl Config {
         if let Some(path) = explicit {
             return Self::resolve(path);
         }
-        if let Ok(path) = env::var(Self::CONFIG_PATH_ENV) {
-            if !path.is_empty() {
-                return Self::resolve(PathBuf::from(path));
-            }
+        if let Ok(path) = env::var(Self::CONFIG_PATH_ENV)
+            && !path.is_empty()
+        {
+            return Self::resolve(PathBuf::from(path));
         }
         let under_state = Self::path_in(state_root);
         if under_state.is_file() {
@@ -381,31 +381,31 @@ impl Config {
     }
 
     fn apply_env(&mut self) {
-        if let Ok(value) = env::var(Self::PROFILE_ENV) {
-            if !value.is_empty() {
-                self.profile.name = value;
-                self.apply_profile_presets();
-            }
+        if let Ok(value) = env::var(Self::PROFILE_ENV)
+            && !value.is_empty()
+        {
+            self.profile.name = value;
+            self.apply_profile_presets();
         }
-        if let Ok(value) = env::var(Self::GOVERNANCE_ADAPTER_ENV) {
-            if !value.is_empty() {
-                self.governance.adapter = value;
-            }
+        if let Ok(value) = env::var(Self::GOVERNANCE_ADAPTER_ENV)
+            && !value.is_empty()
+        {
+            self.governance.adapter = value;
         }
-        if let Ok(value) = env::var(Self::CONTROL_PLANE_ENV) {
-            if !value.is_empty() {
-                self.governance.endpoint = Some(value);
-            }
+        if let Ok(value) = env::var(Self::CONTROL_PLANE_ENV)
+            && !value.is_empty()
+        {
+            self.governance.endpoint = Some(value);
         }
-        if let Ok(value) = env::var(Self::MODEL_ADAPTER_ENV) {
-            if !value.is_empty() {
-                self.model.adapter = value;
-            }
+        if let Ok(value) = env::var(Self::MODEL_ADAPTER_ENV)
+            && !value.is_empty()
+        {
+            self.model.adapter = value;
         }
-        if let Ok(value) = env::var(Self::MODEL_SCRIPT_ENV) {
-            if !value.is_empty() {
-                self.model.script_json = Some(value);
-            }
+        if let Ok(value) = env::var(Self::MODEL_SCRIPT_ENV)
+            && !value.is_empty()
+        {
+            self.model.script_json = Some(value);
         }
     }
 
