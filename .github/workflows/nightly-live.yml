@@ -1,0 +1,52 @@
+# Optional live plane probe against a real sekai-chisei endpoint.
+# Forks and PRs without secrets succeed as a no-op (never red CI).
+name: Nightly Live Plane
+
+on:
+  schedule:
+    # 05:17 UTC daily (offset from weekly CI to spread load)
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-plane-probe:
+    name: Live plane doctor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check required secrets
+        id: secrets
+        env:
+          PLANE: ${{ secrets.SHIKIGAMI_CONTROL_PLANE }}
+        run: |
+          if [ -z "$PLANE" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "SHIKIGAMI_CONTROL_PLANE secret not configured — skipping live probe."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.secrets.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        if: steps.secrets.outputs.present == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Live doctor probe
+        if: steps.secrets.outputs.present == 'true'
+        env:
+          SEKAI_LIVE: "1"
+          SHIKIGAMI_CONTROL_PLANE: ${{ secrets.SHIKIGAMI_CONTROL_PLANE }}
+          SEKAI_TOKEN: ${{ secrets.SEKAI_TOKEN }}
+        run: |
+          cargo test --locked --test plane_live doctor_probes_live_plane -- --ignored --nocapture
+
+      - name: Skip notice
+        if: steps.secrets.outputs.present != 'true'
+        run: echo "No-op success (configure repository secrets to enable)."
