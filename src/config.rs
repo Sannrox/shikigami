@@ -222,10 +222,20 @@ pub struct RunSettings {
     /// Optional overall wall-clock limit in seconds (checked at turn boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// When message count exceeds this, compact middle history (None = disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_after_messages: Option<u32>,
+    /// Messages to retain after the initial user task when compacting (default 8).
+    #[serde(default = "default_compact_keep_tail")]
+    pub compact_keep_tail: u32,
 }
 
 fn default_max_turns() -> u32 {
     50
+}
+
+fn default_compact_keep_tail() -> u32 {
+    8
 }
 
 impl Default for RunSettings {
@@ -233,6 +243,8 @@ impl Default for RunSettings {
         Self {
             max_turns: default_max_turns(),
             timeout_secs: None,
+            compact_after_messages: None,
+            compact_keep_tail: default_compact_keep_tail(),
         }
     }
 }
