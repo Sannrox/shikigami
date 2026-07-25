@@ -157,6 +157,9 @@ the current system prompt or resume fails.
 | `OPENAI_API_KEY` | Default HTTP model key |
 | *(value of `token_env`)* | Plane bearer token when configured |
 
+Credential ergonomics, anti-patterns, and doctor redaction:
+**[credentials.md](credentials.md)**.
+
 There are **no** tenkai environment variables for the harness process. Tenkai
 only installs or upgrades the binary; see
 [../examples/tenkai-product.toml](../examples/tenkai-product.toml).
