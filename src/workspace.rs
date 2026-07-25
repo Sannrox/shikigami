@@ -34,6 +34,80 @@ pub enum WorkspaceError {
     Io(#[from] std::io::Error),
     #[error("git worktree failed: {0}")]
     Git(String),
+    #[error("snapshot not found: {0}")]
+    SnapshotMissing(PathBuf),
+}
+
+/// Copy directory tree without following symlinks (workspace → snapshot).
+pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
+    std::fs::create_dir_all(dst)?;
+    let mut stack = vec![src.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            if meta.is_symlink() {
+                continue;
+            }
+            let from = entry.path();
+            let rel = from.strip_prefix(src).unwrap_or(from.as_path());
+            let to = dst.join(rel);
+            if meta.is_dir() {
+                std::fs::create_dir_all(&to)?;
+                stack.push(from);
+            } else if meta.is_file() {
+                if let Some(parent) = to.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&from, &to)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Snapshot workspace into `state_runs/<run_id>/snapshots/<name>/`.
+pub fn take_snapshot(
+    workspace: &Path,
+    state_runs: &Path,
+    run_id: &str,
+    name: &str,
+) -> Result<PathBuf, WorkspaceError> {
+    let dest = state_runs.join(run_id).join("snapshots").join(name);
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest)?;
+    }
+    copy_tree(workspace, &dest)?;
+    Ok(dest)
+}
+
+/// Restore workspace files from a named snapshot (overwrites files).
+pub fn restore_snapshot(
+    workspace: &Path,
+    state_runs: &Path,
+    run_id: &str,
+    name: &str,
+) -> Result<(), WorkspaceError> {
+    let src = state_runs.join(run_id).join("snapshots").join(name);
+    if !src.is_dir() {
+        return Err(WorkspaceError::SnapshotMissing(src));
+    }
+    // Clear files under workspace then copy back.
+    if workspace.exists() {
+        for entry in std::fs::read_dir(workspace)? {
+            let entry = entry?;
+            let p = entry.path();
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)?;
+            }
+        }
+    } else {
+        std::fs::create_dir_all(workspace)?;
+    }
+    copy_tree(&src, workspace)?;
+    Ok(())
 }
 
 pub trait WorkspacePort: Send + Sync {
@@ -191,5 +265,24 @@ impl WorkspacePort for GitWorktreeWorkspace {
                 .output();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn snapshot_and_restore() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "v1").unwrap();
+        take_snapshot(&ws, &runs, "r1", "initial").unwrap();
+        std::fs::write(ws.join("a.txt"), "v2").unwrap();
+        restore_snapshot(&ws, &runs, "r1", "initial").unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "v1");
     }
 }
