@@ -49,6 +49,9 @@ pub struct RunRequest {
     pub cancel: Option<watch::Receiver<bool>>,
     /// When set, load checkpoint for this run id and continue.
     pub resume_run_id: Option<String>,
+    /// Optional plane logical operation id (parent / host correlation).
+    /// When unset, defaults to the harness `run_id` (attempt id).
+    pub logical_operation_id: Option<String>,
 }
 
 impl RunRequest {
@@ -59,6 +62,7 @@ impl RunRequest {
             timeout: None,
             cancel: None,
             resume_run_id: None,
+            logical_operation_id: None,
         }
     }
 }
@@ -221,7 +225,10 @@ impl Engine {
                 )
             };
 
-        let handle = self.governance.begin_run(&run_id, &task).await?;
+        let handle = self
+            .governance
+            .begin_run(&run_id, &task, request.logical_operation_id.as_deref())
+            .await?;
 
         self.events.emit(HarnessEvent::Message {
             level: "info".into(),
@@ -529,6 +536,7 @@ mod tests {
                 timeout: None,
                 cancel: Some(rx),
                 resume_run_id: None,
+                logical_operation_id: None,
             })
             .await
             .unwrap_err();
@@ -556,6 +564,7 @@ mod tests {
                 timeout: Some(Duration::from_secs(0)),
                 cancel: None,
                 resume_run_id: None,
+                logical_operation_id: None,
             })
             .await
             .unwrap_err();
@@ -594,6 +603,7 @@ mod tests {
                 timeout: None,
                 cancel: None,
                 resume_run_id: None,
+                logical_operation_id: None,
             })
             .await
             .unwrap_err();
@@ -636,6 +646,7 @@ mod tests {
                 timeout: None,
                 cancel: None,
                 resume_run_id: Some(run_id.clone()),
+                logical_operation_id: None,
             })
             .await
             .unwrap();
@@ -643,5 +654,33 @@ mod tests {
         assert_eq!(result.run_id, run_id);
         assert!(result.workspace.join("partial.txt").is_file());
         assert_eq!(result.summary, "resumed ok");
+    }
+
+    #[tokio::test]
+    async fn logical_operation_id_override_on_handle() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"ok\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        state.ensure_ready_for_runs().unwrap();
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(crate::model::from_config(&config).unwrap()),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+        };
+        let mut req = RunRequest::new("with parent op");
+        req.keep_workspace = true;
+        req.logical_operation_id = Some("parent-op-42".into());
+        let result = eng.run(req).await.unwrap();
+        assert!(result.success);
+        // run_id remains a distinct attempt UUID
+        assert_ne!(result.run_id, "parent-op-42");
+        assert!(!result.run_id.is_empty());
     }
 }

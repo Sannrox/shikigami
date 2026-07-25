@@ -248,7 +248,12 @@ impl GovernancePort for SekaiChiseiGovernance {
         !self.endpoint.trim().is_empty()
     }
 
-    async fn begin_run(&self, run_id: &str, task: &str) -> Result<RunHandle, GovernanceError> {
+    async fn begin_run(
+        &self,
+        run_id: &str,
+        task: &str,
+        logical_operation_id: Option<&str>,
+    ) -> Result<RunHandle, GovernanceError> {
         if self.endpoint.trim().is_empty() {
             return Err(GovernanceError::Unavailable(
                 "sekai-chisei endpoint not set".into(),
@@ -260,9 +265,10 @@ impl GovernancePort for SekaiChiseiGovernance {
         {
             return Err(e);
         }
+        let operation_id = logical_operation_id.unwrap_or(run_id).to_string();
         let handle = RunHandle {
             run_id: run_id.into(),
-            operation_id: run_id.into(),
+            operation_id,
             namespace: self.namespace.clone(),
         };
 
@@ -279,7 +285,8 @@ impl GovernancePort for SekaiChiseiGovernance {
                     ],
                 })
                 .await;
-            let mut attributes = harvest::begin_attributes(run_id, task, &self.principal);
+            let mut attributes =
+                harvest::begin_attributes(run_id, &handle.operation_id, task, &self.principal);
             attributes.insert("namespace".into(), handle.namespace.clone());
             let _ = chisei
                 .report_operation_event(ReportOperationEventRequest {
@@ -543,9 +550,17 @@ pub mod harvest {
     pub const KIND_TOOL: &str = "shikigami.tool";
     pub const KIND_COMPLETE: &str = "shikigami.run.complete";
 
-    pub fn begin_attributes(run_id: &str, task: &str, principal: &str) -> HashMap<String, String> {
+    pub fn begin_attributes(
+        run_id: &str,
+        logical_operation_id: &str,
+        task: &str,
+        principal: &str,
+    ) -> HashMap<String, String> {
         let mut attributes = HashMap::new();
         attributes.insert("run_id".into(), run_id.into());
+        attributes.insert("attempt_id".into(), run_id.into());
+        attributes.insert("logical_operation_id".into(), logical_operation_id.into());
+        attributes.insert("operation_id".into(), logical_operation_id.into());
         attributes.insert("task".into(), task.chars().take(4000).collect());
         attributes.insert("principal".into(), principal.into());
         attributes.insert("harness".into(), "shikigami".into());
@@ -766,8 +781,13 @@ mod tests {
 
     #[test]
     fn harvest_begin_attributes_capture_task() {
-        let attrs = harvest::begin_attributes("run-1", "do the thing", "alice");
+        let attrs = harvest::begin_attributes("run-1", "op-9", "do the thing", "alice");
         assert_eq!(attrs.get("run_id").map(String::as_str), Some("run-1"));
+        assert_eq!(attrs.get("attempt_id").map(String::as_str), Some("run-1"));
+        assert_eq!(
+            attrs.get("logical_operation_id").map(String::as_str),
+            Some("op-9")
+        );
         assert_eq!(attrs.get("task").map(String::as_str), Some("do the thing"));
         assert_eq!(attrs.get("principal").map(String::as_str), Some("alice"));
     }
