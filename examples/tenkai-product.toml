@@ -1,8 +1,14 @@
-# Example Tenkai product manifest for *delivering* the shikigami binary.
+# Production-oriented Tenkai product manifest for *delivering* the shikigami binary.
 # Tenkai is not a runtime dependency of the harness process.
 #
-# Usage (from a tenkai checkout, after packaging a release artifact):
-#   tenkaictl publish examples/tenkai-product.toml --allow-unsigned-development
+# Release assets (GitHub):
+#   shikigami-v0.1.0-x86_64-unknown-linux-gnu.tar.gz  (+ .sha256)
+#   shikigami-v0.1.0-aarch64-unknown-linux-gnu.tar.gz
+#   shikigami-v0.1.0-x86_64-apple-darwin.tar.gz
+#   shikigami-v0.1.0-aarch64-apple-darwin.tar.gz
+#
+# Stage the extracted `shikigami` binary next to this file (or adjust `inputs`),
+# then publish with tenkai. See docs/tenkai-delivery.md.
 
 [product]
 name = "shikigami"
@@ -10,8 +16,9 @@ version = "0.1.0"
 
 [deploy]
 workdir = "."
-# Install a prebuilt binary into a known location (adjust for your fleet).
+# Install a prebuilt binary into a known location (adjust for your fleet layout).
 install = "install -m 755 ./shikigami /usr/local/bin/shikigami"
 uninstall = "rm -f /usr/local/bin/shikigami"
+# Strong enough for packaging smoke; operators may add `shikigami doctor` after env is set.
 health = "shikigami version"
 inputs = ["shikigami"]

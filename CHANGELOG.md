@@ -27,6 +27,7 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - Supply-chain CI: `cargo deny` with committed `deny.toml` (licenses + advisories).
 - `shikigami serve` local-queue daemon with health file and graceful shutdown
   (ADR 0003).
+- Tenkai delivery docs and release-aligned product manifest example.
 
 ## [0.1.0] — 2026-07-25
 
