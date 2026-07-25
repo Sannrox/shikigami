@@ -311,6 +311,15 @@ pub struct ContextSettings {
     /// Max bytes of rules text injected into the system prompt.
     #[serde(default = "default_max_rules_bytes")]
     pub max_rules_bytes: usize,
+    /// Root directory for skill packs (relative to workspace, or absolute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_root: Option<String>,
+    /// Skill directory names under `skills_root` (each contains `SKILL.md`).
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Max bytes per skill body.
+    #[serde(default = "default_max_rules_bytes")]
+    pub max_skill_bytes: usize,
 }
 
 fn default_true() -> bool {
@@ -331,6 +340,9 @@ impl Default for ContextSettings {
             load_project_rules: default_true(),
             rules_filenames: default_rules_filenames(),
             max_rules_bytes: default_max_rules_bytes(),
+            skills_root: None,
+            skills: Vec::new(),
+            max_skill_bytes: default_max_rules_bytes(),
         }
     }
 }
