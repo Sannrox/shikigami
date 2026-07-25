@@ -42,6 +42,11 @@ pub enum HarnessEvent {
     Prompt {
         prompt_id: String,
     },
+    /// Older messages were compacted for context size.
+    ContextCompacted {
+        before: usize,
+        after: usize,
+    },
 }
 
 pub trait EventSink: Send + Sync {
