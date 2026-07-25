@@ -151,6 +151,8 @@ impl ToolsSettings {
                 "read_file".into(),
                 "write_file".into(),
                 "edit".into(),
+                "glob".into(),
+                "grep".into(),
                 "report".into(),
                 "escalate".into(),
             ]
