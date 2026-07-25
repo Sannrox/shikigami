@@ -134,7 +134,8 @@ impl Harness {
         lines.push(format!("events:    {} — {}", self.events.id(), ev_detail));
         lines.push(format!("model:     {}", self.model.id()));
         lines.push(format!(
-            "tools:     {}",
+            "tools:     mode={:?} [{}]",
+            self.config.tools.mode,
             self.config.tools.effective_enabled().join(", ")
         ));
         lines.push(format!("max_turns: {}", self.config.run.max_turns));
