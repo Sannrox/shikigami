@@ -69,6 +69,11 @@ enum Command {
         #[arg(long)]
         max_jobs: Option<u64>,
     },
+    /// MCP server over stdio (`doctor` + `run` tools). See docs/mcp.md.
+    ///
+    /// Stdio only — no network bind. Not a multi-tenant control plane;
+    /// prefer library embed for in-process hosts.
+    Mcp,
 }
 
 #[tokio::main]
@@ -197,6 +202,14 @@ async fn run() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!(e))?;
             println!("serve stopped after {n} job(s)");
             drop(tx);
+        }
+        Command::Mcp => {
+            // Protocol uses stdout; keep diagnostics on stderr only.
+            eprintln!("{PRODUCT} mcp server (stdio) — tools: doctor, run");
+            let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
+            shikigami::mcp_server::run_stdio(&harness)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
     }
     Ok(())
