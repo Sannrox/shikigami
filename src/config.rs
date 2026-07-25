@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
     #[serde(default)]
@@ -30,6 +31,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileSettings {
     #[serde(default = "default_profile_name")]
     pub name: String,
@@ -48,6 +50,7 @@ impl Default for ProfileSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GovernanceSettings {
     #[serde(default = "default_governance_adapter")]
     pub adapter: String,
@@ -88,6 +91,7 @@ impl Default for GovernanceSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceSettings {
     #[serde(default = "default_workspace_adapter")]
     pub adapter: String,
@@ -118,6 +122,7 @@ impl Default for WorkspaceSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolsSettings {
     #[serde(default)]
     pub enabled: Vec<String>,
@@ -155,6 +160,7 @@ impl ToolsSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunSettings {
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
@@ -177,6 +183,7 @@ impl Default for RunSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventsSettings {
     #[serde(default = "default_events_adapter")]
     pub adapter: String,
@@ -196,6 +203,7 @@ impl Default for EventsSettings {
 
 /// Model source for turns when governance does not own planning (none/local).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelSettings {
     /// `scripted` | `http` | `plane` (plane forces governance sekai-chisei path).
     #[serde(default = "default_model_adapter")]
@@ -514,5 +522,21 @@ script_json = "[]"
         let (c, _) = Config::resolve(&path).unwrap();
         assert_eq!(c.governance.adapter, "local");
         assert_eq!(c.model.adapter, "scripted");
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_key() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+unknown_thing = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
     }
 }
