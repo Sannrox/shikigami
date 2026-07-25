@@ -165,6 +165,27 @@ Offline defaults never require a plane.
 
 Adapter semantics: [adapters.md](adapters.md).
 
+## Doctor JSON (`schema_version` = 1)
+
+`shikigami doctor --json` emits a `DoctorReport` object:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | number | Doctor JSON schema (currently `1`) |
+| `ok` | bool | All required checks passed |
+| `profile` | string | Effective profile name |
+| `governance` | string | Governance adapter id |
+| `governance_detail` | string | Adapter health detail |
+| `workspace` | string | Workspace adapter id |
+| `workspace_detail` | string | Workspace health detail |
+| `events` | string | Events adapter id |
+| `events_detail` | string | Events health detail |
+| `model` | string | Model adapter id |
+| `lines` | string[] | Human diagnostic lines |
+
+Breaking renames/removals of these fields require a `schema_version` bump and
+CHANGELOG entry. Additional fields may appear without a bump.
+
 ## Compatibility policy (v0.2)
 
 1. **`version` is required** and must equal the crate's supported schema
