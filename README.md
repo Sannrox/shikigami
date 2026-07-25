@@ -59,6 +59,21 @@ cargo build --release
 Expect a successful run that writes `SHIKIGAMI_OK.txt` under the run workspace
 and prints `success=true`.
 
+### Prebuilt binaries
+
+Tagged releases publish multi-arch archives from GitHub Actions
+([Releases](https://github.com/Sannrox/shikigami/releases)):
+
+| Archive suffix | Target |
+| --- | --- |
+| `aarch64-apple-darwin` | Apple Silicon macOS |
+| `x86_64-apple-darwin` | Intel macOS |
+| `x86_64-unknown-linux-gnu` | Linux x86_64 |
+| `aarch64-unknown-linux-gnu` | Linux aarch64 |
+
+Each archive includes a `sha256` checksum. Prefer building from source when
+you need a custom feature set.
+
 ## CLI
 
 ```text
