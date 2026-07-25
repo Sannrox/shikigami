@@ -13,6 +13,10 @@ no Prometheus client crate; export is JSON and/or Prometheus *text format*.
 | `shikigami_runs_parked_total` | counter | Parked (`escalate`) terminations |
 | `shikigami_turns_total` | counter | Model turns completed |
 | `shikigami_plane_errors_total` | counter | Governance/plane errors observed |
+| `shikigami_tokens_input_total` | counter | Input tokens when reported |
+| `shikigami_tokens_output_total` | counter | Output tokens when reported |
+
+`RunResult.usage` carries per-run totals (`input_tokens` / `output_tokens`). Zero means unknown, not free.
 
 ## API
 

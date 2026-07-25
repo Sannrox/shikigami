@@ -12,7 +12,7 @@ use crate::checkpoint::{self, Checkpoint, CheckpointError, ParkedState};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
-use crate::model::{ChatMessage, ModelError, ModelPort};
+use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage};
 use crate::tools::{self, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 
@@ -86,6 +86,8 @@ pub struct RunResult {
     pub park: Option<ParkInfo>,
     /// Versioned prompt id used for this run (`name:sha256`).
     pub prompt_id: String,
+    /// Aggregated token usage when reported by model turns (zeros if unknown).
+    pub usage: TokenUsage,
 }
 
 /// Operator-visible park payload (library + CLI).
@@ -306,6 +308,7 @@ impl Engine {
         let mut final_summary = String::from("completed without report");
         let mut success = false;
         let mut termination = RunTermination::Completed;
+        let mut usage = TokenUsage::default();
 
         // Persist initial checkpoint so resume works mid-run.
         self.save_checkpoint(
@@ -340,6 +343,10 @@ impl Engine {
                     )
                     .await?;
                 turns += 1;
+                if let Some(u) = turn.usage {
+                    usage.input_tokens = usage.input_tokens.saturating_add(u.input_tokens);
+                    usage.output_tokens = usage.output_tokens.saturating_add(u.output_tokens);
+                }
                 self.events.emit(HarnessEvent::ModelTurn {
                     turn: turns,
                     content_preview: turn.content.chars().take(200).collect(),
@@ -620,6 +627,7 @@ impl Engine {
             termination,
             park: park_info,
             prompt_id,
+            usage,
         })
     }
 }
@@ -724,6 +732,7 @@ mod tests {
                 name: "write_file".into(),
                 args_json: r#"{"path":"partial.txt","content":"hello"}"#.into(),
             }],
+            usage: None,
         }]);
         let eng = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
@@ -768,6 +777,7 @@ mod tests {
                 name: "report".into(),
                 args_json: r#"{"summary":"resumed ok","success":true}"#.into(),
             }],
+            usage: None,
         }]);
         let eng2 = Engine {
             governance: Arc::from(governance::from_config(&config2).unwrap()),
@@ -837,6 +847,7 @@ mod tests {
                 name: "escalate".into(),
                 args_json: r#"{"reason":"need human","question":"approve?"}"#.into(),
             }],
+            usage: None,
         }]);
         let eng = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
@@ -885,6 +896,7 @@ mod tests {
                 name: "report".into(),
                 args_json: r#"{"summary":"approved and done","success":true}"#.into(),
             }],
+            usage: None,
         }]);
         let eng3 = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
