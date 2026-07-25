@@ -101,6 +101,9 @@ pub struct WorkspaceSettings {
     pub root: String,
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
+    /// Copy workspace to state after materialize for later restore.
+    #[serde(default)]
+    pub snapshot: bool,
 }
 
 fn default_workspace_adapter() -> String {
@@ -119,6 +122,7 @@ impl Default for WorkspaceSettings {
             adapter: default_workspace_adapter(),
             root: default_workspace_root(),
             branch_prefix: default_branch_prefix(),
+            snapshot: false,
         }
     }
 }
