@@ -6,8 +6,9 @@ use std::sync::Arc;
 use crate::config::{Config, ConfigError, ConfigSource};
 use crate::events::{self, EventError, EventSink, FanoutSink};
 use crate::governance::{self, GovernanceError, GovernancePort};
+use crate::metrics::Metrics;
 use crate::model::{self, ModelError, ModelPort};
-use crate::run::{Engine, RunError, RunRequest, RunResult};
+use crate::run::{Engine, RunError, RunRequest, RunResult, RunTermination};
 use crate::state::{StateError, StateRoot};
 use crate::workspace::{self, WorkspaceError, WorkspacePort};
 
@@ -40,6 +41,8 @@ pub struct Harness {
     workspace: Arc<dyn WorkspacePort>,
     model: Arc<dyn ModelPort>,
     events: Arc<dyn EventSink>,
+    /// Process-local counters (JSON / Prometheus text export).
+    pub metrics: Arc<Metrics>,
 }
 
 /// Stable doctor JSON contract (`schema_version` = 1).
@@ -90,6 +93,7 @@ impl Harness {
             workspace,
             model,
             events,
+            metrics: Metrics::new(),
         })
     }
 
@@ -223,7 +227,27 @@ impl Harness {
             events,
             state_runs: self.state.runs_dir(),
         };
-        Ok(engine.run(request).await?)
+        match engine.run(request).await {
+            Ok(result) => {
+                self.metrics.record_run(
+                    result.success,
+                    result.termination == RunTermination::Parked,
+                    result.turns,
+                );
+                Ok(result)
+            }
+            Err(e) => {
+                if matches!(
+                    e,
+                    RunError::Governance(crate::governance::GovernanceError::Unavailable(_))
+                        | RunError::Governance(crate::governance::GovernanceError::Message(_))
+                ) {
+                    self.metrics.record_plane_error();
+                }
+                self.metrics.record_run(false, false, 0);
+                Err(e.into())
+            }
+        }
     }
 }
 
