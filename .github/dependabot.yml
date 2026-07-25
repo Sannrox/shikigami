@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # gRPC/protobuf stack must move together (tonic <-> prost are coupled).
+      grpc-stack:
+        patterns:
+          - "tonic*"
+          - "prost*"
+      # Everything else: collapse minor + patch bumps into a single PR.
+      cargo-dependencies:
+        update-types:
+          - minor
+          - patch
+    # Remaining major bumps (e.g. rusqlite) still get individual PRs so they
+    # get the review attention a breaking change needs.
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

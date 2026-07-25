@@ -1,0 +1,75 @@
+name: Bug report
+description: Report reproducible incorrect behavior in shikigami.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private keys, tokens, or sensitive data.
+        Report exploitable vulnerabilities through the private security link instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest commands, inputs, or code needed to reproduce the issue.
+      placeholder: |
+        1. Configure ...
+        2. Run `shikigami ...`
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or git SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Profile / path
+      options:
+        - Local (none/local governance, offline)
+        - Governed (sekai-chisei)
+        - Embedded library host
+        - Not applicable
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version, config file, adapters, and plane endpoint if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or diagnostics
+      description: Remove secrets and sensitive data before submitting. Prefer `shikigami doctor` output.
+      render: shell
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regression evidence
+      description: If known, identify the last working version or a focused test that should catch this behavior.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: I removed credentials, tokens, private keys, and sensitive data.
+          required: true
+        - label: This is not an exploitable security vulnerability.
+          required: true

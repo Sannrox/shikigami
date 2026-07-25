@@ -1,0 +1,147 @@
+# Settings reference
+
+Shikigami has **no install / `init` step**. Behavior is selected by versioned
+settings so open-source and production use cases share one binary.
+
+## Resolution order
+
+Later sources override earlier ones where documented:
+
+1. Built-in defaults (`profile = local`, governance `none`, model `scripted`)
+2. Config file (first match):
+   - `--config` / `SHIKIGAMI_CONFIG`
+   - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: `./.shikigami-state`)
+   - `./shikigami.toml` in the current working directory
+3. Environment variables
+4. CLI flags (where provided)
+
+Invalid adapter ids fail at resolve/validate time. Missing optional files are
+not errors.
+
+## Profiles
+
+| Name | Effect |
+| --- | --- |
+| `local` | Default. Offline-friendly. Does not force a plane. |
+| `governed` | Sets governance to `sekai-chisei` if still `none`, forces `fail_closed = true`, prefers model adapter `plane`. |
+
+Custom profile names are allowed as labels; only `governed` applies the preset
+above today.
+
+## Schema (`version = 1`)
+
+Top-level `version` is required and must be `1`.
+
+### `[profile]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `name` | `"local"` | Profile label / preset |
+
+### `[governance]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `adapter` | `"none"` | `none` \| `local` \| `sekai-chisei` |
+| `endpoint` | unset | Control plane base URL (required for fail-closed `sekai-chisei`) |
+| `principal` | `"shikigami"` | Identity presented to the plane (not a secret) |
+| `namespace` | `"default"` | Plane namespace |
+| `fail_closed` | `false` | Fail doctor/run when governance is unhealthy |
+| `token_env` | unset | Env var name holding a Bearer token for the plane |
+
+### `[model]`
+
+Used for ungoverned planning (`none` / `local` governance). When governance is
+`sekai-chisei`, turns use the plane regardless of local HTTP settings.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `adapter` | `"scripted"` | `scripted` \| `http` \| `plane` |
+| `script_json` | built-in demo script | JSON array of turns for `scripted` |
+| `base_url` | OpenAI-compatible default | Base URL for `http` |
+| `model` | `"gpt-4.1-mini"` | Model id for `http` / plane preferred model |
+| `api_key_env` | `"OPENAI_API_KEY"` | Env var for HTTP API key |
+
+#### Scripted turn JSON
+
+```json
+[
+  {
+    "content": "optional assistant text",
+    "tool_calls": [
+      {
+        "id": "optional",
+        "name": "write_file",
+        "args_json": "{\"path\":\"a.txt\",\"content\":\"hi\"}"
+      }
+    ]
+  }
+]
+```
+
+### `[workspace]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `adapter` | `"directory"` | `directory` \| `git-worktree` |
+| `root` | `"."` | Parent/repo root for materialization |
+| `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
+
+### `[tools]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `enabled` | `[]` (→ safe defaults) | Allow-list of tool names |
+| `bash_timeout_secs` | `60` | Default bash timeout (capped at 120s) |
+
+When `enabled` is empty, the effective set is
+`read_file`, `write_file`, `edit`, `report` — **not** `bash`.
+
+### `[run]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `max_turns` | `50` | Hard stop for the turn loop |
+
+### `[events]`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `adapter` | `"stderr"` | `stderr` \| `jsonl` \| `none` |
+
+`jsonl` appends under the state runs directory (`events.jsonl`).
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `SHIKIGAMI_STATE` | State root directory |
+| `SHIKIGAMI_CONFIG` | Path to settings file |
+| `SHIKIGAMI_PROFILE` | Profile name |
+| `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
+| `SHIKIGAMI_CONTROL_PLANE` | sekai-chisei endpoint |
+| `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
+| `SHIKIGAMI_MODEL_SCRIPT` | Scripted JSON (inline) |
+| `OPENAI_API_KEY` | Default HTTP model key |
+| *(value of `token_env`)* | Plane bearer token when configured |
+
+There are **no** tenkai environment variables for the harness process. Tenkai
+only installs or upgrades the binary; see
+[../examples/tenkai-product.toml](../examples/tenkai-product.toml).
+
+## Fail-closed rules
+
+Doctor and `run` fail when:
+
+- `fail_closed` is true or profile is `governed`, **and**
+- governance is unhealthy (e.g. `sekai-chisei` without endpoint, or live probe
+  failure for required plane connectivity).
+
+Offline defaults never require a plane.
+
+## Examples
+
+- [../examples/local-run.toml](../examples/local-run.toml)
+- [../examples/governed-sekai-chisei.toml](../examples/governed-sekai-chisei.toml)
+
+Adapter semantics: [adapters.md](adapters.md).

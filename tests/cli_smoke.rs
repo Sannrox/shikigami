@@ -1,10 +1,11 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+use std::fs;
 use tempfile::tempdir;
 
 #[test]
 fn version_prints_product_identity() {
-    cargo_bin_cmd!("shikigamictl")
+    cargo_bin_cmd!("shikigami")
         .arg("version")
         .assert()
         .success()
@@ -12,42 +13,82 @@ fn version_prints_product_identity() {
 }
 
 #[test]
-fn init_then_doctor_succeeds() {
+fn doctor_succeeds_on_local_defaults() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
 
-    cargo_bin_cmd!("shikigamictl")
-        .args(["--state", state.to_str().unwrap(), "init"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("initialized"));
-
-    cargo_bin_cmd!("shikigamictl")
+    cargo_bin_cmd!("shikigami")
         .args(["--state", state.to_str().unwrap(), "doctor"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("status: ok"));
+        .stdout(predicate::str::contains("status: ok"))
+        .stdout(predicate::str::contains("profile:   local"))
+        .stdout(predicate::str::contains("gov:       none"));
 }
 
 #[test]
-fn run_requires_init_and_is_not_implemented() {
+fn doctor_fails_governed_without_endpoint() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
+    let config = dir.path().join("governed.toml");
+    fs::write(
+        &config,
+        r#"
+version = 1
+[profile]
+name = "governed"
+"#,
+    )
+    .expect("write config");
 
-    cargo_bin_cmd!("shikigamictl")
-        .args(["--state", state.to_str().unwrap(), "run", "hello"])
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "doctor",
+        ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("state not initialized"));
+        .stdout(predicate::str::contains("status: fail"));
+}
 
-    cargo_bin_cmd!("shikigamictl")
-        .args(["--state", state.to_str().unwrap(), "init"])
-        .assert()
-        .success();
+#[test]
+fn local_scripted_run_writes_marker() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let config = dir.path().join("local.toml");
+    fs::write(
+        &config,
+        r#"
+version = 1
+[profile]
+name = "local"
+[governance]
+adapter = "local"
+[model]
+adapter = "scripted"
+[workspace]
+adapter = "directory"
+root = "."
+[events]
+adapter = "none"
+"#,
+    )
+    .expect("write");
 
-    cargo_bin_cmd!("shikigamictl")
-        .args(["--state", state.to_str().unwrap(), "run", "hello"])
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "run",
+            "scripted demo",
+            "--keep-workspace",
+        ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("run is not implemented yet"));
+        .success()
+        .stdout(predicate::str::contains("success=true"));
 }

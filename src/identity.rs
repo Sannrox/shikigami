@@ -8,4 +8,4 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One-line product description for CLI and docs.
 pub const PRODUCT_DESCRIPTION: &str =
-    "headless agent harness governed by sekai-chisei, deliverable through tenkai";
+    "open-source headless agent harness (local or governed via adapters)";

@@ -1,0 +1,93 @@
+# Contributing
+
+Thanks for helping improve **shikigami**. This project is early (pre-1.0);
+focused changes with tests are the most valuable.
+
+## Code of conduct
+
+Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## Ways to contribute
+
+- Bug reports and reproductions (offline preferred)
+- Documentation fixes and examples
+- Deterministic tests
+- New **adapters** behind existing ports (or clear proposals for new ports)
+- Security reports via [SECURITY.md](SECURITY.md) (private)
+
+## Development setup
+
+```bash
+git clone https://github.com/Sannrox/shikigami.git
+cd shikigami
+cargo test
+cargo fmt
+cargo build --all-targets
+```
+
+Requirements: a recent Rust toolchain with **2024 edition** support.
+
+### Offline vs live tests
+
+| Suite | Command | Needs |
+| --- | --- | --- |
+| Default | `cargo test` | Nothing external |
+| Live plane | `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored --nocapture` | Local sekai-chisei |
+
+**PR rule:** offline `cargo test` must pass. Do not require a control plane for
+the default suite.
+
+GitHub Actions CI must stay green. Required checks on `main`:
+
+- Build & Test
+- Rustfmt
+- Clippy
+
+## Architecture rules
+
+Read [DESIGN.md](DESIGN.md) and
+[docs/decisions/0001-ports-and-settings.md](docs/decisions/0001-ports-and-settings.md)
+before changing boundaries.
+
+1. **Ports + settings** — do not hard-wire sekai-chisei into the turn loop.
+2. **No second policy brain** — do not reimplement budgets/policy in-core.
+3. **No tenkai runtime config** — delivery is packaging, not process settings.
+4. **Fail closed when required** — governed profiles must not silently degrade.
+5. **Library-first** — keep `src/bin/shikigami.rs` thin; put logic in the library.
+6. **Runs, not “a shikigami”** — naming for units of work.
+
+Project Skills for repeated workflows live under `.agents/skills/`. Repository
+agent rules: [AGENTS.md](AGENTS.md).
+
+## Pull requests
+
+1. Keep the change focused (one outcome per PR).
+2. Include tests for behavior changes.
+3. Run `cargo fmt` and `cargo test`.
+4. Describe behavior, risk, and test evidence in the PR body.
+5. Link an Issue when one exists.
+
+Commit subjects: short imperative, Conventional Commits welcome
+(`feat:`, `fix:`, `docs:`, `chore:`).
+
+Maintainers prefer **rebase merges** so `main` stays linear:
+
+```bash
+gh pr merge --rebase --delete-branch
+```
+
+## Documentation
+
+User-facing docs are part of the product. Update:
+
+- [README.md](README.md) for entry-point behavior
+- [docs/](docs/) for reference material
+- [CHANGELOG.md](CHANGELOG.md) for user-visible changes
+- Examples under [examples/](examples/) when settings change
+
+Doc index: [docs/README.md](docs/README.md).
+
+## License
+
+By contributing, you agree that your contributions are licensed under the
+Apache License 2.0 ([LICENSE](LICENSE)).

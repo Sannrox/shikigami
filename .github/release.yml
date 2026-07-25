@@ -1,0 +1,29 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Security
+      labels:
+        - "risk:security"
+    - title: Migration
+      labels:
+        - "risk:migration"
+    - title: Added
+      labels:
+        - "type:feature"
+    - title: Fixed
+      labels:
+        - "type:bug"
+    - title: Changed
+      labels:
+        - "type:refactor"
+    - title: Documentation
+      labels:
+        - "type:docs"
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - "*"
