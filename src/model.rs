@@ -283,7 +283,7 @@ impl ModelPort for HttpModel {
             .iter()
             .map(|t| {
                 let params: serde_json::Value =
-                    serde_json::from_str(t.schema).unwrap_or(serde_json::json!({}));
+                    serde_json::from_str(&t.schema).unwrap_or(serde_json::json!({}));
                 serde_json::json!({
                     "type": "function",
                     "function": {

@@ -20,6 +20,7 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - Per-run `TokenUsage` on `RunResult` and process token counters in metrics.
 - Optional context compaction (`run.compact_after_messages`) with event signal.
 - Network egress policy for HTTP model client (`network.egress` / `allow_hosts`).
+- MCP client: register stdio server tools as `mcp.<server>.<tool>` (mock + JSON-RPC).
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).

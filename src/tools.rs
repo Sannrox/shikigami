@@ -78,65 +78,75 @@ pub enum ToolError {
     SearchTruncated(usize),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Message(String),
 }
 
 /// Catalog entry for a tool the registry can enable.
 #[derive(Debug, Clone)]
 pub struct ToolDef {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub schema: &'static str,
+    pub name: String,
+    pub description: String,
+    pub schema: String,
+}
+
+fn def(name: &str, description: &str, schema: &str) -> ToolDef {
+    ToolDef {
+        name: name.into(),
+        description: description.into(),
+        schema: schema.into(),
+    }
 }
 
 /// Builtin tool catalog (registration bootstrap). Dynamic plugins are out of scope;
 /// future MCP/skill tools register into [`ToolRegistry`] without changing the turn loop.
-pub fn builtin_catalog() -> &'static [ToolDef] {
-    &[
-        ToolDef {
-            name: "read_file",
-            description: "Read a UTF-8 text file relative to the workspace root.",
-            schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
-        },
-        ToolDef {
-            name: "write_file",
-            description: "Write a UTF-8 text file relative to the workspace root.",
-            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
-        },
-        ToolDef {
-            name: "edit",
-            description: "Replace exactly one occurrence of old with new in a file.",
-            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
-        },
-        ToolDef {
-            name: "multi_edit",
-            description: "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none).",
-            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"}},"required":["old","new"]}},"required":["path","edits"]}"#,
-        },
-        ToolDef {
-            name: "glob",
-            description: "List workspace-relative file paths matching a glob (supports * and **). Results are capped.",
-            schema: r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}"#,
-        },
-        ToolDef {
-            name: "grep",
-            description: "Search file contents under the workspace with a regex. Results are capped.",
-            schema: r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"max_matches":{"type":"integer"}},"required":["pattern"]}"#,
-        },
-        ToolDef {
-            name: "bash",
-            description: "Run a shell command inside the workspace (timeout-bounded).",
-            schema: r#"{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}"#,
-        },
-        ToolDef {
-            name: "report",
-            description: "Finish the run with a structured summary. Must be the only call in the batch.",
-            schema: r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
-        },
-        ToolDef {
-            name: "escalate",
-            description: "Park the headless run and ask an operator a question. Must be the only call in the batch. Resume later with an answer.",
-            schema: r#"{"type":"object","properties":{"reason":{"type":"string"},"question":{"type":"string"}},"required":["reason"]}"#,
-        },
+pub fn builtin_catalog() -> Vec<ToolDef> {
+    vec![
+        def(
+            "read_file",
+            "Read a UTF-8 text file relative to the workspace root.",
+            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+        ),
+        def(
+            "write_file",
+            "Write a UTF-8 text file relative to the workspace root.",
+            r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
+        ),
+        def(
+            "edit",
+            "Replace exactly one occurrence of old with new in a file.",
+            r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
+        ),
+        def(
+            "multi_edit",
+            "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none).",
+            r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"}},"required":["old","new"]}},"required":["path","edits"]}"#,
+        ),
+        def(
+            "glob",
+            "List workspace-relative file paths matching a glob (supports * and **). Results are capped.",
+            r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}"#,
+        ),
+        def(
+            "grep",
+            "Search file contents under the workspace with a regex. Results are capped.",
+            r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"max_matches":{"type":"integer"}},"required":["pattern"]}"#,
+        ),
+        def(
+            "bash",
+            "Run a shell command inside the workspace (timeout-bounded).",
+            r#"{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}"#,
+        ),
+        def(
+            "report",
+            "Finish the run with a structured summary. Must be the only call in the batch.",
+            r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
+        ),
+        def(
+            "escalate",
+            "Park the headless run and ask an operator a question. Must be the only call in the batch. Resume later with an answer.",
+            r#"{"type":"object","properties":{"reason":{"type":"string"},"question":{"type":"string"}},"required":["reason"]}"#,
+        ),
     ]
 }
 
@@ -145,12 +155,19 @@ pub fn must_be_exclusive_batch(name: &str) -> bool {
     matches!(name, "report" | "escalate")
 }
 
+/// External tool provider (e.g. MCP-backed tool).
+#[async_trait::async_trait]
+pub trait ExternalTool: Send + Sync {
+    fn definition(&self) -> ToolDef;
+    async fn call(&self, args_json: &str) -> Result<String, ToolError>;
+}
+
 /// Run-scoped tool registry: definitions + jailed execution for enabled tools.
 ///
 /// The turn loop talks only to this type (not individual dispatch tables).
-#[derive(Debug, Clone)]
 pub struct ToolRegistry {
     executor: ToolExecutor,
+    external: Vec<std::sync::Arc<dyn ExternalTool>>,
 }
 
 impl ToolRegistry {
@@ -162,12 +179,21 @@ impl ToolRegistry {
     ) -> Result<Self, ToolError> {
         Ok(Self {
             executor: ToolExecutor::new(workspace, enabled, bash_timeout_secs)?,
+            external: Vec::new(),
         })
     }
 
-    /// Model-facing tool definitions for enabled builtins.
+    pub fn register_external(&mut self, tool: std::sync::Arc<dyn ExternalTool>) {
+        self.external.push(tool);
+    }
+
+    /// Model-facing tool definitions for enabled builtins + external tools.
     pub fn definitions(&self) -> Vec<ToolDef> {
-        definitions_for_enabled(&self.executor.enabled)
+        let mut defs = definitions_for_enabled(&self.executor.enabled);
+        for t in &self.external {
+            defs.push(t.definition());
+        }
+        defs
     }
 
     pub fn enabled(&self) -> &[String] {
@@ -176,9 +202,13 @@ impl ToolRegistry {
 
     pub fn is_enabled(&self, name: &str) -> bool {
         self.executor.enabled.iter().any(|e| e == name)
+            || self.external.iter().any(|t| t.definition().name == name)
     }
 
     pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
+        if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
+            return Ok(ToolOutput::Text(t.call(args_json).await?));
+        }
         self.executor.execute(name, args_json).await
     }
 }
@@ -186,9 +216,8 @@ impl ToolRegistry {
 /// Definitions for an allow-list against the builtin catalog.
 pub fn definitions_for_enabled(enabled: &[String]) -> Vec<ToolDef> {
     builtin_catalog()
-        .iter()
-        .filter(|d| enabled.iter().any(|e| e == d.name))
-        .cloned()
+        .into_iter()
+        .filter(|d| enabled.iter().any(|e| e == d.name.as_str()))
         .collect()
 }
 
@@ -790,7 +819,8 @@ mod tests {
             30,
         )
         .unwrap();
-        let names: Vec<_> = reg.definitions().iter().map(|d| d.name).collect();
+        let defs = reg.definitions();
+        let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["read_file", "report"]);
         assert!(must_be_exclusive_batch("report"));
         assert!(must_be_exclusive_batch("escalate"));
