@@ -42,8 +42,13 @@ pub struct Harness {
     events: Arc<dyn EventSink>,
 }
 
-#[derive(Debug, Clone)]
+/// Stable doctor JSON contract (`schema_version` = 1).
+///
+/// Breaking field renames/removals require a schema_version bump and CHANGELOG.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DoctorReport {
+    /// Doctor JSON schema version (currently `1`).
+    pub schema_version: u32,
     pub ok: bool,
     pub profile: String,
     pub governance: String,
@@ -54,6 +59,14 @@ pub struct DoctorReport {
     pub events_detail: String,
     pub model: String,
     pub lines: Vec<String>,
+}
+
+impl DoctorReport {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    pub fn to_json_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("DoctorReport is always serializable")
+    }
 }
 
 impl Harness {
@@ -134,6 +147,7 @@ impl Harness {
         }
 
         DoctorReport {
+            schema_version: DoctorReport::SCHEMA_VERSION,
             ok,
             profile: self.config.profile.name.clone(),
             governance: self.governance.id().into(),
@@ -181,5 +195,55 @@ impl Harness {
             state_runs: self.state.runs_dir(),
         };
         Ok(engine.run(request).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use tempfile::tempdir;
+
+    #[test]
+    fn doctor_json_schema_keys_stable() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let config = Config::default();
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert_eq!(report.schema_version, 1);
+        assert!(report.ok);
+        let v = report.to_json_value();
+        for key in [
+            "schema_version",
+            "ok",
+            "profile",
+            "governance",
+            "governance_detail",
+            "workspace",
+            "workspace_detail",
+            "events",
+            "events_detail",
+            "model",
+            "lines",
+        ] {
+            assert!(v.get(key).is_some(), "missing key {key}");
+        }
+    }
+
+    #[test]
+    fn doctor_fail_closed_governed_without_endpoint() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.profile.name = "governed".into();
+        config.governance.adapter = "sekai-chisei".into();
+        config.governance.fail_closed = true;
+        config.governance.endpoint = None;
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert!(!report.ok);
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.governance, "sekai-chisei");
     }
 }
