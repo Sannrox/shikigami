@@ -42,6 +42,7 @@ pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use metrics::{Metrics, MetricsSnapshot};
+pub use model::TokenUsage;
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{QueueJob, QueueLayout, ServeOptions};
