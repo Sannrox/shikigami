@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
 use crate::model::{ChatMessage, ModelError, ModelPort};
-use crate::tools::{ToolError, ToolExecutor, ToolOutput};
+use crate::tools::{self, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
@@ -282,12 +282,9 @@ impl Engine {
         });
 
         let enabled = self.config.tools.effective_enabled();
-        let tools = ToolExecutor::new(
-            &ws.path,
-            enabled.clone(),
-            self.config.tools.bash_timeout_secs,
-        )?;
-        let tool_defs = ToolExecutor::definitions_json(&enabled);
+        let tools =
+            ToolRegistry::with_builtins(&ws.path, enabled, self.config.tools.bash_timeout_secs)?;
+        let tool_defs = tools.definitions();
 
         let max_turns = self.config.run.max_turns;
         let mut final_summary = String::from("completed without report");
@@ -365,7 +362,7 @@ impl Engine {
                 let exclusive = turn
                     .tool_calls
                     .iter()
-                    .any(|c| c.name == "report" || c.name == "escalate");
+                    .any(|c| tools::must_be_exclusive_batch(&c.name));
                 if exclusive && turn.tool_calls.len() != 1 {
                     for c in &turn.tool_calls {
                         messages.push(ChatMessage {
