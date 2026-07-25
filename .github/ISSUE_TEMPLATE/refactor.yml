@@ -1,0 +1,62 @@
+name: Refactoring
+description: Propose a focused structural improvement with preserved behavior.
+title: "refactor: "
+body:
+  - type: textarea
+    id: friction
+    attributes:
+      label: Concrete friction
+      description: What defect risk, duplication, blocked work, complexity, or measured constraint does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link examples, repeated defects, measurements, or active work affected by the current structure.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Behavior to preserve
+      description: State the public, settings, adapter, and error-semantics invariants that must not change.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope
+      description: Name the affected modules and explicit non-goals.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Which characterization tests or measurements will prove behavior is preserved?
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Primary area
+      options:
+        - Run loop / tools
+        - Governance adapter
+        - Model adapter
+        - Workspace adapter
+        - Settings / CLI
+        - Library embedding API
+        - Documentation or tooling
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: The proposal is motivated by concrete evidence rather than style preference alone.
+          required: true

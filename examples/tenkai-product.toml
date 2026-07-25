@@ -1,0 +1,17 @@
+# Example Tenkai product manifest for *delivering* the shikigami binary.
+# Tenkai is not a runtime dependency of the harness process.
+#
+# Usage (from a tenkai checkout, after packaging a release artifact):
+#   tenkaictl publish examples/tenkai-product.toml --allow-unsigned-development
+
+[product]
+name = "shikigami"
+version = "0.1.0"
+
+[deploy]
+workdir = "."
+# Install a prebuilt binary into a known location (adjust for your fleet).
+install = "install -m 755 ./shikigami /usr/local/bin/shikigami"
+uninstall = "rm -f /usr/local/bin/shikigami"
+health = "shikigami version"
+inputs = ["shikigami"]

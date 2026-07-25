@@ -1,0 +1,31 @@
+# Primary production path: governance through sekai-chisei.
+version = 1
+
+[profile]
+name = "governed"
+
+[governance]
+adapter = "sekai-chisei"
+endpoint = "http://127.0.0.1:50051"
+principal = "shikigami"
+namespace = "default"
+fail_closed = true
+# token_env = "SEKAI_TOKEN"
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[tools]
+enabled = ["read_file", "write_file", "edit", "bash", "report"]
+bash_timeout_secs = 60
+
+[run]
+max_turns = 50
+
+[events]
+adapter = "stderr"
+
+[model]
+adapter = "plane"
+model = "gpt-4.1-mini"

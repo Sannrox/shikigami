@@ -1,53 +1,167 @@
 # shikigami
 
-`shikigami` (式神) is a **local-first headless agent harness**. It runs agent
-work under governance from
-[sekai-chisei](https://github.com/Sannrox/sekai-chisei) and is deliverable as a
-product through [tenkai](https://github.com/Sannrox/tenkai).
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-It is not a control plane, not a delivery plane, and not a desktop shell.
-Those roles stay with sekai-chisei, tenkai, and operator UIs such as onmyoji.
+**shikigami** (式神) is an open-source, local-first **headless agent harness**.
 
-> **Project status:** early-stage (`v0.1.0`). The product identity, local state
-> layout, and CLI skeleton exist. Run execution is not implemented yet.
+It runs autonomous agent work as countable **runs**: materialize a workspace,
+call a model, execute jailed tools, emit progress, and finish with a structured
+result — without a desktop UI.
 
-## Stack role
+Use it offline for demos and CI, or wire it to a governance control plane for
+production. The loop is fixed; **settings select adapters** so different use
+cases do not require forking the core.
 
-| Product | Role |
+| Path | What you get |
 | --- | --- |
-| **sekai-chisei** | Durable facts + governed decisions (policy, budget, eval, audit) |
-| **tenkai** | Publish, promote, converge, probe, rollback |
-| **shikigami** | Headless harness: run lifecycle, workspace, tools, harvest |
-| operator UI (e.g. onmyoji) | Human front door; optional host of the same core ideas |
+| **Local / OSS** | No external plane. Scripted or HTTP models. Deterministic tests. |
+| **Governed** | First-party adapter for [sekai-chisei](https://github.com/Sannrox/sekai-chisei): policy, budget, PlanExecution, audit-oriented events. |
+| **Delivery** | Optional packaging via [tenkai](https://github.com/Sannrox/tenkai). Delivery is not a runtime dependency. |
 
-**Naming:** `shikigami` is the **product / harness**. Individual units of work
-are **runs** (or workers/sessions in code). Do not call a single agent attempt
-“a shikigami.”
+> **Status:** early (`v0.1.0`). Public APIs and settings may change before 1.0.
+> Offline `cargo test` is the supported baseline; live plane tests are ignored
+> by default.
 
-## Quickstart
+## Why
+
+Most coding agents stop at a chat window or a one-off CLI:
+
+- Governance is missing or bolted on after the fact.
+- The same execution core cannot run unattended in CI or on a fleet host.
+- Desktop shells reimplement the loop instead of sharing a testable library.
+
+Shikigami is the **execution plane**: library-first, headless by default,
+fail-closed when governance is required, and pluggable when it is not.
+
+## Requirements
+
+- [Rust](https://rustup.rs/) toolchain with **Rust 2024** edition support
+- macOS or Linux (primary targets today)
+- Optional: a running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) for the governed path
+- Optional: OpenAI-compatible HTTP endpoint for ungoverned `http` model turns
+
+`protoc` is supplied by a vendored build dependency when the
+`governance-sekai-chisei` feature is enabled (default).
+
+## Quickstart (offline)
+
+No control plane, no API keys — uses the built-in **scripted** model:
 
 ```bash
-cargo build --bin shikigamictl
+git clone https://github.com/Sannrox/shikigami.git
+cd shikigami
+cargo build --release
 
-./target/debug/shikigamictl version
-./target/debug/shikigamictl init
-./target/debug/shikigamictl doctor
+./target/release/shikigami doctor
+./target/release/shikigami --config examples/local-run.toml run "demo" --keep-workspace
 ```
 
-`init` creates `.shikigami-state/` with `shikigami.toml` and a `runs/` directory.
-Operational truth for governed operations will live in sekai-chisei; this root
-holds only harness-local install state and run workspaces.
+Expect a successful run that writes `SHIKIGAMI_OK.txt` under the run workspace
+and prints `success=true`.
 
 ## CLI
 
+```text
+shikigami [--state DIR] [--config FILE] <COMMAND>
+```
+
 | Command | Purpose |
 | --- | --- |
-| `shikigamictl version [--json]` | Product identity |
-| `shikigamictl init` | Create local state root |
-| `shikigamictl doctor` | Check local prerequisites |
-| `shikigamictl run [TASK]` | Reserved; not implemented yet |
+| `version [--json]` | Product identity |
+| `doctor [--json]` | Effective profile, adapters, and health (probes the plane when configured) |
+| `run <task> [--keep-workspace]` | Execute one run |
 
-Override the state root with `--state` or `SHIKIGAMI_STATE`.
+| Flag / env | Purpose |
+| --- | --- |
+| `--state` / `SHIKIGAMI_STATE` | State root (default: `./.shikigami-state`) |
+| `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
+| `run --keep-workspace` | Keep the workspace after a successful run |
+
+There is **no** `init` command. Config is optional; disk state is created when a
+run needs it.
+
+## Configuration
+
+Settings are versioned TOML. Use cases change by profile and adapter ids, not
+by patching the turn loop.
+
+| Profile | Intent |
+| --- | --- |
+| `local` (default) | Offline-friendly. Governance `none` or `local`. Model `scripted` or `http`. |
+| `governed` | Production path. Governance `sekai-chisei`, fail-closed, model turns via the plane. |
+
+```bash
+# Inspect effective wiring
+./target/release/shikigami --config examples/local-run.toml doctor
+
+# Governed example (requires a reachable plane)
+export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
+./target/release/shikigami --config examples/governed-sekai-chisei.toml doctor
+```
+
+Full schema, environment variables, and resolution order:
+**[docs/settings.md](docs/settings.md)**.
+
+Examples:
+
+- [`examples/local-run.toml`](examples/local-run.toml) — offline
+- [`examples/governed-sekai-chisei.toml`](examples/governed-sekai-chisei.toml) — plane-backed
+- [`examples/tenkai-product.toml`](examples/tenkai-product.toml) — binary delivery only
+
+## Architecture (short)
+
+```text
+  operator / CI / embedder
+            │
+            ▼
+   ┌─────────────────┐     governance port      ┌────────────────┐
+   │  shikigami core  │────────────────────────▶│ none / local / │
+   │  run · tools ·   │                         │ sekai-chisei   │
+   │  workspace       │                         └────────────────┘
+   └─────────────────┘
+            │
+            │  (optional) install/upgrade binary
+            ▼
+         tenkai
+```
+
+- **Core owns** run lifecycle, workspace materialization, tool jail, event
+  emission.
+- **Adapters own** governance, model source (when not plane-owned), workspace
+  kind, and event sinks.
+- **sekai-chisei** (when selected) owns policy, budget, governed model
+  execution, and durable operational truth.
+- **tenkai** (when used) owns shipping the binary — never process config.
+
+Details: [DESIGN.md](DESIGN.md), [ADR 0001](docs/decisions/0001-ports-and-settings.md),
+[docs/adapters.md](docs/adapters.md).
+
+## Library embedding
+
+The CLI is a thin host. Prefer the library when you need structured results:
+
+```rust
+use shikigami::{Config, Harness, RunRequest, StateRoot};
+
+async fn example() -> Result<(), shikigami::HarnessError> {
+    let state = StateRoot::default_in(".");
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+
+    let harness = Harness::from_config(config, state)?;
+    let result = harness
+        .run(RunRequest {
+            task: "do work".into(),
+            keep_workspace: true,
+        })
+        .await?;
+    assert!(result.success);
+    Ok(())
+}
+```
+
+See [docs/embedding.md](docs/embedding.md).
 
 ## Development
 
@@ -57,9 +171,48 @@ cargo test
 cargo build --all-targets
 ```
 
-Read [DESIGN.md](DESIGN.md) for product boundaries and the first vertical slice.
-Repository workflow notes live in [AGENTS.md](AGENTS.md).
+CI on `main` and pull requests runs **Build & Test**, **Rustfmt**, and **Clippy**
+(see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Those checks are
+required for merges to `main`.
+
+Offline tests must pass with **no** control plane. Live plane probe:
+
+```bash
+SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 \
+  cargo test --test plane_live -- --ignored --nocapture
+```
+
+Cargo features (defaults on):
+
+| Feature | Purpose |
+| --- | --- |
+| `governance-sekai-chisei` | gRPC client + vendored protos |
+| `model-http` | OpenAI-compatible HTTP model adapter |
+
+Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Agent/repo operating rules:
+[AGENTS.md](AGENTS.md).
+
+## Documentation map
+
+| Document | Audience |
+| --- | --- |
+| [VISION.md](VISION.md) | Why this product exists |
+| [DESIGN.md](DESIGN.md) | Architecture and boundaries |
+| [docs/README.md](docs/README.md) | Full documentation index |
+| [docs/settings.md](docs/settings.md) | Configuration reference |
+| [docs/adapters.md](docs/adapters.md) | Ports and built-in adapters |
+| [docs/embedding.md](docs/embedding.md) | Library integration |
+| [docs/decisions/](docs/decisions/) | Accepted ADRs |
+| [CHANGELOG.md](CHANGELOG.md) | Notable changes |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community norms |
+
+## Naming
+
+- **Shikigami** — this product (the harness)
+- **Run** — one unit of agent work
+- Do not call an individual agent attempt “a shikigami”
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE).

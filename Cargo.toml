@@ -4,23 +4,47 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 readme = "README.md"
-description = "Local-first headless agent harness governed by sekai-chisei and deliverable through tenkai."
+description = "Open-source local-first headless agent harness with pluggable governance adapters."
 repository = "https://github.com/Sannrox/shikigami"
 publish = false
+build = "build.rs"
 
 [[bin]]
-name = "shikigamictl"
-path = "src/bin/shikigamictl.rs"
+name = "shikigami"
+path = "src/bin/shikigami.rs"
+
+[features]
+default = ["governance-sekai-chisei", "model-http"]
+governance-sekai-chisei = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
+model-http = ["dep:reqwest"]
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "fs", "sync"] }
 toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Optional: sekai-chisei gRPC
+tonic = { version = "0.14", features = ["tls-webpki-roots", "tls-ring"], optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+
+# Optional: OpenAI-compatible HTTP model for local/ungoverned runs
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

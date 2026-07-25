@@ -1,16 +1,19 @@
 //! Local harness state root (not the control-plane store).
+//!
+//! Created lazily when a run needs workspace storage. No install/`init` step.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, ConfigSource};
 
 /// Filesystem layout for local Shikigami state.
 ///
-/// Operational truth for governed operations lives in sekai-chisei. This root
-/// holds only harness-local install config, scratch, and run workspaces.
+/// Operational truth for governed operations lives in the governance plane
+/// (sekai-chisei when selected). This root holds optional host config, scratch,
+/// and run workspaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRoot {
     path: PathBuf,
@@ -18,10 +21,8 @@ pub struct StateRoot {
 
 #[derive(Debug, Error)]
 pub enum StateError {
-    #[error("state root does not exist: {0}")]
-    Missing(PathBuf),
-    #[error("failed to create state at {path}: {source}")]
-    Create {
+    #[error("failed to prepare state at {path}: {source}")]
+    Prepare {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -54,29 +55,29 @@ impl StateRoot {
     }
 
     pub fn exists(&self) -> bool {
-        self.path.is_dir() && self.config_path().is_file()
+        self.path.is_dir()
     }
 
-    /// Create the state root and a default config if missing.
-    pub fn init(&self) -> Result<Config, StateError> {
-        fs::create_dir_all(self.runs_dir()).map_err(|source| StateError::Create {
+    /// Resolve effective config: optional file under this root, then env.
+    pub fn config(&self) -> Result<(Config, ConfigSource), StateError> {
+        Ok(Config::resolve(self.config_path())?)
+    }
+
+    /// Resolve with full search path (CLI config, env, state, cwd).
+    pub fn config_search(
+        &self,
+        explicit_config: Option<&Path>,
+        cwd: &Path,
+    ) -> Result<(Config, ConfigSource), StateError> {
+        Ok(Config::resolve_search(explicit_config, self.path(), cwd)?)
+    }
+
+    /// Create directories needed to host run workspaces. Idempotent.
+    pub fn ensure_ready_for_runs(&self) -> Result<(), StateError> {
+        fs::create_dir_all(self.runs_dir()).map_err(|source| StateError::Prepare {
             path: self.path.clone(),
             source,
-        })?;
-        let config_path = self.config_path();
-        if config_path.is_file() {
-            return Ok(Config::load(config_path)?);
-        }
-        let config = Config::default();
-        config.save(config_path)?;
-        Ok(config)
-    }
-
-    pub fn load_config(&self) -> Result<Config, StateError> {
-        if !self.exists() {
-            return Err(StateError::Missing(self.path.clone()));
-        }
-        Ok(Config::load(self.config_path())?)
+        })
     }
 }
 
@@ -86,13 +87,21 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn init_is_idempotent() {
+    fn config_works_without_prior_setup() {
         let dir = tempdir().expect("tempdir");
         let root = StateRoot::default_in(dir.path());
-        let first = root.init().expect("init");
-        let second = root.init().expect("re-init");
-        assert_eq!(first, second);
-        assert!(root.exists());
+        assert!(!root.exists());
+        let (config, source) = root.config().expect("config");
+        assert_eq!(config.version, Config::CURRENT_VERSION);
+        assert!(matches!(source, ConfigSource::Defaults));
+    }
+
+    #[test]
+    fn ensure_ready_for_runs_is_idempotent() {
+        let dir = tempdir().expect("tempdir");
+        let root = StateRoot::default_in(dir.path());
+        root.ensure_ready_for_runs().expect("prepare");
+        root.ensure_ready_for_runs().expect("prepare again");
         assert!(root.runs_dir().is_dir());
     }
 }

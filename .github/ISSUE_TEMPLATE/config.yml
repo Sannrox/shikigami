@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Significant design proposal
+    url: https://github.com/Sannrox/shikigami/discussions/new?category=design
+    about: Discuss cross-boundary, public-contract, or difficult-to-reverse design choices before implementation.
+  - name: Security vulnerability
+    url: https://github.com/Sannrox/shikigami/security/advisories/new
+    about: Report exploitable vulnerabilities privately. Do not open a public issue.

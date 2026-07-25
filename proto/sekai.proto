@@ -1,0 +1,1372 @@
+syntax = "proto3";
+package sekai;
+
+// --- Messages ---
+
+message Object {
+  string id = 1;
+  string kind = 2;
+  string name = 3;
+  string namespace = 4;
+  string external_id = 5;
+  map<string, string> properties = 6;
+  int64 created = 7;
+  int64 updated = 8;
+}
+
+message Link {
+  string id = 1;
+  string from_id = 2;
+  string to_id = 3;
+  string relation = 4;
+  int64 created = 5;
+}
+
+message ListFilter {
+  string kind = 1;
+  string name = 2;
+  string namespace = 3;
+  repeated PropertyFilter property_filters = 4;
+  int32 limit = 5;
+  int32 offset = 6;
+  string order_by = 7;
+  bool descending = 8;
+  repeated string interface_filter = 9;
+}
+
+message PropertyFilter {
+  string key = 1;
+  string op = 2;
+  string value = 3;
+}
+
+message GraphQuery {
+  string start_id = 1;
+  string start_external_id = 2;
+  repeated string relations = 3;
+  string direction = 4;
+  int32 max_depth = 5;
+  repeated string kind_filter = 6;
+  map<string, string> property_filter = 7;
+  repeated string interface_filter = 8;
+}
+
+message GraphResult {
+  repeated Object objects = 1;
+  repeated Link links = 2;
+}
+
+message ObjectType {
+  string kind = 1;
+  string description = 2;
+  repeated PropertyDef properties = 3;
+  bool is_builtin = 4;
+  repeated string implements = 5;
+}
+
+message InterfaceDef {
+  string name = 1;
+  string description = 2;
+  repeated PropertyDef properties = 3;
+  bool is_builtin = 4;
+}
+
+message PropertyDef {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  string description = 4;
+  repeated string enum_values = 5;
+  string link_kind = 6;
+  string compute_expr = 7;
+  string classification = 8;
+  repeated StructFieldDef struct_fields = 9;
+}
+
+message StructFieldDef {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  string description = 4;
+  repeated string enum_values = 5;
+}
+
+// Ontology layer (issue #141): first-class semantic concepts above the graph.
+message OntologyProperty {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  string description = 4;
+}
+
+message Cardinality {
+  uint32 min = 1;
+  optional uint32 max = 2;
+}
+
+message OntologyClass {
+  string name = 1;
+  string description = 2;
+  repeated string superclasses = 3;
+  repeated string equivalent_classes = 4;
+  repeated string disjoint_classes = 5;
+  repeated OntologyProperty properties = 6;
+  bool is_builtin = 7;
+  string mapped_kind = 8;
+}
+
+message OntologyRelation {
+  string name = 1;
+  string description = 2;
+  string domain = 3;
+  string range = 4;
+  Cardinality cardinality = 5;
+  string inverse = 6;
+  bool transitive = 7;
+  bool is_builtin = 8;
+  string mapped_relation = 9;
+}
+
+message Function {
+  string name = 1;
+  string description = 2;
+  repeated FuncParam params = 3;
+  repeated PipelineStep pipeline = 4;
+  int64 created = 5;
+}
+
+message FuncParam {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+}
+
+message PipelineStep {
+  string op = 1;
+  string kind = 2;
+  string property = 3;
+  string value = 4;
+  string relation = 5;
+  string dir = 6;
+  string func = 7;
+  string field = 8;
+  string as = 9;
+}
+
+message FunctionResult {
+  repeated Object objects = 1;
+  map<string, string> aggregates = 2;
+}
+
+message Dataset {
+  string id = 1;
+  string name = 2;
+  repeated ColumnDef columns = 3;
+  string object_id = 4;
+  int64 created = 5;
+}
+
+message ColumnDef {
+  string name = 1;
+  string type = 2;
+  string classification = 3;
+}
+
+message RowFilter {
+  string column = 1;
+  string op = 2;
+  string value = 3;
+}
+
+message RowQuery {
+  repeated RowFilter filters = 1;
+  repeated string columns = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message VirtualTable {
+  string id = 1;
+  string name = 2;
+  string dataset_id = 3;
+  repeated RowFilter filters = 4;
+  repeated string columns = 5;
+  int64 created = 6;
+}
+
+message Grant {
+  string id = 1;
+  string object_id = 2;
+  string principal = 3;
+  string role = 4;
+  int64 created = 5;
+}
+
+message Decision {
+  string id = 1;
+  int64 timestamp = 2;
+  string actor = 3;
+  string action = 4;
+  string reason = 5;
+  map<string, string> evidence = 6;
+  string target_id = 7;
+  string outcome = 8;
+}
+
+message ObjectChange {
+  string id = 1;
+  string object_id = 2;
+  string field = 3;
+  string old_value = 4;
+  string new_value = 5;
+  string changed_by = 6;
+  int64 timestamp = 7;
+}
+
+message ActionRequest {
+  string action = 1;
+  map<string, string> params = 2;
+  // Advisory display label only. Authorization uses the authenticated caller
+  // principal from request metadata, not this field.
+  string actor = 3;
+}
+
+message ActionResult {
+  string action = 1;
+  string message = 2;
+  bool dry_run = 3;              // set when the call was a dry run (no mutation)
+  repeated string planned_ops = 4; // ops that would run, in order
+  string decision = 5;          // resolved policy decision: allow|deny|require_approval
+  string approval_id = 6;       // set when the action was held for approval (Phase B)
+}
+
+message ActionParamDef {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  repeated string enum_values = 4;
+}
+
+message ActionOp {
+  string op = 1;
+  string property = 2;
+  string value_from = 3;
+  string relation = 4;
+}
+
+message ActionTypeDef {
+  string name = 1;
+  string description = 2;
+  repeated ActionParamDef params = 3;
+  repeated ActionOp ops = 4;
+  string target_kind = 5;
+  int64 created = 6;
+}
+
+// A versioned description of an existing native query, retrieval, or action
+// surface. Object and action schemas reuse the canonical definitions above;
+// the catalog does not introduce a second schema language.
+message CapabilityEntry {
+  string name = 1;
+  string description = 2;
+  string kind = 3; // query | retrieval | action
+  string lifecycle_state = 4; // preview | active | deprecated | disabled | revoked
+  string contract_version = 5;
+  string minimum_compatible_version = 6;
+  string maximum_compatible_version = 7;
+  string replacement_capability = 8;
+  string input_type = 9;  // canonical protobuf message name
+  string output_type = 10; // canonical protobuf message name
+  repeated string required_scopes = 11;
+  repeated string policy_decision_points = 12;
+  string risk_class = 13;
+  string approval_behavior = 14; // none | may_require | required
+  repeated CapabilityLimit limits = 15;
+  ObjectType object_type = 16;
+  ActionTypeDef action_type = 17;
+  repeated string evidence_requirements = 18;
+}
+
+message CapabilityLimit {
+  string name = 1;
+  uint64 value = 2;
+}
+
+message DiscoverCapabilitiesRequest {
+  string namespace = 1;
+  string contract_version = 2; // empty negotiates the latest supported version
+  string catalog_version = 3; // pins pagination to an observed snapshot
+  uint32 page_size = 4; // defaults to 50 and is capped at 200
+  string page_token = 5;
+}
+
+message DiscoverCapabilitiesResponse {
+  repeated CapabilityEntry capabilities = 1;
+  string contract_version = 2;
+  string catalog_version = 3;
+  string next_page_token = 4;
+  uint32 total_size = 5;
+  string cache_scope = 6; // always authorization_context
+}
+
+// Closed declarative capability-package content. definition_json accepts only
+// the kind-specific identifier, enum, list, and bounded-integer fields.
+message CapabilityPackageComponent {
+  string kind = 1;
+  string name = 2;
+  string definition_json = 3;
+}
+
+message CapabilityPackageManifest {
+  string manifest_version = 1;
+  string name = 2;
+  string version = 3;
+  repeated CapabilityPackageComponent components = 4;
+}
+
+message CapabilityPackageInstallation {
+  string namespace = 1;
+  string package_name = 2;
+  string current_version = 3;
+  string previous_version = 4;
+  string state = 5;
+  string installed_by = 6;
+  string updated_by = 7;
+  int64 installed_at_ms = 8;
+  int64 updated_at_ms = 9;
+}
+
+message CapabilityPackageEvent {
+  int64 sequence = 1;
+  string namespace = 2;
+  string package_name = 3;
+  string package_version = 4;
+  string action = 5;
+  string actor = 6;
+  string request_id = 7;
+  string manifest_digest = 8;
+  string evidence = 9;
+  int64 recorded_at_ms = 10;
+}
+
+message InstallCapabilityPackageRequest { string namespace = 1; CapabilityPackageManifest manifest = 2; string request_id = 3; }
+message InstallCapabilityPackageResponse { CapabilityPackageInstallation installation = 1; }
+message UpgradeCapabilityPackageRequest { string namespace = 1; CapabilityPackageManifest manifest = 2; string request_id = 3; }
+message UpgradeCapabilityPackageResponse { CapabilityPackageInstallation installation = 1; }
+message CapabilityPackageTransitionRequest { string namespace = 1; string package_name = 2; string request_id = 3; }
+message CapabilityPackageTransitionResponse { CapabilityPackageInstallation installation = 1; }
+message GetCapabilityPackageRequest { string namespace = 1; string package_name = 2; }
+message GetCapabilityPackageResponse { CapabilityPackageInstallation installation = 1; CapabilityPackageManifest manifest = 2; repeated CapabilityPackageEvent events = 3; }
+message EvaluateCapabilityPackageResponse { bool passed = 1; }
+message UninstallCapabilityPackageResponse {}
+
+message LineageNode {
+  Object object = 1;
+  string role = 2;
+  bool ephemeral = 3;
+}
+
+message LineageEdge {
+  string from = 1;
+  string to = 2;
+  string relation = 3;
+}
+
+message LineageResult {
+  repeated LineageNode nodes = 1;
+  repeated LineageEdge edges = 2;
+  bool truncated = 3;
+}
+
+// --- Request/Response wrappers ---
+
+message CreateObjectRequest { Object object = 1; }
+message CreateObjectResponse { Object object = 1; }
+message GetObjectRequest { string id = 1; }
+message GetObjectResponse { Object object = 1; }
+message UpdateObjectRequest { Object object = 1; }
+message UpdateObjectResponse { Object object = 1; }
+message DeleteObjectRequest { string id = 1; }
+message DeleteObjectResponse {}
+message ListObjectsRequest { ListFilter filter = 1; }
+message ListObjectsResponse { repeated Object objects = 1; int32 total = 2; }
+message FindByExternalIdRequest { string external_id = 1; }
+message FindByPropertyRequest { string kind = 1; string key = 2; string value = 3; }
+
+message ObjectSet {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  ListFilter filter = 4;
+  string owner_principal = 5;
+  int64 created = 6;
+}
+message CreateObjectSetRequest { ObjectSet object_set = 1; }
+message CreateObjectSetResponse { ObjectSet object_set = 1; }
+message ListObjectSetsRequest {}
+message ListObjectSetsResponse { repeated ObjectSet object_sets = 1; }
+message DeleteObjectSetRequest { string id = 1; }
+message DeleteObjectSetResponse {}
+message ResolveObjectSetRequest {
+  string id = 1;
+  int32 limit = 2;
+  optional int32 offset = 3;
+}
+
+message CreateLinkRequest { Link link = 1; bool fail_if_exists = 2; }
+message CreateLinkResponse { Link link = 1; }
+message DeleteLinkRequest { string id = 1; }
+message DeleteLinkResponse {}
+message GetLinksRequest { string object_id = 1; string relation = 2; string direction = 3; }
+message GetLinksResponse { repeated Link links = 1; }
+message GetLinkedObjectsRequest { string object_id = 1; string relation = 2; string direction = 3; }
+message GetLinkedObjectsResponse { repeated Object objects = 1; }
+
+message TraverseRequest { GraphQuery query = 1; }
+message TraverseResponse { GraphResult result = 1; }
+
+// A bounded, governed context-retrieval root. Exactly one field must be set.
+message ContextRoot {
+  string object_id = 1;
+  string external_id = 2;
+  string link_id = 3;
+}
+
+message RetrieveContextRequest {
+  repeated ContextRoot roots = 1;
+  repeated string relations = 2;
+  string direction = 3; // outgoing | incoming | both; empty defaults to both
+  uint32 max_depth = 4; // 0 is roots-only; values above 3 are capped
+  uint32 max_objects = 5; // 0 defaults to 20; absolute cap is 100
+  uint32 max_links = 6; // 0 defaults to 40 when expanding; cap is 200
+  repeated string kind_filter = 7;
+  string reasoning_mode = 8; // empty/asserted_only | entailment
+  uint32 max_source_rows = 9; // 0 defaults to 200; cap is 1000
+  uint32 max_derived_rows = 10; // 0 defaults to 100; cap is 500
+  uint32 max_derivation_steps = 11; // 0 defaults to 12; cap is 32
+  uint32 max_time_ms = 12; // 0 defaults to 100; cap is 1000
+  uint64 max_explanation_bytes = 13; // 0 defaults to 1 MiB; cap is 16 MiB
+}
+
+message ContextDerivationStep {
+  string kind = 1; // asserted | derived
+  string relation = 2;
+  string from_id = 3;
+  string to_id = 4;
+  repeated string source_fact_ids = 5;
+  string ontology_revision = 6;
+  string rule = 7; // root | graph_link | mapping | subclass | equivalence | transitive
+}
+
+message ContextExplanation {
+  repeated ContextDerivationStep steps = 1;
+  repeated string source_fact_ids = 2;
+  string ontology_revision = 3;
+  bool derived = 4;
+}
+
+message ContextCandidate {
+  Object object = 1;
+  uint32 depth = 2;
+  string via_relation = 3;
+  double affinity = 4;
+  ContextExplanation explanation = 5;
+}
+
+message RetrieveContextResponse {
+  repeated ContextCandidate candidates = 1;
+  repeated Link links = 2;
+  bool truncated = 3;
+  uint32 unresolved_roots = 4;
+  uint32 denied_objects = 5;
+  uint32 truncated_objects = 6;
+  uint32 truncated_links = 7;
+  repeated string truncation_reasons = 8;
+  uint32 source_rows = 9;
+  uint32 derived_rows = 10;
+  string ontology_revision = 11;
+}
+
+message ListSchemaTypesRequest {}
+message ListSchemaTypesResponse { repeated ObjectType types = 1; }
+message CreateSchemaTypeRequest { ObjectType type = 1; }
+message CreateSchemaTypeResponse { ObjectType type = 1; }
+message DeleteSchemaTypeRequest { string kind = 1; }
+message DeleteSchemaTypeResponse {}
+message ListInterfacesRequest {}
+message ListInterfacesResponse { repeated InterfaceDef interfaces = 1; }
+message CreateInterfaceRequest { InterfaceDef interface = 1; }
+message CreateInterfaceResponse { InterfaceDef interface = 1; }
+message DeleteInterfaceRequest { string name = 1; }
+message DeleteInterfaceResponse {}
+
+message ListOntologyClassesRequest {}
+message ListOntologyClassesResponse { repeated OntologyClass classes = 1; }
+message GetOntologyClassRequest { string name = 1; }
+message GetOntologyClassResponse { OntologyClass class = 1; }
+message CreateOntologyClassRequest { OntologyClass class = 1; }
+message CreateOntologyClassResponse { OntologyClass class = 1; }
+message DeleteOntologyClassRequest { string name = 1; }
+message DeleteOntologyClassResponse {}
+
+message ListOntologyRelationsRequest {}
+message ListOntologyRelationsResponse { repeated OntologyRelation relations = 1; }
+message GetOntologyRelationRequest { string name = 1; }
+message GetOntologyRelationResponse { OntologyRelation relation = 1; }
+message CreateOntologyRelationRequest { OntologyRelation relation = 1; }
+message CreateOntologyRelationResponse { OntologyRelation relation = 1; }
+message DeleteOntologyRelationRequest { string name = 1; }
+message DeleteOntologyRelationResponse {}
+
+message ProjectSchemaToOntologyRequest {}
+message ProjectSchemaToOntologyResponse { repeated OntologyClass classes = 1; }
+
+message OntologyLinkViolation {
+  string link_id = 1;
+  string from_id = 2;
+  string to_id = 3;
+  string relation = 4;
+  bool domain_violation = 5;
+  bool range_violation = 6;
+}
+message ReportOntologyLinkViolationsRequest { string ontology_relation = 1; }
+message ReportOntologyLinkViolationsResponse { repeated OntologyLinkViolation violations = 1; }
+
+message ExecuteFunctionRequest { string name = 1; map<string, string> params = 2; }
+message ExecuteFunctionResponse { FunctionResult result = 1; }
+message CreateFunctionRequest { Function function = 1; }
+message CreateFunctionResponse { Function function = 1; }
+message ListFunctionsRequest {}
+message ListFunctionsResponse { repeated Function functions = 1; }
+
+message CreateDatasetRequest { Dataset dataset = 1; }
+message CreateDatasetResponse { Dataset dataset = 1; }
+message UpdateDatasetRequest { Dataset dataset = 1; }
+message UpdateDatasetResponse { Dataset dataset = 1; }
+message ListDatasetsRequest {}
+message ListDatasetsResponse { repeated Dataset datasets = 1; }
+message AppendRowsRequest { string dataset_id = 1; repeated Row rows = 2; }
+message Row { map<string, string> values = 1; }
+message AppendRowsResponse { int32 count = 1; }
+message QueryRowsRequest { string dataset_id = 1; RowQuery query = 2; }
+message QueryRowsResponse { repeated Row rows = 1; }
+
+message CreateVirtualTableRequest { VirtualTable table = 1; }
+message CreateVirtualTableResponse { VirtualTable table = 1; }
+message ListVirtualTablesRequest {}
+message ListVirtualTablesResponse { repeated VirtualTable tables = 1; }
+
+message CreateGrantRequest { Grant grant = 1; }
+message CreateGrantResponse { Grant grant = 1; }
+message DeleteGrantRequest { string id = 1; }
+message DeleteGrantResponse {}
+message ListGrantsRequest { string object_id = 1; }
+message ListGrantsResponse { repeated Grant grants = 1; }
+message CheckAccessRequest { string object_id = 1; repeated string principals = 2; }
+message CheckAccessResponse { bool allowed = 1; }
+message EnsureTeamNamespaceRequest {
+  string namespace = 1;
+  string principal = 2;
+  string role = 3;
+}
+message EnsureTeamNamespaceResponse {
+  Object namespace = 1;
+  repeated Grant grants = 2;
+}
+
+message RecordDecisionRequest { Decision decision = 1; }
+message RecordDecisionResponse { Decision decision = 1; }
+message ListDecisionsRequest { string actor = 1; string action = 2; int64 after = 3; int32 limit = 4; string target_id = 5; }
+message ListDecisionsResponse { repeated Decision decisions = 1; }
+message ListObjectChangesRequest { string object_id = 1; int32 limit = 2; int32 offset = 3; }
+message ListObjectChangesResponse { repeated ObjectChange changes = 1; }
+message PolicyAttestation {
+  string id = 1;
+  string decision_id = 2;       // the audit decision this attestation authorizes
+  string policy_kind = 3;       // e.g. action_policy
+  string policy_scope = 4;
+  string policy_version = 5;    // content hash of policy_snapshot
+  string policy_snapshot = 6;   // canonical JSON of the policy pinned at decision time
+  map<string, string> inputs = 7; // action, actor, risk_class, namespace
+  string decision = 8;          // allow | deny | require_approval
+  string content_hash = 9;
+  int64 created = 10;
+}
+message GetAttestationRequest { string id = 1; }
+message GetAttestationResponse { PolicyAttestation attestation = 1; }
+message ListAttestationsRequest {
+  string decision_id = 1;
+  string policy_scope = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+message ListAttestationsResponse { repeated PolicyAttestation attestations = 1; }
+message VerifyAttestationRequest { string id = 1; }
+message VerifyAttestationResponse {
+  bool ok = 1;
+  bool found = 2;
+  bool hash_ok = 3;            // stored hashes match recomputation
+  bool replay_ok = 4;          // pinned policy replayed over inputs re-derives the decision
+  string replayed_decision = 5;
+  bool decision_linked = 6;    // linked audit decision binds this attestation back
+  string error = 7;
+}
+message VerifyAuditLedgerRequest {}
+message VerifyAuditLedgerResponse {
+  bool ok = 1;
+  int64 entries_checked = 2;
+  int64 first_bad_seq = 3;   // first sequence number that failed (0 when ok)
+  string error = 4;
+  int64 anchor_seq = 5;      // verification started after this purge anchor (0 = genesis)
+  int64 head_seq = 6;
+  string head_hash = 7;
+}
+message AssuranceRecord {
+  Decision decision = 1;
+  PolicyAttestation attestation = 2;
+  VerifyAttestationResponse verification = 3;
+}
+message ExportAssuranceRequest {
+  string action = 1;       // exact action class; required
+  string policy_scope = 2; // administrative scope whose policy proofs may be exported
+  int64 after = 3;
+  int32 limit = 4;
+}
+message ExportAssuranceResponse {
+  repeated AssuranceRecord records = 1;
+  VerifyAuditLedgerResponse ledger = 2;
+}
+
+message CreateActionTypeRequest { ActionTypeDef action_type = 1; }
+message CreateActionTypeResponse { ActionTypeDef action_type = 1; }
+message ListActionTypesRequest {}
+message ListActionTypesResponse { repeated ActionTypeDef action_types = 1; }
+message DeleteActionTypeRequest { string name = 1; }
+message DeleteActionTypeResponse {}
+
+message ExecuteActionRequest {
+  ActionRequest request = 1;
+  bool dry_run = 2; // when true, plan and policy-check without mutating
+}
+message ExecuteActionResponse { ActionResult result = 1; }
+
+// --- Governed action policy (Plan 9) ---
+message ActionPolicy {
+  string scope = 1;                          // e.g. "agent:codex-app" or a namespace
+  string default_decision = 2;               // allow | deny | require_approval
+  map<string, string> action_overrides = 3;  // action name -> decision
+  map<string, string> risk_overrides = 4;    // read|write|destructive -> decision
+  uint32 max_mutations_per_work_unit = 5;    // 0 == unlimited
+  uint32 max_deletes_per_work_unit = 6;      // 0 == unlimited
+}
+
+message SetActionPolicyRequest { ActionPolicy policy = 1; }
+message SetActionPolicyResponse { ActionPolicy policy = 1; }
+message GetActionPolicyRequest { string scope = 1; }
+message GetActionPolicyResponse { ActionPolicy policy = 1; }
+message ListActionPoliciesRequest {}
+message ListActionPoliciesResponse { repeated ActionPolicy policies = 1; }
+
+// --- Governed action approvals (Plan 9, Phase B) ---
+message ActionApproval {
+  string id = 1;
+  string status = 2;                 // pending | approved | denied
+  string actor = 3;                  // proposing principal
+  string action = 4;
+  map<string, string> params = 5;    // redacted for display
+  string work_unit = 6;
+  string policy_scope = 7;
+  string risk_class = 8;
+  string target_id = 9;
+  int64 created = 10;
+  int64 updated = 11;
+  string decided_by = 12;
+  string outcome = 13;
+}
+
+message ApproveActionRequest { string approval_id = 1; }
+message ApproveActionResponse {
+  ActionResult result = 1;
+  ActionApproval approval = 2;
+}
+message DenyActionRequest {
+  string approval_id = 1;
+  string reason = 2;
+}
+message DenyActionResponse { ActionApproval approval = 1; }
+message ListPendingApprovalsRequest {
+  string status = 1; // "" or "pending" for pending only, "all" for every status, or a specific status
+}
+message ListPendingApprovalsResponse { repeated ActionApproval approvals = 1; }
+
+message GetLineageRequest { string object_id = 1; int32 max_nodes = 2; }
+message GetLineageResponse { LineageResult result = 1; }
+
+message ContentionScope {
+  string id = 1;
+  string name = 2;
+  string parent_scope_id = 3;
+  int32 max_concurrency = 4;
+  string admission_policy = 5;
+  int32 heartbeat_ttl_seconds = 6;
+  int32 timeout_seconds = 7;
+  string owner_principal = 8;
+  int64 created = 9;
+  int64 updated = 10;
+}
+
+message WorkUnit {
+  string id = 1;
+  string kind = 2;
+  string actor = 3;
+  string target_object_id = 4;
+  string status = 5;
+  string requested_spec = 6;
+  string scope_id = 7;
+  int32 priority = 8;
+  int32 timeout_seconds = 9;
+  int32 heartbeat_ttl_seconds = 10;
+  int64 created_at = 11;
+  int64 admitted_at = 12;
+  int64 started_at = 13;
+  int64 finished_at = 14;
+  int64 last_heartbeat_at = 15;
+  string failure_reason = 16;
+  string cancel_reason = 17;
+  string owner_principal = 18;
+  string creator_principal = 19;
+  string idempotency_key = 20;
+  int64 updated_at = 21;
+}
+
+message Reservation {
+  string id = 1;
+  string work_unit_id = 2;
+  string scope_id = 3;
+  string status = 4;
+  string lease_owner = 5;
+  int64 leased_at = 6;
+  int64 expires_at = 7;
+  int64 released_at = 8;
+  int64 created_at = 9;
+}
+
+message RunEvent {
+  string id = 1;
+  string work_unit_id = 2;
+  string event_type = 3;
+  string message = 4;
+  map<string, string> evidence = 5;
+  int64 created_at = 6;
+}
+
+message WorkUnitFilter {
+  string status = 1;
+  string actor = 2;
+  string scope_id = 3;
+  string target_object_id = 4;
+  string owner_principal = 5;
+  int32 limit = 6;
+  int32 offset = 7;
+  repeated string statuses = 8;
+  int64 created_after = 9;
+  int64 updated_after = 10;
+  string creator_principal = 11;
+  string page_token = 12;
+}
+
+message ScopeBlockage {
+  string scope_id = 1;
+  string scope_name = 2;
+  string reason = 3;
+  int32 pending_count = 4;
+  int32 active_count = 5;
+}
+
+message CoordinationSnapshot {
+  int32 pending_count = 1;
+  int32 running_count = 2;
+  int32 stale_count = 3;
+  int32 active_reservation_count = 4;
+  int64 oldest_pending_age_ms = 5;
+  repeated ScopeBlockage blocked_scopes = 6;
+  int64 oldest_running_age_ms = 7;
+  int32 stale_reservation_count = 8;
+}
+
+message CreateContentionScopeRequest { ContentionScope scope = 1; string request_id = 2; }
+message CreateContentionScopeResponse { ContentionScope scope = 1; }
+message UpdateContentionScopeRequest { ContentionScope scope = 1; string request_id = 2; }
+message UpdateContentionScopeResponse { ContentionScope scope = 1; }
+message GetContentionScopeRequest { string id = 1; }
+message GetContentionScopeResponse { ContentionScope scope = 1; }
+message ListContentionScopesRequest {}
+message ListContentionScopesResponse { repeated ContentionScope scopes = 1; }
+
+message CreateWorkUnitRequest { WorkUnit work_unit = 1; string request_id = 2; }
+message CreateWorkUnitResponse { WorkUnit work_unit = 1; }
+message GetWorkUnitRequest { string id = 1; }
+message GetWorkUnitResponse { WorkUnit work_unit = 1; }
+message ListWorkUnitsRequest { WorkUnitFilter filter = 1; }
+message ListWorkUnitsResponse { repeated WorkUnit work_units = 1; string next_page_token = 2; }
+
+message TryAdmitWorkUnitRequest { string work_unit_id = 1; string request_id = 2; }
+message TryAdmitWorkUnitResponse {
+  bool admitted = 1;
+  int32 queue_position = 2;
+  string reason = 3;
+  WorkUnit work_unit = 4;
+  repeated Reservation reservations = 5;
+}
+
+message HeartbeatWorkUnitRequest { string work_unit_id = 1; string request_id = 2; }
+message HeartbeatWorkUnitResponse { WorkUnit work_unit = 1; }
+message CompleteWorkUnitRequest { string work_unit_id = 1; string request_id = 2; }
+message CompleteWorkUnitResponse { WorkUnit work_unit = 1; }
+message FailWorkUnitRequest { string work_unit_id = 1; string failure_reason = 2; string request_id = 3; }
+message FailWorkUnitResponse { WorkUnit work_unit = 1; }
+message CancelWorkUnitRequest { string work_unit_id = 1; string cancel_reason = 2; string request_id = 3; }
+message CancelWorkUnitResponse { WorkUnit work_unit = 1; }
+
+message ReleaseReservationRequest { string work_unit_id = 1; string request_id = 2; }
+message ReleaseReservationResponse { int32 released = 1; }
+message ListReservationsRequest {
+  string work_unit_id = 1;
+  string scope_id = 2;
+  string status = 3;
+}
+message ListReservationsResponse { repeated Reservation reservations = 1; }
+
+message ListRunEventsRequest {
+  string work_unit_id = 1;
+  int32 limit = 2;
+  int64 after = 3;
+  repeated string event_types = 4;
+  string page_token = 5;
+}
+message ListRunEventsResponse { repeated RunEvent events = 1; string next_page_token = 2; }
+
+message ReconciliationDetail {
+  string work_unit_id = 1;
+  string reservation_id = 2;
+  string reason = 3;
+  string action = 4;
+}
+message ReconcileWorkUnitsRequest {
+  bool dry_run = 1;
+  string work_unit_id = 2;
+  string scope_id = 3;
+  int32 limit = 4;
+}
+message ReconcileWorkUnitsResponse {
+  int32 work_units_reconciled = 1;
+  int32 reservations_released = 2;
+  repeated ReconciliationDetail details = 3;
+}
+message GetCoordinationSnapshotRequest {}
+message GetCoordinationSnapshotResponse { CoordinationSnapshot snapshot = 1; }
+
+message CredentialRecord {
+  string id = 1;
+  string principal = 2;
+  string status = 3;
+  int64 created = 4;
+  int64 rotated_at = 5;
+  int64 revoked_at = 6;
+  string tenant_id = 7;
+}
+message CreateCredentialRequest { string principal = 1; bool managed_team_principal = 2; string tenant_id = 3; }
+message CreateCredentialResponse { string token = 1; CredentialRecord credential = 2; }
+message RotateCredentialRequest { string principal = 1; bool managed_team_principal = 2; string tenant_id = 3; }
+message RotateCredentialResponse { string token = 1; CredentialRecord credential = 2; }
+message RevokeCredentialRequest { string principal = 1; string tenant_id = 2; }
+message RevokeCredentialResponse { CredentialRecord credential = 1; }
+message ListCredentialsRequest { string tenant_id = 1; }
+message ListCredentialsResponse { repeated CredentialRecord credentials = 1; }
+
+enum TenantLifecycleState {
+  TENANT_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  TENANT_LIFECYCLE_STATE_ACTIVE = 1;
+  TENANT_LIFECYCLE_STATE_SUSPENDED = 2;
+  TENANT_LIFECYCLE_STATE_CLOSURE_PENDING = 3;
+}
+message TenantRecord {
+  string contract_version = 1;
+  string id = 2;
+  TenantLifecycleState state = 3;
+  int64 created_at_ms = 4;
+  int64 updated_at_ms = 5;
+}
+message CreateTenantRequest { string idempotency_key = 1; }
+message CreateTenantResponse { TenantRecord tenant = 1; }
+message GetTenantRequest { string tenant_id = 1; }
+message GetTenantResponse { TenantRecord tenant = 1; }
+message SuspendTenantRequest { string tenant_id = 1; string idempotency_key = 2; }
+message SuspendTenantResponse { TenantRecord tenant = 1; }
+message ReactivateTenantRequest { string tenant_id = 1; string idempotency_key = 2; }
+message ReactivateTenantResponse { TenantRecord tenant = 1; }
+message RequestTenantClosureRequest { string tenant_id = 1; string idempotency_key = 2; }
+message RequestTenantClosureResponse { TenantRecord tenant = 1; }
+
+message NamespaceOwnership {
+  string contract_version = 1;
+  string namespace = 2;
+  string tenant_id = 3;
+  string migrated_from_namespace = 4;
+  int64 created_at_ms = 5;
+}
+message CreateTenantNamespaceRequest {
+  string namespace = 1;
+  string tenant_id = 2;
+  string migrated_from_namespace = 3;
+}
+message CreateTenantNamespaceResponse { NamespaceOwnership ownership = 1; }
+message GetNamespaceOwnershipRequest { string namespace = 1; }
+message GetNamespaceOwnershipResponse { NamespaceOwnership ownership = 1; }
+
+enum TenantMembershipRole {
+  TENANT_MEMBERSHIP_ROLE_UNSPECIFIED = 0;
+  TENANT_MEMBERSHIP_ROLE_OWNER = 1;
+  TENANT_MEMBERSHIP_ROLE_ADMIN = 2;
+  TENANT_MEMBERSHIP_ROLE_MEMBER = 3;
+  TENANT_MEMBERSHIP_ROLE_BILLING_VIEWER = 4;
+}
+message TenantMembership {
+  string contract_version = 1;
+  string tenant_id = 2;
+  string subject_id = 3;
+  TenantMembershipRole role = 4;
+  bool active = 5;
+  int64 created_at_ms = 6;
+  int64 updated_at_ms = 7;
+  optional int64 revoked_at_ms = 8;
+}
+message CreateTenantMembershipRequest {
+  string tenant_id = 1;
+  string subject_id = 2;
+  TenantMembershipRole role = 3;
+}
+message CreateTenantMembershipResponse { TenantMembership membership = 1; }
+message ChangeTenantMembershipRoleRequest {
+  string tenant_id = 1;
+  string subject_id = 2;
+  TenantMembershipRole role = 3;
+}
+message ChangeTenantMembershipRoleResponse { TenantMembership membership = 1; }
+message ListTenantMembershipsRequest { string tenant_id = 1; }
+message ListTenantMembershipsResponse { repeated TenantMembership memberships = 1; }
+message RevokeTenantMembershipRequest { string tenant_id = 1; string subject_id = 2; }
+message RevokeTenantMembershipResponse { TenantMembership membership = 1; }
+
+message GetProvenanceReportRequest { string work_unit_id = 1; }
+message GetProvenanceReportResponse { string report = 1; }
+
+message EvidenceRelationship {
+  string relation = 1;
+  string target_source_record_id = 2;
+  string target_source_type = 3;
+  string target_source_instance = 4;
+}
+
+message EvidenceCausality {
+  string operation_id = 1;
+  string parent_operation_id = 2;
+  string attempt_id = 3;
+  string model_call_id = 4;
+  repeated string subject_references = 5;
+  map<string, string> trace_context = 6;
+}
+
+message EvidenceEnvelope {
+  string contract_version = 1;
+  string source_type = 2;
+  string source_instance = 3;
+  string source_record_id = 4;
+  string source_version = 5;
+  int64 source_sequence = 6;
+  string namespace = 7;
+  string target_external_id = 8;
+  string target_kind = 9;
+  string evidence_type = 10;
+  string signal = 11;
+  string schema_id = 12;
+  string schema_version = 13;
+  string schema_compatibility = 14;
+  int64 observed_at_ms = 15;
+  int64 collected_at_ms = 16;
+  optional int64 expires_at_ms = 17;
+  bytes content_json = 18;
+  repeated EvidenceRelationship relationships = 19;
+  string producer_identity = 20;
+  uint32 confidence_bps = 21;
+  string classification = 22;
+  map<string, string> provenance = 23;
+  string idempotency_key = 24;
+  string content_digest = 25;
+  string intent = 26;
+  EvidenceCausality causality = 27;
+}
+
+message EvidenceProducerCapability {
+  string producer_identity = 1;
+  int64 config_version = 2;
+  repeated string source_instances = 3;
+  repeated string namespaces = 4;
+  repeated string evidence_types = 5;
+  repeated string target_kinds = 6;
+  string classification_ceiling = 7;
+  repeated string allowed_intents = 8;
+  bool allow_operation_attachment = 9;
+  int64 replay_window_ms = 10;
+  int64 max_clock_skew_ms = 11;
+  uint64 max_payload_bytes = 12;
+  uint64 max_relationships = 13;
+  uint32 rate_limit_per_minute = 14;
+  bool revoked = 15;
+  uint64 max_retained_submissions = 16;
+  repeated string source_types = 17;
+}
+
+message EvidenceSchemaDefinition {
+  string schema_id = 1;
+  string schema_version = 2;
+  string evidence_type = 3;
+  repeated string compatible_versions = 4;
+}
+
+message EvidenceSubmissionRecord {
+  string id = 1;
+  string producer_identity = 2;
+  string source_type = 3;
+  string source_instance = 4;
+  string source_record_id = 5;
+  string source_version = 6;
+  int64 source_sequence = 7;
+  string namespace = 8;
+  string target_external_id = 9;
+  string target_kind = 10;
+  string evidence_type = 11;
+  string schema_id = 12;
+  string schema_version = 13;
+  string content_digest = 14;
+  string classification = 15;
+  string intent = 16;
+  string lifecycle_state = 17;
+  string rejection_code = 18;
+  string rejection_summary = 19;
+  int64 observed_at_ms = 20;
+  int64 collected_at_ms = 21;
+  optional int64 expires_at_ms = 22;
+  int64 received_at_ms = 23;
+  int64 updated_at_ms = 24;
+}
+
+message EvidenceSubmissionResult {
+  EvidenceSubmissionRecord submission = 1;
+  bool admitted = 2;
+  bool deduplicated = 3;
+  bool projected = 4;
+}
+
+message RegisterEvidenceProducerRequest { EvidenceProducerCapability capability = 1; }
+message RegisterEvidenceProducerResponse {}
+message RegisterEvidenceSchemaRequest { EvidenceSchemaDefinition definition = 1; }
+message RegisterEvidenceSchemaResponse {}
+message SubmitEvidenceRequest { EvidenceEnvelope envelope = 1; }
+message SubmitEvidenceResponse { EvidenceSubmissionResult result = 1; }
+message SubmitEvidenceBatchRequest { repeated EvidenceEnvelope envelopes = 1; }
+message SubmitEvidenceBatchResponse { repeated EvidenceSubmissionResult results = 1; }
+message GetEvidenceSubmissionRequest { string submission_id = 1; }
+message GetEvidenceSubmissionResponse {
+  EvidenceSubmissionRecord submission = 1;
+  repeated string lifecycle_history = 2;
+}
+message GetEvidenceSubmissionContentRequest { string submission_id = 1; }
+// Returns one retained admitted envelope after rechecking the live ACL on its
+// projected external_evidence object. Missing, unreadable, and non-disclosable
+// lifecycle states all return NOT_FOUND.
+message GetEvidenceSubmissionContentResponse {
+  string submission_id = 1;
+  EvidenceEnvelope envelope = 2;
+  string lifecycle_state = 3;
+}
+message ListEvidenceSubmissionsRequest {
+  string producer_identity = 1;
+  string source_instance = 2;
+  string namespace = 3;
+  string lifecycle_state = 4;
+  string target_external_id = 5;
+  string evidence_type = 6;
+  int32 limit = 7;
+  int32 offset = 8;
+}
+message ListEvidenceSubmissionsResponse { repeated EvidenceSubmissionRecord submissions = 1; }
+message ReplayEvidenceSubmissionRequest { string submission_id = 1; }
+message ReplayEvidenceSubmissionResponse { EvidenceSubmissionResult result = 1; }
+message RetractEvidenceRequest {
+  string submission_id = 1;
+  string source_version = 2;
+  int64 source_sequence = 3;
+  string idempotency_key = 4;
+  int64 observed_at_ms = 5;
+}
+message RetractEvidenceResponse { EvidenceSubmissionResult result = 1; }
+message MarkEvidenceStaleRequest {
+  string submission_id = 1;
+  string source_version = 2;
+  int64 source_sequence = 3;
+  string idempotency_key = 4;
+  int64 observed_at_ms = 5;
+}
+message MarkEvidenceStaleResponse { EvidenceSubmissionResult result = 1; }
+
+// A reference-only, version-pinned context transfer between principals. The
+// manifest never embeds artifact, evidence, receipt, or memory content.
+message HandoffReference {
+  string kind = 1;       // operation_receipt | work_unit | object | evidence_submission | kioku
+  string id = 2;
+  string version = 3;    // content digest, object revision, work-unit revision, or Kioku version
+  bool omitted = 4;
+  string omission_reason = 5; // policy | retention | unavailable
+}
+message HandoffManifest {
+  string id = 1;
+  string namespace = 2;
+  string parent_operation_id = 3;
+  string parent_attempt_id = 4;
+  string parent_work_unit_id = 5;
+  repeated HandoffReference references = 6;
+  string creator_principal = 7;
+  string intended_principal = 8;
+  string intended_scope = 9;
+  string purpose = 10;
+  int64 created_at_ms = 11;
+  int64 expires_at_ms = 12;
+  string digest = 13;
+  string supersedes_manifest_id = 14;
+  bool revoked = 15;
+}
+message CreateHandoffRequest { HandoffManifest manifest = 1; string request_id = 2; }
+message CreateHandoffResponse { HandoffManifest manifest = 1; }
+message ResolveHandoffRequest { string manifest_id = 1; }
+message ResolveHandoffResponse {
+  HandoffManifest manifest = 1;
+  repeated HandoffReference available_references = 2;
+  repeated HandoffReference omissions = 3;
+}
+message RevokeHandoffRequest { string manifest_id = 1; string reason = 2; string request_id = 3; }
+message RevokeHandoffResponse { HandoffManifest manifest = 1; }
+
+// A reusable, namespace-scoped lease. `generation` is a monotonically
+// increasing fencing number and `fencing_token` uniquely identifies the
+// acquisition. Downstream mutation executors must reject a generation older
+// than the highest generation they have observed.
+message Lease {
+  string namespace = 1;
+  string key = 2;
+  uint64 generation = 3;
+  string fencing_token = 4;
+  string owner = 5;
+  string status = 6; // active or released
+  int64 acquired_at_ms = 7;
+  int64 refreshed_at_ms = 8;
+  int64 expires_at_ms = 9;
+  int64 released_at_ms = 10;
+}
+message AcquireLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string owner = 3;
+  int64 ttl_ms = 4;
+  string request_id = 5;
+}
+message AcquireLeaseResponse { Lease lease = 1; }
+message GetLeaseRequest { string namespace = 1; string key = 2; }
+message GetLeaseResponse { Lease lease = 1; }
+message RefreshLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string fencing_token = 3;
+  int64 ttl_ms = 4;
+  string request_id = 5;
+}
+message RefreshLeaseResponse { Lease lease = 1; }
+message ReleaseLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string fencing_token = 3;
+  string request_id = 4;
+}
+message ReleaseLeaseResponse { Lease lease = 1; }
+message TakeoverExpiredLeaseRequest {
+  string namespace = 1;
+  string key = 2;
+  string owner = 3;
+  string expected_fencing_token = 4;
+  int64 expected_expires_at_ms = 5;
+  int64 ttl_ms = 6;
+  string request_id = 7;
+}
+message TakeoverExpiredLeaseResponse { Lease lease = 1; }
+
+// Authorizes one idempotent graph mutation while the referenced lease
+// generation remains active. The fencing token is opaque and is never copied
+// into object audit history.
+message LeasePrecondition {
+  string namespace = 1;
+  string key = 2;
+  string fencing_token = 3;
+  string request_id = 4;
+}
+message GuardedCreateObjectRequest {
+  Object object = 1;
+  LeasePrecondition lease_precondition = 2;
+}
+message GuardedCreateObjectResponse { Object object = 1; }
+message GuardedUpdateObjectRequest {
+  Object object = 1;
+  LeasePrecondition lease_precondition = 2;
+}
+message GuardedUpdateObjectResponse { Object object = 1; }
+message GuardedDeleteObjectRequest {
+  string id = 1;
+  LeasePrecondition lease_precondition = 2;
+}
+message GuardedDeleteObjectResponse {}
+
+// --- Service ---
+
+// Durable, namespace-isolated facts for agent operations. Domain-specific
+// concepts are represented through typed objects and links rather than new
+// fields in this core contract.
+service SekaiService {
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+  rpc GetLease(GetLeaseRequest) returns (GetLeaseResponse);
+  rpc RefreshLease(RefreshLeaseRequest) returns (RefreshLeaseResponse);
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+  rpc TakeoverExpiredLease(TakeoverExpiredLeaseRequest) returns (TakeoverExpiredLeaseResponse);
+  rpc GuardedCreateObject(GuardedCreateObjectRequest) returns (GuardedCreateObjectResponse);
+  rpc GuardedUpdateObject(GuardedUpdateObjectRequest) returns (GuardedUpdateObjectResponse);
+  rpc GuardedDeleteObject(GuardedDeleteObjectRequest) returns (GuardedDeleteObjectResponse);
+  rpc CreateObject(CreateObjectRequest) returns (CreateObjectResponse);
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+  rpc UpdateObject(UpdateObjectRequest) returns (UpdateObjectResponse);
+  rpc DeleteObject(DeleteObjectRequest) returns (DeleteObjectResponse);
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+  rpc CreateObjectSet(CreateObjectSetRequest) returns (CreateObjectSetResponse);
+  rpc ListObjectSets(ListObjectSetsRequest) returns (ListObjectSetsResponse);
+  rpc DeleteObjectSet(DeleteObjectSetRequest) returns (DeleteObjectSetResponse);
+  rpc ResolveObjectSet(ResolveObjectSetRequest) returns (ListObjectsResponse);
+  rpc FindByExternalId(FindByExternalIdRequest) returns (GetObjectResponse);
+  rpc FindByProperty(FindByPropertyRequest) returns (ListObjectsResponse);
+
+  rpc CreateLink(CreateLinkRequest) returns (CreateLinkResponse);
+  rpc DeleteLink(DeleteLinkRequest) returns (DeleteLinkResponse);
+  rpc GetLinks(GetLinksRequest) returns (GetLinksResponse);
+  rpc GetLinkedObjects(GetLinkedObjectsRequest) returns (GetLinkedObjectsResponse);
+
+  rpc Traverse(TraverseRequest) returns (TraverseResponse);
+  rpc RetrieveContext(RetrieveContextRequest) returns (RetrieveContextResponse);
+  rpc DiscoverCapabilities(DiscoverCapabilitiesRequest) returns (DiscoverCapabilitiesResponse);
+  rpc InstallCapabilityPackage(InstallCapabilityPackageRequest) returns (InstallCapabilityPackageResponse);
+  rpc GetCapabilityPackage(GetCapabilityPackageRequest) returns (GetCapabilityPackageResponse);
+  rpc EvaluateCapabilityPackage(CapabilityPackageTransitionRequest) returns (EvaluateCapabilityPackageResponse);
+  rpc UpgradeCapabilityPackage(UpgradeCapabilityPackageRequest) returns (UpgradeCapabilityPackageResponse);
+  rpc RollbackCapabilityPackage(CapabilityPackageTransitionRequest) returns (CapabilityPackageTransitionResponse);
+  rpc DisableCapabilityPackage(CapabilityPackageTransitionRequest) returns (CapabilityPackageTransitionResponse);
+  rpc UninstallCapabilityPackage(CapabilityPackageTransitionRequest) returns (UninstallCapabilityPackageResponse);
+
+  rpc ListSchemaTypes(ListSchemaTypesRequest) returns (ListSchemaTypesResponse);
+  rpc CreateSchemaType(CreateSchemaTypeRequest) returns (CreateSchemaTypeResponse);
+  rpc DeleteSchemaType(DeleteSchemaTypeRequest) returns (DeleteSchemaTypeResponse);
+  rpc ListInterfaces(ListInterfacesRequest) returns (ListInterfacesResponse);
+  rpc CreateInterface(CreateInterfaceRequest) returns (CreateInterfaceResponse);
+  rpc DeleteInterface(DeleteInterfaceRequest) returns (DeleteInterfaceResponse);
+  rpc ListOntologyClasses(ListOntologyClassesRequest) returns (ListOntologyClassesResponse);
+  rpc GetOntologyClass(GetOntologyClassRequest) returns (GetOntologyClassResponse);
+  rpc CreateOntologyClass(CreateOntologyClassRequest) returns (CreateOntologyClassResponse);
+  rpc DeleteOntologyClass(DeleteOntologyClassRequest) returns (DeleteOntologyClassResponse);
+  rpc ListOntologyRelations(ListOntologyRelationsRequest) returns (ListOntologyRelationsResponse);
+  rpc GetOntologyRelation(GetOntologyRelationRequest) returns (GetOntologyRelationResponse);
+  rpc CreateOntologyRelation(CreateOntologyRelationRequest) returns (CreateOntologyRelationResponse);
+  rpc DeleteOntologyRelation(DeleteOntologyRelationRequest) returns (DeleteOntologyRelationResponse);
+  rpc ProjectSchemaToOntology(ProjectSchemaToOntologyRequest) returns (ProjectSchemaToOntologyResponse);
+  rpc ReportOntologyLinkViolations(ReportOntologyLinkViolationsRequest) returns (ReportOntologyLinkViolationsResponse);
+
+  rpc CreateFunction(CreateFunctionRequest) returns (CreateFunctionResponse);
+  rpc ListFunctions(ListFunctionsRequest) returns (ListFunctionsResponse);
+  rpc ExecuteFunction(ExecuteFunctionRequest) returns (ExecuteFunctionResponse);
+
+  rpc CreateDataset(CreateDatasetRequest) returns (CreateDatasetResponse);
+  rpc UpdateDataset(UpdateDatasetRequest) returns (UpdateDatasetResponse);
+  rpc ListDatasets(ListDatasetsRequest) returns (ListDatasetsResponse);
+  rpc AppendRows(AppendRowsRequest) returns (AppendRowsResponse);
+  rpc QueryRows(QueryRowsRequest) returns (QueryRowsResponse);
+  rpc CreateVirtualTable(CreateVirtualTableRequest) returns (CreateVirtualTableResponse);
+  rpc ListVirtualTables(ListVirtualTablesRequest) returns (ListVirtualTablesResponse);
+
+  rpc CreateGrant(CreateGrantRequest) returns (CreateGrantResponse);
+  rpc DeleteGrant(DeleteGrantRequest) returns (DeleteGrantResponse);
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
+  rpc CheckAccess(CheckAccessRequest) returns (CheckAccessResponse);
+  rpc EnsureTeamNamespace(EnsureTeamNamespaceRequest) returns (EnsureTeamNamespaceResponse);
+
+  rpc RecordDecision(RecordDecisionRequest) returns (RecordDecisionResponse);
+  rpc ListDecisions(ListDecisionsRequest) returns (ListDecisionsResponse);
+  rpc ListObjectChanges(ListObjectChangesRequest) returns (ListObjectChangesResponse);
+  rpc VerifyAuditLedger(VerifyAuditLedgerRequest) returns (VerifyAuditLedgerResponse);
+  rpc GetAttestation(GetAttestationRequest) returns (GetAttestationResponse);
+  rpc ListAttestations(ListAttestationsRequest) returns (ListAttestationsResponse);
+  rpc VerifyAttestation(VerifyAttestationRequest) returns (VerifyAttestationResponse);
+  rpc ExportAssurance(ExportAssuranceRequest) returns (ExportAssuranceResponse);
+
+  rpc CreateActionType(CreateActionTypeRequest) returns (CreateActionTypeResponse);
+  rpc ListActionTypes(ListActionTypesRequest) returns (ListActionTypesResponse);
+  rpc DeleteActionType(DeleteActionTypeRequest) returns (DeleteActionTypeResponse);
+  rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
+  rpc SetActionPolicy(SetActionPolicyRequest) returns (SetActionPolicyResponse);
+  rpc GetActionPolicy(GetActionPolicyRequest) returns (GetActionPolicyResponse);
+  rpc ListActionPolicies(ListActionPoliciesRequest) returns (ListActionPoliciesResponse);
+  rpc ApproveAction(ApproveActionRequest) returns (ApproveActionResponse);
+  rpc DenyAction(DenyActionRequest) returns (DenyActionResponse);
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
+  rpc GetLineage(GetLineageRequest) returns (GetLineageResponse);
+
+  rpc CreateContentionScope(CreateContentionScopeRequest) returns (CreateContentionScopeResponse);
+  rpc UpdateContentionScope(UpdateContentionScopeRequest) returns (UpdateContentionScopeResponse);
+  rpc GetContentionScope(GetContentionScopeRequest) returns (GetContentionScopeResponse);
+  rpc ListContentionScopes(ListContentionScopesRequest) returns (ListContentionScopesResponse);
+
+  rpc CreateWorkUnit(CreateWorkUnitRequest) returns (CreateWorkUnitResponse);
+  rpc GetWorkUnit(GetWorkUnitRequest) returns (GetWorkUnitResponse);
+  rpc ListWorkUnits(ListWorkUnitsRequest) returns (ListWorkUnitsResponse);
+  rpc TryAdmitWorkUnit(TryAdmitWorkUnitRequest) returns (TryAdmitWorkUnitResponse);
+  rpc HeartbeatWorkUnit(HeartbeatWorkUnitRequest) returns (HeartbeatWorkUnitResponse);
+  rpc CompleteWorkUnit(CompleteWorkUnitRequest) returns (CompleteWorkUnitResponse);
+  rpc FailWorkUnit(FailWorkUnitRequest) returns (FailWorkUnitResponse);
+  rpc CancelWorkUnit(CancelWorkUnitRequest) returns (CancelWorkUnitResponse);
+
+  rpc ReleaseReservation(ReleaseReservationRequest) returns (ReleaseReservationResponse);
+  rpc ListReservations(ListReservationsRequest) returns (ListReservationsResponse);
+  rpc ListRunEvents(ListRunEventsRequest) returns (ListRunEventsResponse);
+  rpc ReconcileWorkUnits(ReconcileWorkUnitsRequest) returns (ReconcileWorkUnitsResponse);
+  rpc GetCoordinationSnapshot(GetCoordinationSnapshotRequest) returns (GetCoordinationSnapshotResponse);
+  rpc CreateCredential(CreateCredentialRequest) returns (CreateCredentialResponse);
+  rpc RotateCredential(RotateCredentialRequest) returns (RotateCredentialResponse);
+  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc ListCredentials(ListCredentialsRequest) returns (ListCredentialsResponse);
+  rpc GetProvenanceReport(GetProvenanceReportRequest) returns (GetProvenanceReportResponse);
+  rpc RegisterEvidenceProducer(RegisterEvidenceProducerRequest) returns (RegisterEvidenceProducerResponse);
+  rpc RegisterEvidenceSchema(RegisterEvidenceSchemaRequest) returns (RegisterEvidenceSchemaResponse);
+  rpc SubmitEvidence(SubmitEvidenceRequest) returns (SubmitEvidenceResponse);
+  rpc SubmitEvidenceBatch(SubmitEvidenceBatchRequest) returns (SubmitEvidenceBatchResponse);
+  rpc GetEvidenceSubmission(GetEvidenceSubmissionRequest) returns (GetEvidenceSubmissionResponse);
+  rpc GetEvidenceSubmissionContent(GetEvidenceSubmissionContentRequest) returns (GetEvidenceSubmissionContentResponse);
+  rpc ListEvidenceSubmissions(ListEvidenceSubmissionsRequest) returns (ListEvidenceSubmissionsResponse);
+  rpc ReplayEvidenceSubmission(ReplayEvidenceSubmissionRequest) returns (ReplayEvidenceSubmissionResponse);
+  rpc RetractEvidence(RetractEvidenceRequest) returns (RetractEvidenceResponse);
+  rpc MarkEvidenceStale(MarkEvidenceStaleRequest) returns (MarkEvidenceStaleResponse);
+  rpc CreateHandoff(CreateHandoffRequest) returns (CreateHandoffResponse);
+  rpc ResolveHandoff(ResolveHandoffRequest) returns (ResolveHandoffResponse);
+  rpc RevokeHandoff(RevokeHandoffRequest) returns (RevokeHandoffResponse);
+}

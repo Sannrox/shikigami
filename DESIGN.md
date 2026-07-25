@@ -1,103 +1,170 @@
-# shikigami — headless agent harness on sekai-chisei + tenkai
+# Design
 
-> Founding design document, v0.1 (2026-07-25). Product name: **shikigami**
-> (式神) — the headless force that executes agent work. Sibling to sekai
-> (world), chisei (intelligence), and tenkai (deployment / unfolding).
+Founding architecture for **shikigami** (式神), a local-first headless agent
+harness. Companion documents: [VISION.md](VISION.md),
+[docs/settings.md](docs/settings.md),
+[ADR 0001](docs/decisions/0001-ports-and-settings.md).
 
 ## Purpose
 
-`shikigami` is the **headless agent harness** for the stack:
+Shikigami executes agent **runs**:
 
-- start and fence **runs** of agent work;
-- materialize isolated workspaces;
-- invoke tools under chisei authorization;
-- stream progress and harvest evidence into the control plane;
-- remain operable as a single local binary without a UI.
+1. Materialize an isolated workspace.
+2. Drive a model turn loop (locally or through a governance plane).
+3. Execute jailed tools.
+4. Emit harness-local progress events.
+5. Complete with a structured outcome (and optional plane reporting).
 
-It does **not** own policy, budgets, eval judgment, durable operational graph
-truth, release catalogs, or human chat UX.
+It does **not** own:
+
+- durable operational graph truth, policy, budgets, or eval judgment
+  (governance plane, when used);
+- release catalogs or environment convergence (delivery tools such as tenkai);
+- human chat UX (operator shells and IDEs).
 
 ## Why a separate product
 
-Operator shells (onmyoji, bugyo/kiro) need a harness, but a harness that only
-exists inside a desktop app cannot be:
+A harness that only exists inside a desktop app cannot be:
 
-- deployed and versioned by tenkai onto fleets and CI;
 - tested headlessly as the system of record for execution behavior;
-- run on remote or unattended hosts without a GUI.
+- run unattended in CI or on fleet hosts without a GUI;
+- versioned and installed as a delivery product independent of a UI.
 
 Shikigami is that extractable execution plane. UIs may embed or drive it; they
-must not redefine governance or delivery.
+must not redefine governance or the turn loop.
 
-## Non-goals (v0)
+## Architecture
 
-- Desktop / chat UX
-- Being a second chisei (no local policy brain that bypasses the control plane)
-- Being a CI system or tenkai replacement
-- Multi-tenant SaaS control plane
-- Wrapping third-party agent CLIs as the long-term core (native run loop first)
+Accepted in [ADR 0001](docs/decisions/0001-ports-and-settings.md): **ports +
+settings**. The core never hard-wires a control plane; settings select
+adapters. `sekai-chisei` is the first-party production governance adapter.
+
+```text
+  operator / CI / embedder
+            │
+            ▼
+   ┌──────────────────────┐
+   │  shikigami core       │
+   │  Harness · Engine     │
+   │  run · tools · prompt │
+   └──────────┬───────────┘
+              │ ports (selected by settings)
+     ┌────────┼────────┬──────────┐
+     ▼        ▼        ▼          ▼
+ governance  model  workspace   events
+ none/local  scripted directory stderr
+ sekai-chisei http  git-worktree jsonl
+             plane              none
+```
+
+When governance is `sekai-chisei`, model turns use the plane
+(`PlanExecution` / `ExecutePlanStream`). Direct model adapters apply to
+ungoverned profiles only.
+
+**Tenkai** (or any installer) may ship the binary. It is not a runtime port and
+must not appear in harness process settings.
+
+### Process shapes
+
+| Shape | Role |
+| --- | --- |
+| Library (`Harness`) | Embeddable API for hosts |
+| CLI (`shikigami`) | Thin embedded host over the library |
+| Future daemon / `serve` | Optional; not required for v0 |
 
 ## Core concepts
 
 | Concept | Meaning |
 | --- | --- |
 | **Harness** | This product: process that executes runs |
-| **Run** | One countable unit of agent work (workspace + attempts + harvest) |
-| **Workspace** | Isolated tree (worktree or equivalent) for a run |
-| **Control plane** | sekai-chisei: facts, policy, approvals, eval, audit |
-| **Delivery** | tenkai: how this binary and its config land on a host |
-| **Host** | CLI (`shikigamictl`), future daemon, or UI-embedded adapter |
-
-## Architecture (target)
-
-```
- operator / CI / UI
-        │
-        ▼
- ┌──────────────────┐     gRPC / local      ┌─────────────────┐
- │  shikigami core   │─────────────────────▶│  sekai-chisei    │
- │  runs, workspace, │     authz, harvest   │  graph, policy,  │
- │  tools, evidence  │                      │  budget, eval    │
- └────────┬─────────┘                      └─────────────────┘
-          │
-          │ installed & updated by
-          ▼
-     tenkai product
-```
-
-v0 ships an **embedded CLI host** only (`shikigamictl`). Library code stays
-host-agnostic so a daemon or UI adapter can share the same core later.
+| **Run** | One countable unit of work (workspace + turns + outcome) |
+| **Workspace** | Isolated tree for a run (`directory` or `git-worktree`) |
+| **Port** | Versioned boundary (governance, model, workspace, events) |
+| **Adapter** | Implementation of a port selected by settings |
+| **Governance plane** | Optional external system (e.g. sekai-chisei) for policy and governed model execution |
+| **Host** | CLI, embedder, or future daemon |
 
 ## State ownership
 
 | State | Owner |
 | --- | --- |
-| Operations, attempts, harvests, evidence, outcomes | sekai-chisei |
-| Policy, budget, routing, approval, eval verdicts | sekai-chisei (chisei) |
-| Releases / channels for the harness binary | tenkai |
-| Local install config, run scratch, workspace paths | shikigami (`.shikigami-state`) |
+| Operations, harvests, evidence, outcomes (when governed) | Governance plane |
+| Policy, budget, routing, approvals, eval | Governance plane |
+| Release/channel identity of the binary | Delivery system (e.g. tenkai) |
+| Host config, run scratch, workspace paths, local event logs | Shikigami (`.shikigami-state` / configured paths) |
 
-Harness-local state is never a substitute for graph truth. If the control plane
-is required for a run and unavailable, the run fails closed.
+Harness-local state is never a substitute for plane truth. If governance is
+required and unavailable, the run fails closed.
 
-## First vertical slice
+## Run lifecycle
 
-1. Product identity, local state, `version` / `init` / `doctor` — **done in scaffold**
-2. Run record model (local + control-plane registration contract)
-3. Workspace materialization (git worktree or directory sandbox)
-4. Minimal tool loop with chisei external-action / capability path
-5. Harvest of attempt outcome into sekai
-6. tenkai product manifest so the harness installs as a release
+```text
+create run id
+  → materialize workspace
+  → governance.begin_run
+  → loop until terminal | limit:
+        governance.plan_turn (plane or local model)
+        authorize + execute tools (workspace jail)
+        governance.report_tool (best-effort / fail-closed)
+  → governance.complete_run
+  → emit local events / exit
+```
 
-## Open questions
+Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
+`report`. **`bash` is opt-in** via settings for safety.
 
-- Exact gRPC surface for run registration vs reusing PlanExecution / ExecutePlan
-- Whether remote daemon mode is a second binary or a `shikigamictl serve` mode
-- How much of onmyoji-core’s worker loop is donated vs rewritten
-- Default trust profile when running unattended under tenkai
+## Module map
+
+| Path | Responsibility |
+| --- | --- |
+| `src/harness.rs` | Public wiring: config → ports → doctor/run |
+| `src/run.rs` | Turn loop |
+| `src/governance/` | `none`, `local`, `sekai-chisei` |
+| `src/tools.rs` | Workspace-jailed tools |
+| `src/workspace.rs` | Directory and git-worktree materialization |
+| `src/model.rs` | Scripted / HTTP (ungoverned) |
+| `src/events.rs` | stderr / jsonl / none |
+| `src/config.rs` | Versioned settings |
+| `src/bin/shikigami.rs` | CLI host |
+| `proto/` | Vendored protos for sekai-chisei (feature-gated build) |
+
+## Cargo features
+
+| Feature | Default | Purpose |
+| --- | --- | --- |
+| `governance-sekai-chisei` | on | gRPC client + proto compile |
+| `model-http` | on | OpenAI-compatible HTTP model |
+
+## Security posture (summary)
+
+- No secrets in config files; use env references (`token_env`, `api_key_env`).
+- Workspace path jail: no absolute or parent-traversing paths.
+- Bash disabled by default tool allow-list.
+- Fail-closed doctor/run when `governed` / `fail_closed` and plane unhealthy.
+- Do not commit `.shikigami-state/`, credentials, or plane tokens.
+
+Full reporting process: [SECURITY.md](SECURITY.md).
+
+## Roadmap
+
+Shipped in the current tree (pre-1.0):
+
+- Settings + ports + doctor
+- Local scripted/HTTP runs
+- sekai-chisei PlanExecution path
+- Directory and git-worktree workspaces
+- Embeddable `Harness` API
+
+Follow-ups:
+
+- Long-running daemon / `serve` host
+- Mid-run external-action authorization with the plane
+- Richer harvest into plane objects beyond operation events
+- Headless park/escalate protocol
+- CI workflows and release automation
 
 ## Naming rule
 
-- **Shikigami** = this product (harness)
-- **Run** (preferred) / worker / session = one unit of work
+- **Shikigami** = product / harness
+- **Run** = unit of work
 - Do not use “a shikigami” for an individual agent attempt

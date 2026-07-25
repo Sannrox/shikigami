@@ -1,0 +1,57 @@
+name: Research
+description: Time-box an investigation that must end in a decision.
+title: "research: "
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Decision question
+      description: What decision should this investigation make possible?
+    validations:
+      required: true
+  - type: textarea
+    id: hypotheses
+    attributes:
+      label: Hypotheses or options
+      description: List the credible explanations or approaches to evaluate.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Note product boundaries, compatibility, security, data, cost, or environment constraints.
+    validations:
+      required: true
+  - type: input
+    id: timebox
+    attributes:
+      label: Time box
+      description: Give a date or effort limit after which the available evidence will be summarized.
+      placeholder: "2026-08-01 or 2 developer-days"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence to collect
+      description: Identify benchmarks, source material, prototypes, traces, or experiments.
+    validations:
+      required: true
+  - type: textarea
+    id: exit
+    attributes:
+      label: Exit condition
+      description: Define the expected conclusion format and likely follow-up artifact.
+      placeholder: Recommendation plus follow-up Issue, Design Discussion, durable documentation, or no action with rationale.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues, discussions, and pull requests.
+          required: true
+        - label: I will close this investigation with a recommendation or explicit no-action result.
+          required: true

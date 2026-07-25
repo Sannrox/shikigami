@@ -1,0 +1,46 @@
+title: "[Design] "
+labels:
+  - "type:design"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for cross-boundary, public-contract, trust-model, or difficult-to-reverse choices. Implementation tracking belongs in a follow-up Issue.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and context
+      description: What durable problem needs a design decision, and why is the current behavior insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and invariants
+      description: Include product boundaries, compatibility, persistence, security, operations, and non-goals.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Credible options
+      description: Compare at least two viable approaches when possible, including the status quo.
+    validations:
+      required: true
+  - type: textarea
+    id: recommendation
+    attributes:
+      label: Initial recommendation
+      description: State the preferred direction, tradeoffs, and what evidence could change the recommendation.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and adoption
+      description: How can the chosen direction be tested, rolled out, observed, and reversed?
+    validations:
+      required: true
+  - type: textarea
+    id: links
+    attributes:
+      label: Related context
+      description: Link relevant Issues, PRs, docs, benchmarks, or prior decisions.
