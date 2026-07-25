@@ -44,6 +44,20 @@ cargo test --test plane_live -- --ignored --nocapture
 
 Offline `cargo test` never requires a plane.
 
+### Nightly workflow (optional)
+
+Repository workflow [nightly-live.yml](../.github/workflows/nightly-live.yml)
+runs the live doctor probe on a schedule when secrets are configured:
+
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `SHIKIGAMI_CONTROL_PLANE` | yes | gRPC endpoint URL for the plane |
+| `SEKAI_TOKEN` | no | Bearer token if the plane requires auth |
+
+If `SHIKIGAMI_CONTROL_PLANE` is missing (typical on forks), the job **succeeds
+as a no-op** and does not fail CI. Maintainers can also run the workflow via
+**Actions → Nightly Live Plane → Run workflow**.
+
 ## Run (requires plane + model providers)
 
 ```bash
