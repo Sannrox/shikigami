@@ -69,6 +69,104 @@ pub enum ToolError {
     Io(#[from] std::io::Error),
 }
 
+/// Catalog entry for a tool the registry can enable.
+#[derive(Debug, Clone)]
+pub struct ToolDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub schema: &'static str,
+}
+
+/// Builtin tool catalog (registration bootstrap). Dynamic plugins are out of scope;
+/// future MCP/skill tools register into [`ToolRegistry`] without changing the turn loop.
+pub fn builtin_catalog() -> &'static [ToolDef] {
+    &[
+        ToolDef {
+            name: "read_file",
+            description: "Read a UTF-8 text file relative to the workspace root.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+        },
+        ToolDef {
+            name: "write_file",
+            description: "Write a UTF-8 text file relative to the workspace root.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
+        },
+        ToolDef {
+            name: "edit",
+            description: "Replace exactly one occurrence of old with new in a file.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
+        },
+        ToolDef {
+            name: "bash",
+            description: "Run a shell command inside the workspace (timeout-bounded).",
+            schema: r#"{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}"#,
+        },
+        ToolDef {
+            name: "report",
+            description: "Finish the run with a structured summary. Must be the only call in the batch.",
+            schema: r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
+        },
+        ToolDef {
+            name: "escalate",
+            description: "Park the headless run and ask an operator a question. Must be the only call in the batch. Resume later with an answer.",
+            schema: r#"{"type":"object","properties":{"reason":{"type":"string"},"question":{"type":"string"}},"required":["reason"]}"#,
+        },
+    ]
+}
+
+/// Whether this tool must be the only call in a model batch.
+pub fn must_be_exclusive_batch(name: &str) -> bool {
+    matches!(name, "report" | "escalate")
+}
+
+/// Run-scoped tool registry: definitions + jailed execution for enabled tools.
+///
+/// The turn loop talks only to this type (not individual dispatch tables).
+#[derive(Debug, Clone)]
+pub struct ToolRegistry {
+    executor: ToolExecutor,
+}
+
+impl ToolRegistry {
+    /// Bootstrap builtins filtered by the settings allow-list.
+    pub fn with_builtins(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
+            executor: ToolExecutor::new(workspace, enabled, bash_timeout_secs)?,
+        })
+    }
+
+    /// Model-facing tool definitions for enabled builtins.
+    pub fn definitions(&self) -> Vec<ToolDef> {
+        definitions_for_enabled(&self.executor.enabled)
+    }
+
+    pub fn enabled(&self) -> &[String] {
+        &self.executor.enabled
+    }
+
+    pub fn is_enabled(&self, name: &str) -> bool {
+        self.executor.enabled.iter().any(|e| e == name)
+    }
+
+    pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
+        self.executor.execute(name, args_json).await
+    }
+}
+
+/// Definitions for an allow-list against the builtin catalog.
+pub fn definitions_for_enabled(enabled: &[String]) -> Vec<ToolDef> {
+    builtin_catalog()
+        .iter()
+        .filter(|d| enabled.iter().any(|e| e == d.name))
+        .cloned()
+        .collect()
+}
+
+/// Workspace-jailed executor used by [`ToolRegistry`] (and tests).
 #[derive(Debug, Clone)]
 pub struct ToolExecutor {
     workspace: PathBuf,
@@ -90,47 +188,18 @@ impl ToolExecutor {
         })
     }
 
+    /// Backward-compatible alias for [`definitions_for_enabled`].
     pub fn definitions_json(enabled: &[String]) -> Vec<ToolDef> {
-        let all = [
-            ToolDef {
-                name: "read_file",
-                description: "Read a UTF-8 text file relative to the workspace root.",
-                schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
-            },
-            ToolDef {
-                name: "write_file",
-                description: "Write a UTF-8 text file relative to the workspace root.",
-                schema: r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
-            },
-            ToolDef {
-                name: "edit",
-                description: "Replace exactly one occurrence of old with new in a file.",
-                schema: r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
-            },
-            ToolDef {
-                name: "bash",
-                description: "Run a shell command inside the workspace (timeout-bounded).",
-                schema: r#"{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}"#,
-            },
-            ToolDef {
-                name: "report",
-                description: "Finish the run with a structured summary. Must be the only call in the batch.",
-                schema: r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
-            },
-            ToolDef {
-                name: "escalate",
-                description: "Park the headless run and ask an operator a question. Must be the only call in the batch. Resume later with an answer.",
-                schema: r#"{"type":"object","properties":{"reason":{"type":"string"},"question":{"type":"string"}},"required":["reason"]}"#,
-            },
-        ];
-        all.into_iter()
-            .filter(|d| enabled.iter().any(|e| e == d.name))
-            .collect()
+        definitions_for_enabled(enabled)
     }
 
     pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
         if !self.enabled.iter().any(|e| e == name) {
             return Err(ToolError::Disabled(name.into()));
+        }
+        // Unknown names that are enabled still fail closed.
+        if !builtin_catalog().iter().any(|d| d.name == name) {
+            return Err(ToolError::UnknownTool(name.into()));
         }
         match name {
             "read_file" => {
@@ -276,13 +345,6 @@ impl ToolExecutor {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ToolDef {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub schema: &'static str,
-}
-
 /// True when a path must be rejected by the workspace jail before I/O.
 /// Relative paths may contain only normal components (no `..`, roots, prefixes).
 pub fn is_unsafe_relative_path(relative: &Path) -> bool {
@@ -408,5 +470,30 @@ mod tests {
             let path = PathBuf::from(&name);
             prop_assert!(!is_unsafe_relative_path(&path), "{path:?}");
         });
+    }
+
+    #[test]
+    fn registry_definitions_match_enabled_builtins() {
+        let dir = tempdir().unwrap();
+        let reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["read_file".into(), "report".into(), "not_a_tool".into()],
+            30,
+        )
+        .unwrap();
+        let names: Vec<_> = reg.definitions().iter().map(|d| d.name).collect();
+        assert_eq!(names, vec!["read_file", "report"]);
+        assert!(must_be_exclusive_batch("report"));
+        assert!(must_be_exclusive_batch("escalate"));
+        assert!(!must_be_exclusive_batch("bash"));
+    }
+
+    #[tokio::test]
+    async fn registry_unknown_enabled_name_fails_closed() {
+        let dir = tempdir().unwrap();
+        let reg =
+            ToolRegistry::with_builtins(dir.path(), vec!["not_registered".into()], 30).unwrap();
+        let err = reg.execute("not_registered", "{}").await.unwrap_err();
+        assert!(matches!(err, ToolError::UnknownTool(_)));
     }
 }

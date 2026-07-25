@@ -63,6 +63,25 @@ Requires `git` on `PATH` for `git-worktree`.
 
 Harness events are **not** a substitute for plane audit records.
 
+## Tools (`ToolRegistry`)
+
+Tools are not selected by a free-form adapter id. The run loop uses a
+**registry** bootstrapped with **builtins** filtered by
+`[tools].enabled` (see [settings.md](settings.md)).
+
+| Builtin | Role |
+| --- | --- |
+| `read_file` / `write_file` / `edit` | Workspace-jailed file ops |
+| `bash` | Opt-in shell in workspace (timeout-bounded) |
+| `report` / `escalate` | Finish or park; exclusive batch |
+
+API: `ToolRegistry::with_builtins` → `definitions()` + `execute()`.
+Dynamic native plugins remain out of scope; future MCP/skill tools register
+into the same registry without changing the turn loop.
+
+Governed runs still call `authorize_tool` before `execute` for consequential
+tools.
+
 ## Not an adapter
 
 | Name | Why |
