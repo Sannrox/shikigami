@@ -8,9 +8,9 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ## [Unreleased]
 
-### Changed
+## [0.1.0] — 2026-07-25
 
-- Settings tables reject unknown keys (`deny_unknown_fields`); see docs/settings.md compatibility policy.
+First tagged public release.
 
 ### Added
 
@@ -22,9 +22,23 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - Event sinks: `stderr`, `jsonl`, `none`.
 - Workspace-jailed tools: `read_file`, `write_file`, `edit`, `bash` (opt-in), `report`.
 - Embeddable `Harness` library API.
+- Run cancellation and deadline timeouts.
+- Local checkpoint and resume under `.shikigami-state/runs/<id>/`.
+- Stable `doctor --json` contract (`schema_version = 1`) for automation.
 - Examples for local, governed, and tenkai delivery packaging.
-- Project documentation, security policy, and code of conduct.
+- CI (Build & Test, Rustfmt, Clippy), CodeQL, cargo-audit, and tag-driven multi-arch release workflow.
+- Project documentation (settings, adapters, embedding, governed path), security policy with tool-jail threat model, code of conduct, and Dependabot triage notes.
+- Agent skills retargeted for this repository.
 
-## [0.1.0] — 2026-07-25
+### Changed
 
-Initial public tree under active development.
+- Settings tables reject unknown keys (`deny_unknown_fields`); see [docs/settings.md](docs/settings.md) compatibility policy.
+
+### Release artifacts
+
+Tag `v0.1.0` builds archives via `.github/workflows/release.yml` for:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
