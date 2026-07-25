@@ -15,6 +15,7 @@ Operator and contributor documentation for **shikigami**.
 | Correlate run / operation / attempt ids | [identity.md](identity.md) |
 | Versioned prompts and attribution | [prompts.md](prompts.md) |
 | Plane/model credential patterns | [credentials.md](credentials.md) |
+| Run the local-queue daemon | [serve.md](serve.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
 | See accepted design decisions | [decisions/](decisions/) |
