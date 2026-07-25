@@ -11,6 +11,7 @@ Operator and contributor documentation for **shikigami**.
 | Understand architecture | [../DESIGN.md](../DESIGN.md) |
 | Configure profiles and env vars | [settings.md](settings.md) |
 | Run against sekai-chisei | [governed-path.md](governed-path.md) |
+| Map run outcomes to plane harvest | [harvest.md](harvest.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
 | See accepted design decisions | [decisions/](decisions/) |
