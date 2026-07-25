@@ -1,0 +1,63 @@
+syntax = "proto3";
+package llm;
+
+message Message {
+  string role = 1;
+  string content = 2;
+  string tool_call_id = 3;
+  repeated ToolCall tool_calls = 4;
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  string args_json = 3;
+}
+
+message ToolDef {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+}
+
+message ChatRequest {
+  string model = 1;
+  string system = 2;
+  repeated Message messages = 3;
+  repeated ToolDef tools = 4;
+  int32 max_tokens = 5;
+  optional string user_id = 6;
+}
+
+message ChatResponse {
+  string content = 1;
+  repeated ToolCall tool_calls = 2;
+  int32 input_tokens = 3;
+  int32 output_tokens = 4;
+  string stop_reason = 5;
+  int32 cache_read_input_tokens = 6;
+  int32 cache_creation_input_tokens = 7;
+}
+
+message ChatStreamChunk {
+  string content_delta = 1;
+  string content = 2;
+  repeated ToolCall tool_calls = 3;
+  int32 input_tokens = 4;
+  int32 output_tokens = 5;
+  string stop_reason = 6;
+  bool done = 7;
+  int32 cache_read_input_tokens = 8;
+  int32 cache_creation_input_tokens = 9;
+}
+
+message ResolveProviderRequest { string model = 1; }
+message ResolveProviderResponse { string provider = 1; }
+
+// Provider-call execution surface. Policy and governance belong to Chisei;
+// callers that require governed execution use ChiseiService or the gateway.
+service LlmService {
+  rpc Chat(ChatRequest) returns (ChatResponse);
+  rpc ChatStream(ChatRequest) returns (stream ChatStreamChunk);
+  rpc ResolveProvider(ResolveProviderRequest) returns (ResolveProviderResponse);
+}

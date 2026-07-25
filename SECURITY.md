@@ -1,0 +1,60 @@
+# Security Policy
+
+## Supported versions
+
+`shikigami` is pre-1.0. Security fixes target the current `main` line; older
+commits and prerelease snapshots do not receive separate security support.
+
+| Version | Supported |
+| --- | --- |
+| Current `main` | Yes |
+| Older commits and snapshots | No |
+
+## Reporting a vulnerability
+
+Please report security vulnerabilities **privately** via GitHub's private
+vulnerability reporting: open the
+[Security tab](https://github.com/Sannrox/shikigami/security/advisories/new)
+and click **"Report a vulnerability"**. This keeps the report confidential
+until a fix is available.
+
+Do not open public issues or pull requests for exploitable vulnerabilities.
+
+When reporting, include:
+
+- affected commit or version
+- steps to reproduce
+- expected impact
+- whether credentials, local workspaces, or network exposure are involved
+
+Do not include real credentials or unredacted sensitive data in a report.
+
+Maintainers will use the private advisory to coordinate reproduction, impact
+assessment, remediation, and disclosure.
+
+## Security-relevant behavior
+
+Operators and integrators should understand:
+
+- **Tool jail.** File tools reject absolute paths and parent traversal. This is
+  not a full OS sandbox; treat host compromise assumptions accordingly.
+- **Bash is opt-in.** Default tool allow-lists exclude `bash`. Enabling it
+  increases blast radius inside the workspace process environment.
+- **Governance fail-closed.** Profiles with `fail_closed` or `governed` must not
+  run when the plane is missing or unhealthy. If you need offline operation,
+  use the `local` profile deliberately.
+- **Secrets.** Use environment variables for plane tokens and model API keys.
+  Never commit `.shikigami-state/`, `.env` files with secrets, or tokens in TOML.
+- **Plane trust.** When using sekai-chisei, the plane is a trusted control
+  boundary for model routing and policy. Secure the plane and its credentials
+  separately (see sekai-chisei security docs).
+- **Delivery.** Installing the binary via tenkai or other tools is out of band;
+  verify release signatures and supply chain according to your delivery system.
+
+## Safe defaults checklist
+
+- Prefer `profile = local` for demos and CI without a plane.
+- Keep `bash` out of `tools.enabled` unless required.
+- Set `fail_closed = true` only when a plane is actually operated.
+- Run untrusted tasks in disposable workspaces; use `--keep-workspace` only when
+  you need forensic inspection.

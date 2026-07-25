@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a focused capability or improvement.
+title: "feat: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator or integration problem needs to be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior rather than only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: What observable examples, tests, or measurements will demonstrate that the outcome is complete?
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: What related behavior is intentionally outside this request?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: How is the problem handled today, and what tradeoffs did you consider?
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Primary area
+      options:
+        - Run loop / tools
+        - Governance adapter
+        - Model adapter
+        - Workspace adapter
+        - Settings / CLI
+        - Library embedding API
+        - Documentation
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and risk
+      description: Note API, settings, security, privacy, or operator implications.
+  - type: textarea
+    id: design
+    attributes:
+      label: Design discussion
+      description: Link the GitHub Discussion when this changes a core boundary, public contract, or difficult-to-reverse decision.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This keeps the ports+settings boundary, or explains why the boundary should change.
+          required: true

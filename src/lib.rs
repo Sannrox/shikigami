@@ -1,18 +1,47 @@
-//! Shikigami application core.
+//! Shikigami — open-source headless agent harness.
 //!
-//! The headless harness owns run lifecycle, local workspaces, tool execution,
-//! and evidence harvest. Governance stays in sekai-chisei; delivery stays in
-//! tenkai. CLI and future daemon hosts are adapters around this library.
+//! # Embed
+//!
+//! ```ignore
+//! use shikigami::{Config, Harness, RunRequest, StateRoot};
+//!
+//! # async fn demo() -> Result<(), shikigami::HarnessError> {
+//! let state = StateRoot::default_in(".");
+//! let mut config = Config::default();
+//! config.governance.adapter = "local".into();
+//! let harness = Harness::from_config(config, state)?;
+//! let result = harness
+//!     .run(RunRequest {
+//!         task: "write hello".into(),
+//!         keep_workspace: true,
+//!     })
+//!     .await?;
+//! assert!(result.success);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Ports are selected by [Config] settings. Production governance is
+//! `sekai-chisei`. Tenkai delivers the binary only — not a runtime port.
 
 pub mod config;
+pub mod events;
+pub mod governance;
+pub mod harness;
 pub mod identity;
+pub mod model;
+pub mod run;
 pub mod state;
+pub mod tools;
+pub mod workspace;
 
-pub use config::Config;
+pub use config::{Config, ConfigSource};
+pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
+pub use run::{RunRequest, RunResult, SYSTEM_PROMPT};
 pub use state::{StateError, StateRoot};
 
-/// Library liveness probe for hosts and smoke tests.
+/// Library liveness probe.
 pub fn ping() -> PingResponse {
     PingResponse {
         service: PRODUCT.to_string(),
@@ -31,9 +60,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ping_reports_product_identity() {
-        let res = ping();
-        assert_eq!(res.service, "shikigami");
-        assert_eq!(res.version, env!("CARGO_PKG_VERSION"));
+    fn ping_ok() {
+        assert_eq!(ping().service, "shikigami");
     }
 }

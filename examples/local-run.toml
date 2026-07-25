@@ -1,0 +1,26 @@
+# Offline / OSS path — no control plane.
+version = 1
+
+[profile]
+name = "local"
+
+[governance]
+adapter = "local"
+fail_closed = false
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[tools]
+enabled = ["read_file", "write_file", "edit", "report"]
+bash_timeout_secs = 60
+
+[run]
+max_turns = 20
+
+[events]
+adapter = "stderr"
+
+[model]
+adapter = "scripted"
