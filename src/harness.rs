@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::{Config, ConfigError, ConfigSource};
-use crate::events::{self, EventError, EventSink};
+use crate::events::{self, EventError, EventSink, FanoutSink};
 use crate::governance::{self, GovernanceError, GovernancePort};
 use crate::model::{self, ModelError, ModelPort};
 use crate::run::{Engine, RunError, RunRequest, RunResult};
@@ -80,7 +80,8 @@ impl Harness {
         let workspace = Arc::from(workspace::from_config(&config)?);
         let model = Arc::from(model::from_config(&config)?);
         state.ensure_ready_for_runs()?;
-        let events = Arc::from(events::from_config(&config, &state.runs_dir())?);
+        let events: Arc<dyn EventSink> =
+            Arc::from(events::from_config(&config, &state.runs_dir())?);
         Ok(Self {
             config,
             config_source,
@@ -195,16 +196,31 @@ impl Harness {
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, HarnessError> {
+        self.run_with_events(request, None).await
+    }
+
+    /// Run with an optional additional event sink (fan-out with the configured sink).
+    /// Embedders use this for live in-process progress without scraping logs.
+    pub async fn run_with_events(
+        &self,
+        request: RunRequest,
+        extra: Option<Arc<dyn EventSink>>,
+    ) -> Result<RunResult, HarnessError> {
         let report = self.doctor_async().await;
         if !report.ok {
             return Err(HarnessError::Doctor(report.lines.join("; ")));
         }
+        let events = match extra {
+            Some(extra) => Arc::new(FanoutSink::new(vec![Arc::clone(&self.events), extra]))
+                as Arc<dyn EventSink>,
+            None => Arc::clone(&self.events),
+        };
         let engine = Engine {
             config: self.config.clone(),
             governance: Arc::clone(&self.governance),
             workspace: Arc::clone(&self.workspace),
             model: Arc::clone(&self.model),
-            events: Arc::clone(&self.events),
+            events,
             state_runs: self.state.runs_dir(),
         };
         Ok(engine.run(request).await?)

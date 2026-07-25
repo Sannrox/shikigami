@@ -50,6 +50,56 @@ pub trait EventSink: Send + Sync {
     fn health_detail(&self) -> String;
 }
 
+/// Fan-out to multiple sinks (config sink + embedder subscription).
+pub struct FanoutSink {
+    sinks: Vec<std::sync::Arc<dyn EventSink>>,
+}
+
+impl FanoutSink {
+    pub fn new(sinks: Vec<std::sync::Arc<dyn EventSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl EventSink for FanoutSink {
+    fn id(&self) -> &'static str {
+        "fanout"
+    }
+    fn emit(&self, event: HarnessEvent) {
+        for s in &self.sinks {
+            s.emit(event.clone());
+        }
+    }
+    fn health_detail(&self) -> String {
+        let ids: Vec<_> = self.sinks.iter().map(|s| s.id()).collect();
+        format!("fanout({})", ids.join("+"))
+    }
+}
+
+/// In-process channel sink for embedders (lossy if receiver lags: drops).
+pub struct ChannelSink {
+    tx: std::sync::mpsc::Sender<HarnessEvent>,
+}
+
+impl ChannelSink {
+    pub fn pair() -> (Self, std::sync::mpsc::Receiver<HarnessEvent>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Self { tx }, rx)
+    }
+}
+
+impl EventSink for ChannelSink {
+    fn id(&self) -> &'static str {
+        "channel"
+    }
+    fn emit(&self, event: HarnessEvent) {
+        let _ = self.tx.send(event);
+    }
+    fn health_detail(&self) -> String {
+        "in-process channel".into()
+    }
+}
+
 pub fn from_config(config: &Config, state_runs: &Path) -> Result<Box<dyn EventSink>, EventError> {
     match config.events.adapter.as_str() {
         "none" => Ok(Box::new(NoneSink)),

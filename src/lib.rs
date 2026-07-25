@@ -36,6 +36,7 @@ pub mod tools;
 pub mod workspace;
 
 pub use config::{Config, ConfigSource};
+pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
