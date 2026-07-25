@@ -71,7 +71,7 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 
 | Builtin | Role |
 | --- | --- |
-| `read_file` / `write_file` / `edit` | Workspace-jailed file ops |
+| `read_file` / `write_file` / `edit` / `multi_edit` | Workspace-jailed file ops |
 | `glob` / `grep` | Workspace-jailed search (capped matches / output) |
 | `bash` | Opt-in shell in workspace (timeout-bounded) |
 | `report` / `escalate` | Finish or park; exclusive batch |

@@ -58,6 +58,10 @@ pub enum ToolError {
     FileTooLarge(PathBuf),
     #[error("edit target must occur exactly once, found {count}")]
     EditMatch { count: usize },
+    #[error("multi_edit index {index}: old must occur exactly once, found {count}")]
+    MultiEditMatch { index: usize, count: usize },
+    #[error("multi_edit requires a non-empty edits array")]
+    MultiEditEmpty,
     #[error("bash timed out after {0:?}")]
     BashTimeout(Duration),
     #[error("bash output exceeded limit")]
@@ -102,6 +106,11 @@ pub fn builtin_catalog() -> &'static [ToolDef] {
             name: "edit",
             description: "Replace exactly one occurrence of old with new in a file.",
             schema: r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
+        },
+        ToolDef {
+            name: "multi_edit",
+            description: "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none).",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"}},"required":["old","new"]}},"required":["path","edits"]}"#,
         },
         ToolDef {
             name: "glob",
@@ -233,6 +242,11 @@ impl ToolExecutor {
                 self.edit(&args.path, &args.old, &args.new)?;
                 Ok(ToolOutput::Text("file edited".into()))
             }
+            "multi_edit" => {
+                let args: MultiEditArgs = parse(name, args_json)?;
+                let n = self.multi_edit(&args.path, &args.edits)?;
+                Ok(ToolOutput::Text(format!("{n} edits applied")))
+            }
             "glob" => {
                 let args: GlobArgs = parse(name, args_json)?;
                 Ok(ToolOutput::Text(
@@ -341,6 +355,22 @@ impl ToolExecutor {
         }
         let updated = text.replacen(old, new, 1);
         self.write_file(path, &updated)
+    }
+
+    fn multi_edit(&self, path: &Path, edits: &[EditHunk]) -> Result<usize, ToolError> {
+        if edits.is_empty() {
+            return Err(ToolError::MultiEditEmpty);
+        }
+        let mut text = self.read_file(path)?;
+        for (index, hunk) in edits.iter().enumerate() {
+            let count = text.matches(&hunk.old).count();
+            if count != 1 {
+                return Err(ToolError::MultiEditMatch { index, count });
+            }
+            text = text.replacen(&hunk.old, &hunk.new, 1);
+        }
+        self.write_file(path, &text)?;
+        Ok(edits.len())
     }
 
     fn glob_files(&self, pattern: &str, under: Option<&Path>) -> Result<String, ToolError> {
@@ -570,6 +600,18 @@ struct EditArgs {
     path: PathBuf,
     old: String,
     new: String,
+}
+
+#[derive(Deserialize)]
+struct EditHunk {
+    old: String,
+    new: String,
+}
+
+#[derive(Deserialize)]
+struct MultiEditArgs {
+    path: PathBuf,
+    edits: Vec<EditHunk>,
 }
 
 #[derive(Deserialize)]
@@ -809,5 +851,39 @@ mod tests {
         assert!(glob_match("*.txt", "a.txt"));
         assert!(!glob_match("*.txt", "src/a.txt"));
         assert!(glob_match("src/**", "src/a/b"));
+    }
+
+    #[tokio::test]
+    async fn multi_edit_atomic() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "one two three\n").unwrap();
+        let tools = ToolExecutor::new(dir.path(), vec!["multi_edit".into()], 30).unwrap();
+        tools
+            .execute(
+                "multi_edit",
+                r#"{"path":"f.txt","edits":[{"old":"one","new":"1"},{"old":"three","new":"3"}]}"#,
+            )
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert_eq!(text, "1 two 3\n");
+
+        // Ambiguous second edit fails; file unchanged from previous success only after failure path:
+        std::fs::write(dir.path().join("g.txt"), "aa aa\n").unwrap();
+        let err = tools
+            .execute(
+                "multi_edit",
+                r#"{"path":"g.txt","edits":[{"old":"aa","new":"b"}]}"#,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MultiEditMatch { index: 0, count: 2 }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("g.txt")).unwrap(),
+            "aa aa\n"
+        );
     }
 }
