@@ -81,6 +81,8 @@ Dynamic native plugins remain out of scope; future MCP/skill tools register
 into the same registry without changing the turn loop.
 
 Governed runs still call `authorize_tool` before `execute` for consequential
+
+MCP: optional `tools.mcp_servers` — see [mcp.md](mcp.md).
 tools.
 
 ## Not an adapter
