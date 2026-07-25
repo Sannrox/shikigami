@@ -116,7 +116,20 @@ after each turn (version `1`). Resume:
 
 ```bash
 shikigami run --resume <run-id>
-# or library: RunRequest { resume_run_id: Some(id), .. }
+# or library: RunRequest { resume_run_id: Some(id), resume_answer: Some(...), .. }
+
+### Park / escalate (headless)
+
+When the model calls the `escalate` tool, the run terminates with
+`termination=parked` (library `RunTermination::Parked`, CLI non-zero exit).
+Workspace and checkpoint are retained. Resume:
+
+```bash
+shikigami run --resume <run_id> --answer "operator decision"
+# or --answer-file path
+```
+
+Resume without an answer errors (no silent success/deny).
 ```
 
 Checkpoints are harness scratch only — not plane truth. Prompt id must match

@@ -16,6 +16,8 @@ const MAX_BASH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub enum ToolOutput {
     Text(String),
     Report(Report),
+    /// Headless escalation: park the run until an operator answer is supplied.
+    Park(ParkRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -23,6 +25,16 @@ pub struct Report {
     pub summary: String,
     #[serde(default)]
     pub success: bool,
+}
+
+/// Payload produced by the `escalate` tool (operator decision required).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParkRequest {
+    /// Why the run cannot continue unattended.
+    pub reason: String,
+    /// Question or decision for the operator (may equal reason).
+    #[serde(default)]
+    pub question: String,
 }
 
 #[derive(Debug, Error)]
@@ -105,6 +117,11 @@ impl ToolExecutor {
                 description: "Finish the run with a structured summary. Must be the only call in the batch.",
                 schema: r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
             },
+            ToolDef {
+                name: "escalate",
+                description: "Park the headless run and ask an operator a question. Must be the only call in the batch. Resume later with an answer.",
+                schema: r#"{"type":"object","properties":{"reason":{"type":"string"},"question":{"type":"string"}},"required":["reason"]}"#,
+            },
         ];
         all.into_iter()
             .filter(|d| enabled.iter().any(|e| e == d.name))
@@ -145,6 +162,13 @@ impl ToolExecutor {
                     report.success = true;
                 }
                 Ok(ToolOutput::Report(report))
+            }
+            "escalate" => {
+                let mut park: ParkRequest = parse(name, args_json)?;
+                if park.question.is_empty() {
+                    park.question = park.reason.clone();
+                }
+                Ok(ToolOutput::Park(park))
             }
             other => Err(ToolError::UnknownTool(other.into())),
         }

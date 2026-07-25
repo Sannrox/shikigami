@@ -12,6 +12,15 @@ use crate::model::ChatMessage;
 pub const CHECKPOINT_VERSION: u32 = 1;
 pub const CHECKPOINT_FILENAME: &str = "checkpoint.json";
 
+/// Structured park state when a run awaits an operator answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParkedState {
+    pub reason: String,
+    pub question: String,
+    /// Tool call id that must receive the operator answer as a tool result.
+    pub tool_call_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Checkpoint {
     pub version: u32,
@@ -22,6 +31,9 @@ pub struct Checkpoint {
     pub completed_turns: u32,
     pub workspace: PathBuf,
     pub keep_workspace: bool,
+    /// Present when the run is parked for operator input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park: Option<ParkedState>,
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +112,7 @@ mod tests {
             completed_turns: 1,
             workspace: runs.join("abc/workspace"),
             keep_workspace: true,
+            park: None,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
