@@ -26,6 +26,12 @@ pub struct RunHandle {
 pub struct RunOutcome {
     pub success: bool,
     pub summary: String,
+    /// Completed model turns (0 if failed before any turn).
+    pub turns: u32,
+    /// Termination kind: completed | cancelled | timed_out | max_turns | failed
+    pub termination: String,
+    /// Host workspace path (non-authoritative; plane truth is events/receipts).
+    pub workspace: String,
 }
 
 #[derive(Debug, Error)]

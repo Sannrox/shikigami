@@ -29,6 +29,18 @@ pub enum RunTermination {
     Failed,
 }
 
+impl RunTermination {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::MaxTurns => "max_turns",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub task: String,
@@ -314,6 +326,10 @@ impl Engine {
                         .await
                     {
                         let detail = e.to_string();
+                        let _ = self
+                            .governance
+                            .report_tool(&handle, &call.name, false, &detail)
+                            .await;
                         self.events.emit(HarnessEvent::ToolEnd {
                             name: call.name.clone(),
                             ok: false,
@@ -416,6 +432,9 @@ impl Engine {
                         RunOutcome {
                             success: false,
                             summary: summary.clone(),
+                            turns,
+                            termination: e.termination().as_str().into(),
+                            workspace: ws.path.display().to_string(),
                         },
                     )
                     .await;
@@ -435,6 +454,9 @@ impl Engine {
                 RunOutcome {
                     success,
                     summary: final_summary.clone(),
+                    turns,
+                    termination: termination.as_str().into(),
+                    workspace: ws.path.display().to_string(),
                 },
             )
             .await?;
