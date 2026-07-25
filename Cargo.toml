@@ -1,0 +1,26 @@
+[package]
+name = "shikigami"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+readme = "README.md"
+description = "Local-first headless agent harness governed by sekai-chisei and deliverable through tenkai."
+repository = "https://github.com/Sannrox/shikigami"
+publish = false
+
+[[bin]]
+name = "shikigamictl"
+path = "src/bin/shikigamictl.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
