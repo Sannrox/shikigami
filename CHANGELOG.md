@@ -8,6 +8,10 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Settings tables reject unknown keys (`deny_unknown_fields`); see docs/settings.md compatibility policy.
+
 ### Added
 
 - Headless harness core with ports + settings (ADR 0001).

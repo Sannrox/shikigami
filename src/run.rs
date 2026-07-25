@@ -481,6 +481,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_before_first_turn_errors() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"x\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        state.ensure_ready_for_runs().unwrap();
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(crate::model::from_config(&config).unwrap()),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+        };
+        let (tx, rx) = watch::channel(true);
+        let _keep = tx;
+        let err = eng
+            .run(RunRequest {
+                task: "t".into(),
+                keep_workspace: true,
+                timeout: None,
+                cancel: Some(rx),
+                resume_run_id: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn timeout_zero_errors_at_boundary() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let config = base_config(&dir);
+        state.ensure_ready_for_runs().unwrap();
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(crate::model::from_config(&config).unwrap()),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+        };
+        let err = eng
+            .run(RunRequest {
+                task: "t".into(),
+                keep_workspace: true,
+                timeout: Some(Duration::from_secs(0)),
+                cancel: None,
+                resume_run_id: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::TimedOut(_)));
+    }
+
+    #[tokio::test]
     async fn resume_after_partial_script() {
         let dir = tempdir().unwrap();
         let state = StateRoot::new(dir.path().join("state"));

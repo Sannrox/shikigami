@@ -164,3 +164,17 @@ Offline defaults never require a plane.
 - [../examples/governed-sekai-chisei.toml](../examples/governed-sekai-chisei.toml)
 
 Adapter semantics: [adapters.md](adapters.md).
+
+## Compatibility policy (v0.2)
+
+1. **`version` is required** and must equal the crate's supported schema
+   (`1` today). Unsupported versions fail at load time.
+2. **Unknown keys are rejected** at every table (`deny_unknown_fields`). Fix
+   typos rather than silent ignore.
+3. **Breaking changes** (rename/remove fields, change defaults that alter
+   security posture, change version) require a `version` bump and a
+   CHANGELOG entry under a new version heading.
+4. **Additive fields** with `#[serde(default)]` may ship in the same
+   `version` when they do not change existing behavior.
+5. Pre-1.0 (`0.x`) may still break between minor crates versions; the
+   settings `version` field is the config compatibility signal.
