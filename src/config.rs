@@ -540,4 +540,51 @@ unknown_thing = true
         let err = Config::load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
     }
+
+    #[test]
+    fn property_unknown_adapters_fail_validate() {
+        use proptest::prelude::*;
+        proptest!(|(name in "[a-z]{3,12}")| {
+            let known = matches!(
+                name.as_str(),
+                "none" | "local" | "sekai-chisei"
+            );
+            let mut c = Config::default();
+            c.governance.adapter = name.clone();
+            let result = c.validate();
+            if known {
+                prop_assert!(result.is_ok());
+            } else {
+                let bad = matches!(result, Err(ConfigError::UnknownGovernanceAdapter(_)));
+                prop_assert!(bad, "expected unknown adapter error for {}", name);
+            }
+        });
+    }
+
+    #[test]
+    fn property_unknown_toml_keys_rejected() {
+        use proptest::prelude::*;
+        proptest!(|(key in "[a-z]{4,16}")| {
+            prop_assume!(key != "version");
+            let dir = tempdir().unwrap();
+            let path = Config::path_in(dir.path());
+            let body = format!("version = 1\n{key} = true\n");
+            fs::write(&path, body).unwrap();
+            let err = Config::load(&path).unwrap_err();
+            let is_parse = matches!(err, ConfigError::Parse { .. });
+            prop_assert!(is_parse, "expected Parse for key {}, got {}", key, err);
+        });
+    }
+
+    #[test]
+    fn property_default_config_always_validates() {
+        use proptest::prelude::*;
+        // Max turns in a sane range must keep validate ok for defaults.
+        proptest!(|(max_turns in 1u32..10_000)| {
+            let mut c = Config::default();
+            c.run.max_turns = max_turns;
+            prop_assert!(c.validate().is_ok());
+            prop_assert!(!c.requires_governance());
+        });
+    }
 }

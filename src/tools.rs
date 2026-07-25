@@ -175,14 +175,7 @@ impl ToolExecutor {
     }
 
     fn resolve(&self, relative: &Path) -> Result<PathBuf, ToolError> {
-        if relative.is_absolute()
-            || relative.components().any(|c| {
-                matches!(
-                    c,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
+        if is_unsafe_relative_path(relative) {
             return Err(ToolError::UnsafePath(relative.to_path_buf()));
         }
         let joined = self.workspace.join(relative);
@@ -290,6 +283,18 @@ pub struct ToolDef {
     pub schema: &'static str,
 }
 
+/// True when a path must be rejected by the workspace jail before I/O.
+/// Relative paths may contain only normal components (no `..`, roots, prefixes).
+pub fn is_unsafe_relative_path(relative: &Path) -> bool {
+    relative.is_absolute()
+        || relative.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+}
+
 #[derive(Deserialize)]
 struct PathArgs {
     path: PathBuf,
@@ -380,5 +385,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn property_parent_or_absolute_paths_are_unsafe() {
+        use proptest::prelude::*;
+        proptest!(|(suffix in "[a-zA-Z0-9._-]{1,24}")| {
+            let parent = PathBuf::from(format!("../{suffix}"));
+            prop_assert!(is_unsafe_relative_path(&parent));
+            let abs = PathBuf::from(format!("/{suffix}"));
+            prop_assert!(is_unsafe_relative_path(&abs));
+            let nested = PathBuf::from(format!("ok/../../{suffix}"));
+            prop_assert!(is_unsafe_relative_path(&nested));
+        });
+    }
+
+    #[test]
+    fn property_simple_relative_paths_are_safe() {
+        use proptest::prelude::*;
+        proptest!(|(name in "[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}")| {
+            // No separators, no dots-only — always a single normal component.
+            let path = PathBuf::from(&name);
+            prop_assert!(!is_unsafe_relative_path(&path), "{path:?}");
+        });
     }
 }
