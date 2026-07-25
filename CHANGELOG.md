@@ -25,6 +25,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - Optional nightly live plane workflow (no-op without secrets).
 - Property tests for path jail and settings parse/validate invariants.
 - Supply-chain CI: `cargo deny` with committed `deny.toml` (licenses + advisories).
+- `shikigami serve` local-queue daemon with health file and graceful shutdown
+  (ADR 0003).
 
 ## [0.1.0] — 2026-07-25
 
