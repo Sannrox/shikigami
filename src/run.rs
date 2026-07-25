@@ -269,8 +269,9 @@ impl Engine {
 
         let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
         let project_rules = crate::context::load_project_rules(&ws.path, &self.config.context);
+        let skills = crate::context::load_skills(&ws.path, &self.config.context);
         let system_prompt =
-            crate::context::compose_system_prompt(SYSTEM_PROMPT, project_rules.as_ref());
+            crate::context::compose_system_prompt(SYSTEM_PROMPT, project_rules.as_ref(), &skills);
         let handle = self
             .governance
             .begin_run(&run_id, &task, request.logical_operation_id.as_deref())
@@ -283,6 +284,12 @@ impl Engine {
             self.events.emit(HarnessEvent::Message {
                 level: "info".into(),
                 text: format!("project_rules {} digest={}", rules.filename, rules.digest),
+            });
+        }
+        for s in &skills {
+            self.events.emit(HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("skill {} digest={}", s.id, s.digest),
             });
         }
         self.events.emit(HarnessEvent::Message {

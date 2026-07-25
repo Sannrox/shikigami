@@ -16,6 +16,7 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - `multi_edit` tool for atomic multi-site exact replacements in one file.
 - Settings `tools.mode` permission modes (`read` / `workspace` / `workspace_exec` / `custom`).
 - Optional project rules discovery (`AGENTS.md` / `shikigami.rules.md`) into system prompt.
+- Runtime skill packs (`context.skills` + `SKILL.md`) with digests and docs.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
 - Richer governed harvest: `shikigami.run.begin` / tool / complete events with
