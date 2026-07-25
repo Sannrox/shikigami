@@ -11,6 +11,9 @@ use tokio::time::timeout;
 
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_BASH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SEARCH_MATCHES: usize = 200;
+const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_WALK_FILES: usize = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
@@ -65,6 +68,10 @@ pub enum ToolError {
     Disabled(String),
     #[error("unknown tool: {0}")]
     UnknownTool(String),
+    #[error("invalid search pattern: {0}")]
+    InvalidPattern(String),
+    #[error("search truncated after {0} matches")]
+    SearchTruncated(usize),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -95,6 +102,16 @@ pub fn builtin_catalog() -> &'static [ToolDef] {
             name: "edit",
             description: "Replace exactly one occurrence of old with new in a file.",
             schema: r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
+        },
+        ToolDef {
+            name: "glob",
+            description: "List workspace-relative file paths matching a glob (supports * and **). Results are capped.",
+            schema: r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}"#,
+        },
+        ToolDef {
+            name: "grep",
+            description: "Search file contents under the workspace with a regex. Results are capped.",
+            schema: r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"max_matches":{"type":"integer"}},"required":["pattern"]}"#,
         },
         ToolDef {
             name: "bash",
@@ -216,6 +233,24 @@ impl ToolExecutor {
                 self.edit(&args.path, &args.old, &args.new)?;
                 Ok(ToolOutput::Text("file edited".into()))
             }
+            "glob" => {
+                let args: GlobArgs = parse(name, args_json)?;
+                Ok(ToolOutput::Text(
+                    self.glob_files(&args.pattern, args.path.as_deref())?,
+                ))
+            }
+            "grep" => {
+                let args: GrepArgs = parse(name, args_json)?;
+                let max = args
+                    .max_matches
+                    .unwrap_or(MAX_SEARCH_MATCHES)
+                    .clamp(1, MAX_SEARCH_MATCHES);
+                Ok(ToolOutput::Text(self.grep_files(
+                    &args.pattern,
+                    args.path.as_deref(),
+                    max,
+                )?))
+            }
             "bash" => {
                 let args: BashArgs = parse(name, args_json)?;
                 let t = args
@@ -308,6 +343,168 @@ impl ToolExecutor {
         self.write_file(path, &updated)
     }
 
+    fn glob_files(&self, pattern: &str, under: Option<&Path>) -> Result<String, ToolError> {
+        if pattern.is_empty() {
+            return Err(ToolError::InvalidPattern("empty glob pattern".into()));
+        }
+        let base = self.search_base(under)?;
+        let mut matches = Vec::new();
+        let mut truncated = false;
+        self.walk_files(&base, &mut |rel| {
+            let rel_str = rel.to_string_lossy();
+            if glob_match(pattern, rel_str.as_ref()) {
+                if matches.len() >= MAX_SEARCH_MATCHES {
+                    truncated = true;
+                    return false;
+                }
+                matches.push(rel_str.into_owned());
+            }
+            true
+        })?;
+        matches.sort();
+        let mut out = matches.join("\n");
+        if truncated {
+            out.push_str(&format!("\n… truncated after {MAX_SEARCH_MATCHES} matches"));
+        }
+        if out.len() > MAX_SEARCH_OUTPUT_BYTES {
+            out.truncate(MAX_SEARCH_OUTPUT_BYTES);
+            out.push_str("\n… output byte limit");
+        }
+        if out.is_empty() {
+            out = "(no matches)".into();
+        }
+        Ok(out)
+    }
+
+    fn grep_files(
+        &self,
+        pattern: &str,
+        under: Option<&Path>,
+        max_matches: usize,
+    ) -> Result<String, ToolError> {
+        let re =
+            regex::Regex::new(pattern).map_err(|e| ToolError::InvalidPattern(e.to_string()))?;
+        let base = self.search_base(under)?;
+        let mut lines = Vec::new();
+        let mut truncated = false;
+        self.walk_files(&base, &mut |rel| {
+            if truncated {
+                return false;
+            }
+            let abs = self.workspace.join(&rel);
+            let Ok(meta) = std::fs::metadata(&abs) else {
+                return true;
+            };
+            if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+                return true;
+            }
+            let Ok(text) = std::fs::read_to_string(&abs) else {
+                return true; // skip binary / invalid utf-8
+            };
+            for (i, line) in text.lines().enumerate() {
+                if re.is_match(line) {
+                    if lines.len() >= max_matches {
+                        truncated = true;
+                        return false;
+                    }
+                    lines.push(format!("{}:{}:{line}", rel.display(), i + 1));
+                }
+            }
+            true
+        })?;
+        let mut out = lines.join("\n");
+        if truncated {
+            out.push_str(&format!("\n… truncated after {max_matches} matches"));
+        }
+        if out.len() > MAX_SEARCH_OUTPUT_BYTES {
+            out.truncate(MAX_SEARCH_OUTPUT_BYTES);
+            out.push_str("\n… output byte limit");
+        }
+        if out.is_empty() {
+            out = "(no matches)".into();
+        }
+        Ok(out)
+    }
+
+    fn search_base(&self, under: Option<&Path>) -> Result<PathBuf, ToolError> {
+        match under {
+            None => Ok(self.workspace.clone()),
+            Some(p) if p.as_os_str().is_empty() || p == Path::new(".") => {
+                Ok(self.workspace.clone())
+            }
+            Some(p) => {
+                if is_unsafe_relative_path(p) {
+                    return Err(ToolError::UnsafePath(p.to_path_buf()));
+                }
+                let joined = self.workspace.join(p);
+                let canon = std::fs::canonicalize(&joined).map_err(ToolError::Io)?;
+                if !canon.starts_with(&self.workspace) {
+                    return Err(ToolError::PathEscape(p.to_path_buf()));
+                }
+                Ok(canon)
+            }
+        }
+    }
+
+    /// Walk files under `base` (absolute, inside workspace). Callback gets workspace-relative path.
+    /// Return false from callback to stop early.
+    fn walk_files(
+        &self,
+        base: &Path,
+        visit: &mut dyn FnMut(PathBuf) -> bool,
+    ) -> Result<(), ToolError> {
+        if base.is_file() {
+            let rel = base
+                .strip_prefix(&self.workspace)
+                .map_err(|_| ToolError::PathEscape(base.to_path_buf()))?
+                .to_path_buf();
+            if is_unsafe_relative_path(&rel) && rel != Path::new("") {
+                return Err(ToolError::UnsafePath(rel));
+            }
+            let _ = visit(rel);
+            return Ok(());
+        }
+        let mut stack = vec![base.to_path_buf()];
+        let mut seen = 0usize;
+        while let Some(dir) = stack.pop() {
+            let rd = std::fs::read_dir(&dir)?;
+            for entry in rd {
+                let entry = entry?;
+                let path = entry.path();
+                let meta = entry.metadata()?;
+                if meta.is_symlink() {
+                    continue; // do not follow symlinks out of jail
+                }
+                if meta.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !meta.is_file() {
+                    continue;
+                }
+                let canon = match std::fs::canonicalize(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if !canon.starts_with(&self.workspace) {
+                    continue;
+                }
+                let rel = canon
+                    .strip_prefix(&self.workspace)
+                    .map_err(|_| ToolError::PathEscape(path))?
+                    .to_path_buf();
+                seen += 1;
+                if seen > MAX_WALK_FILES {
+                    return Ok(());
+                }
+                if !visit(rel) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn bash(&self, script: &str, limit: Duration) -> Result<String, ToolError> {
         let child = Command::new("bash")
             .arg("-lc")
@@ -379,6 +576,76 @@ struct EditArgs {
 struct BashArgs {
     command: String,
     timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GlobArgs {
+    pattern: String,
+    #[serde(default)]
+    path: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct GrepArgs {
+    pattern: String,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    max_matches: Option<usize>,
+}
+
+/// Simple glob: `*` (within segment), `**` (across segments). No `{a,b}` classes.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    let pat: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    glob_match_segs(&pat, &segs)
+}
+
+fn glob_match_segs(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first().copied(), path.first().copied()) {
+        (None, None) => true,
+        (Some("**"), _) => {
+            // Match empty prefix or consume one path segment and retry.
+            glob_match_segs(&pat[1..], path)
+                || (!path.is_empty() && glob_match_segs(pat, &path[1..]))
+        }
+        (Some(p), Some(s)) if segment_match(p, s) => glob_match_segs(&pat[1..], &path[1..]),
+        (Some(_), None) => pat.iter().all(|p| *p == "**"),
+        _ => false,
+    }
+}
+
+fn segment_match(pat: &str, seg: &str) -> bool {
+    if pat == "*" || pat == "**" {
+        return true;
+    }
+    let pb: Vec<char> = pat.chars().collect();
+    let sb: Vec<char> = seg.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut star = None;
+    let mut star_j = 0usize;
+    while j < sb.len() {
+        if i < pb.len() && (pb[i] == '?' || pb[i] == sb[j]) {
+            i += 1;
+            j += 1;
+        } else if i < pb.len() && pb[i] == '*' {
+            star = Some(i);
+            star_j = j;
+            i += 1;
+        } else if let Some(si) = star {
+            i = si + 1;
+            star_j += 1;
+            j = star_j;
+        } else {
+            return false;
+        }
+    }
+    while i < pb.len() && pb[i] == '*' {
+        i += 1;
+    }
+    i == pb.len()
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(tool: &str, raw: &str) -> Result<T, ToolError> {
@@ -495,5 +762,52 @@ mod tests {
             ToolRegistry::with_builtins(dir.path(), vec!["not_registered".into()], 30).unwrap();
         let err = reg.execute("not_registered", "{}").await.unwrap_err();
         assert!(matches!(err, ToolError::UnknownTool(_)));
+    }
+
+    #[tokio::test]
+    async fn glob_and_grep_respect_workspace() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn hello() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/b.txt"), "hello world\n").unwrap();
+        let tools = ToolExecutor::new(dir.path(), vec!["glob".into(), "grep".into()], 30).unwrap();
+        let glob_out = tools
+            .execute("glob", r#"{"pattern":"**/*.rs"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(g) = glob_out else {
+            panic!("expected text");
+        };
+        assert!(g.contains("src/a.rs") || g.contains("src\\a.rs"), "{g}");
+        assert!(!g.contains("b.txt"), "{g}");
+
+        let grep_out = tools
+            .execute("grep", r#"{"pattern":"hello","path":"src"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(t) = grep_out else {
+            panic!("expected text");
+        };
+        assert!(t.contains("hello"), "{t}");
+
+        let err = tools
+            .execute("grep", r#"{"pattern":"[","path":"."}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidPattern(_)));
+
+        let jail = tools
+            .execute("glob", r#"{"pattern":"*","path":".."}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(jail, ToolError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn glob_match_doublestar() {
+        assert!(glob_match("**/*.rs", "src/lib.rs"));
+        assert!(glob_match("*.txt", "a.txt"));
+        assert!(!glob_match("*.txt", "src/a.txt"));
+        assert!(glob_match("src/**", "src/a/b"));
     }
 }

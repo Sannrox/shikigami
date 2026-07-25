@@ -91,7 +91,7 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `enabled` | `[]` (→ safe defaults) | Allow-list of tool names |
+| `enabled` | `[]` (→ safe defaults) | Allow-list of tool names (default includes `read_file`, `write_file`, `edit`, `glob`, `grep`, `report`, `escalate`; not `bash`) |
 | `bash_timeout_secs` | `60` | Default bash timeout (capped at 120s) |
 
 When `enabled` is empty, the effective set is
