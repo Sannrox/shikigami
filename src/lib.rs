@@ -23,6 +23,7 @@
 
 pub mod checkpoint;
 pub mod config;
+pub mod context;
 pub mod events;
 pub mod governance;
 pub mod harness;

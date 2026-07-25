@@ -28,6 +28,8 @@ pub struct Config {
     pub events: EventsSettings,
     #[serde(default)]
     pub model: ModelSettings,
+    #[serde(default)]
+    pub context: ContextSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +298,43 @@ impl Default for ModelSettings {
     }
 }
 
+/// Project rules / extra context attached to runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSettings {
+    /// Discover and load the first matching project rules file from the workspace.
+    #[serde(default = "default_true")]
+    pub load_project_rules: bool,
+    /// Filenames tried in order under the workspace root.
+    #[serde(default = "default_rules_filenames")]
+    pub rules_filenames: Vec<String>,
+    /// Max bytes of rules text injected into the system prompt.
+    #[serde(default = "default_max_rules_bytes")]
+    pub max_rules_bytes: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_rules_filenames() -> Vec<String> {
+    vec!["AGENTS.md".into(), "shikigami.rules.md".into()]
+}
+
+fn default_max_rules_bytes() -> usize {
+    32 * 1024
+}
+
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self {
+            load_project_rules: default_true(),
+            rules_filenames: default_rules_filenames(),
+            max_rules_bytes: default_max_rules_bytes(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -307,6 +346,7 @@ impl Default for Config {
             run: RunSettings::default(),
             events: EventsSettings::default(),
             model: ModelSettings::default(),
+            context: ContextSettings::default(),
         }
     }
 }

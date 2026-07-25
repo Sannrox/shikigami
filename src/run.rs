@@ -268,6 +268,9 @@ impl Engine {
         };
 
         let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
+        let project_rules = crate::context::load_project_rules(&ws.path, &self.config.context);
+        let system_prompt =
+            crate::context::compose_system_prompt(SYSTEM_PROMPT, project_rules.as_ref());
         let handle = self
             .governance
             .begin_run(&run_id, &task, request.logical_operation_id.as_deref())
@@ -276,6 +279,12 @@ impl Engine {
         self.events.emit(HarnessEvent::Prompt {
             prompt_id: prompt_id.clone(),
         });
+        if let Some(ref rules) = project_rules {
+            self.events.emit(HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("project_rules {} digest={}", rules.filename, rules.digest),
+            });
+        }
         self.events.emit(HarnessEvent::Message {
             level: "info".into(),
             text: format!("workspace {}", ws.path.display()),
@@ -317,7 +326,7 @@ impl Engine {
                     .governance
                     .plan_turn(
                         &handle,
-                        SYSTEM_PROMPT,
+                        &system_prompt,
                         &messages,
                         &tool_defs,
                         self.model.as_ref(),
