@@ -14,6 +14,7 @@ async fn local_scripted_end_to_end() {
     let harness = Harness::from_config(config, state).unwrap();
     let mut request = RunRequest::new("demo");
     request.keep_workspace = true;
+    request.resume_run_id = None;
     let result = harness.run(request).await.unwrap();
     assert!(result.success);
     assert!(result.turns >= 2);

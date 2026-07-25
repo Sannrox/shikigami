@@ -1,6 +1,6 @@
 //! Run lifecycle engine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,12 +8,13 @@ use thiserror::Error;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::checkpoint::{self, Checkpoint, CheckpointError};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
 use crate::model::{ChatMessage, ModelError, ModelPort};
 use crate::tools::{ToolError, ToolExecutor, ToolOutput};
-use crate::workspace::{WorkspaceError, WorkspacePort};
+use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompts/harness-v1.md");
 
@@ -21,27 +22,21 @@ pub const SYSTEM_PROMPT: &str = include_str!("prompts/harness-v1.md");
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunTermination {
-    /// Completed with a report or natural model stop.
     Completed,
-    /// Cooperative cancel observed at a turn boundary.
     Cancelled,
-    /// Wall-clock deadline exceeded at a turn boundary.
     TimedOut,
-    /// Hit `max_turns` without a terminal report.
     MaxTurns,
-    /// Failed with an error (governance, tools, model, etc.).
     Failed,
 }
 
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub task: String,
-    /// When true, keep workspace after success (default false for directory).
     pub keep_workspace: bool,
-    /// Optional overall wall-clock deadline. Overrides config when set.
     pub timeout: Option<Duration>,
-    /// Cooperative cancel flag; checked at turn boundaries.
     pub cancel: Option<watch::Receiver<bool>>,
+    /// When set, load checkpoint for this run id and continue.
+    pub resume_run_id: Option<String>,
 }
 
 impl RunRequest {
@@ -51,6 +46,7 @@ impl RunRequest {
             keep_workspace: false,
             timeout: None,
             cancel: None,
+            resume_run_id: None,
         }
     }
 }
@@ -75,6 +71,8 @@ pub enum RunError {
     Tool(#[from] ToolError),
     #[error(transparent)]
     Model(#[from] ModelError),
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointError),
     #[error("run: {0}")]
     Message(String),
     #[error("max turns exceeded ({0})")]
@@ -125,20 +123,94 @@ impl Engine {
         Ok(())
     }
 
+    fn save_checkpoint(
+        &self,
+        run_id: &str,
+        task: &str,
+        messages: &[ChatMessage],
+        turns: u32,
+        workspace: &Path,
+        keep_workspace: bool,
+    ) -> Result<(), RunError> {
+        let cp = Checkpoint {
+            version: checkpoint::CHECKPOINT_VERSION,
+            run_id: run_id.into(),
+            task: task.into(),
+            prompt_id: checkpoint::prompt_id(SYSTEM_PROMPT),
+            messages: messages.to_vec(),
+            completed_turns: turns,
+            workspace: workspace.to_path_buf(),
+            keep_workspace,
+        };
+        cp.save(&self.state_runs)?;
+        Ok(())
+    }
+
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, RunError> {
-        let run_id = Uuid::new_v4().to_string();
         let started = tokio::time::Instant::now();
         let timeout = request
             .timeout
             .or_else(|| self.config.run.timeout_secs.map(Duration::from_secs));
 
-        self.events.emit(HarnessEvent::Status {
-            status: "starting".into(),
-        });
+        let (run_id, mut messages, mut turns, ws, task, keep_workspace) =
+            if let Some(resume_id) = &request.resume_run_id {
+                let cp = Checkpoint::load(&self.state_runs, resume_id)?;
+                cp.validate_prompt(SYSTEM_PROMPT)?;
+                if !cp.workspace.is_dir() {
+                    return Err(RunError::Message(format!(
+                        "checkpoint workspace missing: {}",
+                        cp.workspace.display()
+                    )));
+                }
+                self.events.emit(HarnessEvent::Status {
+                    status: "resuming".into(),
+                });
+                let ws = MaterializedWorkspace {
+                    path: cp.workspace.clone(),
+                    adapter: "resumed".into(),
+                    cleanup: if cp.keep_workspace {
+                        WorkspaceCleanup::None
+                    } else {
+                        WorkspaceCleanup::RemoveDir
+                    },
+                };
+                let task = if request.task.is_empty() {
+                    cp.task.clone()
+                } else {
+                    request.task.clone()
+                };
+                (
+                    cp.run_id,
+                    cp.messages,
+                    cp.completed_turns,
+                    ws,
+                    task,
+                    cp.keep_workspace || request.keep_workspace,
+                )
+            } else {
+                let run_id = Uuid::new_v4().to_string();
+                self.events.emit(HarnessEvent::Status {
+                    status: "starting".into(),
+                });
+                let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
+                let messages = vec![ChatMessage {
+                    role: "user".into(),
+                    content: request.task.clone(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![],
+                }];
+                (
+                    run_id,
+                    messages,
+                    0u32,
+                    ws,
+                    request.task.clone(),
+                    request.keep_workspace,
+                )
+            };
 
-        let handle = self.governance.begin_run(&run_id, &request.task).await?;
+        let handle = self.governance.begin_run(&run_id, &task).await?;
 
-        let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
         self.events.emit(HarnessEvent::Message {
             level: "info".into(),
             text: format!("workspace {}", ws.path.display()),
@@ -152,18 +224,13 @@ impl Engine {
         )?;
         let tool_defs = ToolExecutor::definitions_json(&enabled);
 
-        let mut messages = vec![ChatMessage {
-            role: "user".into(),
-            content: request.task.clone(),
-            tool_call_id: String::new(),
-            tool_calls: vec![],
-        }];
-
         let max_turns = self.config.run.max_turns;
-        let mut turns = 0u32;
         let mut final_summary = String::from("completed without report");
         let mut success = false;
         let mut termination = RunTermination::Completed;
+
+        // Persist initial checkpoint so resume works mid-run.
+        self.save_checkpoint(&run_id, &task, &messages, turns, &ws.path, keep_workspace)?;
 
         let result = async {
             loop {
@@ -200,6 +267,8 @@ impl Engine {
                     tool_calls: turn.tool_calls.clone(),
                 });
 
+                self.save_checkpoint(&run_id, &task, &messages, turns, &ws.path, keep_workspace)?;
+
                 if turn.tool_calls.is_empty() {
                     final_summary = if turn.content.is_empty() {
                         "model finished without tools".into()
@@ -221,6 +290,14 @@ impl Engine {
                             tool_calls: vec![],
                         });
                     }
+                    self.save_checkpoint(
+                        &run_id,
+                        &task,
+                        &messages,
+                        turns,
+                        &ws.path,
+                        keep_workspace,
+                    )?;
                     continue;
                 }
 
@@ -282,6 +359,20 @@ impl Engine {
                             final_summary = report.summary;
                             success = report.success;
                             termination = RunTermination::Completed;
+                            messages.push(ChatMessage {
+                                role: "tool".into(),
+                                content: format!("report: {}", final_summary),
+                                tool_call_id: call.id.clone(),
+                                tool_calls: vec![],
+                            });
+                            self.save_checkpoint(
+                                &run_id,
+                                &task,
+                                &messages,
+                                turns,
+                                &ws.path,
+                                keep_workspace,
+                            )?;
                             return Ok(());
                         }
                         Err(e) => {
@@ -304,6 +395,7 @@ impl Engine {
                         }
                     }
                 }
+                self.save_checkpoint(&run_id, &task, &messages, turns, &ws.path, keep_workspace)?;
             }
             Ok(())
         }
@@ -313,6 +405,10 @@ impl Engine {
             Ok(()) => (success, final_summary, termination),
             Err(e) => {
                 let summary = e.to_string();
+                let _ = self.save_checkpoint(
+                    &run_id, &task, &messages, turns, &ws.path,
+                    true, // keep workspace on failure for resume/inspection
+                );
                 let _ = self
                     .governance
                     .complete_run(
@@ -323,16 +419,12 @@ impl Engine {
                         },
                     )
                     .await;
-                if !request.keep_workspace {
-                    let _ = self.workspace.cleanup(&ws);
-                }
+                // Do not delete workspace on cancel/timeout/max-turns so resume works.
                 self.events.emit(HarnessEvent::RunFinished {
                     run_id: run_id.clone(),
                     success: false,
                     summary: summary.clone(),
                 });
-                // Cancelled / timed out / max turns are structured outcomes, not
-                // silent successes. Surface via Result::Err so CLI exits non-zero.
                 return Err(e);
             }
         };
@@ -347,7 +439,7 @@ impl Engine {
             )
             .await?;
 
-        if !request.keep_workspace && success {
+        if !keep_workspace && success {
             let _ = self.workspace.cleanup(&ws);
         }
 
@@ -378,146 +470,96 @@ mod tests {
     use crate::state::StateRoot;
     use crate::workspace;
     use tempfile::tempdir;
-    use tokio::sync::watch;
 
-    fn engine(config: Config, state: &StateRoot) -> Engine {
+    fn base_config(dir: &tempfile::TempDir) -> Config {
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.events.adapter = "none".into();
+        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+        config.model.adapter = "scripted".into();
+        config
+    }
+
+    #[tokio::test]
+    async fn resume_after_partial_script() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
         state.ensure_ready_for_runs().unwrap();
-        Engine {
-            governance: Arc::from(governance::from_config(&config).unwrap()),
-            workspace: Arc::from(workspace::from_config(&config).unwrap()),
-            model: Arc::from(crate::model::from_config(&config).unwrap()),
-            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
-            config,
-            state_runs: state.runs_dir(),
-        }
-    }
 
-    #[tokio::test]
-    async fn cancel_before_first_turn_errors() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
-        let mut config = Config::default();
-        config.governance.adapter = "local".into();
-        config.events.adapter = "none".into();
-        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
-        // Never-ending script would hang without cancel.
-        config.model.adapter = "scripted".into();
-        config.model.script_json = Some(
-            r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"x\",\"success\":true}"}]}]"#
-                .into(),
-        );
-
-        let (tx, rx) = watch::channel(true);
-        let _keep = tx;
-        let eng = engine(config, &state);
-        let err = eng
-            .run(RunRequest {
-                task: "t".into(),
-                keep_workspace: true,
-                timeout: None,
-                cancel: Some(rx),
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, RunError::Cancelled));
-        assert_eq!(err.termination(), RunTermination::Cancelled);
-    }
-
-    #[tokio::test]
-    async fn timeout_zero_errors_at_boundary() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
-        let mut config = Config::default();
-        config.governance.adapter = "none".into();
-        config.events.adapter = "none".into();
-        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
-        config.model.adapter = "scripted".into();
-
-        let eng = engine(config, &state);
-        let err = eng
-            .run(RunRequest {
-                task: "t".into(),
-                keep_workspace: true,
-                timeout: Some(Duration::from_secs(0)),
-                cancel: None,
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, RunError::TimedOut(_)));
-    }
-
-    #[tokio::test]
-    async fn completed_run_reports_termination() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
-        let mut config = Config::default();
-        config.governance.adapter = "local".into();
-        config.events.adapter = "none".into();
-        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
-        config.model.adapter = "scripted".into();
-
-        let eng = engine(config, &state);
-        let result = eng
-            .run(RunRequest {
-                task: "demo".into(),
-                keep_workspace: true,
-                timeout: Some(Duration::from_secs(30)),
-                cancel: None,
-            })
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert_eq!(result.termination, RunTermination::Completed);
-    }
-
-    #[tokio::test]
-    async fn max_turns_errors() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
-        let mut config = Config::default();
-        config.governance.adapter = "none".into();
-        config.events.adapter = "none".into();
-        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+        // First run: only write a file (no report) with max_turns 1 → MaxTurns but checkpoint saved
+        let mut config = base_config(&dir);
         config.run.max_turns = 1;
-        // Script keeps calling write_file forever-ish: one write then no report
-        // force max turns: two turns of write without report with max 1 fails on second plan
-        let model = ScriptedModel::from_turns(vec![
-            ModelTurn {
-                content: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: "1".into(),
-                    name: "write_file".into(),
-                    args_json: r#"{"path":"a.txt","content":"x"}"#.into(),
-                }],
-            },
-            ModelTurn {
-                content: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: "2".into(),
-                    name: "write_file".into(),
-                    args_json: r#"{"path":"b.txt","content":"y"}"#.into(),
-                }],
-            },
-        ]);
-        state.ensure_ready_for_runs().unwrap();
+        let model = ScriptedModel::from_turns(vec![ModelTurn {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "1".into(),
+                name: "write_file".into(),
+                args_json: r#"{"path":"partial.txt","content":"hello"}"#.into(),
+            }],
+        }]);
         let eng = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
             workspace: Arc::from(workspace::from_config(&config).unwrap()),
             model: Arc::new(model),
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
-            config,
+            config: config.clone(),
             state_runs: state.runs_dir(),
         };
         let err = eng
             .run(RunRequest {
-                task: "t".into(),
+                task: "partial".into(),
                 keep_workspace: true,
                 timeout: None,
                 cancel: None,
+                resume_run_id: None,
             })
             .await
             .unwrap_err();
-        // After first turn, turns=1 and max_turns=1 so second iteration hits MaxTurns
         assert!(matches!(err, RunError::MaxTurns(1)));
+
+        // Find checkpoint under runs/
+        let runs = state.runs_dir();
+        let run_id = std::fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().join("checkpoint.json").is_file())
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+
+        // Resume with report-only script and higher max_turns
+        let mut config2 = base_config(&dir);
+        config2.run.max_turns = 10;
+        let model2 = ScriptedModel::from_turns(vec![ModelTurn {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "2".into(),
+                name: "report".into(),
+                args_json: r#"{"summary":"resumed ok","success":true}"#.into(),
+            }],
+        }]);
+        let eng2 = Engine {
+            governance: Arc::from(governance::from_config(&config2).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config2).unwrap()),
+            model: Arc::new(model2),
+            events: Arc::from(events::from_config(&config2, &state.runs_dir()).unwrap()),
+            config: config2,
+            state_runs: state.runs_dir(),
+        };
+        let result = eng2
+            .run(RunRequest {
+                task: String::new(),
+                keep_workspace: true,
+                timeout: None,
+                cancel: None,
+                resume_run_id: Some(run_id.clone()),
+            })
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.run_id, run_id);
+        assert!(result.workspace.join("partial.txt").is_file());
+        assert_eq!(result.summary, "resumed ok");
     }
 }

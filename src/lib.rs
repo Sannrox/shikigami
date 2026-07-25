@@ -21,6 +21,7 @@
 //! Ports are selected by [Config] settings. Production governance is
 //! `sekai-chisei`. Tenkai delivers the binary only — not a runtime port.
 
+pub mod checkpoint;
 pub mod config;
 pub mod events;
 pub mod governance;
