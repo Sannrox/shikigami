@@ -19,6 +19,37 @@ use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
 
+/// Compact middle of the message list when over `threshold`.
+/// Keeps the first message (task) and the last `keep_tail` messages.
+/// Returns `(before, after)` when compaction ran.
+pub fn compact_messages(
+    messages: &mut Vec<ChatMessage>,
+    threshold: usize,
+    keep_tail: usize,
+) -> Option<(usize, usize)> {
+    let before = messages.len();
+    if before <= threshold || before <= keep_tail + 1 {
+        return None;
+    }
+    let head = messages.first().cloned()?;
+    let tail_start = before.saturating_sub(keep_tail);
+    let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
+    let dropped = before.saturating_sub(1 + tail.len());
+    let summary = ChatMessage {
+        role: "user".into(),
+        content: format!(
+            "[context compacted: {dropped} earlier messages omitted; continue the original task]"
+        ),
+        tool_call_id: String::new(),
+        tool_calls: vec![],
+    };
+    *messages = std::iter::once(head)
+        .chain(std::iter::once(summary))
+        .chain(tail)
+        .collect();
+    Some((before, messages.len()))
+}
+
 /// How a run ended (success or not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -328,6 +359,15 @@ impl Engine {
 
                 if turns >= max_turns {
                     return Err(RunError::MaxTurns(max_turns));
+                }
+                if let Some(threshold) = self.config.run.compact_after_messages {
+                    let keep = self.config.run.compact_keep_tail.max(2) as usize;
+                    if let Some((before, after)) =
+                        compact_messages(&mut messages, threshold as usize, keep)
+                    {
+                        self.events
+                            .emit(HarnessEvent::ContextCompacted { before, after });
+                    }
                 }
                 self.events.emit(HarnessEvent::Status {
                     status: "planning".into(),
@@ -642,6 +682,24 @@ mod tests {
     use crate::state::StateRoot;
     use crate::workspace;
     use tempfile::tempdir;
+
+    #[test]
+    fn compact_messages_shrinks_list() {
+        let mut msgs: Vec<ChatMessage> = (0..20)
+            .map(|i| ChatMessage {
+                role: if i == 0 { "user" } else { "assistant" }.into(),
+                content: format!("m{i}"),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            })
+            .collect();
+        let (before, after) = compact_messages(&mut msgs, 10, 4).unwrap();
+        assert_eq!(before, 20);
+        assert!(after < before);
+        assert_eq!(msgs[0].content, "m0");
+        assert!(msgs[1].content.contains("compacted"));
+        assert_eq!(msgs.last().unwrap().content, "m19");
+    }
 
     fn base_config(dir: &tempfile::TempDir) -> Config {
         let mut config = Config::default();
