@@ -43,6 +43,9 @@ enum Command {
         /// Keep the workspace directory after a successful run.
         #[arg(long)]
         keep_workspace: bool,
+        /// Overall wall-clock timeout in seconds (checked at turn boundaries).
+        #[arg(long, env = "SHIKIGAMI_RUN_TIMEOUT_SECS")]
+        timeout_secs: Option<u64>,
     },
 }
 
@@ -111,17 +114,16 @@ async fn run() -> anyhow::Result<()> {
         Command::Run {
             task,
             keep_workspace,
+            timeout_secs,
         } => {
             let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
-            let result = harness
-                .run(RunRequest {
-                    task,
-                    keep_workspace,
-                })
-                .await?;
+            let mut request = RunRequest::new(task);
+            request.keep_workspace = keep_workspace;
+            request.timeout = timeout_secs.map(std::time::Duration::from_secs);
+            let result = harness.run(request).await?;
             println!(
-                "run {} turns={} success={} summary={}",
-                result.run_id, result.turns, result.success, result.summary
+                "run {} turns={} success={} termination={:?} summary={}",
+                result.run_id, result.turns, result.success, result.termination, result.summary
             );
             println!("workspace {}", result.workspace.display());
             if !result.success {
