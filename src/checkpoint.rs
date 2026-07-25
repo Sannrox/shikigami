@@ -50,9 +50,17 @@ pub enum CheckpointError {
     PromptMismatch,
 }
 
+/// Versioned prompt id for a body (defaults to the `harness-v1` name prefix
+/// for backward-compatible checkpoints written before `prompts` module).
 pub fn prompt_id(prompt: &str) -> String {
+    // Prefer the canonical asset id when body matches the shipped default.
+    if prompt == crate::prompts::HARNESS_V1.body
+        || prompt.replace("\r\n", "\n") == crate::prompts::HARNESS_V1.body.replace("\r\n", "\n")
+    {
+        return crate::prompts::versioned_id(&crate::prompts::HARNESS_V1);
+    }
     let digest = Sha256::digest(prompt.replace("\r\n", "\n").as_bytes());
-    format!("harness-v1:{digest:x}")
+    format!("custom:{digest:x}")
 }
 
 pub fn path_for(state_runs: &Path, run_id: &str) -> PathBuf {

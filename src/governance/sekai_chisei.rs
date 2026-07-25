@@ -288,6 +288,10 @@ impl GovernancePort for SekaiChiseiGovernance {
             let mut attributes =
                 harvest::begin_attributes(run_id, &handle.operation_id, task, &self.principal);
             attributes.insert("namespace".into(), handle.namespace.clone());
+            attributes.insert(
+                "prompt_id".into(),
+                crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT),
+            );
             let _ = chisei
                 .report_operation_event(ReportOperationEventRequest {
                     operation_id: handle.operation_id.clone(),
@@ -565,6 +569,10 @@ pub mod harvest {
         attributes.insert("principal".into(), principal.into());
         attributes.insert("harness".into(), "shikigami".into());
         attributes.insert("product".into(), "shikigami".into());
+        attributes.insert(
+            "prompt_id".into(),
+            crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT),
+        );
         attributes
     }
 
@@ -594,6 +602,10 @@ pub mod harvest {
         attributes.insert(
             "authoritative".into(),
             "plane".into(), // local state is non-authoritative for governed truth
+        );
+        attributes.insert(
+            "prompt_id".into(),
+            crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT),
         );
         attributes
     }
