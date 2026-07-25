@@ -160,6 +160,21 @@ the current system prompt or resume fails.
 Credential ergonomics, anti-patterns, and doctor redaction:
 **[credentials.md](credentials.md)**.
 
+## Property tests
+
+Default `cargo test` includes proptest coverage for:
+
+- path jail rejection (`is_unsafe_relative_path` — absolute / `..` components)
+- settings validate/parse invariants (unknown adapters, unknown TOML keys)
+
+To run only those cases:
+
+```bash
+cargo test property_
+```
+
+No separate fuzz job is required for v0.x.
+
 There are **no** tenkai environment variables for the harness process. Tenkai
 only installs or upgrades the binary; see
 [../examples/tenkai-product.toml](../examples/tenkai-product.toml).
