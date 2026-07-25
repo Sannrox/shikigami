@@ -24,10 +24,24 @@ pub struct ToolCall {
     pub args_json: String,
 }
 
+/// Token counts when the provider (or script) reports them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn total(self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelTurn {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Error)]
@@ -95,6 +109,7 @@ impl ScriptedModel {
             .into_iter()
             .map(|t| ModelTurn {
                 content: t.content.unwrap_or_default(),
+                usage: t.usage,
                 tool_calls: t
                     .tool_calls
                     .into_iter()
@@ -133,6 +148,8 @@ struct ScriptedTurn {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ScriptedCall>,
+    #[serde(default)]
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Deserialize)]
@@ -324,9 +341,30 @@ impl ModelPort for HttpModel {
                 });
             }
         }
+        let usage = body.get("usage").and_then(|u| {
+            let input = u
+                .get("prompt_tokens")
+                .or_else(|| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output = u
+                .get("completion_tokens")
+                .or_else(|| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if input == 0 && output == 0 {
+                None
+            } else {
+                Some(TokenUsage {
+                    input_tokens: input,
+                    output_tokens: output,
+                })
+            }
+        });
         Ok(ModelTurn {
             content,
             tool_calls,
+            usage,
         })
     }
 }

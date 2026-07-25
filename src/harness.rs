@@ -234,6 +234,8 @@ impl Harness {
                     result.success,
                     result.termination == RunTermination::Parked,
                     result.turns,
+                    result.usage.input_tokens,
+                    result.usage.output_tokens,
                 );
                 Ok(result)
             }
@@ -245,7 +247,7 @@ impl Harness {
                 ) {
                     self.metrics.record_plane_error();
                 }
-                self.metrics.record_run(false, false, 0);
+                self.metrics.record_run(false, false, 0, 0, 0);
                 Err(e.into())
             }
         }
