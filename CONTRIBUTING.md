@@ -15,6 +15,18 @@ Participation is governed by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 - New **adapters** behind existing ports (or clear proposals for new ports)
 - Security reports via [SECURITY.md](SECURITY.md) (private)
 
+## Discussions vs Issues
+
+| Use | For |
+| --- | --- |
+| **GitHub Discussions** | Cross-boundary design, “how should we…”, long options analysis |
+| **Issues** | Concrete bugs, ready features with acceptance evidence, chores |
+
+Issue templates link a **design** Discussions category. If that category is
+missing on a fork, enable Discussions and add a category named `Design` (slug
+`design`) in the repository Settings → General → Features → Discussions, or
+use the **Ideas** category until then.
+
 ## Development setup
 
 ```bash
