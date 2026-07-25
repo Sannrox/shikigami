@@ -122,6 +122,8 @@ Rules and skills are **untrusted text** injected into the system prompt (not exe
 | Field | Default | Description |
 | --- | --- | --- |
 | `max_turns` | `50` | Hard stop for the turn loop |
+| `compact_after_messages` | unset | Compact middle history when message count exceeds N (off by default) |
+| `compact_keep_tail` | `8` | Messages kept after the first task message when compacting |
 | `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |
 
 CLI / env override: `shikigami run --timeout-secs N` or `SHIKIGAMI_RUN_TIMEOUT_SECS`.
