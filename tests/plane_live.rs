@@ -62,5 +62,9 @@ async fn doctor_fails_closed_when_endpoint_wrong() {
     config.governance.endpoint = Some("http://127.0.0.1:1".into());
     let harness = Harness::from_config(config, state).unwrap();
     let report = harness.doctor_async().await;
-    assert!(!report.ok, "wrong endpoint must fail closed: {:?}", report.lines);
+    assert!(
+        !report.ok,
+        "wrong endpoint must fail closed: {:?}",
+        report.lines
+    );
 }
