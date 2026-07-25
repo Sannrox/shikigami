@@ -85,6 +85,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | `version [--json]` | Product identity |
 | `doctor [--json]` | Effective profile, adapters, and health (probes the plane when configured) |
 | `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
+| `serve [--poll-ms N] [--max-jobs N]` | Local-queue daemon host ([docs/serve.md](docs/serve.md)) |
 
 | Flag / env | Purpose |
 | --- | --- |

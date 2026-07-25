@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use shikigami::{Harness, PRODUCT, PRODUCT_DESCRIPTION, RunRequest, StateRoot, VERSION};
+use shikigami::{
+    Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions, StateRoot,
+    VERSION,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -56,6 +59,15 @@ enum Command {
         /// Read operator answer from a file (UTF-8); alternative to --answer.
         #[arg(long)]
         answer_file: Option<PathBuf>,
+    },
+    /// Long-running local-queue host (see docs/serve.md).
+    Serve {
+        /// Poll interval for the inbox in milliseconds.
+        #[arg(long, default_value_t = 200)]
+        poll_ms: u64,
+        /// Exit after processing this many jobs (tests / oneshot drain).
+        #[arg(long)]
+        max_jobs: Option<u64>,
     },
 }
 
@@ -160,6 +172,31 @@ async fn run() -> anyhow::Result<()> {
             if !result.success {
                 anyhow::bail!("run reported failure");
             }
+        }
+        Command::Serve { poll_ms, max_jobs } => {
+            let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
+            let layout = QueueLayout::under_state(state.path());
+            layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
+            println!(
+                "serve inbox={} health={}",
+                layout.inbox.display(),
+                layout.health.display()
+            );
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let sig_tx = tx.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                let _ = sig_tx.send(true);
+            });
+            let options = ServeOptions {
+                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
+                max_jobs,
+            };
+            let n = shikigami::serve::run_serve(&harness, &layout, options, rx)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            println!("serve stopped after {n} job(s)");
+            drop(tx);
         }
     }
     Ok(())
