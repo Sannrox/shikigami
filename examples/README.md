@@ -6,7 +6,7 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | --- | --- |
 | [`local-run.toml`](local-run.toml) | Offline profile: local governance + scripted model |
 | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Production-style plane wiring (needs a reachable sekai-chisei) |
-| [`tenkai-product.toml`](tenkai-product.toml) | Example **delivery** manifest for installing the binary via tenkai |
+| [`tenkai-product.toml`](tenkai-product.toml) | Delivery manifest aligned with GitHub Release asset names |
 
 ## Offline demo
 
