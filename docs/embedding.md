@@ -91,7 +91,7 @@ Changes still require CHANGELOG entries; avoid drive-by renames.
 | --- | --- |
 | `Harness::{from_config, resolve, doctor, doctor_async, run}` | Primary entry |
 | `Config` / settings `version = 1` fields with defaults | Unknown keys rejected |
-| `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` | Bounds and resume |
+| `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` / `logical_operation_id` | Bounds, resume, plane op correlation |
 | `RunResult` fields including `termination` | Structured outcomes |
 | `DoctorReport` JSON `schema_version = 1` keys | Automation contract |
 | CLI subcommands `version` / `doctor` / `run` | Flags may grow |

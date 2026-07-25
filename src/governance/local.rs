@@ -35,10 +35,17 @@ impl GovernancePort for LocalGovernance {
         true
     }
 
-    async fn begin_run(&self, run_id: &str, _task: &str) -> Result<RunHandle, GovernanceError> {
+    async fn begin_run(
+        &self,
+        run_id: &str,
+        _task: &str,
+        logical_operation_id: Option<&str>,
+    ) -> Result<RunHandle, GovernanceError> {
         Ok(RunHandle {
             run_id: run_id.into(),
-            operation_id: format!("local-{run_id}"),
+            operation_id: logical_operation_id
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("local-{run_id}")),
             namespace: "local".into(),
         })
     }

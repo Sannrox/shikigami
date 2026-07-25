@@ -15,10 +15,17 @@ pub use none::NoneGovernance;
 #[cfg(feature = "governance-sekai-chisei")]
 pub mod sekai_chisei;
 
+/// Lineage for one harness attempt correlated to plane operations.
+///
+/// See [docs/identity.md](../../docs/identity.md) and ADR 0002.
 #[derive(Debug, Clone)]
 pub struct RunHandle {
+    /// Harness attempt id (UUID). Equals plane `attempt_id`.
     pub run_id: String,
+    /// Logical operation id for plane receipts / PlanExecution.
+    /// Defaults to `run_id` when the caller does not supply a parent op.
     pub operation_id: String,
+    /// Plane namespace for policy and harvest.
     pub namespace: String,
 }
 
@@ -50,7 +57,14 @@ pub trait GovernancePort: Send + Sync {
     fn health_detail(&self) -> String;
     fn health_ok(&self) -> bool;
 
-    async fn begin_run(&self, run_id: &str, task: &str) -> Result<RunHandle, GovernanceError>;
+    /// Start a run. `logical_operation_id` maps to plane `operation_id` /
+    /// `logical_operation_id` (defaults to `run_id` when `None`).
+    async fn begin_run(
+        &self,
+        run_id: &str,
+        task: &str,
+        logical_operation_id: Option<&str>,
+    ) -> Result<RunHandle, GovernanceError>;
 
     /// Produce the next model turn. Local adapters use the provided model port
     /// callback; sekai-chisei uses PlanExecution on the plane.
