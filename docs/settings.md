@@ -85,6 +85,7 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | --- | --- | --- |
 | `adapter` | `"directory"` | `directory` \| `git-worktree` |
 | `root` | `"."` | Parent/repo root for materialization |
+| `snapshot` | `false` | After materialize, copy workspace to `state/runs/<id>/snapshots/initial` |
 | `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
 
 ### `[tools]`

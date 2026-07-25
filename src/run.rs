@@ -89,6 +89,8 @@ pub struct RunRequest {
     pub logical_operation_id: Option<String>,
     /// Operator answer when resuming a parked run (from `escalate`).
     pub resume_answer: Option<String>,
+    /// Restore workspace from this snapshot name before continuing (e.g. `"initial"`).
+    pub restore_snapshot: Option<String>,
 }
 
 impl RunRequest {
@@ -101,6 +103,7 @@ impl RunRequest {
             resume_run_id: None,
             logical_operation_id: None,
             resume_answer: None,
+            restore_snapshot: None,
         }
     }
 }
@@ -329,6 +332,21 @@ impl Engine {
             level: "info".into(),
             text: format!("workspace {}", ws.path.display()),
         });
+
+        if let Some(name) = &request.restore_snapshot {
+            crate::workspace::restore_snapshot(&ws.path, &self.state_runs, &run_id, name)?;
+            self.events.emit(HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("restored snapshot `{name}`"),
+            });
+        } else if self.config.workspace.snapshot {
+            let dest =
+                crate::workspace::take_snapshot(&ws.path, &self.state_runs, &run_id, "initial")?;
+            self.events.emit(HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("snapshot initial at {}", dest.display()),
+            });
+        }
 
         let enabled = self.config.tools.effective_enabled();
         let tools =
@@ -739,6 +757,7 @@ mod tests {
                 resume_run_id: None,
                 logical_operation_id: None,
                 resume_answer: None,
+                restore_snapshot: None,
             })
             .await
             .unwrap_err();
@@ -768,6 +787,7 @@ mod tests {
                 resume_run_id: None,
                 logical_operation_id: None,
                 resume_answer: None,
+                restore_snapshot: None,
             })
             .await
             .unwrap_err();
@@ -809,6 +829,7 @@ mod tests {
                 resume_run_id: None,
                 logical_operation_id: None,
                 resume_answer: None,
+                restore_snapshot: None,
             })
             .await
             .unwrap_err();
@@ -854,6 +875,7 @@ mod tests {
                 resume_run_id: Some(run_id.clone()),
                 logical_operation_id: None,
                 resume_answer: None,
+                restore_snapshot: None,
             })
             .await
             .unwrap();
@@ -941,6 +963,7 @@ mod tests {
                 resume_run_id: Some(parked.run_id.clone()),
                 logical_operation_id: None,
                 resume_answer: None,
+                restore_snapshot: None,
             })
             .await
             .unwrap_err();
