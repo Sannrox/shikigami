@@ -20,6 +20,7 @@ Operator and contributor documentation for **shikigami**.
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Run metrics export | [metrics.md](metrics.md) |
 | Network egress policy | [network.md](network.md) |
+| MCP client and server host | [mcp.md](mcp.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
 | See accepted design decisions | [decisions/](decisions/) |

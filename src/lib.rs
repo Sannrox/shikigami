@@ -29,6 +29,7 @@ pub mod governance;
 pub mod harness;
 pub mod identity;
 pub mod mcp;
+pub mod mcp_server;
 pub mod metrics;
 pub mod model;
 pub mod prompts;
@@ -42,6 +43,7 @@ pub use config::{Config, ConfigSource, EgressMode, McpServerSettings, Permission
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
+pub use mcp_server::McpRunSummary;
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use model::TokenUsage;
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
