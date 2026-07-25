@@ -431,6 +431,7 @@ impl GovernancePort for SekaiChiseiGovernance {
                     args_json: c.args_json,
                 })
                 .collect(),
+            usage: None, // plane usage surfaces via harvest when available
         })
     }
 
