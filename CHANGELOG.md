@@ -8,6 +8,11 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
+  (bash / write_file / edit / read_file; `report` remains harness-internal).
+
 ## [0.1.0] — 2026-07-25
 
 First tagged public release.
