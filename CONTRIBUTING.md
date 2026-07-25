@@ -45,6 +45,9 @@ GitHub Actions CI must stay green. Required checks on `main`:
 
 ## Architecture rules
 
+Embed API expectations: [docs/embedding.md](docs/embedding.md) (freeze candidates).
+
+
 Read [DESIGN.md](DESIGN.md) and
 [docs/decisions/0001-ports-and-settings.md](docs/decisions/0001-ports-and-settings.md)
 before changing boundaries.
