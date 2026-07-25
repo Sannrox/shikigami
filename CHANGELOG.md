@@ -24,6 +24,7 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   values ([docs/credentials.md](docs/credentials.md)).
 - Optional nightly live plane workflow (no-op without secrets).
 - Property tests for path jail and settings parse/validate invariants.
+- Supply-chain CI: `cargo deny` with committed `deny.toml` (licenses + advisories).
 
 ## [0.1.0] — 2026-07-25
 

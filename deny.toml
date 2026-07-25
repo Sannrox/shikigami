@@ -1,0 +1,52 @@
+# Supply-chain policy for shikigami.
+# Rationale: fail CI on unlicensed/copyleft surprises and known advisories,
+# while allowing intentional exceptions via this file (documented).
+# Local: cargo deny check
+# CI: .github/workflows/security-audit.yml job cargo-deny
+
+[graph]
+all-features = true
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+]
+
+[advisories]
+version = 2
+yanked = "warn"
+# Unsound/unmaintained advisories are still surfaced; ignore only with rationale.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+  "OpenSSL",
+  "Apache-2.0 WITH LLVM-exception",
+  "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+# Workspace-only crates may pull duplicates; warn rather than hard-fail for v0.x.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
