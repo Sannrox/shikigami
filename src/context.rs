@@ -55,18 +55,78 @@ pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Optio
     None
 }
 
-/// Compose system prompt with optional project rules.
-pub fn compose_system_prompt(base: &str, rules: Option<&ProjectRules>) -> String {
-    match rules {
-        None => base.to_string(),
-        Some(r) => format!("{base}\n\n# Project rules (`{}`)\n\n{}", r.filename, r.body),
-    }
+/// A loaded skill pack (SKILL.md text + digest).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillPack {
+    pub id: String,
+    pub body: String,
+    pub digest: String,
+    pub truncated: bool,
 }
 
-/// Path used only in tests/helpers.
-#[allow(dead_code)]
-pub fn rules_path(workspace: &Path, filename: &str) -> PathBuf {
-    workspace.join(filename)
+/// Load configured skill packs from `skills_root/<id>/SKILL.md`.
+pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPack> {
+    if settings.skills.is_empty() {
+        return Vec::new();
+    }
+    let root = match &settings.skills_root {
+        Some(r) if !r.is_empty() => {
+            let p = PathBuf::from(r);
+            if p.is_absolute() {
+                p
+            } else {
+                workspace.join(p)
+            }
+        }
+        _ => workspace.join(".shikigami/skills"),
+    };
+    let max = settings.max_skill_bytes.clamp(1, MAX_DEFAULT * 4);
+    let mut out = Vec::new();
+    for id in &settings.skills {
+        if id.contains("..") || id.contains('/') || id.contains('\\') {
+            continue;
+        }
+        let path = root.join(id).join("SKILL.md");
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&path) else {
+            continue;
+        };
+        let truncated = raw.len() > max;
+        let slice = if truncated { &raw[..max] } else { &raw[..] };
+        let mut body = String::from_utf8_lossy(slice).into_owned();
+        if truncated {
+            body.push_str("\n\n… [skill truncated]\n");
+        }
+        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        out.push(SkillPack {
+            id: id.clone(),
+            body,
+            digest,
+            truncated,
+        });
+    }
+    out
+}
+
+/// Compose system prompt with optional project rules and skill packs.
+pub fn compose_system_prompt(
+    base: &str,
+    rules: Option<&ProjectRules>,
+    skills: &[SkillPack],
+) -> String {
+    let mut out = base.to_string();
+    if let Some(r) = rules {
+        out.push_str(&format!(
+            "\n\n# Project rules (`{}`)\n\n{}",
+            r.filename, r.body
+        ));
+    }
+    for s in skills {
+        out.push_str(&format!("\n\n# Skill `{}`\n\n{}", s.id, s.body));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -101,5 +161,24 @@ mod tests {
             ..Default::default()
         };
         assert!(load_project_rules(dir.path(), &s).is_none());
+    }
+
+    #[test]
+    fn loads_skill_pack() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join(".shikigami/skills/demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "prefer tests first\n").unwrap();
+        let s = ContextSettings {
+            skills: vec!["demo".into()],
+            ..Default::default()
+        };
+        let packs = load_skills(dir.path(), &s);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].id, "demo");
+        assert!(packs[0].body.contains("tests first"));
+        let composed = compose_system_prompt("BASE", None, &packs);
+        assert!(composed.contains("Skill `demo`"));
+        assert!(composed.contains("tests first"));
     }
 }
