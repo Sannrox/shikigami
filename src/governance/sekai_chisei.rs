@@ -31,9 +31,10 @@ use sha2::{Digest, Sha256};
 
 use proto::chisei::chisei_service_client::ChiseiServiceClient;
 use proto::chisei::{
-    AuthorizeExternalActionRequest, ChatMessage as ProtoChatMessage, ExecutePlanRequest,
-    ExecutionInput, ExternalActionDecision, ExternalActionRequest, PlanExecutionRequest,
-    ReportOperationEventRequest, ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
+    AuthorizeExternalActionRequest, AuthorizeOperationReporterRequest,
+    ChatMessage as ProtoChatMessage, ExecutePlanRequest, ExecutionInput, ExternalActionDecision,
+    ExternalActionRequest, PlanExecutionRequest, ReportOperationEventRequest,
+    ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
 };
 use proto::sekai::ListSchemaTypesRequest;
 use proto::sekai::sekai_service_client::SekaiServiceClient;
@@ -259,12 +260,44 @@ impl GovernancePort for SekaiChiseiGovernance {
         {
             return Err(e);
         }
-        let _ = task;
-        Ok(RunHandle {
+        let handle = RunHandle {
             run_id: run_id.into(),
             operation_id: run_id.into(),
             namespace: self.namespace.clone(),
-        })
+        };
+
+        // Best-effort harvest: authorize reporter + run.begin event.
+        if let Ok((mut chisei, _)) = self.connect().await {
+            let _ = chisei
+                .authorize_operation_reporter(AuthorizeOperationReporterRequest {
+                    operation_id: handle.operation_id.clone(),
+                    principal: self.principal.clone(),
+                    event_kinds: vec![
+                        "shikigami.run.begin".into(),
+                        "shikigami.tool".into(),
+                        "shikigami.run.complete".into(),
+                    ],
+                })
+                .await;
+            let mut attributes = harvest::begin_attributes(run_id, task, &self.principal);
+            attributes.insert("namespace".into(), handle.namespace.clone());
+            let _ = chisei
+                .report_operation_event(ReportOperationEventRequest {
+                    operation_id: handle.operation_id.clone(),
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    parent_event_id: String::new(),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    kind: "shikigami.run.begin".into(),
+                    attributes,
+                    references: vec![],
+                })
+                .await;
+        } else if self.fail_closed {
+            // connect failed after successful probe is unexpected; still allow
+            // the run to proceed — complete_run will surface fail-closed errors.
+        }
+
+        Ok(handle)
     }
 
     async fn plan_turn(
@@ -452,10 +485,7 @@ impl GovernancePort for SekaiChiseiGovernance {
                 return Ok(());
             }
         };
-        let mut attributes = std::collections::HashMap::new();
-        attributes.insert("tool".into(), name.into());
-        attributes.insert("ok".into(), ok.to_string());
-        attributes.insert("detail".into(), detail.chars().take(2000).collect());
+        let attributes = harvest::tool_attributes(name, ok, detail);
         let _ = chisei
             .report_operation_event(ReportOperationEventRequest {
                 operation_id: handle.operation_id.clone(),
@@ -484,12 +514,8 @@ impl GovernancePort for SekaiChiseiGovernance {
                 return Ok(());
             }
         };
-        let mut attributes = std::collections::HashMap::new();
-        attributes.insert("success".into(), outcome.success.to_string());
-        attributes.insert(
-            "summary".into(),
-            outcome.summary.chars().take(4000).collect(),
-        );
+        let attributes = harvest::complete_attributes(&outcome);
+        let references = harvest::complete_references(handle, &outcome);
         let _ = chisei
             .report_operation_event(ReportOperationEventRequest {
                 operation_id: handle.operation_id.clone(),
@@ -498,10 +524,88 @@ impl GovernancePort for SekaiChiseiGovernance {
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 kind: "shikigami.run.complete".into(),
                 attributes,
-                references: vec![],
+                references,
             })
             .await;
         Ok(())
+    }
+}
+
+/// Pure harvest mapping: run lifecycle → plane operation events.
+/// Local checkpoint/state is never authoritative for governed truth.
+pub mod harvest {
+    use std::collections::HashMap;
+
+    use super::proto::chisei::OperationEvidenceReference;
+    use crate::governance::{RunHandle, RunOutcome};
+
+    pub const KIND_BEGIN: &str = "shikigami.run.begin";
+    pub const KIND_TOOL: &str = "shikigami.tool";
+    pub const KIND_COMPLETE: &str = "shikigami.run.complete";
+
+    pub fn begin_attributes(run_id: &str, task: &str, principal: &str) -> HashMap<String, String> {
+        let mut attributes = HashMap::new();
+        attributes.insert("run_id".into(), run_id.into());
+        attributes.insert("task".into(), task.chars().take(4000).collect());
+        attributes.insert("principal".into(), principal.into());
+        attributes.insert("harness".into(), "shikigami".into());
+        attributes.insert("product".into(), "shikigami".into());
+        attributes
+    }
+
+    pub fn tool_attributes(name: &str, ok: bool, detail: &str) -> HashMap<String, String> {
+        let mut attributes = HashMap::new();
+        attributes.insert("tool".into(), name.into());
+        attributes.insert("ok".into(), ok.to_string());
+        attributes.insert("detail".into(), detail.chars().take(2000).collect());
+        attributes.insert("harness".into(), "shikigami".into());
+        attributes
+    }
+
+    pub fn complete_attributes(outcome: &RunOutcome) -> HashMap<String, String> {
+        let mut attributes = HashMap::new();
+        attributes.insert("success".into(), outcome.success.to_string());
+        attributes.insert(
+            "summary".into(),
+            outcome.summary.chars().take(4000).collect(),
+        );
+        attributes.insert("turns".into(), outcome.turns.to_string());
+        attributes.insert("termination".into(), outcome.termination.clone());
+        attributes.insert(
+            "workspace".into(),
+            outcome.workspace.chars().take(2000).collect(),
+        );
+        attributes.insert("harness".into(), "shikigami".into());
+        attributes.insert(
+            "authoritative".into(),
+            "plane".into(), // local state is non-authoritative for governed truth
+        );
+        attributes
+    }
+
+    pub fn complete_references(
+        handle: &RunHandle,
+        outcome: &RunOutcome,
+    ) -> Vec<OperationEvidenceReference> {
+        let mut refs = vec![OperationEvidenceReference {
+            kind: "run_id".into(),
+            reference: handle.run_id.clone(),
+            content_hash: String::new(),
+            disclosed_fields: vec!["run_id".into()],
+            omitted: false,
+            omission_reason: String::new(),
+        }];
+        if !outcome.workspace.is_empty() {
+            refs.push(OperationEvidenceReference {
+                kind: "workspace_path".into(),
+                reference: outcome.workspace.chars().take(2000).collect(),
+                content_hash: String::new(),
+                disclosed_fields: vec!["path".into()],
+                omitted: false,
+                omission_reason: String::new(),
+            });
+        }
+        refs
     }
 }
 
@@ -622,5 +726,49 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn harvest_complete_attributes_include_termination() {
+        let outcome = RunOutcome {
+            success: false,
+            summary: "timed out".into(),
+            turns: 3,
+            termination: "timed_out".into(),
+            workspace: "/tmp/ws".into(),
+        };
+        let attrs = harvest::complete_attributes(&outcome);
+        assert_eq!(attrs.get("success").map(String::as_str), Some("false"));
+        assert_eq!(attrs.get("turns").map(String::as_str), Some("3"));
+        assert_eq!(
+            attrs.get("termination").map(String::as_str),
+            Some("timed_out")
+        );
+        assert_eq!(
+            attrs.get("authoritative").map(String::as_str),
+            Some("plane")
+        );
+        let handle = RunHandle {
+            run_id: "r1".into(),
+            operation_id: "r1".into(),
+            namespace: "ns".into(),
+        };
+        let refs = harvest::complete_references(&handle, &outcome);
+        assert!(
+            refs.iter()
+                .any(|r| r.kind == "run_id" && r.reference == "r1")
+        );
+        assert!(
+            refs.iter()
+                .any(|r| r.kind == "workspace_path" && r.reference == "/tmp/ws")
+        );
+    }
+
+    #[test]
+    fn harvest_begin_attributes_capture_task() {
+        let attrs = harvest::begin_attributes("run-1", "do the thing", "alice");
+        assert_eq!(attrs.get("run_id").map(String::as_str), Some("run-1"));
+        assert_eq!(attrs.get("task").map(String::as_str), Some("do the thing"));
+        assert_eq!(attrs.get("principal").map(String::as_str), Some("alice"));
     }
 }

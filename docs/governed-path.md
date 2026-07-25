@@ -53,6 +53,12 @@ cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml \
 
 If the plane is down under `fail_closed`, doctor and run refuse to start.
 
+## Harvest (plane-visible run records)
+
+Governed runs emit operation events so outcomes are reconstructable without
+local-only state. Mapping table and attribute contract:
+**[harvest.md](harvest.md)**.
+
 ## Mid-run tool authorization (external-action)
 
 When governance is `sekai-chisei`, each **consequential tool invocation** is
