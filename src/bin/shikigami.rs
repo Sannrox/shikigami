@@ -91,18 +91,7 @@ async fn run() -> anyhow::Result<()> {
             let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
             let report = harness.doctor_async().await;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": report.ok,
-                        "profile": report.profile,
-                        "governance": report.governance,
-                        "workspace": report.workspace,
-                        "events": report.events,
-                        "model": report.model,
-                        "lines": report.lines,
-                    }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("{PRODUCT} doctor");
                 println!("  version:  {VERSION}");
