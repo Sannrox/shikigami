@@ -27,9 +27,12 @@ pub mod proto {
     }
 }
 
+use sha2::{Digest, Sha256};
+
 use proto::chisei::chisei_service_client::ChiseiServiceClient;
 use proto::chisei::{
-    ChatMessage as ProtoChatMessage, ExecutePlanRequest, ExecutionInput, PlanExecutionRequest,
+    AuthorizeExternalActionRequest, ChatMessage as ProtoChatMessage, ExecutePlanRequest,
+    ExecutionInput, ExternalActionDecision, ExternalActionRequest, PlanExecutionRequest,
     ReportOperationEventRequest, ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
 };
 use proto::sekai::ListSchemaTypesRequest;
@@ -127,6 +130,100 @@ impl SekaiChiseiGovernance {
             .await
             .map_err(|e| GovernanceError::Unavailable(format!("probe: {e}")))?;
         Ok(())
+    }
+
+    /// Whether a tool must request plane external-action authorization before
+    /// host execution. `report` is harness-internal completion signaling.
+    pub(crate) fn tool_requires_external_action(name: &str) -> bool {
+        !matches!(name, "report")
+    }
+
+    /// Map a shikigami tool to the external-action risk class contract.
+    pub(crate) fn tool_risk_class(name: &str) -> &'static str {
+        match name {
+            "bash" => "destructive",
+            "write_file" | "edit" => "write",
+            "read_file" => "read",
+            _ => "write",
+        }
+    }
+
+    fn arguments_digest(args_json: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(args_json.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Interpret an ExternalActionDecision for headless execution.
+    /// Only `permit` allows the tool to run; `require_approval` is denied
+    /// because the headless path cannot wait for interactive approval.
+    pub(crate) fn interpret_external_action_decision(
+        decision: &ExternalActionDecision,
+    ) -> Result<(), GovernanceError> {
+        match decision.decision.as_str() {
+            "permit" => Ok(()),
+            "deny" => Err(GovernanceError::Denied(format!(
+                "external-action denied: {}",
+                if decision.reason.is_empty() {
+                    "policy denied"
+                } else {
+                    &decision.reason
+                }
+            ))),
+            "require_approval" => Err(GovernanceError::Denied(format!(
+                "external-action requires approval (unsupported headless): {}",
+                if decision.reason.is_empty() {
+                    "approval required"
+                } else {
+                    &decision.reason
+                }
+            ))),
+            other => Err(GovernanceError::Denied(format!(
+                "external-action unexpected decision `{other}`{}",
+                if decision.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", decision.reason)
+                }
+            ))),
+        }
+    }
+
+    fn build_external_action_request(
+        &self,
+        handle: &RunHandle,
+        name: &str,
+        args_json: &str,
+    ) -> ExternalActionRequest {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        ExternalActionRequest {
+            version: "external-action.request/v1".into(),
+            operation_id: handle.operation_id.clone(),
+            parent_operation_id: String::new(),
+            attempt_id: handle.run_id.clone(),
+            request_id: request_id.clone(),
+            actor: self.principal.clone(),
+            namespace: handle.namespace.clone(),
+            requesting_harness: "shikigami".into(),
+            intended_executor: "shikigami".into(),
+            action_type: format!("shikigami.tool.{name}"),
+            parameter_schema: "application/json".into(),
+            canonical_arguments_digest: Self::arguments_digest(args_json),
+            policy_summary: std::collections::HashMap::from([("tool".into(), name.to_string())]),
+            target_selectors: vec![format!("tool:{name}")],
+            immutable_preconditions: std::collections::HashMap::new(),
+            risk_class: Self::tool_risk_class(name).into(),
+            expected_effects: vec![format!("execute_tool:{name}")],
+            requested_invocation_count: 1,
+            deadline_ms: chrono::Utc::now().timestamp_millis() + 120_000,
+            estimated_cost_micros: 0,
+            estimated_volume: 0,
+            affected_resource_count: 1,
+            rollback_capability: String::new(),
+            required_host_capabilities: vec!["shikigami.tools".into()],
+            idempotency_key: request_id,
+            policy_project: handle.namespace.clone(),
+        }
     }
 }
 
@@ -295,13 +392,48 @@ impl GovernancePort for SekaiChiseiGovernance {
 
     async fn authorize_tool(
         &self,
-        _handle: &RunHandle,
-        _name: &str,
-        _args_json: &str,
+        handle: &RunHandle,
+        name: &str,
+        args_json: &str,
     ) -> Result<(), GovernanceError> {
-        // Tool allow-list is enforced by the plane via prepared tools; host still
-        // re-checks enabled tools in the engine. Future: external-action authz.
-        Ok(())
+        if !Self::tool_requires_external_action(name) {
+            return Ok(());
+        }
+
+        let (mut chisei, _) = match self.connect().await {
+            Ok(c) => c,
+            Err(e) => {
+                if self.fail_closed {
+                    return Err(e);
+                }
+                return Ok(());
+            }
+        };
+
+        let request = self.build_external_action_request(handle, name, args_json);
+        let response = match chisei
+            .authorize_external_action(AuthorizeExternalActionRequest {
+                request: Some(request),
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                if self.fail_closed {
+                    return Err(GovernanceError::Unavailable(format!(
+                        "AuthorizeExternalAction: {e}"
+                    )));
+                }
+                return Ok(());
+            }
+        };
+
+        let decision = response
+            .into_inner()
+            .decision
+            .ok_or_else(|| GovernanceError::Denied("external-action missing decision".into()))?;
+
+        Self::interpret_external_action_decision(&decision)
     }
 
     async fn report_tool(
@@ -383,4 +515,112 @@ pub async fn live_probe(config: &Config) -> Result<String, GovernanceError> {
     }
     g.probe().await?;
     Ok(format!("reachable at {}", g.endpoint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decision(kind: &str, reason: &str) -> ExternalActionDecision {
+        ExternalActionDecision {
+            version: "external-action.decision/v1".into(),
+            authorization_id: "auth-1".into(),
+            request_digest: "digest".into(),
+            decision: kind.into(),
+            reason: reason.into(),
+            approval_id: String::new(),
+            policy_scope: String::new(),
+            policy_version: String::new(),
+            created_at_ms: 0,
+            expires_at_ms: 0,
+            cancelled_at_ms: 0,
+            assurance: None,
+            permit: None,
+        }
+    }
+
+    #[test]
+    fn report_skips_external_action() {
+        assert!(!SekaiChiseiGovernance::tool_requires_external_action(
+            "report"
+        ));
+        assert!(SekaiChiseiGovernance::tool_requires_external_action("bash"));
+        assert!(SekaiChiseiGovernance::tool_requires_external_action(
+            "write_file"
+        ));
+        assert!(SekaiChiseiGovernance::tool_requires_external_action("edit"));
+        assert!(SekaiChiseiGovernance::tool_requires_external_action(
+            "read_file"
+        ));
+    }
+
+    #[test]
+    fn risk_classes_match_tool_consequences() {
+        assert_eq!(
+            SekaiChiseiGovernance::tool_risk_class("bash"),
+            "destructive"
+        );
+        assert_eq!(
+            SekaiChiseiGovernance::tool_risk_class("write_file"),
+            "write"
+        );
+        assert_eq!(SekaiChiseiGovernance::tool_risk_class("edit"), "write");
+        assert_eq!(SekaiChiseiGovernance::tool_risk_class("read_file"), "read");
+    }
+
+    #[test]
+    fn permit_allows_execution() {
+        assert!(
+            SekaiChiseiGovernance::interpret_external_action_decision(&decision("permit", ""))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn deny_blocks_execution() {
+        let err = SekaiChiseiGovernance::interpret_external_action_decision(&decision(
+            "deny",
+            "budget exhausted",
+        ))
+        .unwrap_err();
+        match err {
+            GovernanceError::Denied(msg) => {
+                assert!(msg.contains("budget exhausted"), "{msg}");
+            }
+            other => panic!("expected Denied, got {other}"),
+        }
+    }
+
+    #[test]
+    fn require_approval_blocks_headless() {
+        let err = SekaiChiseiGovernance::interpret_external_action_decision(&decision(
+            "require_approval",
+            "needs human",
+        ))
+        .unwrap_err();
+        match err {
+            GovernanceError::Denied(msg) => {
+                assert!(msg.contains("approval"), "{msg}");
+                assert!(msg.contains("needs human"), "{msg}");
+            }
+            other => panic!("expected Denied, got {other}"),
+        }
+    }
+
+    #[test]
+    fn unknown_decision_fails_closed() {
+        let err = SekaiChiseiGovernance::interpret_external_action_decision(&decision("maybe", ""))
+            .unwrap_err();
+        assert!(matches!(err, GovernanceError::Denied(_)));
+    }
+
+    #[test]
+    fn arguments_digest_is_stable() {
+        let a = SekaiChiseiGovernance::arguments_digest(r#"{"path":"a.txt"}"#);
+        let b = SekaiChiseiGovernance::arguments_digest(r#"{"path":"a.txt"}"#);
+        let c = SekaiChiseiGovernance::arguments_digest(r#"{"path":"b.txt"}"#);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 64);
+    }
 }

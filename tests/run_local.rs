@@ -49,3 +49,35 @@ async fn custom_script_edit_flow() {
     let text = std::fs::read_to_string(result.workspace.join("x.txt")).unwrap();
     assert_eq!(text, "two");
 }
+
+/// Denied authorize_tool must not execute the host tool (allow-list path).
+/// Governed external-action deny uses the same run-loop branch.
+#[tokio::test]
+async fn denied_tool_authorization_does_not_execute() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    // Only report is enabled — write_file must be denied and not create the file.
+    config.tools.enabled = vec!["report".into()];
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"FORBIDDEN.txt\",\"content\":\"nope\"}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done without write\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let mut request = RunRequest::new("deny write");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success);
+    assert!(
+        !result.workspace.join("FORBIDDEN.txt").exists(),
+        "denied write_file must not create the file"
+    );
+}
