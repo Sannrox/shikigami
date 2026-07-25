@@ -71,11 +71,7 @@ pub struct SekaiChiseiGovernance {
 impl SekaiChiseiGovernance {
     pub fn from_config(config: &Config) -> Result<Self, GovernanceError> {
         // Allow construction without endpoint so `doctor` can report the gap.
-        let endpoint = config
-            .governance
-            .endpoint
-            .clone()
-            .unwrap_or_default();
+        let endpoint = config.governance.endpoint.clone().unwrap_or_default();
         Ok(Self {
             endpoint,
             principal: config.governance.principal.clone(),
@@ -161,10 +157,10 @@ impl GovernancePort for SekaiChiseiGovernance {
             ));
         }
         // Connectivity check; operation id is harness-owned lineage for PlanExecution.
-        if let Err(e) = self.probe().await {
-            if self.fail_closed {
-                return Err(e);
-            }
+        if let Err(e) = self.probe().await
+            && self.fail_closed
+        {
+            return Err(e);
         }
         let _ = task;
         Ok(RunHandle {
