@@ -1,6 +1,6 @@
 ---
 name: verify-change
-description: Verify a sekai-chisei Rust, protocol, documentation, configuration, or workflow change with proportionate deterministic checks. Use after implementation, before review, or when a contributor needs an exact evidence report without overstating unrun tests.
+description: Verify a shikigami Rust, protocol, documentation, configuration, or workflow change with proportionate deterministic checks. Use after implementation, before review, or when a contributor needs an exact evidence report without overstating unrun tests.
 ---
 
 # Verify Change
