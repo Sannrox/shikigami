@@ -78,3 +78,35 @@ depending on `Harness` + `Config` for the most stable path.
 - [settings.md](settings.md) — configuration
 - [adapters.md](adapters.md) — ports
 - [../DESIGN.md](../DESIGN.md) — architecture
+
+
+## Pre-1.0 freeze candidates vs evolving surfaces
+
+Until **1.0**, treat the following as *relatively stable* for embedders.
+Changes still require CHANGELOG entries; avoid drive-by renames.
+
+### Prefer depending on (freeze candidates)
+
+| Surface | Notes |
+| --- | --- |
+| `Harness::{from_config, resolve, doctor, doctor_async, run}` | Primary entry |
+| `Config` / settings `version = 1` fields with defaults | Unknown keys rejected |
+| `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` | Bounds and resume |
+| `RunResult` fields including `termination` | Structured outcomes |
+| `DoctorReport` JSON `schema_version = 1` keys | Automation contract |
+| CLI subcommands `version` / `doctor` / `run` | Flags may grow |
+
+### Evolving (expect churn)
+
+| Surface | Notes |
+| --- | --- |
+| `GovernancePort` trait methods | Will grow for authz/harvest |
+| Checkpoint file format beyond v1 | Versioned; migrations may appear |
+| Event sink payload shapes | Additive preferred |
+| Feature flags and optional deps | May split further |
+| `serve` / daemon host | Not yet shipped |
+
+### CHANGELOG policy for embedders
+
+- **Breaking** embed API or doctor JSON key removals: call out under `### Changed` / `### Breaking` and bump the relevant schema version when applicable.
+- **Additive** fields with defaults: same settings `version` or same doctor `schema_version` is OK.
