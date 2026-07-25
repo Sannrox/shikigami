@@ -152,6 +152,7 @@ impl ToolsSettings {
                 "write_file".into(),
                 "edit".into(),
                 "report".into(),
+                "escalate".into(),
             ]
         } else {
             self.enabled.clone()

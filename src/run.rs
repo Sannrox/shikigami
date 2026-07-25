@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::checkpoint::{self, Checkpoint, CheckpointError};
+use crate::checkpoint::{self, Checkpoint, CheckpointError, ParkedState};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
@@ -27,6 +27,8 @@ pub enum RunTermination {
     TimedOut,
     MaxTurns,
     Failed,
+    /// Awaiting operator answer via resume (escalate tool).
+    Parked,
 }
 
 impl RunTermination {
@@ -37,6 +39,7 @@ impl RunTermination {
             Self::TimedOut => "timed_out",
             Self::MaxTurns => "max_turns",
             Self::Failed => "failed",
+            Self::Parked => "parked",
         }
     }
 }
@@ -52,6 +55,8 @@ pub struct RunRequest {
     /// Optional plane logical operation id (parent / host correlation).
     /// When unset, defaults to the harness `run_id` (attempt id).
     pub logical_operation_id: Option<String>,
+    /// Operator answer when resuming a parked run (from `escalate`).
+    pub resume_answer: Option<String>,
 }
 
 impl RunRequest {
@@ -63,6 +68,7 @@ impl RunRequest {
             cancel: None,
             resume_run_id: None,
             logical_operation_id: None,
+            resume_answer: None,
         }
     }
 }
@@ -75,6 +81,16 @@ pub struct RunResult {
     pub turns: u32,
     pub workspace: PathBuf,
     pub termination: RunTermination,
+    /// Set when `termination == Parked`.
+    pub park: Option<ParkInfo>,
+}
+
+/// Operator-visible park payload (library + CLI).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParkInfo {
+    pub reason: String,
+    pub question: String,
+    pub tool_call_id: String,
 }
 
 #[derive(Debug, Error)]
@@ -139,6 +155,7 @@ impl Engine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn save_checkpoint(
         &self,
         run_id: &str,
@@ -147,6 +164,7 @@ impl Engine {
         turns: u32,
         workspace: &Path,
         keep_workspace: bool,
+        park: Option<ParkedState>,
     ) -> Result<(), RunError> {
         let cp = Checkpoint {
             version: checkpoint::CHECKPOINT_VERSION,
@@ -157,6 +175,7 @@ impl Engine {
             completed_turns: turns,
             workspace: workspace.to_path_buf(),
             keep_workspace,
+            park,
         };
         cp.save(&self.state_runs)?;
         Ok(())
@@ -168,62 +187,82 @@ impl Engine {
             .timeout
             .or_else(|| self.config.run.timeout_secs.map(Duration::from_secs));
 
-        let (run_id, mut messages, mut turns, ws, task, keep_workspace) =
-            if let Some(resume_id) = &request.resume_run_id {
-                let cp = Checkpoint::load(&self.state_runs, resume_id)?;
-                cp.validate_prompt(SYSTEM_PROMPT)?;
-                if !cp.workspace.is_dir() {
-                    return Err(RunError::Message(format!(
-                        "checkpoint workspace missing: {}",
-                        cp.workspace.display()
-                    )));
-                }
-                self.events.emit(HarnessEvent::Status {
-                    status: "resuming".into(),
-                });
-                let ws = MaterializedWorkspace {
-                    path: cp.workspace.clone(),
-                    adapter: "resumed".into(),
-                    cleanup: if cp.keep_workspace {
-                        WorkspaceCleanup::None
-                    } else {
-                        WorkspaceCleanup::RemoveDir
-                    },
-                };
-                let task = if request.task.is_empty() {
-                    cp.task.clone()
+        let (run_id, mut messages, mut turns, ws, task, keep_workspace) = if let Some(resume_id) =
+            &request.resume_run_id
+        {
+            let cp = Checkpoint::load(&self.state_runs, resume_id)?;
+            cp.validate_prompt(SYSTEM_PROMPT)?;
+            if !cp.workspace.is_dir() {
+                return Err(RunError::Message(format!(
+                    "checkpoint workspace missing: {}",
+                    cp.workspace.display()
+                )));
+            }
+            self.events.emit(HarnessEvent::Status {
+                status: "resuming".into(),
+            });
+            let ws = MaterializedWorkspace {
+                path: cp.workspace.clone(),
+                adapter: "resumed".into(),
+                cleanup: if cp.keep_workspace {
+                    WorkspaceCleanup::None
                 } else {
-                    request.task.clone()
-                };
-                (
-                    cp.run_id,
-                    cp.messages,
-                    cp.completed_turns,
-                    ws,
-                    task,
-                    cp.keep_workspace || request.keep_workspace,
-                )
-            } else {
-                let run_id = Uuid::new_v4().to_string();
-                self.events.emit(HarnessEvent::Status {
-                    status: "starting".into(),
-                });
-                let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
-                let messages = vec![ChatMessage {
-                    role: "user".into(),
-                    content: request.task.clone(),
-                    tool_call_id: String::new(),
-                    tool_calls: vec![],
-                }];
-                (
-                    run_id,
-                    messages,
-                    0u32,
-                    ws,
-                    request.task.clone(),
-                    request.keep_workspace,
-                )
+                    WorkspaceCleanup::RemoveDir
+                },
             };
+            let task = if request.task.is_empty() {
+                cp.task.clone()
+            } else {
+                request.task.clone()
+            };
+            let mut messages = cp.messages;
+            if let Some(park) = &cp.park {
+                let answer = request.resume_answer.as_ref().ok_or_else(|| {
+                        RunError::Message(format!(
+                            "run {resume_id} is parked (reason: {}); supply resume_answer / --answer to continue",
+                            park.reason
+                        ))
+                    })?;
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: format!("operator answer: {answer}"),
+                    tool_call_id: park.tool_call_id.clone(),
+                    tool_calls: vec![],
+                });
+            } else if request.resume_answer.is_some() {
+                return Err(RunError::Message(
+                    "resume_answer provided but run is not parked".into(),
+                ));
+            }
+            (
+                cp.run_id,
+                messages,
+                cp.completed_turns,
+                ws,
+                task,
+                cp.keep_workspace || request.keep_workspace,
+            )
+        } else {
+            let run_id = Uuid::new_v4().to_string();
+            self.events.emit(HarnessEvent::Status {
+                status: "starting".into(),
+            });
+            let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
+            let messages = vec![ChatMessage {
+                role: "user".into(),
+                content: request.task.clone(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            }];
+            (
+                run_id,
+                messages,
+                0u32,
+                ws,
+                request.task.clone(),
+                request.keep_workspace,
+            )
+        };
 
         let handle = self
             .governance
@@ -249,9 +288,18 @@ impl Engine {
         let mut termination = RunTermination::Completed;
 
         // Persist initial checkpoint so resume works mid-run.
-        self.save_checkpoint(&run_id, &task, &messages, turns, &ws.path, keep_workspace)?;
+        self.save_checkpoint(
+            &run_id,
+            &task,
+            &messages,
+            turns,
+            &ws.path,
+            keep_workspace,
+            None,
+        )?;
 
-        let result = async {
+        // Ok(Some(park)) when escalated; Ok(None) when finished normally.
+        let result: Result<Option<ParkInfo>, RunError> = async {
             loop {
                 self.check_bounds(&request, started, timeout)?;
 
@@ -286,7 +334,15 @@ impl Engine {
                     tool_calls: turn.tool_calls.clone(),
                 });
 
-                self.save_checkpoint(&run_id, &task, &messages, turns, &ws.path, keep_workspace)?;
+                self.save_checkpoint(
+                    &run_id,
+                    &task,
+                    &messages,
+                    turns,
+                    &ws.path,
+                    keep_workspace,
+                    None,
+                )?;
 
                 if turn.tool_calls.is_empty() {
                     final_summary = if turn.content.is_empty() {
@@ -299,12 +355,16 @@ impl Engine {
                     break;
                 }
 
-                let has_report = turn.tool_calls.iter().any(|c| c.name == "report");
-                if has_report && turn.tool_calls.len() != 1 {
+                let exclusive = turn
+                    .tool_calls
+                    .iter()
+                    .any(|c| c.name == "report" || c.name == "escalate");
+                if exclusive && turn.tool_calls.len() != 1 {
                     for c in &turn.tool_calls {
                         messages.push(ChatMessage {
                             role: "tool".into(),
-                            content: "tool batch rejected: report must be the only call".into(),
+                            content: "tool batch rejected: report/escalate must be the only call"
+                                .into(),
                             tool_call_id: c.id.clone(),
                             tool_calls: vec![],
                         });
@@ -316,6 +376,7 @@ impl Engine {
                         turns,
                         &ws.path,
                         keep_workspace,
+                        None,
                     )?;
                     continue;
                 }
@@ -395,8 +456,45 @@ impl Engine {
                                 turns,
                                 &ws.path,
                                 keep_workspace,
+                                None,
                             )?;
-                            return Ok(());
+                            return Ok(None);
+                        }
+                        Ok(ToolOutput::Park(park)) => {
+                            let detail = format!("parked: {}", park.reason);
+                            let _ = self
+                                .governance
+                                .report_tool(&handle, "escalate", false, &detail)
+                                .await;
+                            self.events.emit(HarnessEvent::ToolEnd {
+                                name: "escalate".into(),
+                                ok: false,
+                                detail: detail.clone(),
+                            });
+                            // No tool result yet — operator answer is injected on resume.
+                            let parked = ParkedState {
+                                reason: park.reason.clone(),
+                                question: park.question.clone(),
+                                tool_call_id: call.id.clone(),
+                            };
+                            let info = ParkInfo {
+                                reason: park.reason.clone(),
+                                question: park.question.clone(),
+                                tool_call_id: call.id.clone(),
+                            };
+                            final_summary = park.reason;
+                            success = false;
+                            termination = RunTermination::Parked;
+                            self.save_checkpoint(
+                                &run_id,
+                                &task,
+                                &messages,
+                                turns,
+                                &ws.path,
+                                true, // always keep workspace while parked
+                                Some(parked),
+                            )?;
+                            return Ok(Some(info));
                         }
                         Err(e) => {
                             let detail = e.to_string();
@@ -418,19 +516,33 @@ impl Engine {
                         }
                     }
                 }
-                self.save_checkpoint(&run_id, &task, &messages, turns, &ws.path, keep_workspace)?;
+                self.save_checkpoint(
+                    &run_id,
+                    &task,
+                    &messages,
+                    turns,
+                    &ws.path,
+                    keep_workspace,
+                    None,
+                )?;
             }
-            Ok(())
+            Ok(None)
         }
         .await;
 
+        let park_info = match &result {
+            Ok(park) => park.clone(),
+            Err(_) => None,
+        };
+
         let (success, final_summary, termination) = match result {
-            Ok(()) => (success, final_summary, termination),
+            Ok(_) => (success, final_summary, termination),
             Err(e) => {
                 let summary = e.to_string();
                 let _ = self.save_checkpoint(
                     &run_id, &task, &messages, turns, &ws.path,
                     true, // keep workspace on failure for resume/inspection
+                    None,
                 );
                 let _ = self
                     .governance
@@ -468,7 +580,8 @@ impl Engine {
             )
             .await?;
 
-        if !keep_workspace && success {
+        // Keep workspace on park; only delete on successful non-park completion.
+        if !keep_workspace && success && termination != RunTermination::Parked {
             let _ = self.workspace.cleanup(&ws);
         }
 
@@ -485,6 +598,7 @@ impl Engine {
             turns,
             workspace: ws.path,
             termination,
+            park: park_info,
         })
     }
 }
@@ -537,6 +651,7 @@ mod tests {
                 cancel: Some(rx),
                 resume_run_id: None,
                 logical_operation_id: None,
+                resume_answer: None,
             })
             .await
             .unwrap_err();
@@ -565,6 +680,7 @@ mod tests {
                 cancel: None,
                 resume_run_id: None,
                 logical_operation_id: None,
+                resume_answer: None,
             })
             .await
             .unwrap_err();
@@ -604,6 +720,7 @@ mod tests {
                 cancel: None,
                 resume_run_id: None,
                 logical_operation_id: None,
+                resume_answer: None,
             })
             .await
             .unwrap_err();
@@ -647,6 +764,7 @@ mod tests {
                 cancel: None,
                 resume_run_id: Some(run_id.clone()),
                 logical_operation_id: None,
+                resume_answer: None,
             })
             .await
             .unwrap();
@@ -682,5 +800,87 @@ mod tests {
         // run_id remains a distinct attempt UUID
         assert_ne!(result.run_id, "parent-op-42");
         assert!(!result.run_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn escalate_parks_and_resume_with_answer() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+
+        let config = base_config(&dir);
+        let model = ScriptedModel::from_turns(vec![ModelTurn {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "esc-1".into(),
+                name: "escalate".into(),
+                args_json: r#"{"reason":"need human","question":"approve?"}"#.into(),
+            }],
+        }]);
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::new(model),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config: config.clone(),
+            state_runs: state.runs_dir(),
+        };
+        let mut req = RunRequest::new("needs approval");
+        req.keep_workspace = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert!(!parked.success);
+        assert!(parked.park.is_some());
+        assert_eq!(parked.park.as_ref().unwrap().question, "approve?");
+
+        // Resume without answer must fail loudly (no silent deny/success).
+        let eng2 = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(crate::model::from_config(&config).unwrap()),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config: config.clone(),
+            state_runs: state.runs_dir(),
+        };
+        let err = eng2
+            .run(RunRequest {
+                task: String::new(),
+                keep_workspace: true,
+                timeout: None,
+                cancel: None,
+                resume_run_id: Some(parked.run_id.clone()),
+                logical_operation_id: None,
+                resume_answer: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("parked"), "{err}");
+
+        // Resume with answer continues and can report success.
+        let model3 = ScriptedModel::from_turns(vec![ModelTurn {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "r1".into(),
+                name: "report".into(),
+                args_json: r#"{"summary":"approved and done","success":true}"#.into(),
+            }],
+        }]);
+        let eng3 = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::new(model3),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+        };
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        resume.resume_answer = Some("yes, proceed".into());
+        let done = eng3.run(resume).await.unwrap();
+        assert!(done.success);
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(done.summary, "approved and done");
+        assert!(done.park.is_none());
     }
 }
