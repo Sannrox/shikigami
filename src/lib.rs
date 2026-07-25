@@ -36,7 +36,7 @@ pub mod workspace;
 pub use config::{Config, ConfigSource};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
-pub use run::{RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
+pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use state::{StateError, StateRoot};
 
 /// Library liveness probe.
