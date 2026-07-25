@@ -1612,6 +1612,7 @@ dependencies = [
  "proptest",
  "prost",
  "protoc-bin-vendored",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
