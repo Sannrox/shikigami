@@ -14,6 +14,7 @@ Operator and contributor documentation for **shikigami**.
 | Map run outcomes to plane harvest | [harvest.md](harvest.md) |
 | Correlate run / operation / attempt ids | [identity.md](identity.md) |
 | Versioned prompts and attribution | [prompts.md](prompts.md) |
+| Plane/model credential patterns | [credentials.md](credentials.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
 | See accepted design decisions | [decisions/](decisions/) |

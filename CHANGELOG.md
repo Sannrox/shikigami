@@ -20,6 +20,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   `--answer` / `resume_answer` continues from checkpoint.
 - Versioned prompt assets (`src/prompts/`) with digest ids on events, harvest,
   and `RunResult` ([docs/prompts.md](docs/prompts.md)).
+- Credential helper docs; doctor reports env presence only and redacts secret
+  values ([docs/credentials.md](docs/credentials.md)).
 
 ## [0.1.0] — 2026-07-25
 
