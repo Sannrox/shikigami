@@ -158,6 +158,9 @@ impl ToolsSettings {
 pub struct RunSettings {
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    /// Optional overall wall-clock limit in seconds (checked at turn boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 fn default_max_turns() -> u32 {
@@ -168,6 +171,7 @@ impl Default for RunSettings {
     fn default() -> Self {
         Self {
             max_turns: default_max_turns(),
+            timeout_secs: None,
         }
     }
 }

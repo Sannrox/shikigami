@@ -12,15 +12,12 @@ async fn local_scripted_end_to_end() {
     config.workspace.root = dir.path().join("ws-root").to_string_lossy().into();
 
     let harness = Harness::from_config(config, state).unwrap();
-    let result = harness
-        .run(RunRequest {
-            task: "demo".into(),
-            keep_workspace: true,
-        })
-        .await
-        .unwrap();
+    let mut request = RunRequest::new("demo");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
     assert!(result.success);
     assert!(result.turns >= 2);
+    assert_eq!(result.termination, shikigami::RunTermination::Completed);
     let marker = result.workspace.join("SHIKIGAMI_OK.txt");
     assert!(marker.is_file(), "expected {}", marker.display());
 }
@@ -44,13 +41,9 @@ async fn custom_script_edit_flow() {
     config.workspace.root = dir.path().join("ws").to_string_lossy().into();
 
     let harness = Harness::from_config(config, state).unwrap();
-    let result = harness
-        .run(RunRequest {
-            task: "edit flow".into(),
-            keep_workspace: true,
-        })
-        .await
-        .unwrap();
+    let mut request = RunRequest::new("edit flow");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
     assert!(result.success);
     let text = std::fs::read_to_string(result.workspace.join("x.txt")).unwrap();
     assert_eq!(text, "two");
