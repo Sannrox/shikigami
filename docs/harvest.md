@@ -10,7 +10,8 @@ governed truth. Offline adapters (`none`, `local`) never write to the plane.
 
 | Harness concept | Plane surface | Notes |
 | --- | --- | --- |
-| `run_id` | `operation_id` (v0.1: same value) | Logical operation lineage for PlanExecution and events |
+| `run_id` | `attempt_id` | Harness attempt UUID; resume key |
+| `operation_id` / `logical_operation_id` | plane `operation_id` | Defaults to `run_id`; override via `RunRequest.logical_operation_id` |
 | Run start | `ReportOperationEvent` kind `shikigami.run.begin` | Includes task, principal, namespace |
 | Tool attempt | `ReportOperationEvent` kind `shikigami.tool` | `ok`, `tool`, truncated `detail` (allow + deny) |
 | Run finish | `ReportOperationEvent` kind `shikigami.run.complete` | success, summary, turns, termination, workspace path ref |

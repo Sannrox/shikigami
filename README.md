@@ -165,12 +165,9 @@ async fn example() -> Result<(), shikigami::HarnessError> {
     config.model.adapter = "scripted".into();
 
     let harness = Harness::from_config(config, state)?;
-    let result = harness
-        .run(RunRequest {
-            task: "do work".into(),
-            keep_workspace: true,
-        })
-        .await?;
+    let mut request = RunRequest::new("do work");
+    request.keep_workspace = true;
+    let result = harness.run(request).await?;
     assert!(result.success);
     Ok(())
 }

@@ -5,6 +5,7 @@ Accepted decisions that must outlive a single PR.
 | ADR | Title | Status |
 | --- | --- | --- |
 | [0001](0001-ports-and-settings.md) | Ports and settings (sekai-chisei first-party) | Accepted |
+| [0002](0002-run-identity.md) | Run identity and plane operation lineage | Accepted |
 
 ## When to write an ADR
 
