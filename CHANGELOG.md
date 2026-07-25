@@ -14,6 +14,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   (bash / write_file / edit / read_file; `report` remains harness-internal).
 - Richer governed harvest: `shikigami.run.begin` / tool / complete events with
   turns, termination, and evidence references ([docs/harvest.md](docs/harvest.md)).
+- Documented run identity model (ADR 0002); `RunRequest.logical_operation_id`
+  for host/plane correlation ([docs/identity.md](docs/identity.md)).
 
 ## [0.1.0] — 2026-07-25
 
