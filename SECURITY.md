@@ -58,3 +58,37 @@ Operators and integrators should understand:
 - Set `fail_closed = true` only when a plane is actually operated.
 - Run untrusted tasks in disposable workspaces; use `--keep-workspace` only when
   you need forensic inspection.
+
+
+## Threat model (tools and workspaces)
+
+### Assets
+
+- Host filesystem outside the run workspace
+- Plane credentials and model API keys in the environment
+- Integrity of governed audit trails (when using sekai-chisei)
+
+### Adversaries / abuse cases
+
+- Model-generated tool arguments attempting path escape (`../`, absolute paths)
+- Overly large file or bash output exhausting disk/memory
+- Operator misconfiguration enabling bash or disabling fail-closed governance
+
+### Controls today
+
+- Relative-path jail for file tools; parent and absolute paths rejected
+- Default tool allow-list excludes `bash`
+- Output and file size caps in the tool executor
+- Fail-closed doctor/run for governed profiles without a healthy plane
+- Secrets via env / `token_env`, not TOML
+
+### Non-goals (v0)
+
+- Full OS sandboxing (containers, seccomp, macOS seatbelt profiles)
+- Protecting against a fully compromised host process
+- Multi-tenant isolation inside one process
+
+### Tests
+
+Unit tests cover parent-path rejection for file tools. Escape-class coverage
+should grow with property tests (see open Issues).
