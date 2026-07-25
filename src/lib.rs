@@ -30,6 +30,7 @@ pub mod identity;
 pub mod model;
 pub mod prompts;
 pub mod run;
+pub mod serve;
 pub mod state;
 pub mod tools;
 pub mod workspace;
@@ -39,6 +40,7 @@ pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
+pub use serve::{QueueJob, QueueLayout, ServeOptions};
 pub use state::{StateError, StateRoot};
 
 /// Library liveness probe.
