@@ -337,6 +337,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_absolute_path() {
+        let dir = tempdir().unwrap();
+        let tools = ToolExecutor::new(dir.path(), vec!["read_file".into()], 30).unwrap();
+        let err = tools
+            .execute("read_file", r#"{"path":"/etc/passwd"}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::UnsafePath(_)));
+    }
+
+    #[tokio::test]
     async fn rejects_parent_path() {
         let dir = tempdir().unwrap();
         let tools = ToolExecutor::new(dir.path(), vec!["read_file".into()], 30).unwrap();
