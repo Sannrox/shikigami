@@ -38,7 +38,8 @@ enum Command {
     },
     /// Execute a harness run.
     Run {
-        /// Task specification (required).
+        /// Task specification (optional when --resume is set).
+        #[arg(default_value = "")]
         task: String,
         /// Keep the workspace directory after a successful run.
         #[arg(long)]
@@ -46,6 +47,9 @@ enum Command {
         /// Overall wall-clock timeout in seconds (checked at turn boundaries).
         #[arg(long, env = "SHIKIGAMI_RUN_TIMEOUT_SECS")]
         timeout_secs: Option<u64>,
+        /// Resume a previous run from its local checkpoint.
+        #[arg(long)]
+        resume: Option<String>,
     },
 }
 
@@ -115,11 +119,16 @@ async fn run() -> anyhow::Result<()> {
             task,
             keep_workspace,
             timeout_secs,
+            resume,
         } => {
+            if resume.is_none() && task.is_empty() {
+                anyhow::bail!("task is required unless --resume is set");
+            }
             let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
             let mut request = RunRequest::new(task);
             request.keep_workspace = keep_workspace;
             request.timeout = timeout_secs.map(std::time::Duration::from_secs);
+            request.resume_run_id = resume;
             let result = harness.run(request).await?;
             println!(
                 "run {} turns={} success={} termination={:?} summary={}",
