@@ -50,6 +50,53 @@ async fn custom_script_edit_flow() {
     assert_eq!(text, "two");
 }
 
+#[tokio::test]
+async fn live_event_stream_receives_scripted_sequence() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("demo");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Prompt { .. })),
+        "missing Prompt: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ToolStart { name, .. } if name == "write_file")),
+        "missing write_file start: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::RunFinished { success: true, .. })),
+        "missing RunFinished: {events:?}"
+    );
+}
+
 /// Denied authorize_tool must not execute the host tool (allow-list path).
 /// Governed external-action deny uses the same run-loop branch.
 #[tokio::test]

@@ -28,6 +28,7 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - `shikigami serve` local-queue daemon with health file and graceful shutdown
   (ADR 0003).
 - Tenkai delivery docs and release-aligned product manifest example.
+- `Harness::run_with_events` + `ChannelSink` / `FanoutSink` for embedder live streams.
 
 ## [0.1.0] — 2026-07-25
 

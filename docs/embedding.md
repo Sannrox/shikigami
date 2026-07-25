@@ -89,12 +89,35 @@ Changes still require CHANGELOG entries; avoid drive-by renames.
 
 | Surface | Notes |
 | --- | --- |
-| `Harness::{from_config, resolve, doctor, doctor_async, run}` | Primary entry |
+| `Harness::{from_config, resolve, doctor, doctor_async, run, run_with_events}` | Primary entry |
 | `Config` / settings `version = 1` fields with defaults | Unknown keys rejected |
-| `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` / `logical_operation_id` | Bounds, resume, plane op correlation |
-| `RunResult` fields including `termination` | Structured outcomes |
+| `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` / `logical_operation_id` / `resume_answer` | Bounds, resume, plane op correlation |
+| `RunResult` fields including `termination`, `park`, `prompt_id` | Structured outcomes |
+| `HarnessEvent` + `ChannelSink` / `EventSink` | Live in-process progress |
 | `DoctorReport` JSON `schema_version = 1` keys | Automation contract |
-| CLI subcommands `version` / `doctor` / `run` | Flags may grow |
+| CLI subcommands `version` / `doctor` / `run` / `serve` | Flags may grow |
+
+### Live event stream
+
+```rust
+use shikigami::{ChannelSink, Harness, HarnessEvent, RunRequest};
+use std::sync::Arc;
+
+// CLI can keep events.adapter = "stderr"; library adds a channel:
+let (sink, rx) = ChannelSink::pair();
+let result = harness
+    .run_with_events(RunRequest::new("task"), Some(Arc::new(sink)))
+    .await?;
+while let Ok(ev) = rx.try_recv() {
+    match ev {
+        HarnessEvent::ToolStart { name, .. } => { /* progress UI */ }
+        HarnessEvent::RunFinished { .. } => {}
+        _ => {}
+    }
+}
+```
+
+Events are best-effort for UI (not durable plane truth). Crash recovery uses checkpoints.
 
 ### Evolving (expect churn)
 
@@ -104,7 +127,7 @@ Changes still require CHANGELOG entries; avoid drive-by renames.
 | Checkpoint file format beyond v1 | Versioned; migrations may appear |
 | Event sink payload shapes | Additive preferred |
 | Feature flags and optional deps | May split further |
-| `serve` / daemon host | Not yet shipped |
+| Serve queue protocol | Local FS queue first; HTTP later |
 
 ### CHANGELOG policy for embedders
 
