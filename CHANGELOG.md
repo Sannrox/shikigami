@@ -18,6 +18,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   for host/plane correlation ([docs/identity.md](docs/identity.md)).
 - Headless `escalate` tool parks runs with structured payload; resume with
   `--answer` / `resume_answer` continues from checkpoint.
+- Versioned prompt assets (`src/prompts/`) with digest ids on events, harvest,
+  and `RunResult` ([docs/prompts.md](docs/prompts.md)).
 
 ## [0.1.0] — 2026-07-25
 
