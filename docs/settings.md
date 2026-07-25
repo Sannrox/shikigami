@@ -109,6 +109,19 @@ Embedders may also pass `RunRequest.timeout` and a cooperative
 `RunRequest.cancel` (`tokio::sync::watch::Receiver<bool>`). Cancel and timeout
 surface as errors (`RunError::Cancelled` / `TimedOut`), never as silent success.
 
+### Resume
+
+Local checkpoints are written under `$SHIKIGAMI_STATE/runs/<run_id>/checkpoint.json`
+after each turn (version `1`). Resume:
+
+```bash
+shikigami run --resume <run-id>
+# or library: RunRequest { resume_run_id: Some(id), .. }
+```
+
+Checkpoints are harness scratch only — not plane truth. Prompt id must match
+the current system prompt or resume fails.
+
 ### `[events]`
 
 | Field | Default | Description |

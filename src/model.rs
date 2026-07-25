@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::config::Config;
 use crate::tools::ToolDef;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -17,7 +17,7 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
