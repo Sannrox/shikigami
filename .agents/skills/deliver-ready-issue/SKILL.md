@@ -1,6 +1,6 @@
 ---
 name: deliver-ready-issue
-description: Deliver a dependency-ready sekai-chisei GitHub Issue through a bounded implementation workflow. Use when asked to implement, publish, or land a specific ready Issue, or to take the next explicitly approved frontier item through verification and review.
+description: Deliver a dependency-ready shikigami GitHub Issue through a bounded implementation workflow. Use when asked to implement, publish, or land a specific ready Issue, or to take the next explicitly approved frontier item through verification and review.
 ---
 
 # Deliver Ready Issue
