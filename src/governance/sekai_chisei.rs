@@ -143,7 +143,7 @@ impl SekaiChiseiGovernance {
     pub(crate) fn tool_risk_class(name: &str) -> &'static str {
         match name {
             "bash" => "destructive",
-            "write_file" | "edit" => "write",
+            "write_file" | "edit" | "multi_edit" => "write",
             "read_file" | "glob" | "grep" => "read",
             _ => "write",
         }
