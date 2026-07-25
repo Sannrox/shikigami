@@ -10,6 +10,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ### Added
 
+- `ToolRegistry` for run-loop tool definitions and execution (builtin catalog
+  bootstrap; foundation for skills/MCP registration).
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
 - Richer governed harvest: `shikigami.run.begin` / tool / complete events with
