@@ -30,6 +30,8 @@ pub struct Config {
     pub model: ModelSettings,
     #[serde(default)]
     pub context: ContextSettings,
+    #[serde(default)]
+    pub network: NetworkSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +377,66 @@ impl Default for Config {
             events: EventsSettings::default(),
             model: ModelSettings::default(),
             context: ContextSettings::default(),
+            network: NetworkSettings::default(),
+        }
+    }
+}
+
+/// Network egress policy (honest residual risk for unrestricted bash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressMode {
+    /// No harness-level network restriction (default OSS behavior).
+    #[default]
+    Unrestricted,
+    /// Block harness HTTP client calls (model http adapter).
+    Deny,
+    /// Only listed hosts for harness HTTP client.
+    Allowlist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSettings {
+    #[serde(default)]
+    pub egress: EgressMode,
+    /// Hostnames allowed when `egress = allowlist` (exact match, case-insensitive).
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            egress: EgressMode::Unrestricted,
+            allow_hosts: Vec::new(),
+        }
+    }
+}
+
+impl NetworkSettings {
+    /// Validate an HTTP(S) URL against egress policy.
+    pub fn check_http_url(&self, url: &str) -> Result<(), String> {
+        match self.egress {
+            EgressMode::Unrestricted => Ok(()),
+            EgressMode::Deny => Err("network egress denied by settings (egress=deny)".into()),
+            EgressMode::Allowlist => {
+                let host = url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+                    .ok_or_else(|| format!("cannot parse host from URL for egress check: {url}"))?;
+                let ok = self
+                    .allow_hosts
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&host));
+                if ok {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "host `{host}` not in network.allow_hosts (egress=allowlist)"
+                    ))
+                }
+            }
         }
     }
 }
@@ -694,6 +756,27 @@ unknown_thing = true
             let is_parse = matches!(err, ConfigError::Parse { .. });
             prop_assert!(is_parse, "expected Parse for key {}, got {}", key, err);
         });
+    }
+
+    #[test]
+    fn egress_allowlist_and_deny() {
+        let deny = NetworkSettings {
+            egress: EgressMode::Deny,
+            ..Default::default()
+        };
+        assert!(deny.check_http_url("https://api.openai.com/v1").is_err());
+        let allow = NetworkSettings {
+            egress: EgressMode::Allowlist,
+            allow_hosts: vec!["api.openai.com".into()],
+        };
+        assert!(
+            allow
+                .check_http_url("https://api.openai.com/v1/chat")
+                .is_ok()
+        );
+        assert!(allow.check_http_url("https://evil.example/v1").is_err());
+        let open = NetworkSettings::default();
+        assert!(open.check_http_url("https://evil.example/v1").is_ok());
     }
 
     #[test]

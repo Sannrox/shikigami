@@ -215,6 +215,10 @@ impl HttpModel {
             .base_url
             .clone()
             .unwrap_or_else(|| "https://api.openai.com/v1".into());
+        config
+            .network
+            .check_http_url(&base_url)
+            .map_err(ModelError::Message)?;
         let api_key = std::env::var(&config.model.api_key_env).map_err(|_| {
             ModelError::Message(format!("missing API key env {}", config.model.api_key_env))
         })?;

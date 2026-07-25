@@ -138,6 +138,15 @@ impl Harness {
             self.config.tools.mode,
             self.config.tools.effective_enabled().join(", ")
         ));
+        lines.push(format!(
+            "network:   egress={:?} allow_hosts={}",
+            self.config.network.egress,
+            if self.config.network.allow_hosts.is_empty() {
+                "(none)".into()
+            } else {
+                self.config.network.allow_hosts.join(",")
+            }
+        ));
         lines.push(format!("max_turns: {}", self.config.run.max_turns));
         lines.push(format!("credentials: {}", credential_summary(&self.config)));
 

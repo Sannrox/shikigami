@@ -39,6 +39,7 @@ prost = { version = "0.14", optional = true }
 # Optional: OpenAI-compatible HTTP model for local/ungoverned runs
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 regex = "1.13.1"
+url = "2.5.8"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
