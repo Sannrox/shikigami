@@ -148,6 +148,21 @@ impl Harness {
             }
         ));
         lines.push(format!("max_turns: {}", self.config.run.max_turns));
+        if self.config.hooks.is_empty() {
+            lines.push("hooks:     (none)".into());
+        } else {
+            let names: Vec<_> = self
+                .config
+                .hooks
+                .iter()
+                .map(|h| format!("{}:{}", h.event, h.command))
+                .collect();
+            lines.push(format!(
+                "hooks:     {} [{}]",
+                self.config.hooks.len(),
+                names.join(", ")
+            ));
+        }
         lines.push(format!("credentials: {}", credential_summary(&self.config)));
 
         let mut ok = true;
