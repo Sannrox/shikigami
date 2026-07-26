@@ -31,7 +31,8 @@ Human documentation index: [docs/README.md](docs/README.md).
 - `cargo run --bin shikigami -- doctor` prints effective settings and adapter health.
 - `cargo run --bin shikigami -- --config examples/local-run.toml run "demo" --keep-workspace`
   exercises an offline scripted run.
-- `cargo run --example embed_smoke` is the offline library host proof.
+- `cargo run --locked --example embed_smoke` is the offline library host proof
+  (also gated on PR/`main` CI Build & Test).
 - `cargo build --release` builds an optimized binary.
 - `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
   runs the ignored live plane probe when a local sekai-chisei is available.

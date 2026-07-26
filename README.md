@@ -61,10 +61,11 @@ and prints `success=true`.
 
 ### Library embed smoke (host proof)
 
-Offline proof that a host can drive `Harness` without shelling the CLI:
+Offline proof that a host can drive `Harness` without shelling the CLI.
+PR and `main` CI run the same command after `cargo test`:
 
 ```bash
-cargo run --example embed_smoke
+cargo run --locked --example embed_smoke
 ```
 
 Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript export).
