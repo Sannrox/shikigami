@@ -67,6 +67,13 @@ Ordered epics — **not** 1.0 blockers:
   (e.g. onmyoji or a documented peer) without requiring plane for offline path
 - Follow-up Issues should only open for decided post-1.0 epics, not open-ended research
 
+## Freeze audit
+
+Point-in-time go/no-go against this ADR:
+[docs/1.0-freeze-audit.md](../1.0-freeze-audit.md) (research #109, 2026-07-26).
+Recommendation: **no-go** until external embed smoke exists (or this ADR is
+amended via Design Discussion).
+
 ## Rejected alternatives
 
 1. **Thin 1.0** — omits serve/park/harvest already delivering operator value

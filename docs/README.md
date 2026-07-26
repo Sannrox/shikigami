@@ -24,6 +24,7 @@ Operator and contributor documentation for **shikigami**.
 | Lifecycle hooks | [hooks.md](hooks.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
+| 1.0 freeze audit (research closeout) | [1.0-freeze-audit.md](1.0-freeze-audit.md) |
 | See accepted design decisions | [decisions/](decisions/) |
 | Contribute code | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 | Report a vulnerability | [../SECURITY.md](../SECURITY.md) |
