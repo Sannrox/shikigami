@@ -301,6 +301,13 @@ pub fn must_be_exclusive_batch(name: &str) -> bool {
     matches!(name, "report" | "escalate")
 }
 
+/// Tools safe to run concurrently with each other (reads; no workspace mutation).
+///
+/// Write tools, bash, todo_write, report/escalate stay serial for the whole batch.
+pub fn is_parallel_safe_tool(name: &str) -> bool {
+    matches!(name, "read_file" | "glob" | "grep" | "web_fetch")
+}
+
 /// External tool provider (e.g. MCP-backed tool).
 #[async_trait::async_trait]
 pub trait ExternalTool: Send + Sync {
