@@ -69,20 +69,21 @@ clean tree.
    uncertainty. At minimum for ship: `cargo fmt --check`, focused/`cargo test`,
    and `cargo clippy --all-targets -- -D warnings` (offline; no plane required).
 3. Run **`autoreview` before committing** (or before push if already committed).
-   Use the **project-local** helper—do not skip because CI is green:
+   Do **not** vendor the skill into this repo. Resolve the shared helper (env
+   `AUTOREVIEW`, else agent-skills / `AGENTS_HOME` / sekai-chisei path—see
+   `AGENTS.md` “Agent delivery closeout”). Do not skip because CI is green:
 
    ```bash
-   export AUTOREVIEW=".agents/skills/autoreview/scripts/autoreview"
    # After commit on a topic branch (preferred):
    "$AUTOREVIEW" --mode branch --base origin/main
    # Uncommitted work only:
    "$AUTOREVIEW" --mode local
    ```
 
-   Read `.agents/skills/autoreview/SKILL.md` for engines, findings policy, and
-   when to stop. Fix actionable findings; rerun tests and autoreview until the
-   helper exits 0 with no accepted/actionable findings, or document a
-   maintainer-judgment blocker in the PR body.
+   Read the shared autoreview `SKILL.md` next to the helper for engines,
+   findings policy, and when to stop. Fix actionable findings; rerun tests and
+   autoreview until the helper exits 0 with no accepted/actionable findings, or
+   document a maintainer-judgment blocker in the PR body.
 4. Inspect the final diff for scope, generated artifacts, secrets, and
    accidental runtime state.
 5. In the PR description (or implement-only handoff), report verify-change

@@ -55,10 +55,22 @@ or public-API change) that will be **committed, pushed, or opened as a PR**:
 1. Run focused checks via the `verify-change` Skill (or equivalent `cargo fmt`,
    `cargo test`, `cargo clippy --all-targets -- -D warnings`).
 2. Run **`autoreview`** before the ship commit (or before push if the commit
-   already exists). Use the project skill:
+   already exists). **Do not vendor** the autoreview skill into this repo;
+   resolve the helper from the shared skill install (first match wins):
 
    ```bash
-   export AUTOREVIEW=".agents/skills/autoreview/scripts/autoreview"
+   # Preferred: shared agent-skills checkout or global skills home
+   if [ -x "${AUTOREVIEW:-}" ]; then :; \
+   elif [ -x "$HOME/Projects/agent-skills/skills/autoreview/scripts/autoreview" ]; then
+     export AUTOREVIEW="$HOME/Projects/agent-skills/skills/autoreview/scripts/autoreview"
+   elif [ -x "${AGENTS_HOME:-$HOME/.agents}/skills/autoreview/scripts/autoreview" ]; then
+     export AUTOREVIEW="${AGENTS_HOME:-$HOME/.agents}/skills/autoreview/scripts/autoreview"
+   elif [ -x "$HOME/Projects/sekai-chisei/.agents/skills/autoreview/scripts/autoreview" ]; then
+     export AUTOREVIEW="$HOME/Projects/sekai-chisei/.agents/skills/autoreview/scripts/autoreview"
+   else
+     echo "autoreview helper not found; install shared agent-skills or set AUTOREVIEW" >&2
+     exit 1
+   fi
    # Dirty uncommitted work:
    "$AUTOREVIEW" --mode local
    # Topic branch / open PR (preferred after commit):
@@ -80,8 +92,9 @@ Docs-only typo fixes and pure formatting may skip structured review; state the
 waiver. The `deliver-ready-issue` Skill requires this same closeout before
 publish/land.
 
-Default review engine is Codex (`gpt-5.5` via the helper). See
-[`.agents/skills/autoreview/SKILL.md`](.agents/skills/autoreview/SKILL.md).
+Default review engine is Codex (`gpt-5.5` via the helper). Read the shared
+`autoreview` skill’s `SKILL.md` next to the resolved helper for engines and
+findings policy.
 
 ## Ontology Policy
 
