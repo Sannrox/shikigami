@@ -1,5 +1,6 @@
-//! Governance ports: none, local, sekai-chisei.
+//! Governance ports: none, local, http-callback, sekai-chisei.
 
+mod http_callback;
 mod local;
 mod none;
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use crate::config::Config;
 use crate::model::{ChatMessage, ModelTurn};
 use crate::tools::ToolDef;
 
+pub use http_callback::HttpCallbackGovernance;
 pub use local::LocalGovernance;
 pub use none::NoneGovernance;
 
@@ -103,6 +105,9 @@ pub fn from_config(config: &Config) -> Result<Box<dyn GovernancePort>, Governanc
     match config.governance.adapter.as_str() {
         "none" => Ok(Box::new(NoneGovernance::from_config(config))),
         "local" => Ok(Box::new(LocalGovernance::from_config(config))),
+        "http-callback" | "host-authz" => {
+            Ok(Box::new(HttpCallbackGovernance::from_config(config)?))
+        }
         "sekai-chisei" => {
             #[cfg(feature = "governance-sekai-chisei")]
             {

@@ -12,7 +12,44 @@ Architectural decision: [decisions/0001-ports-and-settings.md](decisions/0001-po
 | --- | --- | --- |
 | `none` | stable for v0 | No external plane; local model path; tool allow-list only |
 | `local` | stable for v0 | In-process tool allow-list for deterministic tests |
+| `http-callback` (alias `host-authz`) | stable for host brokers | POSTs tool authz to a host URL; allow/deny with timeout |
 | `sekai-chisei` | primary production path | gRPC: probe, `PlanExecution`, `ExecutePlanStream`, operation events |
+
+### HTTP host callback (`http-callback`)
+
+For interactive hosts (for example Aldunis Code PermissionBroker) that cannot
+embed the harness library:
+
+```toml
+[governance]
+adapter = "http-callback"
+endpoint = "http://127.0.0.1:9/host-authz"   # host-supplied loopback URL
+token_env = "ALDUNIS_PROVIDER_RUN_TOKEN"    # optional Bearer token env
+fail_closed = true
+```
+
+On each mutating tool authorization the harness POSTs JSON:
+
+```json
+{
+  "version": "host-authz.request/v1",
+  "run_id": "…",
+  "operation_id": "…",
+  "tool": "write_file",
+  "args_json": "{…redacted summary…}"
+}
+```
+
+Expected response:
+
+```json
+{ "decision": "allow" }
+```
+
+or `{ "decision": "deny", "message": "…" }` (`behavior` is accepted as an alias
+for `decision`). Timeout or HTTP failure denies when `fail_closed` is true.
+Read/search/report/todo tools skip the host callback after the local allow-list
+check. Requires the `model-http` feature (default) for the HTTP client.
 
 Feature flag: `governance-sekai-chisei` (default **on**) compiles the client from
 vendored protos in [`../proto/`](../proto/).
