@@ -405,11 +405,7 @@ impl ToolRegistry {
                 Ok(g) => g,
                 Err(_) => return,
             };
-            guard
-                .jobs
-                .drain()
-                .map(|(_id, job)| job.child)
-                .collect()
+            guard.jobs.drain().map(|(_id, job)| job.child).collect()
         };
         for mut child in children {
             let _ = child.start_kill();
