@@ -30,7 +30,12 @@ config pointing at the `shikigami` binary with args `mcp`).
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `doctor` | (none) | Pretty-printed doctor JSON (`schema_version` = 1). Secrets redacted as in the CLI. `isError` when `ok` is false. |
-| `run` | `task` (string, required unless resume), `keep_workspace` (bool), `timeout_secs` (u64), `resume_run_id`, `resume_answer` | Pretty-printed run summary (`run_id`, `success`, `summary`, `turns`, `workspace`, `termination`, optional `park`, `prompt_id`, `usage`). `isError` when `success` is false. |
+| `run` | `task` (string, required unless resume), `keep_workspace` (bool), `timeout_secs` (u64), `resume_run_id`, `resume_answer` | **Blocking** run summary. Prefer async tools for long work. |
+| `run_start` | same as `run` | Starts a **single-flight** background run (non-blocking). |
+| `run_status` | (none) | `phase` (`idle`/`running`/`finished`), recent event lines, `result` when finished. |
+| `run_wait` | optional `timeout_secs` | Blocks until finished (or timeout while still `running`). |
+
+Cancellation: process-level only in v1 (kill the MCP server). No multi-tenant job queue.
 
 Default local profile needs **no** governance plane. Serve-queue administration
 is intentionally out of scope for v1 MCP tools.

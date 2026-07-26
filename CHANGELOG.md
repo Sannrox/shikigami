@@ -42,6 +42,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   with timeout and fail-closed policy ([docs/hooks.md](docs/hooks.md)).
 - Background bash jobs (`bash_background` / `bash_job_status` / `bash_job_logs`)
   when bash is enabled; reaped at run end.
+- MCP server async run tools: `run_start`, `run_status`, `run_wait` (single-flight
+  poll path for long runs; blocking `run` retained).
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
