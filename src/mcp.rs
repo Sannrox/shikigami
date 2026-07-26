@@ -638,10 +638,12 @@ mod tests {
         });
 
         let dir = tempdir().unwrap();
-        let mut config = Config::default();
-        config.network = NetworkSettings {
-            egress: EgressMode::Allowlist,
-            allow_hosts: vec!["127.0.0.1".into()],
+        let mut config = Config {
+            network: NetworkSettings {
+                egress: EgressMode::Allowlist,
+                allow_hosts: vec!["127.0.0.1".into()],
+            },
+            ..Default::default()
         };
         config.tools.mcp_servers = vec![McpServerSettings {
             name: "httpdemo".into(),
@@ -667,15 +669,22 @@ mod tests {
         }
 
         // egress deny
-        config.network.egress = EgressMode::Deny;
+        let mut deny_cfg = Config {
+            network: NetworkSettings {
+                egress: EgressMode::Deny,
+                allow_hosts: vec![],
+            },
+            ..Default::default()
+        };
+        deny_cfg.tools.mcp_servers = config.tools.mcp_servers.clone();
         let mut reg2 = ToolRegistry::with_builtins(
             dir.path(),
             vec!["read_file".into()],
             30,
-            config.network.clone(),
+            deny_cfg.network.clone(),
         )
         .unwrap();
-        let err = attach_mcp_servers(&mut reg2, &config).await.unwrap_err();
+        let err = attach_mcp_servers(&mut reg2, &deny_cfg).await.unwrap_err();
         assert!(
             err.to_string().contains("denied") || err.to_string().contains("egress"),
             "{err}"
