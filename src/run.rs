@@ -12,9 +12,11 @@ use crate::checkpoint::{self, Checkpoint, CheckpointError, ParkedState};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
+use crate::hooks::{self, HookEvent};
 use crate::model::{ChatMessage, CostEstimate, ModelError, ModelPort, TokenUsage, ToolCall};
 use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
+use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -378,6 +380,18 @@ impl Engine {
         let mut termination = RunTermination::Completed;
         let mut usage = TokenUsage::default();
 
+        hooks::run_hooks(
+            &self.config.hooks,
+            HookEvent::PreRun,
+            json!({
+                "run_id": run_id,
+                "task": task,
+                "resume": request.resume_run_id.is_some(),
+            }),
+        )
+        .await
+        .map_err(RunError::Message)?;
+
         // Persist initial checkpoint so resume works mid-run.
         self.save_checkpoint(
             &run_id,
@@ -489,7 +503,13 @@ impl Engine {
                 }
 
                 let concurrency = self.config.run.tool_concurrency.max(1) as usize;
+                let hooks_need_serial = self
+                    .config
+                    .hooks
+                    .iter()
+                    .any(|h| matches!(h.event.as_str(), "pre_tool" | "post_tool" | "on_park"));
                 let can_parallel = concurrency > 1
+                    && !hooks_need_serial
                     && turn.tool_calls.len() > 1
                     && turn
                         .tool_calls
@@ -543,6 +563,20 @@ impl Engine {
                     let mut out = Vec::with_capacity(turn.tool_calls.len());
                     for call in &turn.tool_calls {
                         self.check_bounds(&request, started, timeout)?;
+                        if let Err(e) = hooks::run_hooks(
+                            &self.config.hooks,
+                            HookEvent::PreTool,
+                            json!({
+                                "run_id": run_id,
+                                "tool": call.name,
+                                "args_json": call.args_json,
+                            }),
+                        )
+                        .await
+                        {
+                            out.push((call.clone(), Err(e)));
+                            continue;
+                        }
                         if let Err(e) = self
                             .governance
                             .authorize_tool(&handle, &call.name, &call.args_json)
@@ -578,6 +612,16 @@ impl Engine {
                                 ok: true,
                                 detail: text.chars().take(500).collect(),
                             });
+                            let _ = hooks::run_hooks(
+                                &self.config.hooks,
+                                HookEvent::PostTool,
+                                json!({
+                                    "run_id": run_id,
+                                    "tool": call.name,
+                                    "ok": true,
+                                }),
+                            )
+                            .await;
                             messages.push(ChatMessage {
                                 role: "tool".into(),
                                 content: text,
@@ -662,6 +706,16 @@ impl Engine {
                                 ok: false,
                                 detail: detail.clone(),
                             });
+                            let _ = hooks::run_hooks(
+                                &self.config.hooks,
+                                HookEvent::PostTool,
+                                json!({
+                                    "run_id": run_id,
+                                    "tool": call.name,
+                                    "ok": false,
+                                }),
+                            )
+                            .await;
                             messages.push(ChatMessage {
                                 role: "tool".into(),
                                 content: detail,
@@ -757,6 +811,18 @@ impl Engine {
             self.config.model.input_usd_micros_per_mtok,
             self.config.model.output_usd_micros_per_mtok,
         );
+
+        let _ = hooks::run_hooks(
+            &self.config.hooks,
+            HookEvent::PostRun,
+            json!({
+                "run_id": run_id,
+                "success": success,
+                "termination": termination.as_str(),
+                "summary": final_summary,
+            }),
+        )
+        .await;
 
         Ok(RunResult {
             run_id,

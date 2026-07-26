@@ -38,6 +38,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - Optional per-run cost estimate on `RunResult.cost` from token usage ×
   settings rates (`model.input_usd_micros_per_mtok` / `output_…`); absent when
   rates unset.
+- Settings-driven lifecycle hooks (`[[hooks]]`: pre/post run/tool, on_park)
+  with timeout and fail-closed policy ([docs/hooks.md](docs/hooks.md)).
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
