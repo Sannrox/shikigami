@@ -561,6 +561,8 @@ pub enum ConfigError {
     UnknownModelAdapter(String),
     #[error("governance adapter `sekai-chisei` requires an endpoint")]
     MissingGovernanceEndpoint,
+    #[error("{0}")]
+    Invalid(String),
 }
 
 impl Config {
@@ -696,8 +698,18 @@ impl Config {
             other => return Err(ConfigError::UnknownGovernanceAdapter(other.into())),
         }
         match self.workspace.adapter.as_str() {
-            "directory" | "git-worktree" => {}
+            "directory" | "inplace" | "directory-inplace" | "git-worktree" => {}
             other => return Err(ConfigError::UnknownWorkspaceAdapter(other.into())),
+        }
+        if self.workspace.snapshot
+            && matches!(
+                self.workspace.adapter.as_str(),
+                "inplace" | "directory-inplace"
+            )
+        {
+            return Err(ConfigError::Invalid(
+                "workspace.snapshot cannot be used with adapter `inplace`".into(),
+            ));
         }
         match self.events.adapter.as_str() {
             "stderr" | "jsonl" | "none" => {}

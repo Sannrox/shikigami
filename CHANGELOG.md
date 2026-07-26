@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-07-26
+
+### Added
+
+- Workspace adapter `inplace` / `directory-inplace`: use `workspace.root` as the
+  run workspace without creating nested `shikigami-runs/<id>` directories
+  (for host-selected worktrees such as Aldunis Code).
+
 ## [1.0.0] — 2026-07-26
 
 First **stable** release under the [ADR 0004](docs/decisions/0004-v1-contract.md)
