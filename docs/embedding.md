@@ -3,6 +3,19 @@
 The `shikigami` CLI is a thin host. Prefer the **library** when you need
 structured results, cancellation hooks, or an in-process UI.
 
+## Host proof ranking (v0.2+)
+
+| Rank | Surface | Status | Proof |
+| --- | --- | --- | --- |
+| 1 | Library `Harness` | **Primary** offline host; ADR 0004 embed path | `cargo run --locked --example embed_smoke` — **CI-gated** on PR/`main` |
+| 2 | CLI (`doctor` / `run` / `serve` / `export`) | Operator path; thin over the same core | Offline `examples/local-run.toml` demo in README |
+| 3 | MCP stdio server (`shikigami mcp`) | **Optional** host for MCP-native clients | [mcp.md](mcp.md) + [examples/mcp-host.example.json](../examples/mcp-host.example.json) |
+
+Do **not** treat MCP or a future interactive TUI as the 1.0 library freeze
+surface. External peer-repo embed (e.g. onmyoji) is tracked separately for the
+ADR 0004 “external embed smoke” checklist item — in-repo `embed_smoke` is the
+supported OSS baseline today.
+
 ## Minimal example
 
 ```rust
@@ -55,16 +68,18 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 
 | Item | Notes |
 | --- | --- |
-| `Harness` | Primary entry: `doctor`, `doctor_async`, `run` |
-| `Config` / `ConfigSource` | Versioned settings |
+| `Harness` | Primary entry: `doctor`, `doctor_async`, `run`, `run_with_events` |
+| `Config` / `ConfigSource` | Versioned settings (`version = 1`, deny unknown) |
 | `StateRoot` | Local state layout |
-| `RunRequest` / `RunResult` | Run I/O |
+| `RunRequest` / `RunResult` | Run I/O (incl. park, usage, optional `cost`) |
 | `DoctorReport` / `HarnessError` | Diagnostics and errors |
+| `export_run_transcript` / `ExportOptions` | Offline JSONL from checkpoints |
 | `governance::GovernancePort` | Trait for custom governance (pre-1.0: may evolve) |
-| CLI subcommands | `version`, `doctor`, `run` — flags may grow |
+| CLI subcommands | `version`, `doctor`, `run`, `serve`, `mcp`, `export` — flags may grow |
 
 Pre-1.0: treat trait methods and settings fields as **evolving**. Prefer
-depending on `Harness` + `Config` for the most stable path.
+depending on `Harness` + `Config` for the most stable path. See freeze
+candidates below and [ADR 0004](decisions/0004-v1-contract.md).
 
 ## Host responsibilities
 
@@ -87,15 +102,20 @@ Changes still require CHANGELOG entries; avoid drive-by renames.
 
 ### Prefer depending on (freeze candidates)
 
+Aligned with [ADR 0004](decisions/0004-v1-contract.md) medium 1.0 contract.
+Still *pre-1.0 guidance* — not a promise until 1.0 tags.
+
 | Surface | Notes |
 | --- | --- |
 | `Harness::{from_config, resolve, doctor, doctor_async, run, run_with_events}` | Primary entry |
 | `Config` / settings `version = 1` fields with defaults | Unknown keys rejected |
 | `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` / `logical_operation_id` / `resume_answer` | Bounds, resume, plane op correlation |
-| `RunResult` fields including `termination`, `park`, `prompt_id` | Structured outcomes |
-| `HarnessEvent` + `ChannelSink` / `EventSink` | Live in-process progress |
+| `RunResult` fields including `termination`, `park`, `prompt_id`, token `usage` | Structured outcomes |
+| `RunResult.cost` when rates configured | Optional estimate only; absent ≠ zero |
+| `HarnessEvent` + `ChannelSink` / `EventSink` | Live in-process progress (additive events OK) |
+| `export_run_transcript` + export `schema_version = 1` line shapes | Offline host audit path |
 | `DoctorReport` JSON `schema_version = 1` keys | Automation contract |
-| CLI subcommands `version` / `doctor` / `run` / `serve` | Flags may grow |
+| CLI subcommands `version` / `doctor` / `run` / `serve` | Flags may grow; core names stable |
 
 ### Live event stream
 
@@ -138,7 +158,7 @@ let jsonl = export_run_transcript(
 CLI: `shikigami export <run_id> [-o transcript.jsonl]`. Fields are truncated and
 optional config redaction applies the same secret scrubbing as doctor.
 
-### Evolving (expect churn)
+### Evolving / host-only (not freeze core)
 
 | Surface | Notes |
 | --- | --- |
@@ -147,6 +167,11 @@ optional config redaction applies the same secret scrubbing as doctor.
 | Event sink payload shapes | Additive preferred |
 | Feature flags and optional deps | May split further |
 | Serve queue protocol | Local FS queue first; HTTP later |
+| MCP server tool set / framing details | Optional host; tools may grow; stdio-only for now |
+| MCP client transports and settings | Integration surface; not embed freeze list |
+| Lifecycle hooks (`[[hooks]]`) | Settings-driven; schema may grow |
+| Interactive TUI | Explicit non-goal for default product; not in this crate’s 1.0 must-haves |
+| Cost rate settings field names | Optional ops; misconfig is operator error |
 
 ### CHANGELOG policy for embedders
 

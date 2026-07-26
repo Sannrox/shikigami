@@ -2,19 +2,25 @@
 
 Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 
-| File | Purpose |
-| --- | --- |
-| [`local-run.toml`](local-run.toml) | Offline profile: local governance + scripted model |
-| [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Production-style plane wiring (needs a reachable sekai-chisei) |
-| [`tenkai-product.toml`](tenkai-product.toml) | Delivery manifest aligned with GitHub Release asset names |
-| [`embed_smoke.rs`](embed_smoke.rs) | Offline library host proof (`Harness` + events + export) |
+## Host surfaces
+
+| Priority | Artifact | Role |
+| --- | --- | --- |
+| **Primary CI proof** | [`embed_smoke.rs`](embed_smoke.rs) | Offline library host (`Harness` + events + export). Gated on PR/`main` CI. |
+| Operator CLI | [`local-run.toml`](local-run.toml) | Offline profile for `doctor` / `run` demos |
+| Optional MCP host | [`mcp-host.example.json`](mcp-host.example.json) | Cursor/Claude Desktop-style stdio config for `shikigami mcp` |
+| Governed wiring | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Plane profile (needs reachable sekai-chisei) |
+| Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
+
+See [docs/embedding.md](../docs/embedding.md) (host ranking + freeze list) and
+[docs/mcp.md](../docs/mcp.md) (MCP tools including `run_start` / `run_status` / `run_wait`).
 
 ## Offline demo
 
 ```bash
 cargo run --bin shikigami -- --config examples/local-run.toml doctor
 cargo run --bin shikigami -- --config examples/local-run.toml run "demo" --keep-workspace
-cargo run --example embed_smoke
+cargo run --locked --example embed_smoke
 ```
 
 ## Governed doctor
