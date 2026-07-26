@@ -101,6 +101,7 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `mode` | `custom` | `custom` \| `read` \| `workspace` \| `workspace_exec` |
 | `enabled` | `[]` | Allow-list; with non-`custom` mode, **intersects** the mode set |
 | `bash_timeout_secs` | `60` | Default bash timeout (capped at 120s) |
+| `respect_ignore` | `true` | `glob`/`grep` honor built-in defaults + `.gitignore` / `.shikigamiignore` |
 
 | Mode | Effective tools (before optional `enabled` intersect) |
 | --- | --- |
@@ -121,6 +122,11 @@ context is needed to disambiguate. Caps: 16 files, 32 hunks, 64KiB JSON payload.
 `tools.enabled` (custom mode or intersect). See [network.md](network.md).
 
 Modes are host policy, not an OS sandbox.
+
+When `respect_ignore = true` (default), search tools skip heavy dirs (`node_modules`,
+`target`, `.git`, …) and patterns from workspace `.shikigamiignore` / `.gitignore`
+(no negation/`!` in v1; pure matcher, no git binary). **`read_file` of an explicit
+path is never blocked by ignore** — ignore is convenience filtering, not a secret vault.
 
 ### `[context]`
 
