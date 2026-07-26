@@ -213,6 +213,7 @@ impl Engine {
         keep_workspace: bool,
         park: Option<ParkedState>,
         todos: Vec<TodoItem>,
+        workspace_adapter: &str,
     ) -> Result<(), RunError> {
         let cp = Checkpoint {
             version: checkpoint::CHECKPOINT_VERSION,
@@ -223,6 +224,7 @@ impl Engine {
             completed_turns: turns,
             workspace: workspace.to_path_buf(),
             keep_workspace,
+            workspace_adapter: workspace_adapter.into(),
             park,
             todos,
         };
@@ -251,8 +253,12 @@ impl Engine {
                 });
                 let ws = MaterializedWorkspace {
                     path: cp.workspace.clone(),
-                    adapter: "resumed".into(),
-                    cleanup: if cp.keep_workspace {
+                    adapter: if cp.workspace_adapter.is_empty() {
+                        "resumed".into()
+                    } else {
+                        cp.workspace_adapter.clone()
+                    },
+                    cleanup: if cp.keep_workspace || cp.workspace_adapter == "inplace" {
                         WorkspaceCleanup::None
                     } else {
                         WorkspaceCleanup::RemoveDir
@@ -319,6 +325,11 @@ impl Engine {
         let skills = crate::context::load_skills(&ws.path, &self.config.context);
         let system_prompt =
             crate::context::compose_system_prompt(SYSTEM_PROMPT, project_rules.as_ref(), &skills);
+        if request.restore_snapshot.is_some() && ws.adapter == "inplace" {
+            return Err(RunError::Message(
+                "restore_snapshot is not supported with workspace adapter `inplace`".into(),
+            ));
+        }
         let handle = self
             .governance
             .begin_run(&run_id, &task, request.logical_operation_id.as_deref())
@@ -402,6 +413,7 @@ impl Engine {
             keep_workspace,
             None,
             tools.todos(),
+                    &ws.adapter,
         )?;
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
@@ -462,6 +474,7 @@ impl Engine {
                     keep_workspace,
                     None,
                     tools.todos(),
+                    &ws.adapter,
                 )?;
 
                 if turn.tool_calls.is_empty() {
@@ -498,6 +511,7 @@ impl Engine {
                         keep_workspace,
                         None,
                         tools.todos(),
+                    &ws.adapter,
                     )?;
                     continue;
                 }
@@ -657,6 +671,7 @@ impl Engine {
                                 keep_workspace,
                                 None,
                                 tools.todos(),
+                    &ws.adapter,
                             )?;
                             return Ok(None);
                         }
@@ -703,6 +718,7 @@ impl Engine {
                                 true,
                                 Some(parked),
                                 tools.todos(),
+                    &ws.adapter,
                             )?;
                             return Ok(Some(info));
                         }
@@ -744,6 +760,7 @@ impl Engine {
                     keep_workspace,
                     None,
                     tools.todos(),
+                    &ws.adapter,
                 )?;
             }
             Ok(None)
@@ -769,7 +786,7 @@ impl Engine {
                     true, // keep workspace on failure for resume/inspection
                     None,
                     tools.todos(),
-                );
+                &ws.adapter,);
                 let _ = self
                     .governance
                     .complete_run(

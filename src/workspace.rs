@@ -126,6 +126,19 @@ pub fn from_config(config: &Config) -> Result<Box<dyn WorkspacePort>, WorkspaceE
         "directory" => Ok(Box::new(DirectoryWorkspace {
             root: PathBuf::from(&config.workspace.root),
         })),
+        // Use the configured root itself (no nested shikigami-runs/<id>).
+        // Hosts such as Aldunis Code pass a selected worktree path.
+        "inplace" | "directory-inplace" => {
+            if config.workspace.snapshot {
+                return Err(WorkspaceError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "workspace.snapshot cannot be used with adapter `inplace`",
+                )));
+            }
+            Ok(Box::new(InPlaceDirectoryWorkspace {
+                root: PathBuf::from(&config.workspace.root),
+            }))
+        }
         "git-worktree" => Ok(Box::new(GitWorktreeWorkspace {
             repo: PathBuf::from(&config.workspace.root),
             branch_prefix: config.workspace.branch_prefix.clone(),
@@ -136,6 +149,65 @@ pub fn from_config(config: &Config) -> Result<Box<dyn WorkspacePort>, WorkspaceE
 
 struct DirectoryWorkspace {
     root: PathBuf,
+}
+
+/// Workspace is exactly `root` (must already exist). No per-run subdirectory.
+///
+/// Safety: the harness state root must **not** live under `root` (otherwise
+/// tools can read/write checkpoints). Snapshots are rejected for this adapter.
+/// Hosts must serialize concurrent runs against the same root (no OS lock).
+struct InPlaceDirectoryWorkspace {
+    root: PathBuf,
+}
+
+fn path_is_within(parent: &Path, child: &Path) -> bool {
+    let Ok(parent) = parent.canonicalize() else {
+        return false;
+    };
+    let Ok(child) = child.canonicalize() else {
+        return child.starts_with(&parent);
+    };
+    child.starts_with(&parent)
+}
+
+impl WorkspacePort for InPlaceDirectoryWorkspace {
+    fn id(&self) -> &'static str {
+        "inplace"
+    }
+
+    fn health_detail(&self) -> String {
+        format!("inplace root={}", self.root.display())
+    }
+
+    fn materialize(
+        &self,
+        _run_id: &str,
+        state_runs: &Path,
+    ) -> Result<MaterializedWorkspace, WorkspaceError> {
+        if !self.root.is_dir() {
+            return Err(WorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("inplace workspace root missing: {}", self.root.display()),
+            )));
+        }
+        let path = std::fs::canonicalize(&self.root)?;
+        if path_is_within(&path, state_runs) {
+            return Err(WorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "inplace workspace must not contain the harness state directory; \
+                 set SHIKIGAMI_STATE / --state outside the workspace root",
+            )));
+        }
+        Ok(MaterializedWorkspace {
+            path,
+            adapter: "inplace".into(),
+            cleanup: WorkspaceCleanup::None,
+        })
+    }
+
+    fn cleanup(&self, _ws: &MaterializedWorkspace) -> Result<(), WorkspaceError> {
+        Ok(())
+    }
 }
 
 impl WorkspacePort for DirectoryWorkspace {
