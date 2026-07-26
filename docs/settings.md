@@ -61,6 +61,10 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `base_url` | OpenAI-compatible default | Base URL for `http` |
 | `model` | `"gpt-4.1-mini"` | Model id for `http` / plane preferred model |
 | `api_key_env` | `"OPENAI_API_KEY"` | Env var for HTTP API key |
+| `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
+| `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
+
+When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
 
 #### Scripted turn JSON
 

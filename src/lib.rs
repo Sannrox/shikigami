@@ -46,7 +46,7 @@ pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;
 pub use metrics::{Metrics, MetricsSnapshot};
-pub use model::TokenUsage;
+pub use model::{CostEstimate, TokenUsage};
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{QueueJob, QueueLayout, ServeOptions};

@@ -329,6 +329,13 @@ pub struct ModelSettings {
     /// Inline JSON array of scripted turns for tests/demos.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_json: Option<String>,
+    /// Optional cost rate: USD **microdollars** per million input tokens
+    /// (1_000_000 = $1.00 / MTok). When unset with output rate, no cost estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_usd_micros_per_mtok: Option<u64>,
+    /// Optional cost rate: USD microdollars per million output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_usd_micros_per_mtok: Option<u64>,
 }
 
 fn default_model_adapter() -> String {
@@ -349,6 +356,8 @@ impl Default for ModelSettings {
             model: default_model_name(),
             api_key_env: default_api_key_env(),
             script_json: None,
+            input_usd_micros_per_mtok: None,
+            output_usd_micros_per_mtok: None,
         }
     }
 }
