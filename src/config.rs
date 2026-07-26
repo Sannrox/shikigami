@@ -32,6 +32,29 @@ pub struct Config {
     pub context: ContextSettings,
     #[serde(default)]
     pub network: NetworkSettings,
+    /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
+    #[serde(default)]
+    pub hooks: Vec<HookSettings>,
+}
+
+/// One lifecycle hook entry (`command` is operator-trusted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookSettings {
+    /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park`
+    pub event: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+    /// When true, hook failure/timeout aborts the run or tool.
+    #[serde(default)]
+    pub fail_closed: bool,
+}
+
+fn default_hook_timeout_ms() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +447,7 @@ impl Default for Config {
             model: ModelSettings::default(),
             context: ContextSettings::default(),
             network: NetworkSettings::default(),
+            hooks: Vec::new(),
         }
     }
 }
