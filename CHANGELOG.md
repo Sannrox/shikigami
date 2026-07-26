@@ -27,6 +27,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   `TodosUpdated` event); not a substitute for park/escalate or plane work-units.
 - Opt-in `web_fetch` tool (HTTP GET) governed by `[network]` egress with
   private/link-local SSRF blocks ([docs/network.md](docs/network.md)).
+- `apply_patch` tool: structured multi-hunk context patches, atomic multi-file,
+  fail-closed on ambiguous matches (alongside `edit` / `multi_edit`).
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).

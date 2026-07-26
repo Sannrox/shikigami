@@ -25,6 +25,9 @@ pub const MAX_TODO_ID_CHARS: usize = 64;
 const MAX_WEB_FETCH_BYTES: usize = 256 * 1024;
 const WEB_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const WEB_FETCH_MAX_REDIRECTS: usize = 5;
+const MAX_APPLY_PATCH_BYTES: usize = 64 * 1024;
+const MAX_APPLY_PATCH_HUNKS: usize = 32;
+const MAX_APPLY_PATCH_FILES: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
@@ -102,6 +105,8 @@ pub enum ToolError {
     MultiEditMatch { index: usize, count: usize },
     #[error("multi_edit requires a non-empty edits array")]
     MultiEditEmpty,
+    #[error("apply_patch: {0}")]
+    ApplyPatch(String),
     #[error("bash timed out after {0:?}")]
     BashTimeout(Duration),
     #[error("bash output exceeded limit")]
@@ -161,6 +166,11 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             "multi_edit",
             "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none).",
             r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"}},"required":["old","new"]}},"required":["path","edits"]}"#,
+        ),
+        def(
+            "apply_patch",
+            "Apply structured multi-hunk patches with optional surrounding context. Atomic across all files/hunks (all succeed or none). Prefer when multi_edit exact matches are too brittle. Fails closed on 0 or >1 matches.",
+            r#"{"type":"object","properties":{"patches":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"hunks":{"type":"array","items":{"type":"object","properties":{"context_before":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"},"context_after":{"type":"string"}},"required":["old","new"]}}},"required":["path","hunks"]}}},"required":["patches"]}"#,
         ),
         def(
             "glob",
@@ -628,6 +638,19 @@ impl ToolExecutor {
                 let n = self.multi_edit(&args.path, &args.edits)?;
                 Ok(ToolOutput::Text(format!("{n} edits applied")))
             }
+            "apply_patch" => {
+                if args_json.len() > MAX_APPLY_PATCH_BYTES {
+                    return Err(ToolError::ApplyPatch(format!(
+                        "payload exceeds {MAX_APPLY_PATCH_BYTES} bytes"
+                    )));
+                }
+                let args: ApplyPatchArgs = parse(name, args_json)?;
+                let n = self.apply_patch(&args.patches)?;
+                Ok(ToolOutput::Text(format!(
+                    "{n} hunk(s) applied across {} file(s)",
+                    args.patches.len()
+                )))
+            }
             "glob" => {
                 let args: GlobArgs = parse(name, args_json)?;
                 Ok(ToolOutput::Text(
@@ -752,6 +775,73 @@ impl ToolExecutor {
         }
         self.write_file(path, &text)?;
         Ok(edits.len())
+    }
+
+    /// Apply structured context hunks atomically across files (compute then write).
+    fn apply_patch(&self, patches: &[FilePatch]) -> Result<usize, ToolError> {
+        if patches.is_empty() {
+            return Err(ToolError::ApplyPatch(
+                "patches array must not be empty".into(),
+            ));
+        }
+        if patches.len() > MAX_APPLY_PATCH_FILES {
+            return Err(ToolError::ApplyPatch(format!(
+                "at most {MAX_APPLY_PATCH_FILES} files per call"
+            )));
+        }
+        let total_hunks: usize = patches.iter().map(|p| p.hunks.len()).sum();
+        if total_hunks == 0 {
+            return Err(ToolError::ApplyPatch("no hunks provided".into()));
+        }
+        if total_hunks > MAX_APPLY_PATCH_HUNKS {
+            return Err(ToolError::ApplyPatch(format!(
+                "at most {MAX_APPLY_PATCH_HUNKS} hunks per call"
+            )));
+        }
+
+        let mut planned: Vec<(PathBuf, String)> = Vec::new();
+        let mut applied = 0usize;
+        for file in patches {
+            let path = PathBuf::from(&file.path);
+            if file.hunks.is_empty() {
+                return Err(ToolError::ApplyPatch(format!(
+                    "{}: hunks must not be empty",
+                    file.path
+                )));
+            }
+            let mut text = self.read_file(&path)?;
+            for (index, hunk) in file.hunks.iter().enumerate() {
+                let before = hunk.context_before.as_deref().unwrap_or("");
+                let after = hunk.context_after.as_deref().unwrap_or("");
+                if hunk.old.is_empty() {
+                    return Err(ToolError::ApplyPatch(format!(
+                        "{} hunk {index}: old must not be empty",
+                        file.path
+                    )));
+                }
+                let needle = format!("{before}{}{after}", hunk.old);
+                let count = text.matches(&needle).count();
+                if count != 1 {
+                    return Err(ToolError::ApplyPatch(format!(
+                        "{} hunk {index}: expected exactly one match for context+old+context, found {count}",
+                        file.path
+                    )));
+                }
+                let replacement = format!("{before}{}{after}", hunk.new);
+                text = text.replacen(&needle, &replacement, 1);
+                applied += 1;
+            }
+            if text.len() as u64 > MAX_FILE_BYTES {
+                return Err(ToolError::FileTooLarge(path));
+            }
+            // Resolve path jail before staging write.
+            let abs = self.resolve(&path)?;
+            planned.push((abs, text));
+        }
+        for (abs, text) in planned {
+            std::fs::write(abs, text)?;
+        }
+        Ok(applied)
     }
 
     fn glob_files(&self, pattern: &str, under: Option<&Path>) -> Result<String, ToolError> {
@@ -993,6 +1083,27 @@ struct EditHunk {
 struct MultiEditArgs {
     path: PathBuf,
     edits: Vec<EditHunk>,
+}
+
+#[derive(Deserialize)]
+struct ApplyPatchArgs {
+    patches: Vec<FilePatch>,
+}
+
+#[derive(Deserialize)]
+struct FilePatch {
+    path: String,
+    hunks: Vec<PatchHunk>,
+}
+
+#[derive(Deserialize)]
+struct PatchHunk {
+    #[serde(default)]
+    context_before: Option<String>,
+    old: String,
+    new: String,
+    #[serde(default)]
+    context_after: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1361,6 +1472,65 @@ mod tests {
         assert!(glob_match("*.txt", "a.txt"));
         assert!(!glob_match("*.txt", "src/a.txt"));
         assert!(glob_match("src/**", "src/a/b"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_context_hunks_atomic() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.txt"),
+            "header\nkeep\nold1\nmid\nold2\nfooter\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("b.txt"), "x\ny\nz\n").unwrap();
+        let tools = ToolExecutor::new(dir.path(), vec!["apply_patch".into()], 30).unwrap();
+        let out = tools
+            .execute(
+                "apply_patch",
+                r#"{
+                  "patches": [
+                    {
+                      "path": "a.txt",
+                      "hunks": [
+                        {"context_before":"keep\n","old":"old1\n","new":"new1\n","context_after":"mid\n"},
+                        {"context_before":"mid\n","old":"old2\n","new":"new2\n","context_after":"footer\n"}
+                      ]
+                    },
+                    {
+                      "path": "b.txt",
+                      "hunks": [
+                        {"old":"y\n","new":"Y\n"}
+                      ]
+                    }
+                  ]
+                }"#,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(out, ToolOutput::Text(t) if t.contains("3 hunk")));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "header\nkeep\nnew1\nmid\nnew2\nfooter\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "x\nY\nz\n"
+        );
+
+        // Ambiguous old without unique context fails closed (no partial write).
+        std::fs::write(dir.path().join("c.txt"), "a\nfoo\nb\nfoo\nc\n").unwrap();
+        let err = tools
+            .execute(
+                "apply_patch",
+                r#"{"patches":[{"path":"c.txt","hunks":[{"old":"foo\n","new":"bar\n"}]}]}"#,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exactly one match"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("c.txt")).unwrap(),
+            "a\nfoo\nb\nfoo\nc\n"
+        );
     }
 
     #[tokio::test]

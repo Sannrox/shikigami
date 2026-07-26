@@ -193,6 +193,7 @@ impl ToolsSettings {
             "write_file".into(),
             "edit".into(),
             "multi_edit".into(),
+            "apply_patch".into(),
             "glob".into(),
             "grep".into(),
             "todo_write".into(),
