@@ -50,6 +50,7 @@ pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{QueueJob, QueueLayout, ServeOptions};
 pub use state::{StateError, StateRoot};
+pub use tools::{TodoItem, TodoStatus};
 
 /// Library liveness probe.
 pub fn ping() -> PingResponse {

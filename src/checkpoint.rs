@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::model::ChatMessage;
+use crate::tools::TodoItem;
 
 pub const CHECKPOINT_VERSION: u32 = 1;
 pub const CHECKPOINT_FILENAME: &str = "checkpoint.json";
@@ -34,6 +35,9 @@ pub struct Checkpoint {
     /// Present when the run is parked for operator input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park: Option<ParkedState>,
+    /// Run-scoped todo checklist (from `todo_write`); empty on older checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<TodoItem>,
 }
 
 #[derive(Debug, Error)]
@@ -121,6 +125,7 @@ mod tests {
             workspace: runs.join("abc/workspace"),
             keep_workspace: true,
             park: None,
+            todos: vec![],
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
