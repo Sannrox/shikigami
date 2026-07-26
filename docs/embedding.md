@@ -64,7 +64,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 }
 ```
 
-## Public surface (v0 expectations)
+## Public surface (1.0 expectations)
 
 | Item | Notes |
 | --- | --- |
@@ -74,12 +74,11 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | `RunRequest` / `RunResult` | Run I/O (incl. park, usage, optional `cost`) |
 | `DoctorReport` / `HarnessError` | Diagnostics and errors |
 | `export_run_transcript` / `ExportOptions` | Offline JSONL from checkpoints |
-| `governance::GovernancePort` | Trait for custom governance (pre-1.0: may evolve) |
-| CLI subcommands | `version`, `doctor`, `run`, `serve`, `mcp`, `export` — flags may grow |
+| `governance::GovernancePort` | Trait for custom governance (may still grow; not freeze-core) |
+| CLI subcommands | `version`, `doctor`, `run`, `serve` freeze-core; `mcp`, `export` host-adjacent — flags may grow |
 
-Pre-1.0: treat trait methods and settings fields as **evolving**. Prefer
-depending on `Harness` + `Config` for the most stable path. See freeze
-candidates below and [ADR 0004](decisions/0004-v1-contract.md).
+Prefer depending on freeze-core surfaces below and
+[ADR 0004](decisions/0004-v1-contract.md).
 
 ## Host responsibilities
 
@@ -95,15 +94,14 @@ candidates below and [ADR 0004](decisions/0004-v1-contract.md).
 - [../DESIGN.md](../DESIGN.md) — architecture
 
 
-## Pre-1.0 freeze candidates vs evolving surfaces
+## 1.0 freeze core vs evolving surfaces
 
-Until **1.0**, treat the following as *relatively stable* for embedders.
-Changes still require CHANGELOG entries; avoid drive-by renames.
+At **1.0**, the following are **freeze-core** for embedders (semver breakage
+requires a major bump). Additive fields with defaults remain OK.
 
-### Prefer depending on (freeze candidates)
+### Prefer depending on (freeze core)
 
 Aligned with [ADR 0004](decisions/0004-v1-contract.md) medium 1.0 contract.
-Still *pre-1.0 guidance* — not a promise until 1.0 tags.
 
 | Surface | Notes |
 | --- | --- |
