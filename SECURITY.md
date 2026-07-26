@@ -2,13 +2,15 @@
 
 ## Supported versions
 
-`shikigami` is pre-1.0. Security fixes target the current `main` line; older
-commits and prerelease snapshots do not receive separate security support.
+Security fixes target the latest **1.x** release line and current `main`.
+Older major lines, prerelease snapshots, and untagged commits do not receive
+separate security support.
 
 | Version | Supported |
 | --- | --- |
+| `1.x` (latest minor/patch) | Yes |
 | Current `main` | Yes |
-| Older commits and snapshots | No |
+| `0.x` and older commits/snapshots | No |
 
 ## Reporting a vulnerability
 
