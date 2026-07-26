@@ -244,6 +244,7 @@ mod tests {
             completed_turns: 1,
             workspace: runs.join("run-1/ws"),
             keep_workspace: true,
+            workspace_adapter: "directory".into(),
             park: None,
             todos: vec![TodoItem {
                 id: "1".into(),
@@ -292,6 +293,7 @@ mod tests {
             completed_turns: 0,
             workspace: runs.join("ws"),
             keep_workspace: true,
+            workspace_adapter: "directory".into(),
             park: Some(ParkedState {
                 reason: "need help".into(),
                 question: "ok?".into(),
