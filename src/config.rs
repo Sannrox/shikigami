@@ -187,15 +187,30 @@ pub struct ToolsSettings {
     pub mcp_servers: Vec<McpServerSettings>,
 }
 
-/// Stdio MCP server configuration.
+/// MCP server configuration (stdio command or HTTP URL).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerSettings {
     pub name: String,
-    /// Executable. Special value `mock` registers an offline echo tool for tests.
+    /// Executable for stdio transport. Special value `mock` registers an offline echo tool.
+    /// Empty when using `url` / HTTP transport.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// `stdio` (default) or `http` (JSON-RPC POST; SSE stream not required for v1).
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    /// Base URL for HTTP transport (e.g. `http://127.0.0.1:8080/mcp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Optional env var holding a Bearer token for HTTP MCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".into()
 }
 
 fn default_bash_timeout() -> u64 {
