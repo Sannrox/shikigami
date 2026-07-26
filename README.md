@@ -70,7 +70,12 @@ cargo run --locked --example embed_smoke
 
 Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript export).
 
-Optional host surfaces (not the CI freeze proof):
+**External** host proof (out-of-tree consumer for ADR 0004):
+[`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke)
+depends on git tag `v0.2.0` and runs the same offline doctor + scripted run +
+export pattern under its own CI.
+
+Optional host surfaces (not the library freeze proof):
 
 - CLI operator path: `doctor` / `run` above
 - MCP stdio: `shikigami mcp` — [docs/mcp.md](docs/mcp.md), [examples/mcp-host.example.json](examples/mcp-host.example.json)
