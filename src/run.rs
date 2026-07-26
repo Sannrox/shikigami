@@ -12,9 +12,11 @@ use crate::checkpoint::{self, Checkpoint, CheckpointError, ParkedState};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
-use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage};
+use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage, ToolCall};
 use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
@@ -365,6 +367,7 @@ impl Engine {
             crate::mcp::attach_mcp_servers(&mut tools, &self.config).await?;
         }
         let tool_defs = tools.definitions();
+        let tools = Arc::new(tools);
 
         let max_turns = self.config.run.max_turns;
         let mut final_summary = String::from("completed without report");
@@ -482,38 +485,79 @@ impl Engine {
                     continue;
                 }
 
-                for call in &turn.tool_calls {
-                    self.check_bounds(&request, started, timeout)?;
+                let concurrency = self.config.run.tool_concurrency.max(1) as usize;
+                let can_parallel = concurrency > 1
+                    && turn.tool_calls.len() > 1
+                    && turn
+                        .tool_calls
+                        .iter()
+                        .all(|c| tools::is_parallel_safe_tool(&c.name));
 
+                // Ordered ToolStart for stable live streams.
+                for call in &turn.tool_calls {
                     self.events.emit(HarnessEvent::ToolStart {
                         name: call.name.clone(),
                         args_json: call.args_json.clone(),
                     });
-                    if let Err(e) = self
-                        .governance
-                        .authorize_tool(&handle, &call.name, &call.args_json)
-                        .await
-                    {
-                        let detail = e.to_string();
-                        let _ = self
-                            .governance
-                            .report_tool(&handle, &call.name, false, &detail)
-                            .await;
-                        self.events.emit(HarnessEvent::ToolEnd {
-                            name: call.name.clone(),
-                            ok: false,
-                            detail: detail.clone(),
-                        });
-                        messages.push(ChatMessage {
-                            role: "tool".into(),
-                            content: detail,
-                            tool_call_id: call.id.clone(),
-                            tool_calls: vec![],
-                        });
-                        continue;
-                    }
+                }
 
-                    match tools.execute(&call.name, &call.args_json).await {
+                // Parallel path only for all-read batches (no report/park/write).
+                let batch_outcomes: Vec<(ToolCall, Result<ToolOutput, String>)> = if can_parallel {
+                    self.check_bounds(&request, started, timeout)?;
+                    let sem = Arc::new(Semaphore::new(concurrency));
+                    let mut set = JoinSet::new();
+                    for (i, call) in turn.tool_calls.iter().cloned().enumerate() {
+                        let tools = Arc::clone(&tools);
+                        let gov = Arc::clone(&self.governance);
+                        let handle = handle.clone();
+                        let sem = Arc::clone(&sem);
+                        set.spawn(async move {
+                            let _permit = sem.acquire().await.expect("semaphore");
+                            if let Err(e) = gov
+                                .authorize_tool(&handle, &call.name, &call.args_json)
+                                .await
+                            {
+                                return (i, call, Err(e.to_string()));
+                            }
+                            match tools.execute(&call.name, &call.args_json).await {
+                                Ok(out) => (i, call, Ok(out)),
+                                Err(e) => (i, call, Err(e.to_string())),
+                            }
+                        });
+                    }
+                    let mut raw = Vec::with_capacity(turn.tool_calls.len());
+                    while let Some(joined) = set.join_next().await {
+                        match joined {
+                            Ok(item) => raw.push(item),
+                            Err(e) => {
+                                return Err(RunError::Message(format!("tool task join: {e}")));
+                            }
+                        }
+                    }
+                    raw.sort_by_key(|(i, _, _)| *i);
+                    raw.into_iter().map(|(_, call, res)| (call, res)).collect()
+                } else {
+                    let mut out = Vec::with_capacity(turn.tool_calls.len());
+                    for call in &turn.tool_calls {
+                        self.check_bounds(&request, started, timeout)?;
+                        if let Err(e) = self
+                            .governance
+                            .authorize_tool(&handle, &call.name, &call.args_json)
+                            .await
+                        {
+                            out.push((call.clone(), Err(e.to_string())));
+                            continue;
+                        }
+                        match tools.execute(&call.name, &call.args_json).await {
+                            Ok(o) => out.push((call.clone(), Ok(o))),
+                            Err(e) => out.push((call.clone(), Err(e.to_string()))),
+                        }
+                    }
+                    out
+                };
+
+                for (call, outcome) in batch_outcomes {
+                    match outcome {
                         Ok(ToolOutput::Text(text)) => {
                             let _ = self
                                 .governance
@@ -580,7 +624,6 @@ impl Engine {
                                 ok: false,
                                 detail: detail.clone(),
                             });
-                            // No tool result yet — operator answer is injected on resume.
                             let parked = ParkedState {
                                 reason: park.reason.clone(),
                                 question: park.question.clone(),
@@ -600,14 +643,13 @@ impl Engine {
                                 &messages,
                                 turns,
                                 &ws.path,
-                                true, // always keep workspace while parked
+                                true,
                                 Some(parked),
                                 tools.todos(),
                             )?;
                             return Ok(Some(info));
                         }
-                        Err(e) => {
-                            let detail = e.to_string();
+                        Err(detail) => {
                             let _ = self
                                 .governance
                                 .report_tool(&handle, &call.name, false, &detail)
@@ -915,6 +957,64 @@ mod tests {
         assert_eq!(result.run_id, run_id);
         assert!(result.workspace.join("partial.txt").is_file());
         assert_eq!(result.summary, "resumed ok");
+    }
+
+    #[tokio::test]
+    async fn parallel_safe_read_tools_in_one_turn() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let ws = dir.path().join("ws-root");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "aaa").unwrap();
+        std::fs::write(ws.join("b.txt"), "bbb").unwrap();
+
+        let mut config = base_config(&dir);
+        config.run.tool_concurrency = 4;
+        config.workspace.root = ws.to_string_lossy().into();
+        let model = ScriptedModel::from_turns(vec![
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "1".into(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"a.txt"}"#.into(),
+                    },
+                    ToolCall {
+                        id: "2".into(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"b.txt"}"#.into(),
+                    },
+                ],
+                usage: None,
+            },
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "3".into(),
+                    name: "report".into(),
+                    args_json: r#"{"summary":"parallel ok","success":true}"#.into(),
+                }],
+                usage: None,
+            },
+        ]);
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::new(model),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+        };
+        let mut req = RunRequest::new("read both");
+        req.keep_workspace = true;
+        let result = eng.run(req).await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.summary, "parallel ok");
+        assert!(tools::is_parallel_safe_tool("read_file"));
+        assert!(!tools::is_parallel_safe_tool("write_file"));
+        assert!(!tools::is_parallel_safe_tool("report"));
     }
 
     #[tokio::test]
