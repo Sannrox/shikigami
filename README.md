@@ -18,9 +18,11 @@ cases do not require forking the core.
 | **Governed** | First-party adapter for [sekai-chisei](https://github.com/Sannrox/sekai-chisei): policy, budget, PlanExecution, audit-oriented events. |
 | **Delivery** | Optional packaging via [tenkai](https://github.com/Sannrox/tenkai). Delivery is not a runtime dependency. |
 
-> **Status:** `v0.2.0` (pre-1.0). Public APIs and settings may still change
-> before 1.0. Offline `cargo test` is the supported baseline; live plane tests
-> are ignored by default.
+> **Status:** `v1.0.0`. Freeze-core library, settings, run, doctor JSON, and
+> offline OSS paths follow semver under
+> [ADR 0004](docs/decisions/0004-v1-contract.md). Additive evolution remains
+> allowed on documented evolving/host-only surfaces (e.g. MCP). Offline
+> `cargo test` is the supported baseline; live plane tests are ignored by default.
 
 ## Why
 

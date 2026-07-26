@@ -41,10 +41,10 @@ with local adapters.
 
 ## Path to 1.0
 
-Pre-1.0 may still break 0.x with CHANGELOG discipline. The **1.0 must-have /
-won't-have** contract and ordered post-1.0 themes live in
+The **1.0 must-have / won't-have** contract and ordered post-1.0 themes live in
 [docs/decisions/0004-v1-contract.md](docs/decisions/0004-v1-contract.md)
 (medium 1.0: library + serve + park/resume + harvest; not a SaaS control plane).
+Freeze-core surfaces follow semver from crate `1.0.0`.
 6. **Local scratch, external truth.** Harness state holds workspaces and
    logs; durable operational facts belong to the governance plane when used.
 7. **Safe tool defaults.** Bash and high-risk tools are opt-in via settings.
@@ -68,6 +68,7 @@ won't-have** contract and ordered post-1.0 themes live in
 
 ## Status
 
-Early pre-1.0. Boundaries in [DESIGN.md](DESIGN.md) and
-[ADR 0001](docs/decisions/0001-ports-and-settings.md) are the architectural
-source of truth while APIs stabilize.
+**1.0** (medium contract). Boundaries in [DESIGN.md](DESIGN.md) and
+[ADR 0001](docs/decisions/0001-ports-and-settings.md) remain the architectural
+source of truth; freeze-core vs evolving surfaces are listed in
+[docs/embedding.md](docs/embedding.md) and ADR 0004.
