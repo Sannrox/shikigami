@@ -12,7 +12,7 @@ use crate::checkpoint::{self, Checkpoint, CheckpointError, ParkedState};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
-use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage, ToolCall};
+use crate::model::{ChatMessage, CostEstimate, ModelError, ModelPort, TokenUsage, ToolCall};
 use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 use tokio::sync::Semaphore;
@@ -124,6 +124,8 @@ pub struct RunResult {
     pub prompt_id: String,
     /// Aggregated token usage when reported by model turns (zeros if unknown).
     pub usage: TokenUsage,
+    /// Cost estimate when both model cost rates are configured; otherwise `None`.
+    pub cost: Option<CostEstimate>,
     /// Final run-scoped todo checklist (empty if never set).
     pub todos: Vec<TodoItem>,
 }
@@ -750,6 +752,12 @@ impl Engine {
             summary: final_summary.clone(),
         });
 
+        let cost = CostEstimate::from_usage_and_rates(
+            usage,
+            self.config.model.input_usd_micros_per_mtok,
+            self.config.model.output_usd_micros_per_mtok,
+        );
+
         Ok(RunResult {
             run_id,
             success,
@@ -760,6 +768,7 @@ impl Engine {
             park: park_info,
             prompt_id,
             usage,
+            cost,
             todos: tools.todos(),
         })
     }
