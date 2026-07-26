@@ -66,12 +66,27 @@ clean tree.
 
 1. Add focused deterministic tests while implementing.
 2. Run `verify-change` and retain exact commands, results, skips, and remaining
-   uncertainty.
-3. Run `autoreview` before committing. Fix actionable findings and rerun the
-   relevant checks until no material finding remains or a documented blocker
-   requires maintainer judgment.
+   uncertainty. At minimum for ship: `cargo fmt --check`, focused/`cargo test`,
+   and `cargo clippy --all-targets -- -D warnings` (offline; no plane required).
+3. Run **`autoreview` before committing** (or before push if already committed).
+   Use the **project-local** helper—do not skip because CI is green:
+
+   ```bash
+   export AUTOREVIEW=".agents/skills/autoreview/scripts/autoreview"
+   # After commit on a topic branch (preferred):
+   "$AUTOREVIEW" --mode branch --base origin/main
+   # Uncommitted work only:
+   "$AUTOREVIEW" --mode local
+   ```
+
+   Read `.agents/skills/autoreview/SKILL.md` for engines, findings policy, and
+   when to stop. Fix actionable findings; rerun tests and autoreview until the
+   helper exits 0 with no accepted/actionable findings, or document a
+   maintainer-judgment blocker in the PR body.
 4. Inspect the final diff for scope, generated artifacts, secrets, and
    accidental runtime state.
+5. In the PR description (or implement-only handoff), report verify-change
+   evidence **and** the autoreview command + clean/fixed/rejected outcome.
 
 ### 5. Publish when authorized
 
@@ -107,7 +122,7 @@ Return:
 - Issue and authority ceiling;
 - branch, commit, and Pull Request when created;
 - implemented outcome;
-- verification and review evidence;
+- verification evidence (commands + results) and autoreview closeout;
 - merge state and newly available follow-up work when applicable;
 - blockers, skipped checks, and remaining uncertainty.
 

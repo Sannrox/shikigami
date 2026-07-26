@@ -8,6 +8,12 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Agent closeout: project-local `autoreview` skill plus `AGENTS.md` /
+  `deliver-ready-issue` requirements so structured review is mandatory before
+  ship (parity with sekai-chisei delivery practice).
+
 ## [0.2.0] — 2026-07-26
 
 Coding-agent parity and host surfaces on the headless harness core.

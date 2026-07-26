@@ -55,3 +55,10 @@ Report:
 - remaining uncertainty.
 
 Never use “all tests pass” unless all stated tests actually ran and passed.
+
+## Relationship to autoreview
+
+`verify-change` is **deterministic** local evidence only. It does **not** replace
+structured second-model review. For non-trivial code that will be committed or
+opened as a PR, run the `autoreview` Skill after verify-change and before ship
+(see `AGENTS.md` “Agent delivery closeout” and `deliver-ready-issue`).
