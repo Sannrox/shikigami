@@ -69,14 +69,28 @@ command = "mock"          # offline mock: registers mcp.demo.echo
 args = []
 ```
 
-For a real server:
+For a real stdio server:
 
 ```toml
 [[tools.mcp_servers]]
 name = "filesystem"
+transport = "stdio"       # default
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 ```
+
+HTTP JSON-RPC (POST) transport:
+
+```toml
+[[tools.mcp_servers]]
+name = "remote"
+transport = "http"
+url = "https://mcp.example.com/mcp"
+token_env = "MCP_TOKEN"   # optional Bearer
+```
+
+HTTP URLs are checked with `[network]` egress (`deny` / `allowlist` / `unrestricted`).
+Timeouts are 30s. Full SSE streaming is not required for v1 list/call.
 
 ### Client security
 
