@@ -36,6 +36,10 @@ pub struct Checkpoint {
     pub completed_turns: u32,
     pub workspace: PathBuf,
     pub keep_workspace: bool,
+    /// Workspace adapter id at materialization (`directory`, `inplace`, …).
+    /// Older checkpoints omit this field (default empty).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace_adapter: String,
     /// Present when the run is parked for operator input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub park: Option<ParkedState>,
@@ -128,6 +132,7 @@ mod tests {
             completed_turns: 1,
             workspace: runs.join("abc/workspace"),
             keep_workspace: true,
+            workspace_adapter: "directory".into(),
             park: None,
             todos: vec![],
         };
