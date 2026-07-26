@@ -8,7 +8,7 @@ structured results, cancellation hooks, or an in-process UI.
 | Rank | Surface | Status | Proof |
 | --- | --- | --- | --- |
 | 1 | Library `Harness` (in-repo) | **Primary** offline host; ADR 0004 embed path | `cargo run --locked --example embed_smoke` — **CI-gated** on PR/`main` |
-| 1b | Library `Harness` (external) | ADR 0004 **external** embed smoke | [`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke) — out-of-tree consumer on git tag `v0.2.0`, CI `cargo run --locked` |
+| 1b | Library `Harness` (external) | ADR 0004 **external** embed smoke | [`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke) — out-of-tree consumer on git tag `v1.0.0`, CI `cargo run --locked` |
 | 2 | CLI (`doctor` / `run` / `serve` / `export`) | Operator path; thin over the same core | Offline `examples/local-run.toml` demo in README |
 | 3 | MCP stdio server (`shikigami mcp`) | **Optional** host for MCP-native clients | [mcp.md](mcp.md) + [examples/mcp-host.example.json](../examples/mcp-host.example.json) |
 
