@@ -354,8 +354,12 @@ impl Engine {
         }
 
         let enabled = self.config.tools.effective_enabled();
-        let mut tools =
-            ToolRegistry::with_builtins(&ws.path, enabled, self.config.tools.bash_timeout_secs)?;
+        let mut tools = ToolRegistry::with_builtins(
+            &ws.path,
+            enabled,
+            self.config.tools.bash_timeout_secs,
+            self.config.network.clone(),
+        )?;
         tools.set_todos(initial_todos);
         if !self.config.tools.mcp_servers.is_empty() {
             crate::mcp::attach_mcp_servers(&mut tools, &self.config).await?;

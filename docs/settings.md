@@ -106,6 +106,9 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 Coding default includes `todo_write` (run-scoped checklist; max 32 items).
 It is **not** a plane work-unit API and does not replace `escalate`/park.
 
+`web_fetch` is **opt-in only** (not in coding default or mode presets). Add it via
+`tools.enabled` (custom mode or intersect). See [network.md](network.md).
+
 Modes are host policy, not an OS sandbox.
 
 ### `[context]`
