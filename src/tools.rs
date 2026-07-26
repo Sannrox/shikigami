@@ -28,6 +28,8 @@ const WEB_FETCH_MAX_REDIRECTS: usize = 5;
 const MAX_APPLY_PATCH_BYTES: usize = 64 * 1024;
 const MAX_APPLY_PATCH_HUNKS: usize = 32;
 const MAX_APPLY_PATCH_FILES: usize = 16;
+const MAX_BG_JOBS: usize = 4;
+const MAX_BG_LOG_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
@@ -188,6 +190,21 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             r#"{"type":"object","properties":{"command":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["command"]}"#,
         ),
         def(
+            "bash_background",
+            "Start a background shell command in the workspace; returns job_id. Poll with bash_job_status / bash_job_logs. Jobs are killed when the run ends.",
+            r#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}"#,
+        ),
+        def(
+            "bash_job_status",
+            "Status of a background bash job (running|exited|unknown).",
+            r#"{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}"#,
+        ),
+        def(
+            "bash_job_logs",
+            "Tail combined stdout/stderr of a background bash job (capped).",
+            r#"{"type":"object","properties":{"job_id":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["job_id"]}"#,
+        ),
+        def(
             "report",
             "Finish the run with a structured summary. Must be the only call in the batch.",
             r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
@@ -325,6 +342,26 @@ pub struct ToolRegistry {
     todos: Arc<Mutex<Vec<TodoItem>>>,
     network: NetworkSettings,
     web_fetcher: Arc<dyn WebFetcher>,
+    bg_jobs: Arc<Mutex<BackgroundJobs>>,
+}
+
+struct BackgroundJobs {
+    next_id: u64,
+    jobs: std::collections::HashMap<String, BgJob>,
+}
+
+struct BgJob {
+    child: tokio::process::Child,
+    log_path: PathBuf,
+}
+
+impl BackgroundJobs {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            jobs: std::collections::HashMap::new(),
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -357,7 +394,27 @@ impl ToolRegistry {
             todos: Arc::new(Mutex::new(Vec::new())),
             network,
             web_fetcher,
+            bg_jobs: Arc::new(Mutex::new(BackgroundJobs::new())),
         })
+    }
+
+    /// Kill all background bash jobs (run end cleanup).
+    pub async fn kill_background_jobs(&self) {
+        let children: Vec<tokio::process::Child> = {
+            let mut guard = match self.bg_jobs.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard
+                .jobs
+                .drain()
+                .map(|(_id, job)| job.child)
+                .collect()
+        };
+        for mut child in children {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
     }
 
     /// Override the HTTP client (offline tests).
@@ -383,7 +440,16 @@ impl ToolRegistry {
 
     /// Model-facing tool definitions for enabled builtins + external tools.
     pub fn definitions(&self) -> Vec<ToolDef> {
-        let mut defs = definitions_for_enabled(&self.executor.enabled);
+        let mut enabled = self.executor.enabled.clone();
+        // Background job tools share bash authority.
+        if enabled.iter().any(|e| e == "bash") {
+            for extra in ["bash_background", "bash_job_status", "bash_job_logs"] {
+                if !enabled.iter().any(|e| e == extra) {
+                    enabled.push(extra.into());
+                }
+            }
+        }
+        let mut defs = definitions_for_enabled(&enabled);
         for t in &self.external {
             defs.push(t.definition());
         }
@@ -422,10 +488,124 @@ impl ToolRegistry {
             let text = self.web_fetch(args_json).await?;
             return Ok(ToolOutput::Text(text));
         }
+        if matches!(
+            name,
+            "bash_background" | "bash_job_status" | "bash_job_logs"
+        ) {
+            // Same authority as bash: require bash in the allow-list.
+            if !self.executor.enabled.iter().any(|e| e == "bash") {
+                return Err(ToolError::Disabled(name.into()));
+            }
+            let text = match name {
+                "bash_background" => self.bash_background(args_json).await?,
+                "bash_job_status" => self.bash_job_status(args_json).await?,
+                "bash_job_logs" => self.bash_job_logs(args_json)?,
+                _ => unreachable!(),
+            };
+            return Ok(ToolOutput::Text(text));
+        }
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
             return Ok(ToolOutput::Text(t.call(args_json).await?));
         }
         self.executor.execute(name, args_json).await
+    }
+
+    async fn bash_background(&self, args_json: &str) -> Result<String, ToolError> {
+        let args: BashArgs = parse("bash_background", args_json)?;
+        let mut guard = self
+            .bg_jobs
+            .lock()
+            .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
+        if guard.jobs.len() >= MAX_BG_JOBS {
+            return Err(ToolError::Message(format!(
+                "bash_background: at most {MAX_BG_JOBS} concurrent jobs"
+            )));
+        }
+        let job_id = format!("job-{}", guard.next_id);
+        guard.next_id += 1;
+        let log_dir = self.executor.workspace.join(".shikigami/jobs");
+        std::fs::create_dir_all(&log_dir)?;
+        let log_path = log_dir.join(format!("{job_id}.log"));
+        let log_file = std::fs::File::create(&log_path)?;
+        let stdout = Stdio::from(log_file.try_clone()?);
+        let stderr = Stdio::from(log_file);
+        let child = Command::new("bash")
+            .arg("-lc")
+            .arg(&args.command)
+            .current_dir(&self.executor.workspace)
+            .stdout(stdout)
+            .stderr(stderr)
+            .kill_on_drop(true)
+            .spawn()?;
+        guard.jobs.insert(
+            job_id.clone(),
+            BgJob {
+                child,
+                log_path: log_path.clone(),
+            },
+        );
+        Ok(format!("job_id={job_id}\nlog={}", log_path.display()))
+    }
+
+    async fn bash_job_status(&self, args_json: &str) -> Result<String, ToolError> {
+        #[derive(Deserialize)]
+        struct Args {
+            job_id: String,
+        }
+        let args: Args = parse("bash_job_status", args_json)?;
+        let mut guard = self
+            .bg_jobs
+            .lock()
+            .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
+        let Some(job) = guard.jobs.get_mut(&args.job_id) else {
+            return Ok(format!("job_id={} status=unknown", args.job_id));
+        };
+        match job.child.try_wait() {
+            Ok(Some(status)) => Ok(format!(
+                "job_id={} status=exited code={}",
+                args.job_id,
+                status.code().unwrap_or(-1)
+            )),
+            Ok(None) => Ok(format!("job_id={} status=running", args.job_id)),
+            Err(e) => Err(ToolError::Message(format!("bash_job_status: {e}"))),
+        }
+    }
+
+    fn bash_job_logs(&self, args_json: &str) -> Result<String, ToolError> {
+        #[derive(Deserialize)]
+        struct Args {
+            job_id: String,
+            max_bytes: Option<usize>,
+        }
+        let args: Args = parse("bash_job_logs", args_json)?;
+        let max = args
+            .max_bytes
+            .unwrap_or(MAX_BG_LOG_BYTES)
+            .clamp(1, MAX_BG_LOG_BYTES);
+        let guard = self
+            .bg_jobs
+            .lock()
+            .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
+        let Some(job) = guard.jobs.get(&args.job_id) else {
+            return Err(ToolError::Message(format!(
+                "bash_job_logs: unknown job {}",
+                args.job_id
+            )));
+        };
+        let data = std::fs::read(&job.log_path)?;
+        let slice = if data.len() > max {
+            &data[data.len() - max..]
+        } else {
+            &data[..]
+        };
+        let mut text = String::from_utf8_lossy(slice).into_owned();
+        if data.len() > max {
+            text = format!("…[truncated]\n{text}");
+        }
+        if text.is_empty() {
+            text = "(empty)".into();
+        }
+        Ok(text)
     }
 
     async fn web_fetch(&self, args_json: &str) -> Result<String, ToolError> {
@@ -1311,6 +1491,57 @@ fn parse<T: for<'de> Deserialize<'de>>(tool: &str, raw: &str) -> Result<T, ToolE
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn background_bash_job_poll_and_logs() {
+        let dir = tempdir().unwrap();
+        let reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["bash".into()],
+            30,
+            NetworkSettings::default(),
+        )
+        .unwrap();
+        let start = reg
+            .execute(
+                "bash_background",
+                r#"{"command":"printf 'hello-bg\\n'; sleep 0.2; printf 'done\\n'"}"#,
+            )
+            .await
+            .unwrap();
+        let ToolOutput::Text(start_text) = start else {
+            panic!("text");
+        };
+        let job_id = start_text
+            .lines()
+            .find_map(|l| l.strip_prefix("job_id="))
+            .expect("job_id line")
+            .to_string();
+        // Poll until exited
+        let mut status = String::new();
+        for _ in 0..50 {
+            let s = reg
+                .execute("bash_job_status", &format!(r#"{{"job_id":"{job_id}"}}"#))
+                .await
+                .unwrap();
+            let ToolOutput::Text(t) = s else { panic!() };
+            status = t;
+            if status.contains("exited") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(status.contains("exited"), "{status}");
+        let logs = reg
+            .execute("bash_job_logs", &format!(r#"{{"job_id":"{job_id}"}}"#))
+            .await
+            .unwrap();
+        let ToolOutput::Text(log_text) = logs else {
+            panic!()
+        };
+        assert!(log_text.contains("hello-bg"), "{log_text}");
+        reg.kill_background_jobs().await;
+    }
 
     #[tokio::test]
     async fn todo_write_caps_and_round_trip() {

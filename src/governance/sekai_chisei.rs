@@ -142,7 +142,7 @@ impl SekaiChiseiGovernance {
     /// Map a shikigami tool to the external-action risk class contract.
     pub(crate) fn tool_risk_class(name: &str) -> &'static str {
         match name {
-            "bash" => "destructive",
+            "bash" | "bash_background" | "bash_job_status" | "bash_job_logs" => "destructive",
             "write_file" | "edit" | "multi_edit" | "apply_patch" => "write",
             "read_file" | "glob" | "grep" | "web_fetch" => "read",
             _ => "write",
