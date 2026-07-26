@@ -671,6 +671,16 @@ impl Engine {
                                 ok: false,
                                 detail: detail.clone(),
                             });
+                            let _ = hooks::run_hooks(
+                                &self.config.hooks,
+                                HookEvent::OnPark,
+                                json!({
+                                    "run_id": run_id,
+                                    "reason": park.reason,
+                                    "question": park.question,
+                                }),
+                            )
+                            .await;
                             let parked = ParkedState {
                                 reason: park.reason.clone(),
                                 question: park.question.clone(),
