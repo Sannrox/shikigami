@@ -154,6 +154,11 @@ pub struct ToolsSettings {
     pub mode: PermissionMode,
     #[serde(default = "default_bash_timeout")]
     pub bash_timeout_secs: u64,
+    /// When true (default), `glob`/`grep` honor built-in defaults plus
+    /// workspace `.gitignore` and `.shikigamiignore`. `read_file` of an
+    /// explicit path is never blocked by ignore rules.
+    #[serde(default = "default_respect_ignore")]
+    pub respect_ignore: bool,
     /// MCP servers whose tools are registered as `mcp.<name>.<tool>`.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerSettings>,
@@ -174,12 +179,17 @@ fn default_bash_timeout() -> u64 {
     60
 }
 
+fn default_respect_ignore() -> bool {
+    true
+}
+
 impl Default for ToolsSettings {
     fn default() -> Self {
         Self {
             enabled: Vec::new(),
             mode: PermissionMode::Custom,
             bash_timeout_secs: default_bash_timeout(),
+            respect_ignore: default_respect_ignore(),
             mcp_servers: Vec::new(),
         }
     }

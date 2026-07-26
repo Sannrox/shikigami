@@ -33,6 +33,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   as JSONL from checkpoint (`schema_version` = 1).
 - Concurrent execution of parallel-safe tool batches (`run.tool_concurrency`);
   writes remain serial; results ordered by call index.
+- `tools.respect_ignore` (default true): glob/grep honor built-ins +
+  `.gitignore` / `.shikigamiignore`; explicit `read_file` still allowed.
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
