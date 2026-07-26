@@ -37,6 +37,7 @@ pub mod run;
 pub mod serve;
 pub mod state;
 pub mod tools;
+pub mod transcript;
 pub mod workspace;
 
 pub use config::{Config, ConfigSource, EgressMode, McpServerSettings, PermissionMode};
@@ -51,6 +52,9 @@ pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{QueueJob, QueueLayout, ServeOptions};
 pub use state::{StateError, StateRoot};
 pub use tools::{TodoItem, TodoStatus};
+pub use transcript::{
+    ExportOptions, TRANSCRIPT_SCHEMA_VERSION, TranscriptError, export_run_transcript,
+};
 
 /// Library liveness probe.
 pub fn ping() -> PingResponse {
