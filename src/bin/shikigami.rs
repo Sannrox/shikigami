@@ -213,9 +213,11 @@ async fn run() -> anyhow::Result<()> {
         }
         Command::Mcp => {
             // Protocol uses stdout; keep diagnostics on stderr only.
-            eprintln!("{PRODUCT} mcp server (stdio) — tools: doctor, run");
+            eprintln!(
+                "{PRODUCT} mcp server (stdio) — tools: doctor, run, run_start, run_status, run_wait"
+            );
             let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
-            shikigami::mcp_server::run_stdio(&harness)
+            shikigami::mcp_server::run_stdio(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
