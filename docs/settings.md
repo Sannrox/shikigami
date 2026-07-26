@@ -99,9 +99,12 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | Mode | Effective tools (before optional `enabled` intersect) |
 | --- | --- |
 | `custom` | `enabled` if set, else coding default (writes/search, **no** bash) |
-| `read` | `read_file`, `glob`, `grep`, `report`, `escalate` |
+| `read` | `read_file`, `glob`, `grep`, `todo_write`, `report`, `escalate` |
 | `workspace` | coding default (no bash) |
 | `workspace_exec` | coding default + `bash` |
+
+Coding default includes `todo_write` (run-scoped checklist; max 32 items).
+It is **not** a plane work-unit API and does not replace `escalate`/park.
 
 Modes are host policy, not an OS sandbox.
 

@@ -47,6 +47,12 @@ pub enum HarnessEvent {
         before: usize,
         after: usize,
     },
+    /// Run-scoped todo checklist was replaced via `todo_write`.
+    TodosUpdated {
+        /// Compact summary (counts + lines); full items live on checkpoint / RunResult.
+        summary: String,
+        item_count: usize,
+    },
 }
 
 pub trait EventSink: Send + Sync {

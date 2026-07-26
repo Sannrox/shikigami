@@ -2,9 +2,10 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -14,6 +15,10 @@ const MAX_BASH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 200;
 const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_WALK_FILES: usize = 5_000;
+/// Hard caps for run-scoped todo lists (untrusted model text).
+pub const MAX_TODO_ITEMS: usize = 32;
+pub const MAX_TODO_CONTENT_CHARS: usize = 512;
+pub const MAX_TODO_ID_CHARS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
@@ -38,6 +43,35 @@ pub struct ParkRequest {
     /// Question or decision for the operator (may equal reason).
     #[serde(default)]
     pub question: String,
+}
+
+/// Status of one run-scoped todo item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl TodoStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// One checklist item for a run (not a plane work-unit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: TodoStatus,
 }
 
 #[derive(Debug, Error)]
@@ -147,6 +181,11 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             "Park the headless run and ask an operator a question. Must be the only call in the batch. Resume later with an answer.",
             r#"{"type":"object","properties":{"reason":{"type":"string"},"question":{"type":"string"}},"required":["reason"]}"#,
         ),
+        def(
+            "todo_write",
+            "Replace the run-scoped todo checklist (max 32 items). Not a substitute for escalate/park or plane work-units. Persist across checkpoint resume.",
+            r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]}},"required":["id","content","status"]}}},"required":["items"]}"#,
+        ),
     ]
 }
 
@@ -168,6 +207,8 @@ pub trait ExternalTool: Send + Sync {
 pub struct ToolRegistry {
     executor: ToolExecutor,
     external: Vec<std::sync::Arc<dyn ExternalTool>>,
+    /// Run-scoped checklist (shared; updated by `todo_write`).
+    todos: Arc<Mutex<Vec<TodoItem>>>,
 }
 
 impl ToolRegistry {
@@ -180,11 +221,24 @@ impl ToolRegistry {
         Ok(Self {
             executor: ToolExecutor::new(workspace, enabled, bash_timeout_secs)?,
             external: Vec::new(),
+            todos: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
     pub fn register_external(&mut self, tool: std::sync::Arc<dyn ExternalTool>) {
         self.external.push(tool);
+    }
+
+    /// Replace the in-memory todo list (e.g. when resuming a checkpoint).
+    pub fn set_todos(&self, items: Vec<TodoItem>) {
+        if let Ok(mut guard) = self.todos.lock() {
+            *guard = items;
+        }
+    }
+
+    /// Snapshot of the current run-scoped todo list.
+    pub fn todos(&self) -> Vec<TodoItem> {
+        self.todos.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Model-facing tool definitions for enabled builtins + external tools.
@@ -206,11 +260,96 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
+        if name == "todo_write" {
+            if !self.executor.enabled.iter().any(|e| e == name) {
+                return Err(ToolError::Disabled(name.into()));
+            }
+            let items = apply_todo_write(args_json)?;
+            {
+                let mut guard = self
+                    .todos
+                    .lock()
+                    .map_err(|_| ToolError::Message("todo list lock poisoned".into()))?;
+                *guard = items.clone();
+            }
+            let summary = format_todo_summary(&items);
+            return Ok(ToolOutput::Text(summary));
+        }
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
             return Ok(ToolOutput::Text(t.call(args_json).await?));
         }
         self.executor.execute(name, args_json).await
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoWriteArgs {
+    items: Vec<TodoItemWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TodoItemWire {
+    id: String,
+    content: String,
+    status: String,
+}
+
+fn apply_todo_write(args_json: &str) -> Result<Vec<TodoItem>, ToolError> {
+    let args: TodoWriteArgs = parse("todo_write", args_json)?;
+    if args.items.len() > MAX_TODO_ITEMS {
+        return Err(ToolError::Message(format!(
+            "todo_write: at most {MAX_TODO_ITEMS} items"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(args.items.len());
+    for raw in args.items {
+        let id = raw.id.trim().to_string();
+        if id.is_empty() || id.chars().count() > MAX_TODO_ID_CHARS {
+            return Err(ToolError::Message(format!(
+                "todo_write: id must be 1..{MAX_TODO_ID_CHARS} characters"
+            )));
+        }
+        if !seen.insert(id.clone()) {
+            return Err(ToolError::Message(format!(
+                "todo_write: duplicate id `{id}`"
+            )));
+        }
+        let content = raw.content.trim().to_string();
+        if content.is_empty() || content.chars().count() > MAX_TODO_CONTENT_CHARS {
+            return Err(ToolError::Message(format!(
+                "todo_write: content must be 1..{MAX_TODO_CONTENT_CHARS} characters"
+            )));
+        }
+        let status = match raw.status.as_str() {
+            "pending" => TodoStatus::Pending,
+            "in_progress" => TodoStatus::InProgress,
+            "completed" => TodoStatus::Completed,
+            "cancelled" => TodoStatus::Cancelled,
+            other => {
+                return Err(ToolError::Message(format!(
+                    "todo_write: invalid status `{other}`"
+                )));
+            }
+        };
+        out.push(TodoItem {
+            id,
+            content,
+            status,
+        });
+    }
+    Ok(out)
+}
+
+fn format_todo_summary(items: &[TodoItem]) -> String {
+    if items.is_empty() {
+        return "todos: (empty)".into();
+    }
+    let mut lines = vec![format!("todos: {} item(s)", items.len())];
+    for t in items {
+        lines.push(format!("- [{}] {}: {}", t.status.as_str(), t.id, t.content));
+    }
+    lines.join("\n")
 }
 
 /// Definitions for an allow-list against the builtin catalog.
@@ -730,6 +869,44 @@ fn parse<T: for<'de> Deserialize<'de>>(tool: &str, raw: &str) -> Result<T, ToolE
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn todo_write_caps_and_round_trip() {
+        let dir = tempdir().unwrap();
+        let reg = ToolRegistry::with_builtins(dir.path(), vec!["todo_write".into()], 30).unwrap();
+        let out = reg
+            .execute(
+                "todo_write",
+                r#"{"items":[{"id":"1","content":"first","status":"pending"},{"id":"2","content":"second","status":"in_progress"}]}"#,
+            )
+            .await
+            .unwrap();
+        match out {
+            ToolOutput::Text(t) => {
+                assert!(t.contains("2 item"), "{t}");
+                assert!(t.contains("first"), "{t}");
+            }
+            _ => panic!("expected text"),
+        }
+        assert_eq!(reg.todos().len(), 2);
+        assert_eq!(reg.todos()[1].status, TodoStatus::InProgress);
+
+        let err = reg
+            .execute(
+                "todo_write",
+                r#"{"items":[{"id":"a","content":"x","status":"pending"},{"id":"a","content":"y","status":"pending"}]}"#,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+
+        let too_many: Vec<String> = (0..MAX_TODO_ITEMS + 1)
+            .map(|i| format!(r#"{{"id":"{i}","content":"c","status":"pending"}}"#))
+            .collect();
+        let payload = format!(r#"{{"items":[{}]}}"#, too_many.join(","));
+        let err = reg.execute("todo_write", &payload).await.unwrap_err();
+        assert!(err.to_string().contains("at most"), "{err}");
+    }
 
     #[tokio::test]
     async fn write_read_edit_report() {

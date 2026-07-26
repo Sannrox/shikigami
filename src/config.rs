@@ -195,6 +195,7 @@ impl ToolsSettings {
             "multi_edit".into(),
             "glob".into(),
             "grep".into(),
+            "todo_write".into(),
             "report".into(),
             "escalate".into(),
         ]
@@ -207,6 +208,7 @@ impl ToolsSettings {
                 "read_file".into(),
                 "glob".into(),
                 "grep".into(),
+                "todo_write".into(),
                 "report".into(),
                 "escalate".into(),
             ],

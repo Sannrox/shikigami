@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
 use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage};
-use crate::tools::{self, ToolError, ToolOutput, ToolRegistry};
+use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
@@ -122,6 +122,8 @@ pub struct RunResult {
     pub prompt_id: String,
     /// Aggregated token usage when reported by model turns (zeros if unknown).
     pub usage: TokenUsage,
+    /// Final run-scoped todo checklist (empty if never set).
+    pub todos: Vec<TodoItem>,
 }
 
 /// Operator-visible park payload (library + CLI).
@@ -204,6 +206,7 @@ impl Engine {
         workspace: &Path,
         keep_workspace: bool,
         park: Option<ParkedState>,
+        todos: Vec<TodoItem>,
     ) -> Result<(), RunError> {
         let cp = Checkpoint {
             version: checkpoint::CHECKPOINT_VERSION,
@@ -215,6 +218,7 @@ impl Engine {
             workspace: workspace.to_path_buf(),
             keep_workspace,
             park,
+            todos,
         };
         cp.save(&self.state_runs)?;
         Ok(())
@@ -226,82 +230,83 @@ impl Engine {
             .timeout
             .or_else(|| self.config.run.timeout_secs.map(Duration::from_secs));
 
-        let (run_id, mut messages, mut turns, ws, task, keep_workspace) = if let Some(resume_id) =
-            &request.resume_run_id
-        {
-            let cp = Checkpoint::load(&self.state_runs, resume_id)?;
-            cp.validate_prompt(SYSTEM_PROMPT)?;
-            if !cp.workspace.is_dir() {
-                return Err(RunError::Message(format!(
-                    "checkpoint workspace missing: {}",
-                    cp.workspace.display()
-                )));
-            }
-            self.events.emit(HarnessEvent::Status {
-                status: "resuming".into(),
-            });
-            let ws = MaterializedWorkspace {
-                path: cp.workspace.clone(),
-                adapter: "resumed".into(),
-                cleanup: if cp.keep_workspace {
-                    WorkspaceCleanup::None
+        let (run_id, mut messages, mut turns, ws, task, keep_workspace, initial_todos) =
+            if let Some(resume_id) = &request.resume_run_id {
+                let cp = Checkpoint::load(&self.state_runs, resume_id)?;
+                cp.validate_prompt(SYSTEM_PROMPT)?;
+                if !cp.workspace.is_dir() {
+                    return Err(RunError::Message(format!(
+                        "checkpoint workspace missing: {}",
+                        cp.workspace.display()
+                    )));
+                }
+                self.events.emit(HarnessEvent::Status {
+                    status: "resuming".into(),
+                });
+                let ws = MaterializedWorkspace {
+                    path: cp.workspace.clone(),
+                    adapter: "resumed".into(),
+                    cleanup: if cp.keep_workspace {
+                        WorkspaceCleanup::None
+                    } else {
+                        WorkspaceCleanup::RemoveDir
+                    },
+                };
+                let task = if request.task.is_empty() {
+                    cp.task.clone()
                 } else {
-                    WorkspaceCleanup::RemoveDir
-                },
-            };
-            let task = if request.task.is_empty() {
-                cp.task.clone()
-            } else {
-                request.task.clone()
-            };
-            let mut messages = cp.messages;
-            if let Some(park) = &cp.park {
-                let answer = request.resume_answer.as_ref().ok_or_else(|| {
+                    request.task.clone()
+                };
+                let mut messages = cp.messages;
+                if let Some(park) = &cp.park {
+                    let answer = request.resume_answer.as_ref().ok_or_else(|| {
                         RunError::Message(format!(
                             "run {resume_id} is parked (reason: {}); supply resume_answer / --answer to continue",
                             park.reason
                         ))
                     })?;
-                messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: format!("operator answer: {answer}"),
-                    tool_call_id: park.tool_call_id.clone(),
-                    tool_calls: vec![],
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: format!("operator answer: {answer}"),
+                        tool_call_id: park.tool_call_id.clone(),
+                        tool_calls: vec![],
+                    });
+                } else if request.resume_answer.is_some() {
+                    return Err(RunError::Message(
+                        "resume_answer provided but run is not parked".into(),
+                    ));
+                }
+                (
+                    cp.run_id,
+                    messages,
+                    cp.completed_turns,
+                    ws,
+                    task,
+                    cp.keep_workspace || request.keep_workspace,
+                    cp.todos,
+                )
+            } else {
+                let run_id = Uuid::new_v4().to_string();
+                self.events.emit(HarnessEvent::Status {
+                    status: "starting".into(),
                 });
-            } else if request.resume_answer.is_some() {
-                return Err(RunError::Message(
-                    "resume_answer provided but run is not parked".into(),
-                ));
-            }
-            (
-                cp.run_id,
-                messages,
-                cp.completed_turns,
-                ws,
-                task,
-                cp.keep_workspace || request.keep_workspace,
-            )
-        } else {
-            let run_id = Uuid::new_v4().to_string();
-            self.events.emit(HarnessEvent::Status {
-                status: "starting".into(),
-            });
-            let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
-            let messages = vec![ChatMessage {
-                role: "user".into(),
-                content: request.task.clone(),
-                tool_call_id: String::new(),
-                tool_calls: vec![],
-            }];
-            (
-                run_id,
-                messages,
-                0u32,
-                ws,
-                request.task.clone(),
-                request.keep_workspace,
-            )
-        };
+                let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
+                let messages = vec![ChatMessage {
+                    role: "user".into(),
+                    content: request.task.clone(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![],
+                }];
+                (
+                    run_id,
+                    messages,
+                    0u32,
+                    ws,
+                    request.task.clone(),
+                    request.keep_workspace,
+                    Vec::new(),
+                )
+            };
 
         let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
         let project_rules = crate::context::load_project_rules(&ws.path, &self.config.context);
@@ -351,6 +356,7 @@ impl Engine {
         let enabled = self.config.tools.effective_enabled();
         let mut tools =
             ToolRegistry::with_builtins(&ws.path, enabled, self.config.tools.bash_timeout_secs)?;
+        tools.set_todos(initial_todos);
         if !self.config.tools.mcp_servers.is_empty() {
             crate::mcp::attach_mcp_servers(&mut tools, &self.config).await?;
         }
@@ -371,6 +377,7 @@ impl Engine {
             &ws.path,
             keep_workspace,
             None,
+            tools.todos(),
         )?;
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
@@ -430,6 +437,7 @@ impl Engine {
                     &ws.path,
                     keep_workspace,
                     None,
+                    tools.todos(),
                 )?;
 
                 if turn.tool_calls.is_empty() {
@@ -465,6 +473,7 @@ impl Engine {
                         &ws.path,
                         keep_workspace,
                         None,
+                        tools.todos(),
                     )?;
                     continue;
                 }
@@ -506,6 +515,13 @@ impl Engine {
                                 .governance
                                 .report_tool(&handle, &call.name, true, &text)
                                 .await;
+                            if call.name == "todo_write" {
+                                let items = tools.todos();
+                                self.events.emit(HarnessEvent::TodosUpdated {
+                                    summary: text.chars().take(500).collect(),
+                                    item_count: items.len(),
+                                });
+                            }
                             self.events.emit(HarnessEvent::ToolEnd {
                                 name: call.name.clone(),
                                 ok: true,
@@ -545,6 +561,7 @@ impl Engine {
                                 &ws.path,
                                 keep_workspace,
                                 None,
+                                tools.todos(),
                             )?;
                             return Ok(None);
                         }
@@ -581,6 +598,7 @@ impl Engine {
                                 &ws.path,
                                 true, // always keep workspace while parked
                                 Some(parked),
+                                tools.todos(),
                             )?;
                             return Ok(Some(info));
                         }
@@ -612,6 +630,7 @@ impl Engine {
                     &ws.path,
                     keep_workspace,
                     None,
+                    tools.todos(),
                 )?;
             }
             Ok(None)
@@ -628,9 +647,14 @@ impl Engine {
             Err(e) => {
                 let summary = e.to_string();
                 let _ = self.save_checkpoint(
-                    &run_id, &task, &messages, turns, &ws.path,
+                    &run_id,
+                    &task,
+                    &messages,
+                    turns,
+                    &ws.path,
                     true, // keep workspace on failure for resume/inspection
                     None,
+                    tools.todos(),
                 );
                 let _ = self
                     .governance
@@ -689,6 +713,7 @@ impl Engine {
             park: park_info,
             prompt_id,
             usage,
+            todos: tools.todos(),
         })
     }
 }
@@ -886,6 +911,114 @@ mod tests {
         assert_eq!(result.run_id, run_id);
         assert!(result.workspace.join("partial.txt").is_file());
         assert_eq!(result.summary, "resumed ok");
+    }
+
+    #[tokio::test]
+    async fn todo_write_survives_checkpoint_resume() {
+        use crate::tools::TodoStatus;
+
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+
+        let mut config = base_config(&dir);
+        config.run.max_turns = 1;
+        let model = ScriptedModel::from_turns(vec![ModelTurn {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "t1".into(),
+                name: "todo_write".into(),
+                args_json:
+                    r#"{"items":[{"id":"a","content":"ship feature","status":"in_progress"}]}"#
+                        .into(),
+            }],
+            usage: None,
+        }]);
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::new(model),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config: config.clone(),
+            state_runs: state.runs_dir(),
+        };
+        let err = eng
+            .run(RunRequest {
+                task: "with todos".into(),
+                keep_workspace: true,
+                timeout: None,
+                cancel: None,
+                resume_run_id: None,
+                logical_operation_id: None,
+                resume_answer: None,
+                restore_snapshot: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::MaxTurns(1)));
+
+        let runs = state.runs_dir();
+        let run_id = std::fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().join("checkpoint.json").is_file())
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .into_owned();
+        let cp = Checkpoint::load(&runs, &run_id).unwrap();
+        assert_eq!(cp.todos.len(), 1);
+        assert_eq!(cp.todos[0].id, "a");
+        assert_eq!(cp.todos[0].status, TodoStatus::InProgress);
+
+        let mut config2 = base_config(&dir);
+        config2.run.max_turns = 5;
+        let model2 = ScriptedModel::from_turns(vec![
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "t2".into(),
+                    name: "todo_write".into(),
+                    args_json:
+                        r#"{"items":[{"id":"a","content":"ship feature","status":"completed"}]}"#
+                            .into(),
+                }],
+                usage: None,
+            },
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "t3".into(),
+                    name: "report".into(),
+                    args_json: r#"{"summary":"todos done","success":true}"#.into(),
+                }],
+                usage: None,
+            },
+        ]);
+        let eng2 = Engine {
+            governance: Arc::from(governance::from_config(&config2).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config2).unwrap()),
+            model: Arc::new(model2),
+            events: Arc::from(events::from_config(&config2, &state.runs_dir()).unwrap()),
+            config: config2,
+            state_runs: state.runs_dir(),
+        };
+        let result = eng2
+            .run(RunRequest {
+                task: String::new(),
+                keep_workspace: true,
+                timeout: None,
+                cancel: None,
+                resume_run_id: Some(run_id),
+                logical_operation_id: None,
+                resume_answer: None,
+                restore_snapshot: None,
+            })
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.todos.len(), 1);
+        assert_eq!(result.todos[0].status, TodoStatus::Completed);
     }
 
     #[tokio::test]
