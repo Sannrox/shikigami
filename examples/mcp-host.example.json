@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "shikigami": {
+      "command": "shikigami",
+      "args": ["mcp"],
+      "env": {
+        "SHIKIGAMI_STATE": "/tmp/shikigami-mcp-state"
+      }
+    }
+  },
+  "_comment": "Example Cursor/Claude Desktop-style stdio MCP host config. Point command at a built shikigami binary on PATH or use an absolute path. Tools: doctor, run, run_start, run_status, run_wait. Headless-default product; this is an optional host surface."
+}

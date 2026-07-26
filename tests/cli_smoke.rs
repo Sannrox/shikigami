@@ -9,7 +9,10 @@ fn version_prints_product_identity() {
         .arg("version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("shikigami 0.1.0"));
+        .stdout(predicate::str::contains(format!(
+            "shikigami {}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 #[test]

@@ -7,12 +7,14 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | [`local-run.toml`](local-run.toml) | Offline profile: local governance + scripted model |
 | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Production-style plane wiring (needs a reachable sekai-chisei) |
 | [`tenkai-product.toml`](tenkai-product.toml) | Delivery manifest aligned with GitHub Release asset names |
+| [`embed_smoke.rs`](embed_smoke.rs) | Offline library host proof (`Harness` + events + export) |
 
 ## Offline demo
 
 ```bash
 cargo run --bin shikigami -- --config examples/local-run.toml doctor
 cargo run --bin shikigami -- --config examples/local-run.toml run "demo" --keep-workspace
+cargo run --example embed_smoke
 ```
 
 ## Governed doctor

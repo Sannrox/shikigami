@@ -152,7 +152,11 @@ impl SekaiChiseiGovernance {
     fn arguments_digest(args_json: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(args_json.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// Interpret an ExternalActionDecision for headless execution.

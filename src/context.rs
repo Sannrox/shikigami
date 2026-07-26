@@ -44,7 +44,10 @@ pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Optio
         if truncated {
             body.push_str("\n\n… [project rules truncated]\n");
         }
-        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        let digest = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         return Some(ProjectRules {
             filename: name.clone(),
             body,
@@ -99,7 +102,10 @@ pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPac
         if truncated {
             body.push_str("\n\n… [skill truncated]\n");
         }
-        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        let digest = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         out.push(SkillPack {
             id: id.clone(),
             body,
