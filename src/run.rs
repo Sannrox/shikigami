@@ -413,7 +413,7 @@ impl Engine {
             keep_workspace,
             None,
             tools.todos(),
-                    &ws.adapter,
+            &ws.adapter,
         )?;
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
@@ -511,7 +511,7 @@ impl Engine {
                         keep_workspace,
                         None,
                         tools.todos(),
-                    &ws.adapter,
+                        &ws.adapter,
                     )?;
                     continue;
                 }
@@ -671,7 +671,7 @@ impl Engine {
                                 keep_workspace,
                                 None,
                                 tools.todos(),
-                    &ws.adapter,
+                                &ws.adapter,
                             )?;
                             return Ok(None);
                         }
@@ -718,7 +718,7 @@ impl Engine {
                                 true,
                                 Some(parked),
                                 tools.todos(),
-                    &ws.adapter,
+                                &ws.adapter,
                             )?;
                             return Ok(Some(info));
                         }
@@ -786,7 +786,8 @@ impl Engine {
                     true, // keep workspace on failure for resume/inspection
                     None,
                     tools.todos(),
-                &ws.adapter,);
+                    &ws.adapter,
+                );
                 let _ = self
                     .governance
                     .complete_run(
