@@ -1,5 +1,6 @@
 //! Workspace-jailed tools for the agent loop.
 
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,8 @@ use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::config::NetworkSettings;
+
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_BASH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 200;
@@ -19,6 +22,9 @@ const MAX_WALK_FILES: usize = 5_000;
 pub const MAX_TODO_ITEMS: usize = 32;
 pub const MAX_TODO_CONTENT_CHARS: usize = 512;
 pub const MAX_TODO_ID_CHARS: usize = 64;
+const MAX_WEB_FETCH_BYTES: usize = 256 * 1024;
+const WEB_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+const WEB_FETCH_MAX_REDIRECTS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
@@ -186,7 +192,98 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             "Replace the run-scoped todo checklist (max 32 items). Not a substitute for escalate/park or plane work-units. Persist across checkpoint resume.",
             r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]}},"required":["id","content","status"]}}},"required":["items"]}"#,
         ),
+        def(
+            "web_fetch",
+            "HTTP(S) GET a URL and return truncated text (status, final URL, body). Opt-in tool; respects [network] egress. Blocks private/link-local targets. Not a browser.",
+            r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#,
+        ),
     ]
+}
+
+/// Pluggable HTTP GET for `web_fetch` (real client or offline mock).
+#[async_trait::async_trait]
+pub trait WebFetcher: Send + Sync {
+    async fn get(&self, url: &str) -> Result<WebFetchResponse, ToolError>;
+}
+
+/// Successful web_fetch HTTP result (before truncation formatting).
+#[derive(Debug, Clone)]
+pub struct WebFetchResponse {
+    pub status: u16,
+    pub final_url: String,
+    pub body: String,
+}
+
+/// Offline test fetcher: returns a fixed body for any allowed URL.
+pub struct MockWebFetcher {
+    pub status: u16,
+    pub body: String,
+}
+
+#[async_trait::async_trait]
+impl WebFetcher for MockWebFetcher {
+    async fn get(&self, url: &str) -> Result<WebFetchResponse, ToolError> {
+        Ok(WebFetchResponse {
+            status: self.status,
+            final_url: url.to_string(),
+            body: self.body.clone(),
+        })
+    }
+}
+
+/// Reqwest-backed fetcher (requires `model-http` feature).
+#[cfg(feature = "model-http")]
+pub struct ReqwestWebFetcher {
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "model-http")]
+impl ReqwestWebFetcher {
+    pub fn new() -> Result<Self, ToolError> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(WEB_FETCH_MAX_REDIRECTS))
+            .timeout(WEB_FETCH_TIMEOUT)
+            .user_agent(format!(
+                "shikigami/{} (web_fetch)",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .build()
+            .map_err(|e| ToolError::Message(format!("web_fetch client: {e}")))?;
+        Ok(Self { client })
+    }
+}
+
+#[cfg(feature = "model-http")]
+#[async_trait::async_trait]
+impl WebFetcher for ReqwestWebFetcher {
+    async fn get(&self, url: &str) -> Result<WebFetchResponse, ToolError> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| ToolError::Message(format!("web_fetch request failed: {e}")))?;
+        let status = resp.status().as_u16();
+        let final_url = resp.url().to_string();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ToolError::Message(format!("web_fetch body: {e}")))?;
+        let truncated = if bytes.len() > MAX_WEB_FETCH_BYTES {
+            &bytes[..MAX_WEB_FETCH_BYTES]
+        } else {
+            &bytes[..]
+        };
+        let mut body = String::from_utf8_lossy(truncated).into_owned();
+        if bytes.len() > MAX_WEB_FETCH_BYTES {
+            body.push_str("\n…[truncated]");
+        }
+        Ok(WebFetchResponse {
+            status,
+            final_url,
+            body,
+        })
+    }
 }
 
 /// Whether this tool must be the only call in a model batch.
@@ -209,6 +306,8 @@ pub struct ToolRegistry {
     external: Vec<std::sync::Arc<dyn ExternalTool>>,
     /// Run-scoped checklist (shared; updated by `todo_write`).
     todos: Arc<Mutex<Vec<TodoItem>>>,
+    network: NetworkSettings,
+    web_fetcher: Arc<dyn WebFetcher>,
 }
 
 impl ToolRegistry {
@@ -217,12 +316,21 @@ impl ToolRegistry {
         workspace: impl Into<PathBuf>,
         enabled: Vec<String>,
         bash_timeout_secs: u64,
+        network: NetworkSettings,
     ) -> Result<Self, ToolError> {
+        let web_fetcher = default_web_fetcher()?;
         Ok(Self {
             executor: ToolExecutor::new(workspace, enabled, bash_timeout_secs)?,
             external: Vec::new(),
             todos: Arc::new(Mutex::new(Vec::new())),
+            network,
+            web_fetcher,
         })
+    }
+
+    /// Override the HTTP client (offline tests).
+    pub fn set_web_fetcher(&mut self, fetcher: Arc<dyn WebFetcher>) {
+        self.web_fetcher = fetcher;
     }
 
     pub fn register_external(&mut self, tool: std::sync::Arc<dyn ExternalTool>) {
@@ -275,11 +383,116 @@ impl ToolRegistry {
             let summary = format_todo_summary(&items);
             return Ok(ToolOutput::Text(summary));
         }
+        if name == "web_fetch" {
+            if !self.executor.enabled.iter().any(|e| e == name) {
+                return Err(ToolError::Disabled(name.into()));
+            }
+            let text = self.web_fetch(args_json).await?;
+            return Ok(ToolOutput::Text(text));
+        }
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
             return Ok(ToolOutput::Text(t.call(args_json).await?));
         }
         self.executor.execute(name, args_json).await
     }
+
+    async fn web_fetch(&self, args_json: &str) -> Result<String, ToolError> {
+        let args: WebFetchArgs = parse("web_fetch", args_json)?;
+        let url = args.url.trim();
+        validate_web_fetch_url(url)?;
+        self.network
+            .check_http_url(url)
+            .map_err(ToolError::Message)?;
+        let resp = self.web_fetcher.get(url).await?;
+        // Re-check final URL host policy (redirects).
+        if resp.final_url != url {
+            validate_web_fetch_url(&resp.final_url)?;
+            self.network
+                .check_http_url(&resp.final_url)
+                .map_err(ToolError::Message)?;
+        }
+        Ok(format!(
+            "status={}\nfinal_url={}\n\n{}",
+            resp.status, resp.final_url, resp.body
+        ))
+    }
+}
+
+fn default_web_fetcher() -> Result<Arc<dyn WebFetcher>, ToolError> {
+    #[cfg(feature = "model-http")]
+    {
+        Ok(Arc::new(ReqwestWebFetcher::new()?))
+    }
+    #[cfg(not(feature = "model-http"))]
+    {
+        Ok(Arc::new(UnavailableWebFetcher))
+    }
+}
+
+#[cfg(not(feature = "model-http"))]
+struct UnavailableWebFetcher;
+
+#[cfg(not(feature = "model-http"))]
+#[async_trait::async_trait]
+impl WebFetcher for UnavailableWebFetcher {
+    async fn get(&self, _url: &str) -> Result<WebFetchResponse, ToolError> {
+        Err(ToolError::Message(
+            "web_fetch requires the model-http feature (HTTP client)".into(),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WebFetchArgs {
+    url: String,
+}
+
+/// Validate scheme and block private/link-local/loopback targets (SSRF baseline).
+pub fn validate_web_fetch_url(url: &str) -> Result<(), ToolError> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| ToolError::Message(format!("web_fetch url: {e}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(ToolError::Message(format!(
+                "web_fetch: only http/https allowed, got `{other}`"
+            )));
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ToolError::Message("web_fetch: URL missing host".into()))?;
+    if is_blocked_fetch_host(host) {
+        return Err(ToolError::Message(format!(
+            "web_fetch: blocked host `{host}` (private/link-local/loopback not allowed)"
+        )));
+    }
+    Ok(())
+}
+
+fn is_blocked_fetch_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") || h == "metadata.google.internal" {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.octets()[0] == 169 && v4.octets()[1] == 254
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+                    || v6.is_unspecified()
+            }
+        };
+    }
+    false
 }
 
 #[derive(Debug, Deserialize)]
@@ -873,7 +1086,13 @@ mod tests {
     #[tokio::test]
     async fn todo_write_caps_and_round_trip() {
         let dir = tempdir().unwrap();
-        let reg = ToolRegistry::with_builtins(dir.path(), vec!["todo_write".into()], 30).unwrap();
+        let reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["todo_write".into()],
+            30,
+            NetworkSettings::default(),
+        )
+        .unwrap();
         let out = reg
             .execute(
                 "todo_write",
@@ -994,6 +1213,7 @@ mod tests {
             dir.path(),
             vec!["read_file".into(), "report".into(), "not_a_tool".into()],
             30,
+            NetworkSettings::default(),
         )
         .unwrap();
         let defs = reg.definitions();
@@ -1007,10 +1227,93 @@ mod tests {
     #[tokio::test]
     async fn registry_unknown_enabled_name_fails_closed() {
         let dir = tempdir().unwrap();
-        let reg =
-            ToolRegistry::with_builtins(dir.path(), vec!["not_registered".into()], 30).unwrap();
+        let reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["not_registered".into()],
+            30,
+            NetworkSettings::default(),
+        )
+        .unwrap();
         let err = reg.execute("not_registered", "{}").await.unwrap_err();
         assert!(matches!(err, ToolError::UnknownTool(_)));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_respects_egress_and_ssrf_blocks() {
+        use crate::config::EgressMode;
+
+        let dir = tempdir().unwrap();
+        let net = NetworkSettings {
+            egress: EgressMode::Deny,
+            ..Default::default()
+        };
+        let mut reg =
+            ToolRegistry::with_builtins(dir.path(), vec!["web_fetch".into()], 30, net).unwrap();
+        reg.set_web_fetcher(Arc::new(MockWebFetcher {
+            status: 200,
+            body: "should-not-run".into(),
+        }));
+        let err = reg
+            .execute("web_fetch", r#"{"url":"https://example.com/doc"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("denied"), "{err}");
+
+        let allow = NetworkSettings {
+            egress: EgressMode::Allowlist,
+            allow_hosts: vec!["example.com".into()],
+        };
+        let mut reg2 =
+            ToolRegistry::with_builtins(dir.path(), vec!["web_fetch".into()], 30, allow).unwrap();
+        reg2.set_web_fetcher(Arc::new(MockWebFetcher {
+            status: 200,
+            body: "hello docs".into(),
+        }));
+        let out = reg2
+            .execute("web_fetch", r#"{"url":"https://example.com/doc"}"#)
+            .await
+            .unwrap();
+        match out {
+            ToolOutput::Text(t) => {
+                assert!(t.contains("status=200"), "{t}");
+                assert!(t.contains("hello docs"), "{t}");
+                assert!(t.contains("final_url=https://example.com/doc"), "{t}");
+            }
+            _ => panic!("expected text"),
+        }
+        let err = reg2
+            .execute("web_fetch", r#"{"url":"https://evil.example/x"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("allow_hosts"), "{err}");
+
+        // SSRF baseline even when unrestricted
+        let open = NetworkSettings {
+            egress: EgressMode::Unrestricted,
+            ..Default::default()
+        };
+        let reg3 =
+            ToolRegistry::with_builtins(dir.path(), vec!["web_fetch".into()], 30, open).unwrap();
+        for bad in [
+            r#"{"url":"http://127.0.0.1/"}"#,
+            r#"{"url":"http://localhost/"}"#,
+            r#"{"url":"http://10.0.0.1/"}"#,
+            r#"{"url":"file:///etc/passwd"}"#,
+        ] {
+            let err = reg3.execute("web_fetch", bad).await.unwrap_err();
+            assert!(
+                err.to_string().contains("blocked")
+                    || err.to_string().contains("only http")
+                    || err.to_string().contains("web_fetch"),
+                "url={bad} err={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_fetch_not_in_default_coding_tools() {
+        use crate::config::ToolsSettings;
+        assert!(!ToolsSettings::default_coding_tools().contains(&"web_fetch".into()));
     }
 
     #[tokio::test]

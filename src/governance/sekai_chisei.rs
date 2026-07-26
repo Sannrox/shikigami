@@ -144,7 +144,7 @@ impl SekaiChiseiGovernance {
         match name {
             "bash" => "destructive",
             "write_file" | "edit" | "multi_edit" => "write",
-            "read_file" | "glob" | "grep" => "read",
+            "read_file" | "glob" | "grep" | "web_fetch" => "read",
             _ => "write",
         }
     }
