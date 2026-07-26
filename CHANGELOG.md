@@ -44,6 +44,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   when bash is enabled; reaped at run end.
 - MCP server async run tools: `run_start`, `run_status`, `run_wait` (single-flight
   poll path for long runs; blocking `run` retained).
+- MCP client HTTP transport (`transport = "http"` + `url`) with network egress
+  checks and optional `token_env` Bearer auth.
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
