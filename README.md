@@ -74,7 +74,7 @@ Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript ex
 
 **External** host proof (out-of-tree consumer for ADR 0004):
 [`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke)
-depends on git tag `v0.2.0` and runs the same offline doctor + scripted run +
+depends on git tag `v1.0.0` and runs the same offline doctor + scripted run +
 export pattern under its own CI.
 
 Optional host surfaces (not the library freeze proof):
