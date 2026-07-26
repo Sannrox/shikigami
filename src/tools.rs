@@ -335,9 +335,24 @@ impl ToolRegistry {
         bash_timeout_secs: u64,
         network: NetworkSettings,
     ) -> Result<Self, ToolError> {
+        Self::with_builtins_ignore(workspace, enabled, bash_timeout_secs, network, true)
+    }
+
+    pub fn with_builtins_ignore(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+        network: NetworkSettings,
+        respect_ignore: bool,
+    ) -> Result<Self, ToolError> {
         let web_fetcher = default_web_fetcher()?;
         Ok(Self {
-            executor: ToolExecutor::new(workspace, enabled, bash_timeout_secs)?,
+            executor: ToolExecutor::new_with_ignore(
+                workspace,
+                enabled,
+                bash_timeout_secs,
+                respect_ignore,
+            )?,
             external: Vec::new(),
             todos: Arc::new(Mutex::new(Vec::new())),
             network,
@@ -596,6 +611,8 @@ pub struct ToolExecutor {
     workspace: PathBuf,
     enabled: Vec<String>,
     bash_timeout: Duration,
+    /// Patterns for glob/grep filtering (empty when respect_ignore is false).
+    ignore_patterns: Vec<String>,
 }
 
 impl ToolExecutor {
@@ -604,11 +621,26 @@ impl ToolExecutor {
         enabled: Vec<String>,
         bash_timeout_secs: u64,
     ) -> Result<Self, ToolError> {
+        Self::new_with_ignore(workspace, enabled, bash_timeout_secs, true)
+    }
+
+    pub fn new_with_ignore(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+        respect_ignore: bool,
+    ) -> Result<Self, ToolError> {
         let workspace = std::fs::canonicalize(workspace.into())?;
+        let ignore_patterns = if respect_ignore {
+            load_ignore_patterns(&workspace)
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             workspace,
             enabled,
             bash_timeout: Duration::from_secs(bash_timeout_secs.max(1)),
+            ignore_patterns,
         })
     }
 
@@ -955,7 +987,7 @@ impl ToolExecutor {
     }
 
     /// Walk files under `base` (absolute, inside workspace). Callback gets workspace-relative path.
-    /// Return false from callback to stop early.
+    /// Return false from callback to stop early. Honors ignore patterns for dirs and files.
     fn walk_files(
         &self,
         base: &Path,
@@ -968,6 +1000,9 @@ impl ToolExecutor {
                 .to_path_buf();
             if is_unsafe_relative_path(&rel) && rel != Path::new("") {
                 return Err(ToolError::UnsafePath(rel));
+            }
+            if path_is_ignored(&rel, &self.ignore_patterns) {
+                return Ok(());
             }
             let _ = visit(rel);
             return Ok(());
@@ -982,6 +1017,13 @@ impl ToolExecutor {
                 let meta = entry.metadata()?;
                 if meta.is_symlink() {
                     continue; // do not follow symlinks out of jail
+                }
+                let rel = match path.strip_prefix(&self.workspace) {
+                    Ok(r) => r.to_path_buf(),
+                    Err(_) => continue,
+                };
+                if path_is_ignored(&rel, &self.ignore_patterns) {
+                    continue;
                 }
                 if meta.is_dir() {
                     stack.push(path);
@@ -1133,6 +1175,75 @@ struct GrepArgs {
     path: Option<PathBuf>,
     #[serde(default)]
     max_matches: Option<usize>,
+}
+
+/// Built-in defaults always loaded when `respect_ignore` is true.
+fn builtin_ignore_patterns() -> Vec<String> {
+    vec![
+        ".git".into(),
+        "node_modules".into(),
+        "target".into(),
+        "dist".into(),
+        "build".into(),
+        ".venv".into(),
+        "venv".into(),
+        "__pycache__".into(),
+        ".DS_Store".into(),
+        "*.pyc".into(),
+        ".shikigami-state".into(),
+    ]
+}
+
+fn load_ignore_patterns(workspace: &Path) -> Vec<String> {
+    let mut patterns = builtin_ignore_patterns();
+    for name in [".shikigamiignore", ".gitignore"] {
+        let path = workspace.join(name);
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            for line in raw.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                    continue; // v1: no negation support
+                }
+                let line = line.trim_end_matches('/').to_string();
+                if !line.is_empty() {
+                    patterns.push(line);
+                }
+            }
+        }
+    }
+    patterns
+}
+
+/// Whether a workspace-relative path matches ignore patterns (files or dirs).
+pub fn path_is_ignored(rel: &Path, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let s = rel.to_string_lossy().replace('\\', "/");
+    let s = s.trim_start_matches("./");
+    if s.is_empty() {
+        return false;
+    }
+    for pat in patterns {
+        let pat = pat.trim().trim_start_matches('/').trim_end_matches('/');
+        if pat.is_empty() {
+            continue;
+        }
+        if glob_match(pat, s) || glob_match(&format!("**/{pat}"), s) {
+            return true;
+        }
+        // Prefix directory: node_modules/foo
+        if s.starts_with(&format!("{pat}/")) {
+            return true;
+        }
+        // Component match: any path segment
+        for seg in s.split('/') {
+            if glob_match(pat, seg) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Simple glob: `*` (within segment), `**` (across segments). No `{a,b}` classes.
@@ -1432,6 +1543,55 @@ mod tests {
     fn web_fetch_not_in_default_coding_tools() {
         use crate::config::ToolsSettings;
         assert!(!ToolsSettings::default_coding_tools().contains(&"web_fetch".into()));
+    }
+
+    #[tokio::test]
+    async fn glob_and_grep_honor_ignore_patterns() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("src/keep.rs"), "fn keep() {}").unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/x.js"), "secret").unwrap();
+        std::fs::write(dir.path().join(".shikigamiignore"), "secret.txt\n").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "nope").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "ok").unwrap();
+
+        let tools = ToolExecutor::new_with_ignore(
+            dir.path(),
+            vec!["glob".into(), "grep".into(), "read_file".into()],
+            30,
+            true,
+        )
+        .unwrap();
+        let glob_out = tools
+            .execute("glob", r#"{"pattern":"**/*"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(g) = glob_out else {
+            panic!("text");
+        };
+        assert!(g.contains("keep.rs"), "{g}");
+        assert!(g.contains("visible.txt"), "{g}");
+        assert!(!g.contains("node_modules"), "{g}");
+        assert!(!g.contains("secret.txt"), "{g}");
+
+        // Explicit read_file still works for ignored paths.
+        let read = tools
+            .execute("read_file", r#"{"path":"secret.txt"}"#)
+            .await
+            .unwrap();
+        assert_eq!(read, ToolOutput::Text("nope".into()));
+
+        let tools_off =
+            ToolExecutor::new_with_ignore(dir.path(), vec!["glob".into()], 30, false).unwrap();
+        let glob_all = tools_off
+            .execute("glob", r#"{"pattern":"**/*"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(g2) = glob_all else {
+            panic!("text");
+        };
+        assert!(g2.contains("node_modules") || g2.contains("x.js"), "{g2}");
     }
 
     #[tokio::test]

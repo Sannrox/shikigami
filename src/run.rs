@@ -356,11 +356,12 @@ impl Engine {
         }
 
         let enabled = self.config.tools.effective_enabled();
-        let mut tools = ToolRegistry::with_builtins(
+        let mut tools = ToolRegistry::with_builtins_ignore(
             &ws.path,
             enabled,
             self.config.tools.bash_timeout_secs,
             self.config.network.clone(),
+            self.config.tools.respect_ignore,
         )?;
         tools.set_todos(initial_todos);
         if !self.config.tools.mcp_servers.is_empty() {
