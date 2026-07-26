@@ -134,9 +134,9 @@ impl SekaiChiseiGovernance {
     }
 
     /// Whether a tool must request plane external-action authorization before
-    /// host execution. `report` is harness-internal completion signaling.
+    /// host execution. `report` / `escalate` / `todo_write` are harness-internal.
     pub(crate) fn tool_requires_external_action(name: &str) -> bool {
-        !matches!(name, "report" | "escalate")
+        !matches!(name, "report" | "escalate" | "todo_write")
     }
 
     /// Map a shikigami tool to the external-action risk class contract.
@@ -678,6 +678,9 @@ mod tests {
         ));
         assert!(!SekaiChiseiGovernance::tool_requires_external_action(
             "escalate"
+        ));
+        assert!(!SekaiChiseiGovernance::tool_requires_external_action(
+            "todo_write"
         ));
         assert!(SekaiChiseiGovernance::tool_requires_external_action("bash"));
         assert!(SekaiChiseiGovernance::tool_requires_external_action(
