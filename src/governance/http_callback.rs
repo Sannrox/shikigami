@@ -403,20 +403,21 @@ mod tests {
     }
 
     fn config_with_endpoint(endpoint: &str) -> Config {
-        let mut config = Config::default();
-        config.governance = GovernanceSettings {
-            adapter: "http-callback".into(),
-            endpoint: Some(endpoint.into()),
-            principal: "test".into(),
-            fail_closed: true,
-            namespace: "default".into(),
-            token_env: None,
-        };
-        config.tools = ToolsSettings {
-            enabled: vec!["read_file".into(), "write_file".into(), "bash".into()],
-            ..ToolsSettings::default()
-        };
-        config
+        Config {
+            governance: GovernanceSettings {
+                adapter: "http-callback".into(),
+                endpoint: Some(endpoint.into()),
+                principal: "test".into(),
+                fail_closed: true,
+                namespace: "default".into(),
+                token_env: None,
+            },
+            tools: ToolsSettings {
+                enabled: vec!["read_file".into(), "write_file".into(), "bash".into()],
+                ..ToolsSettings::default()
+            },
+            ..Config::default()
+        }
     }
 
     #[tokio::test]
@@ -464,7 +465,7 @@ mod tests {
             .unwrap();
         // Give any accidental HTTP a moment.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(*called.lock().await, false);
+        assert!(!*called.lock().await);
         task.abort();
     }
 
