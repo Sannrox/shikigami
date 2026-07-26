@@ -243,6 +243,10 @@ impl ToolsSettings {
 pub struct RunSettings {
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    /// Max concurrent tool executions for a batch of parallel-safe tools only.
+    /// `1` forces sequential execution. Writes always force a serial batch.
+    #[serde(default = "default_tool_concurrency")]
+    pub tool_concurrency: u32,
     /// Optional overall wall-clock limit in seconds (checked at turn boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
@@ -258,6 +262,10 @@ fn default_max_turns() -> u32 {
     50
 }
 
+fn default_tool_concurrency() -> u32 {
+    4
+}
+
 fn default_compact_keep_tail() -> u32 {
     8
 }
@@ -266,6 +274,7 @@ impl Default for RunSettings {
     fn default() -> Self {
         Self {
             max_turns: default_max_turns(),
+            tool_concurrency: default_tool_concurrency(),
             timeout_secs: None,
             compact_after_messages: None,
             compact_keep_tail: default_compact_keep_tail(),

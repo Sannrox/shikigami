@@ -88,6 +88,12 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `snapshot` | `false` | After materialize, copy workspace to `state/runs/<id>/snapshots/initial` |
 | `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
 
+### `[run]` (tool concurrency)
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `tool_concurrency` | `4` | Max concurrent tools when a turn’s batch is **all parallel-safe** (`read_file`, `glob`, `grep`, `web_fetch`). `1` forces sequential. Any write/bash/`todo_write`/`report`/`escalate` batch runs **serially**. Tool messages are applied in original call order. |
+
 ### `[tools]`
 
 | Field | Default | Description |
