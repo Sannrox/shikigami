@@ -10,9 +10,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ### Changed
 
-- Agent closeout: project-local `autoreview` skill plus `AGENTS.md` /
-  `deliver-ready-issue` requirements so structured review is mandatory before
-  ship (parity with sekai-chisei delivery practice).
+- Agent closeout: `AGENTS.md` / `deliver-ready-issue` require shared
+  `autoreview` (not vendored) before ship; CI is not a substitute.
 
 ## [0.2.0] — 2026-07-26
 
