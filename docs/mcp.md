@@ -5,11 +5,13 @@ Shikigami speaks MCP in two directions:
 | Role | Purpose | Entry |
 | --- | --- | --- |
 | **Client** | Attach remote MCP tools into the run-loop registry | `[[tools.mcp_servers]]` settings |
-| **Server** | Expose `doctor` + `run` to MCP-native hosts | `shikigami mcp` (stdio) |
+| **Server** | Expose harness tools to MCP-native hosts | `shikigami mcp` (stdio): `doctor`, `run`, `run_start`, `run_status`, `run_wait` |
 
-Library embed (`Harness`) remains the preferred in-process host path
-([ADR 0001](decisions/0001-ports-and-settings.md)). The MCP server is a thin
-CLI host, **not** a multi-tenant control plane. Tenkai delivers the binary only.
+Library embed (`Harness`) remains the **primary** in-process host path and CI
+host proof ([embedding.md](embedding.md), `examples/embed_smoke.rs`). The MCP
+server is an **optional** thin CLI host for stdio clients — **not** a multi-tenant
+control plane, and **not** part of the 1.0 library freeze surface. Tenkai
+delivers the binary only.
 
 ## Server (`shikigami mcp`)
 
@@ -43,11 +45,19 @@ is intentionally out of scope for v1 MCP tools.
 
 ### Example client session (conceptual)
 
-1. `initialize` → server capabilities + `serverInfo`
+1. `initialize` → server capabilities + `serverInfo` (instructions mention async poll tools)
 2. `notifications/initialized`
-3. `tools/list` → `doctor`, `run`
+3. `tools/list` → `doctor`, `run`, `run_start`, `run_status`, `run_wait`
 4. `tools/call` name=`doctor`
-5. `tools/call` name=`run` arguments=`{"task":"…","keep_workspace":true}`
+5. Short work: `tools/call` name=`run` arguments=`{"task":"…","keep_workspace":true}`
+6. Long work (preferred):
+   - `tools/call` name=`run_start` arguments=`{"task":"…","keep_workspace":true}`
+   - poll `run_status` until `phase` is `finished` (or call `run_wait`)
+7. Only one background run at a time (**single-flight**); a second `run_start`
+   while `running` fails until the first finishes
+
+Example host config (Cursor / Claude Desktop style): 
+[examples/mcp-host.example.json](../examples/mcp-host.example.json).
 
 ### Security
 
