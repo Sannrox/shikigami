@@ -1,7 +1,8 @@
 # Contributing
 
-Thanks for helping improve **shikigami**. This project is early (pre-1.0);
-focused changes with tests are the most valuable.
+Thanks for helping improve **shikigami**. This project is at **1.0** (medium
+contract; freeze-core surfaces follow semver). Focused changes with tests are
+the most valuable.
 
 ## Code of conduct
 
