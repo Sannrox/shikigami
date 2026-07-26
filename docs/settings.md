@@ -106,6 +106,11 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 Coding default includes `todo_write` (run-scoped checklist; max 32 items).
 It is **not** a plane work-unit API and does not replace `escalate`/park.
 
+Coding default also includes `apply_patch` (structured multi-hunk patches with
+optional context; atomic across files). Prefer `edit` / `multi_edit` for exact
+single-site or multi-site replacements; use `apply_patch` when surrounding
+context is needed to disambiguate. Caps: 16 files, 32 hunks, 64KiB JSON payload.
+
 `web_fetch` is **opt-in only** (not in coding default or mode presets). Add it via
 `tools.enabled` (custom mode or intersect). See [network.md](network.md).
 
