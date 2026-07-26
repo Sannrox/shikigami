@@ -27,6 +27,7 @@ pub mod context;
 pub mod events;
 pub mod governance;
 pub mod harness;
+pub mod hooks;
 pub mod identity;
 pub mod mcp;
 pub mod mcp_server;
@@ -40,7 +41,9 @@ pub mod tools;
 pub mod transcript;
 pub mod workspace;
 
-pub use config::{Config, ConfigSource, EgressMode, McpServerSettings, PermissionMode};
+pub use config::{
+    Config, ConfigSource, EgressMode, HookSettings, McpServerSettings, PermissionMode,
+};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
