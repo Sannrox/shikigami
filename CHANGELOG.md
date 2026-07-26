@@ -40,6 +40,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   rates unset.
 - Settings-driven lifecycle hooks (`[[hooks]]`: pre/post run/tool, on_park)
   with timeout and fail-closed policy ([docs/hooks.md](docs/hooks.md)).
+- Background bash jobs (`bash_background` / `bash_job_status` / `bash_job_logs`)
+  when bash is enabled; reaped at run end.
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).

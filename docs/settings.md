@@ -112,7 +112,11 @@ When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never
 | `custom` | `enabled` if set, else coding default (writes/search, **no** bash) |
 | `read` | `read_file`, `glob`, `grep`, `todo_write`, `report`, `escalate` |
 | `workspace` | coding default (no bash) |
-| `workspace_exec` | coding default + `bash` |
+| `workspace_exec` | coding default + `bash` (also exposes `bash_background` / `bash_job_status` / `bash_job_logs`) |
+
+Background jobs (when bash is enabled): start with `bash_background`, poll with
+`bash_job_status` / `bash_job_logs`. Jobs are killed when the run finishes
+(success, failure, or park). Max 4 concurrent jobs; logs capped at 256KiB.
 
 Coding default includes `todo_write` (run-scoped checklist; max 32 items).
 It is **not** a plane work-unit API and does not replace `escalate`/park.
