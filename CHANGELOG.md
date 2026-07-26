@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-07-26
+
+### Added
+
+- Governance adapter `http-callback` (alias `host-authz`): POST tool authorization
+  to a host URL for interactive PermissionBroker-style gates.
+
 ## [1.0.2] — 2026-07-26
 
 ### Added

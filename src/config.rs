@@ -694,8 +694,22 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.governance.adapter.as_str() {
-            "none" | "local" | "sekai-chisei" => {}
+            "none" | "local" | "sekai-chisei" | "http-callback" | "host-authz" => {}
             other => return Err(ConfigError::UnknownGovernanceAdapter(other.into())),
+        }
+        if matches!(
+            self.governance.adapter.as_str(),
+            "http-callback" | "host-authz"
+        ) && self
+            .governance
+            .endpoint
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(ConfigError::Invalid(
+                "governance adapter `http-callback` requires governance.endpoint".into(),
+            ));
         }
         match self.workspace.adapter.as_str() {
             "directory" | "inplace" | "directory-inplace" | "git-worktree" => {}
