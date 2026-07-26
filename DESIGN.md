@@ -147,21 +147,21 @@ Full reporting process: [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-Shipped in the current tree (pre-1.0):
+Shipped in the **1.0** tree (medium contract; see ADR 0004):
 
 - Settings + ports + doctor
 - Local scripted/HTTP runs
-- sekai-chisei PlanExecution path
+- sekai-chisei PlanExecution path + external-action tool authz + harvest
 - Directory and git-worktree workspaces
-- Embeddable `Harness` API
+- Embeddable `Harness` API + in-repo/external host proofs
+- Park/escalate resume, serve FS queue, metrics, MCP host/client (host-adjacent)
 
-Follow-ups:
+Post-1.0 themes (not freeze-core):
 
-- Long-running daemon / `serve` host
-- Mid-run external-action authorization with the plane
-- Richer harvest into plane objects beyond operation events
-- Headless park/escalate protocol
-- CI workflows and release automation
+- Richer serve intake (HTTP/plane work-units)
+- Deeper governance-native harvest objects
+- Delivery fleets and adapter ecosystem
+- Eval / quality-loop harnesses
 
 ## Naming rule
 

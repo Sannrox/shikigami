@@ -13,7 +13,7 @@ shikigami-vX.Y.Z-<target>.tar.gz
 shikigami-vX.Y.Z-<target>.sha256
 ```
 
-Targets (v0.1.0):
+Targets (`v1.0.0` and later use the same matrix):
 
 | Target | Typical host |
 | --- | --- |
@@ -25,7 +25,7 @@ Targets (v0.1.0):
 Example download:
 
 ```bash
-VERSION=v0.1.0
+VERSION=v1.0.0
 TARGET=x86_64-unknown-linux-gnu
 BASE=https://github.com/Sannrox/shikigami/releases/download/${VERSION}
 curl -fsSL -O "$BASE/shikigami-${VERSION}-${TARGET}.tar.gz"
