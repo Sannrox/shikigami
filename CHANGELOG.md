@@ -3,29 +3,63 @@
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
+## [1.0.0] — 2026-07-26
+
+First **stable** release under the [ADR 0004](docs/decisions/0004-v1-contract.md)
+**medium 1.0** contract. Freeze-core surfaces follow semver; additive evolution
+remains allowed where documented.
+
+### Stability (freeze core)
+
+| Area | Contract |
+| --- | --- |
+| Architecture | Ports + settings (ADR 0001); tenkai delivery-only |
+| Library | `Harness::{from_config, resolve, doctor, doctor_async, run, run_with_events}` |
+| Settings | `version = 1`, deny unknown keys |
+| Run | `RunRequest` / `RunResult` / `RunTermination` including park + resume |
+| Identity | ADR 0002 |
+| Events | `HarnessEvent` additive; channel sink |
+| CLI | `version`, `doctor`, `run`, `serve` (flags may grow) |
+| Offline OSS | `cargo test` without plane |
+| Governed path | PlanExecution + external-action tool authz + harvest |
+| Doctor JSON | `schema_version = 1` |
+
+See [docs/embedding.md](docs/embedding.md) for freeze vs evolving/host-only
+surfaces (MCP, hooks, TUI remain non-core).
+
+### Host proof
+
+- In-repo: `cargo run --locked --example embed_smoke` **CI-gated** on PR/`main`
+- External: [Sannrox/shikigami-embed-smoke](https://github.com/Sannrox/shikigami-embed-smoke)
+  (out-of-tree consumer; offline doctor + scripted run + transcript export)
+
+### Added (since 0.2.0)
 
 - Host proof CI gate for `examples/embed_smoke` on PR/`main` Build & Test.
 - Host-proof docs alignment (embed ranking, MCP poll tools, freeze candidates).
-- [docs/1.0-freeze-audit.md](docs/1.0-freeze-audit.md): research #109 closeout
-  (updated: external proof via
-  [shikigami-embed-smoke](https://github.com/Sannrox/shikigami-embed-smoke)).
-- External offline embed smoke repo + docs links for ADR 0004 (#113).
+- [docs/1.0-freeze-audit.md](docs/1.0-freeze-audit.md) research closeout (#109)
+  and external proof links (#113).
 
-### Fixed
+### Fixed (since 0.2.0)
 
 - MCP HTTP client compiles with `--no-default-features` (`list_tools` always
   present; feature-gated body).
 
-### Changed
+### Changed (since 0.2.0)
 
 - Agent closeout: `AGENTS.md` / `deliver-ready-issue` require shared
   `autoreview` (not vendored) before ship; CI is not a substitute.
+- Product status is **1.0 stable** for freeze-core surfaces (no longer “0.x may
+  break freely”).
+
+### Release artifacts
+
+Tag `v1.0.0` builds archives via `.github/workflows/release.yml` for documented
+multi-arch targets (same matrix as 0.2.0).
 
 ## [0.2.0] — 2026-07-26
 
@@ -92,7 +126,9 @@ First tagged public release.
 
 Tag `v0.1.0` builds archives via `.github/workflows/release.yml` for:
 
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
-- `x86_64-unknown-linux-gnu`
-- `aarch64-unknown-linux-gnu`
+| Archive suffix | Target |
+| --- | --- |
+| `aarch64-apple-darwin` | Apple Silicon macOS |
+| `x86_64-apple-darwin` | Intel macOS |
+| `x86_64-unknown-linux-gnu` | Linux x86_64 |
+| `aarch64-unknown-linux-gnu` | Linux aarch64 |
