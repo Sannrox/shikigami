@@ -26,9 +26,12 @@ Human documentation index: [docs/README.md](docs/README.md).
 
 - `cargo fmt` formats Rust code before review.
 - `cargo test` runs the normal unit and integration test suite (no plane required).
+- `cargo clippy --all-targets -- -D warnings` is required for ship-level local
+  gates (matches CI).
 - `cargo run --bin shikigami -- doctor` prints effective settings and adapter health.
 - `cargo run --bin shikigami -- --config examples/local-run.toml run "demo" --keep-workspace`
   exercises an offline scripted run.
+- `cargo run --example embed_smoke` is the offline library host proof.
 - `cargo build --release` builds an optimized binary.
 - `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
   runs the ignored live plane probe when a local sekai-chisei is available.
@@ -42,6 +45,43 @@ and `SHIKIGAMI_MODEL_ADAPTER`. See [docs/settings.md](docs/settings.md) and
 GitHub Issues are the planning source of truth. Project-specific Skills live
 under `.agents/skills/`. Read `DESIGN.md`, `VISION.md`, and accepted ADRs under
 `docs/decisions/` before changing system boundaries.
+
+## Agent delivery closeout (required)
+
+`cargo test` / Clippy / green CI are **not** a substitute for structured code
+review. For non-trivial implementation work (any behavior, security, settings,
+or public-API change) that will be **committed, pushed, or opened as a PR**:
+
+1. Run focused checks via the `verify-change` Skill (or equivalent `cargo fmt`,
+   `cargo test`, `cargo clippy --all-targets -- -D warnings`).
+2. Run **`autoreview`** before the ship commit (or before push if the commit
+   already exists). Use the project skill:
+
+   ```bash
+   export AUTOREVIEW=".agents/skills/autoreview/scripts/autoreview"
+   # Dirty uncommitted work:
+   "$AUTOREVIEW" --mode local
+   # Topic branch / open PR (preferred after commit):
+   "$AUTOREVIEW" --mode branch --base origin/main
+   # Already committed on a clean tree:
+   "$AUTOREVIEW" --mode commit --commit HEAD
+   ```
+
+3. Treat helper output as advisory: verify each accepted finding in the real
+   code, fix actionable ones, rerun tests and autoreview until the helper exits
+   0 with no accepted/actionable findings (or document a maintainer judgment
+   blocker in the PR).
+4. Report in the PR or handoff: commands run, tests, autoreview result
+   (clean / findings fixed / consciously rejected).
+
+**Do not skip autoreview** because CI is green, the change is “small,” or the
+session is optimizing for throughput unless the user explicitly waived it.
+Docs-only typo fixes and pure formatting may skip structured review; state the
+waiver. The `deliver-ready-issue` Skill requires this same closeout before
+publish/land.
+
+Default review engine is Codex (`gpt-5.5` via the helper). See
+[`.agents/skills/autoreview/SKILL.md`](.agents/skills/autoreview/SKILL.md).
 
 ## Ontology Policy
 
@@ -82,14 +122,15 @@ Use short imperative subjects, often Conventional Commit style:
 `feat(run): jail bash to workspace`, `docs: document settings resolution`,
 `fix(governance): fail closed without plane endpoint`. Keep commits narrow and
 describe the affected subsystem when useful. Pull requests should include a
-concise behavior summary, tests run, linked issue or context, and any
-configuration or security implications. Update [CHANGELOG.md](CHANGELOG.md) for
-user-visible changes. When merging PRs, prefer GitHub rebase merges so reviewed
-commits remain individually visible while `main` stays linear. Use
-`gh pr merge --rebase --delete-branch` unless the user explicitly asks for a
-merge commit or squash merge. Do not rewrite protected `main` after merging
-unless the user explicitly approves; if protection is temporarily relaxed,
-restore force-push and status-check settings immediately after the correction.
+concise behavior summary, **tests run**, **autoreview result** (for non-trivial
+code), linked issue or context, and any configuration or security implications.
+Update [CHANGELOG.md](CHANGELOG.md) for user-visible changes. When merging PRs,
+prefer GitHub rebase merges so reviewed commits remain individually visible
+while `main` stays linear. Use `gh pr merge --rebase --delete-branch` unless the
+user explicitly asks for a merge commit or squash merge. Do not rewrite
+protected `main` after merging unless the user explicitly approves; if
+protection is temporarily relaxed, restore force-push and status-check settings
+immediately after the correction.
 
 ## Security & Configuration Tips
 
