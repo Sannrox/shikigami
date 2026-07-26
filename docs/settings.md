@@ -271,16 +271,16 @@ Adapter semantics: [adapters.md](adapters.md).
 Breaking renames/removals of these fields require a `schema_version` bump and
 CHANGELOG entry. Additional fields may appear without a bump.
 
-## Compatibility policy (v0.2)
+## Compatibility policy (1.0)
 
 1. **`version` is required** and must equal the crate's supported schema
    (`1` today). Unsupported versions fail at load time.
 2. **Unknown keys are rejected** at every table (`deny_unknown_fields`). Fix
    typos rather than silent ignore.
-3. **Breaking changes** (rename/remove fields, change defaults that alter
-   security posture, change version) require a `version` bump and a
-   CHANGELOG entry under a new version heading.
+3. **Breaking changes** (rename/remove freeze-core fields, change defaults that
+   alter security posture, change settings schema `version`) require a settings
+   `version` bump and/or crate major version, plus a CHANGELOG entry.
 4. **Additive fields** with `#[serde(default)]` may ship in the same
-   `version` when they do not change existing behavior.
-5. Pre-1.0 (`0.x`) may still break between minor crates versions; the
-   settings `version` field is the config compatibility signal.
+   settings `version` when they do not change existing behavior.
+5. From **crate 1.0**, freeze-core public API and doctor JSON follow semver;
+   the settings `version` field remains the config compatibility signal.
