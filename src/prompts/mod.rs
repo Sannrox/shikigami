@@ -24,7 +24,7 @@ pub const DEFAULT_PROMPT: PromptAsset = HARNESS_V1;
 pub fn body_digest(body: &str) -> String {
     let normalized = body.replace("\r\n", "\n");
     let digest = Sha256::digest(normalized.as_bytes());
-    format!("{digest:x}")
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Versioned id: `{id}:{sha256hex}` — changes when content changes.

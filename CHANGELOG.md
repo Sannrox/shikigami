@@ -8,66 +8,40 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-26
+
+Coding-agent parity and host surfaces on the headless harness core.
+
 ### Added
 
-- `ToolRegistry` for run-loop tool definitions and execution (builtin catalog
-  bootstrap; foundation for skills/MCP registration).
-- Workspace-jailed `glob` and `grep` tools (capped results; defaults enabled).
-- `multi_edit` tool for atomic multi-site exact replacements in one file.
-- Settings `tools.mode` permission modes (`read` / `workspace` / `workspace_exec` / `custom`).
-- Optional project rules discovery (`AGENTS.md` / `shikigami.rules.md`) into system prompt.
-- Runtime skill packs (`context.skills` + `SKILL.md`) with digests and docs.
-- Per-run `TokenUsage` on `RunResult` and process token counters in metrics.
-- Optional context compaction (`run.compact_after_messages`) with event signal.
-- Network egress policy for HTTP model client (`network.egress` / `allow_hosts`).
-- MCP client: register stdio server tools as `mcp.<server>.<tool>` (mock + JSON-RPC).
-- MCP server host: `shikigami mcp` (stdio) exposes `doctor` and `run` tools
-  ([docs/mcp.md](docs/mcp.md)); not a multi-tenant control plane.
-- Run-scoped `todo_write` checklist tool (checkpoint + `RunResult.todos` +
-  `TodosUpdated` event); not a substitute for park/escalate or plane work-units.
-- Opt-in `web_fetch` tool (HTTP GET) governed by `[network]` egress with
-  private/link-local SSRF blocks ([docs/network.md](docs/network.md)).
-- `apply_patch` tool: structured multi-hunk context patches, atomic multi-file,
-  fail-closed on ambiguous matches (alongside `edit` / `multi_edit`).
-- Offline run transcript export (`export_run_transcript` + `shikigami export`)
-  as JSONL from checkpoint (`schema_version` = 1).
-- Concurrent execution of parallel-safe tool batches (`run.tool_concurrency`);
-  writes remain serial; results ordered by call index.
-- `tools.respect_ignore` (default true): glob/grep honor built-ins +
-  `.gitignore` / `.shikigamiignore`; explicit `read_file` still allowed.
-- Optional per-run cost estimate on `RunResult.cost` from token usage ×
-  settings rates (`model.input_usd_micros_per_mtok` / `output_…`); absent when
-  rates unset.
-- Settings-driven lifecycle hooks (`[[hooks]]`: pre/post run/tool, on_park)
-  with timeout and fail-closed policy ([docs/hooks.md](docs/hooks.md)).
-- Background bash jobs (`bash_background` / `bash_job_status` / `bash_job_logs`)
-  when bash is enabled; reaped at run end.
-- MCP server async run tools: `run_start`, `run_status`, `run_wait` (single-flight
-  poll path for long runs; blocking `run` retained).
-- MCP client HTTP transport (`transport = "http"` + `url`) with network egress
-  checks and optional `token_env` Bearer auth.
-- Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
-- Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
-  (bash / write_file / edit / read_file; `report` remains harness-internal).
-- Richer governed harvest: `shikigami.run.begin` / tool / complete events with
-  turns, termination, and evidence references ([docs/harvest.md](docs/harvest.md)).
-- Documented run identity model (ADR 0002); `RunRequest.logical_operation_id`
-  for host/plane correlation ([docs/identity.md](docs/identity.md)).
-- Headless `escalate` tool parks runs with structured payload; resume with
-  `--answer` / `resume_answer` continues from checkpoint.
-- Versioned prompt assets (`src/prompts/`) with digest ids on events, harvest,
-  and `RunResult` ([docs/prompts.md](docs/prompts.md)).
-- Credential helper docs; doctor reports env presence only and redacts secret
-  values ([docs/credentials.md](docs/credentials.md)).
-- Optional nightly live plane workflow (no-op without secrets).
-- Property tests for path jail and settings parse/validate invariants.
-- Supply-chain CI: `cargo deny` with committed `deny.toml` (licenses + advisories).
-- `shikigami serve` local-queue daemon with health file and graceful shutdown
-  (ADR 0003).
-- Tenkai delivery docs and release-aligned product manifest example.
-- `Harness::run_with_events` + `ChannelSink` / `FanoutSink` for embedder live streams.
-- Process metrics counters with JSON + Prometheus text export (`docs/metrics.md`).
-- ADR 0004: v1.0 medium contract and bright-future sequencing.
+- **Tool registry & coding tools:** `ToolRegistry`, workspace-jailed `glob` /
+  `grep`, `multi_edit`, `apply_patch`, `todo_write`, permission modes
+  (`tools.mode`), concurrent parallel-safe tool batches (`run.tool_concurrency`).
+- **Context:** project rules (`AGENTS.md`), skill packs, optional compaction,
+  ignore support for search (`tools.respect_ignore`, default true).
+- **MCP:** client (stdio + **HTTP** transport), server host
+  (`shikigami mcp`: `doctor`, `run`, `run_start` / `run_status` / `run_wait`).
+- **Network:** egress policy for HTTP model and MCP HTTP / `web_fetch` (opt-in;
+  private/link-local blocked for fetch).
+- **Ops:** transcript export (`shikigami export`), lifecycle hooks (`[[hooks]]`),
+  background bash jobs, optional cost estimate on `RunResult.cost`, metrics,
+  live embed event stream, serve daemon, workspace snapshots.
+- **Governed path:** external-action authz, richer harvest, run identity ADR,
+  park/escalate resume, versioned prompts, credential hygiene.
+- **Quality:** property tests, cargo-deny CI, ADR 0004 v1 contract notes.
+- **Host proof:** `examples/embed_smoke.rs` offline embed + export smoke.
+- **Deps:** `sha2` 0.11, `toml` 1.x.
+
+### Changed
+
+- Default search tools honor ignore patterns (set `tools.respect_ignore = false`
+  to restore 0.1-style unfiltered walks).
+- CLI surface grows: `serve`, `mcp`, `export` (still headless-default).
+
+### Compatibility
+
+- Settings `version = 1` with `deny_unknown_fields` unchanged.
+- `0.x` may still break; see ADRs for 1.0 freeze intent.
 
 ## [0.1.0] — 2026-07-25
 

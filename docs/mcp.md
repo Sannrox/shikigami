@@ -23,7 +23,8 @@ shikigami --state ./state mcp
 ```
 
 Hosts should connect via MCP stdio (for example Cursor / Claude Desktop style
-config pointing at the `shikigami` binary with args `mcp`).
+config pointing at the `shikigami` binary with args `mcp`). See
+[examples/mcp-host.example.json](../examples/mcp-host.example.json).
 
 ### Tools
 

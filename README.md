@@ -18,9 +18,9 @@ cases do not require forking the core.
 | **Governed** | First-party adapter for [sekai-chisei](https://github.com/Sannrox/sekai-chisei): policy, budget, PlanExecution, audit-oriented events. |
 | **Delivery** | Optional packaging via [tenkai](https://github.com/Sannrox/tenkai). Delivery is not a runtime dependency. |
 
-> **Status:** early (`v0.1.0`). Public APIs and settings may change before 1.0.
-> Offline `cargo test` is the supported baseline; live plane tests are ignored
-> by default.
+> **Status:** `v0.2.0` (pre-1.0). Public APIs and settings may still change
+> before 1.0. Offline `cargo test` is the supported baseline; live plane tests
+> are ignored by default.
 
 ## Why
 
@@ -59,6 +59,16 @@ cargo build --release
 Expect a successful run that writes `SHIKIGAMI_OK.txt` under the run workspace
 and prints `success=true`.
 
+### Library embed smoke (host proof)
+
+Offline proof that a host can drive `Harness` without shelling the CLI:
+
+```bash
+cargo run --example embed_smoke
+```
+
+Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript export).
+
 ### Prebuilt binaries
 
 Tagged releases publish multi-arch archives from GitHub Actions
@@ -86,7 +96,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | `doctor [--json]` | Effective profile, adapters, and health (probes the plane when configured) |
 | `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
 | `serve [--poll-ms N] [--max-jobs N]` | Local-queue daemon host ([docs/serve.md](docs/serve.md)) |
-| `mcp` | MCP stdio server exposing `doctor` + `run` ([docs/mcp.md](docs/mcp.md)) |
+| `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([docs/mcp.md](docs/mcp.md)) |
 | `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([docs/embedding.md](docs/embedding.md)) |
 
 | Flag / env | Purpose |

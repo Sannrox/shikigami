@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 use thiserror::Error;
 
 use crate::model::ChatMessage;
@@ -64,7 +68,7 @@ pub fn prompt_id(prompt: &str) -> String {
         return crate::prompts::versioned_id(&crate::prompts::HARNESS_V1);
     }
     let digest = Sha256::digest(prompt.replace("\r\n", "\n").as_bytes());
-    format!("custom:{digest:x}")
+    format!("custom:{}", hex_lower(digest.as_slice()))
 }
 
 pub fn path_for(state_runs: &Path, run_id: &str) -> PathBuf {
