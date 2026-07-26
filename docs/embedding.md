@@ -119,6 +119,25 @@ while let Ok(ev) = rx.try_recv() {
 
 Events are best-effort for UI (not durable plane truth). Crash recovery uses checkpoints.
 
+### Offline transcript export
+
+Export a completed or parked run from local checkpoint state (no plane):
+
+```rust
+use shikigami::{export_run_transcript, ExportOptions, StateRoot};
+
+let state = StateRoot::default_in(".");
+let jsonl = export_run_transcript(
+    &state.runs_dir(),
+    "RUN_ID",
+    &ExportOptions::default(),
+)?;
+// JSONL lines: meta, message*, todos?, park?, end — each has schema_version = 1
+```
+
+CLI: `shikigami export <run_id> [-o transcript.jsonl]`. Fields are truncated and
+optional config redaction applies the same secret scrubbing as doctor.
+
 ### Evolving (expect churn)
 
 | Surface | Notes |
