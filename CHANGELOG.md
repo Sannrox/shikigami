@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-07-26
+
+### Added
+
+- `shikigami run --task-file PATH` so hosts can pass task text without putting
+  prompts on the process argv.
+
 ## [1.0.1] — 2026-07-26
 
 ### Added
