@@ -70,9 +70,10 @@ Ordered epics — **not** 1.0 blockers:
 ## Freeze audit
 
 Point-in-time go/no-go against this ADR:
-[docs/1.0-freeze-audit.md](../1.0-freeze-audit.md) (research #109, 2026-07-26).
-Recommendation: **no-go** until external embed smoke exists (or this ADR is
-amended via Design Discussion).
+[docs/1.0-freeze-audit.md](../1.0-freeze-audit.md) (research #109, 2026-07-26;
+updated for #113). External offline embed smoke:
+[`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke).
+Remaining 1.0 path: release chore (#114).
 
 ## Rejected alternatives
 

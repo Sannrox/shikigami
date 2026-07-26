@@ -13,7 +13,14 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
 - Host proof CI gate for `examples/embed_smoke` on PR/`main` Build & Test.
 - Host-proof docs alignment (embed ranking, MCP poll tools, freeze candidates).
 - [docs/1.0-freeze-audit.md](docs/1.0-freeze-audit.md): research #109 closeout
-  — **no-go** for `v1.0.0` until external embed smoke (ADR 0004).
+  (updated: external proof via
+  [shikigami-embed-smoke](https://github.com/Sannrox/shikigami-embed-smoke)).
+- External offline embed smoke repo + docs links for ADR 0004 (#113).
+
+### Fixed
+
+- MCP HTTP client compiles with `--no-default-features` (`list_tools` always
+  present; feature-gated body).
 
 ### Changed
 

@@ -399,40 +399,48 @@ impl McpHttpClient {
         }
     }
 
-    #[cfg(feature = "model-http")]
     async fn list_tools(&mut self) -> Result<Vec<McpToolInfo>, ToolError> {
-        let result = self.request("tools/list", json!({})).await?;
-        let tools = result
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let mut out = Vec::new();
-        for t in tools {
-            let name = t
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let description = t
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let schema = t
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or_else(|| json!({"type":"object"}));
-            out.push(McpToolInfo {
-                name,
-                description,
-                input_schema: schema.to_string(),
-            });
+        #[cfg(not(feature = "model-http"))]
+        {
+            return Err(ToolError::Message(
+                "http mcp requires the model-http feature".into(),
+            ));
         }
-        Ok(out)
+        #[cfg(feature = "model-http")]
+        {
+            let result = self.request("tools/list", json!({})).await?;
+            let tools = result
+                .get("tools")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            for t in tools {
+                let name = t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let description = t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let schema = t
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type":"object"}));
+                out.push(McpToolInfo {
+                    name,
+                    description,
+                    input_schema: schema.to_string(),
+                });
+            }
+            Ok(out)
+        }
     }
 
     #[cfg(feature = "model-http")]
@@ -551,7 +559,9 @@ mod tests {
     use crate::config::{Config, EgressMode, NetworkSettings};
     use crate::tools::ToolRegistry;
     use tempfile::tempdir;
+    #[cfg(feature = "model-http")]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[cfg(feature = "model-http")]
     use tokio::net::TcpListener;
 
     fn mock_stdio_server(name: &str) -> McpServerSettings {
