@@ -61,7 +61,7 @@ and prints `success=true`.
 
 ### Library embed smoke (host proof)
 
-Offline proof that a host can drive `Harness` without shelling the CLI.
+**Primary** offline proof that a host can drive `Harness` without shelling the CLI.
 PR and `main` CI run the same command after `cargo test`:
 
 ```bash
@@ -69,6 +69,12 @@ cargo run --locked --example embed_smoke
 ```
 
 Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript export).
+
+Optional host surfaces (not the CI freeze proof):
+
+- CLI operator path: `doctor` / `run` above
+- MCP stdio: `shikigami mcp` — [docs/mcp.md](docs/mcp.md), [examples/mcp-host.example.json](examples/mcp-host.example.json)
+- Embed API freeze guidance: [docs/embedding.md](docs/embedding.md)
 
 ### Prebuilt binaries
 
