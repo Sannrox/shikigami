@@ -759,6 +759,7 @@ impl Engine {
             Ok(_) => (success, final_summary, termination),
             Err(e) => {
                 let summary = e.to_string();
+                tools.kill_background_jobs().await;
                 let _ = self.save_checkpoint(
                     &run_id,
                     &task,
@@ -821,6 +822,9 @@ impl Engine {
             self.config.model.input_usd_micros_per_mtok,
             self.config.model.output_usd_micros_per_mtok,
         );
+
+        // Always reap background shells so runs do not leak processes.
+        tools.kill_background_jobs().await;
 
         let _ = hooks::run_hooks(
             &self.config.hooks,
