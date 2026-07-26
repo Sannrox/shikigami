@@ -322,8 +322,13 @@ mod tests {
             command: "mock".into(),
             args: vec![],
         }];
-        let mut reg =
-            ToolRegistry::with_builtins(dir.path(), vec!["read_file".into()], 30).unwrap();
+        let mut reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["read_file".into()],
+            30,
+            crate::config::NetworkSettings::default(),
+        )
+        .unwrap();
         let n = attach_mcp_servers(&mut reg, &config).await.unwrap();
         assert_eq!(n, 1);
         let defs = reg.definitions();
