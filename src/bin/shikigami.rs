@@ -44,6 +44,9 @@ enum Command {
         /// Task specification (optional when --resume is set).
         #[arg(default_value = "")]
         task: String,
+        /// Read task from a UTF-8 file (avoids exposing prompts on argv).
+        #[arg(long)]
+        task_file: Option<PathBuf>,
         /// Keep the workspace directory after a successful run.
         #[arg(long)]
         keep_workspace: bool,
@@ -142,7 +145,15 @@ async fn run() -> anyhow::Result<()> {
             resume,
             answer,
             answer_file,
+            task_file,
         } => {
+            let task = match (task.is_empty(), task_file) {
+                (false, Some(_)) => {
+                    anyhow::bail!("use only one of task argument or --task-file");
+                }
+                (true, Some(path)) => std::fs::read_to_string(path)?,
+                (_, None) => task,
+            };
             if resume.is_none() && task.is_empty() {
                 anyhow::bail!("task is required unless --resume is set");
             }
