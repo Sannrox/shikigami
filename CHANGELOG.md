@@ -25,6 +25,8 @@ once 1.0.0 is released. Until then, `0.x` releases may include breaking changes.
   ([docs/mcp.md](docs/mcp.md)); not a multi-tenant control plane.
 - Run-scoped `todo_write` checklist tool (checkpoint + `RunResult.todos` +
   `TodosUpdated` event); not a substitute for park/escalate or plane work-units.
+- Opt-in `web_fetch` tool (HTTP GET) governed by `[network]` egress with
+  private/link-local SSRF blocks ([docs/network.md](docs/network.md)).
 - Optional workspace snapshots (`workspace.snapshot`) and restore via RunRequest.
 - Governed mid-run tool authorization via sekai-chisei `AuthorizeExternalAction`
   (bash / write_file / edit / read_file; `report` remains harness-internal).
