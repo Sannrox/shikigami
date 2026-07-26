@@ -113,23 +113,27 @@ async fn invoke_hook(hook: &HookSettings, event: HookEvent, payload: &Value) -> 
 mod tests {
     use super::*;
     use crate::config::HookSettings;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
-    #[tokio::test]
-    async fn fail_closed_pre_tool_blocks() {
-        let mut script = NamedTempFile::new().unwrap();
-        writeln!(script, "#!/bin/sh\nexit 1").unwrap();
+    fn write_script(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sh");
+        std::fs::write(&path, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = script.as_file().metadata().unwrap().permissions();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
             perms.set_mode(0o755);
-            std::fs::set_permissions(script.path(), perms).unwrap();
+            std::fs::set_permissions(&path, perms).unwrap();
         }
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn fail_closed_pre_tool_blocks() {
+        let (_dir, path) = write_script("#!/bin/sh\nexit 1\n");
         let hooks = vec![HookSettings {
             event: "pre_tool".into(),
-            command: script.path().to_string_lossy().into(),
+            command: path.to_string_lossy().into(),
             args: vec![],
             timeout_ms: 2_000,
             fail_closed: true,
@@ -146,18 +150,10 @@ mod tests {
 
     #[tokio::test]
     async fn fail_open_ignores_failure() {
-        let mut script = NamedTempFile::new().unwrap();
-        writeln!(script, "#!/bin/sh\nexit 1").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = script.as_file().metadata().unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(script.path(), perms).unwrap();
-        }
+        let (_dir, path) = write_script("#!/bin/sh\nexit 1\n");
         let hooks = vec![HookSettings {
             event: "post_run".into(),
-            command: script.path().to_string_lossy().into(),
+            command: path.to_string_lossy().into(),
             args: vec![],
             timeout_ms: 2_000,
             fail_closed: false,
@@ -169,18 +165,10 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_fail_closed() {
-        let mut script = NamedTempFile::new().unwrap();
-        writeln!(script, "#!/bin/sh\nsleep 5").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = script.as_file().metadata().unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(script.path(), perms).unwrap();
-        }
+        let (_dir, path) = write_script("#!/bin/sh\nsleep 5\n");
         let hooks = vec![HookSettings {
             event: "pre_run".into(),
-            command: script.path().to_string_lossy().into(),
+            command: path.to_string_lossy().into(),
             args: vec![],
             timeout_ms: 100,
             fail_closed: true,
