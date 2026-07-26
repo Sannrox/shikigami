@@ -87,6 +87,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
 | `serve [--poll-ms N] [--max-jobs N]` | Local-queue daemon host ([docs/serve.md](docs/serve.md)) |
 | `mcp` | MCP stdio server exposing `doctor` + `run` ([docs/mcp.md](docs/mcp.md)) |
+| `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([docs/embedding.md](docs/embedding.md)) |
 
 | Flag / env | Purpose |
 | --- | --- |

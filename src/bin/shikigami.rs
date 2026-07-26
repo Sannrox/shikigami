@@ -74,6 +74,14 @@ enum Command {
     /// Stdio only — no network bind. Not a multi-tenant control plane;
     /// prefer library embed for in-process hosts.
     Mcp,
+    /// Export a run transcript as JSONL from local checkpoint state.
+    Export {
+        /// Run id under the state root (`runs/<id>/checkpoint.json`).
+        run_id: String,
+        /// Write to this path instead of stdout.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -210,6 +218,25 @@ async fn run() -> anyhow::Result<()> {
             shikigami::mcp_server::run_stdio(&harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Command::Export { run_id, output } => {
+            let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
+            let opts = shikigami::ExportOptions {
+                max_field_chars: 2_000,
+                config: Some(harness.config.clone()),
+            };
+            let jsonl = shikigami::export_run_transcript(&state.runs_dir(), &run_id, &opts)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if let Some(path) = output {
+                std::fs::write(&path, &jsonl)?;
+                eprintln!(
+                    "wrote transcript {} bytes to {}",
+                    jsonl.len(),
+                    path.display()
+                );
+            } else {
+                print!("{jsonl}");
+            }
         }
     }
     Ok(())
