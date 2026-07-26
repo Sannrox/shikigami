@@ -37,6 +37,41 @@ impl TokenUsage {
     }
 }
 
+/// Optional USD cost estimate when rates are configured on settings.
+///
+/// Amounts are integer **microdollars** (1_000_000 = $1.00). Absent rates ⇒
+/// no estimate (never invent costs). Zero tokens with rates ⇒ zero cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostEstimate {
+    pub currency: String,
+    pub input_usd_micros: u64,
+    pub output_usd_micros: u64,
+    pub total_usd_micros: u64,
+}
+
+impl CostEstimate {
+    /// Compute cost from usage and per-million-token microdollar rates.
+    /// Returns `None` unless **both** rates are provided.
+    pub fn from_usage_and_rates(
+        usage: TokenUsage,
+        input_usd_micros_per_mtok: Option<u64>,
+        output_usd_micros_per_mtok: Option<u64>,
+    ) -> Option<Self> {
+        let (in_rate, out_rate) = match (input_usd_micros_per_mtok, output_usd_micros_per_mtok) {
+            (Some(i), Some(o)) => (i, o),
+            _ => return None,
+        };
+        let input_usd_micros = usage.input_tokens.saturating_mul(in_rate) / 1_000_000;
+        let output_usd_micros = usage.output_tokens.saturating_mul(out_rate) / 1_000_000;
+        Some(Self {
+            currency: "USD".into(),
+            input_usd_micros,
+            output_usd_micros,
+            total_usd_micros: input_usd_micros.saturating_add(output_usd_micros),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelTurn {
     pub content: String,
@@ -370,5 +405,34 @@ impl ModelPort for HttpModel {
             tool_calls,
             usage,
         })
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    #[test]
+    fn cost_none_without_rates() {
+        let u = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+        };
+        assert!(CostEstimate::from_usage_and_rates(u, None, None).is_none());
+        assert!(CostEstimate::from_usage_and_rates(u, Some(1), None).is_none());
+    }
+
+    #[test]
+    fn cost_from_rates() {
+        // $1 / MTok input, $2 / MTok output → micros 1e6 and 2e6
+        let u = TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+        };
+        let c = CostEstimate::from_usage_and_rates(u, Some(1_000_000), Some(2_000_000)).unwrap();
+        assert_eq!(c.currency, "USD");
+        assert_eq!(c.input_usd_micros, 1_000_000);
+        assert_eq!(c.output_usd_micros, 1_000_000);
+        assert_eq!(c.total_usd_micros, 2_000_000);
     }
 }
