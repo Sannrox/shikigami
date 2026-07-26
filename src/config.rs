@@ -250,6 +250,7 @@ impl ToolsSettings {
             PermissionMode::WorkspaceExec => {
                 let mut t = Self::default_coding_tools();
                 t.push("bash".into());
+                // bg job tools are auto-exposed when bash is enabled (definitions())
                 t
             }
         }
