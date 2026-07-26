@@ -30,6 +30,10 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # ADR 0004 / #107: offline library host proof (no plane, no network providers)
+      - name: Embed smoke (host proof)
+        run: cargo run --locked --example embed_smoke
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
