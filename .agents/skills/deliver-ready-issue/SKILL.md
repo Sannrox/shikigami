@@ -92,7 +92,16 @@ clean tree.
 ### 5. Publish when authorized
 
 1. Stage only the intended paths and create a narrow imperative commit.
-2. Push the topic branch without force.
+   Never use `--no-gpg-sign`. If signing fails, stop and fix GPG.
+2. Publish the topic branch with **GitHub-verified** commits via
+   `scripts/gh-verified-push.sh` (GraphQL `createCommitOnBranch`), not a plain
+   `git push`, unless the user explicitly asks for git-protocol push:
+   - New branch:
+     `scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
+   - Update existing branch:
+     `scripts/gh-verified-push.sh --branch <topic> --sync-local`
+   - Confirm the script reports `verification.verified=true` and that the
+     hosted tree matches local `HEAD`.
 3. Open a ready Pull Request that:
    - links and closes the Issue;
    - summarizes behavior rather than file operations;
@@ -104,10 +113,13 @@ clean tree.
 ### 6. Land when authorized
 
 1. Wait for required CI and review. Resolve actionable feedback in the same
-   branch and rerun affected checks.
+   branch and rerun affected checks. Re-publish review fixes with
+   `scripts/gh-verified-push.sh` so the PR tip stays Verified.
 2. Recheck that dependencies and repository protections still permit landing.
-3. Use the repository's documented rebase merge strategy and delete the remote
-   branch.
+3. Prefer squash merge for Verified linear history on `main`:
+   `gh pr merge --squash --delete-branch`.
+   Use `--match-head-commit` with the published tip when available. Do not use
+   GitHub rebase-merge when Verified commits matter.
 4. Confirm the Issue closed, the default branch contains the merge, and the
    local checkout is synchronized when safe.
 5. Invoke `advance-issue-frontier` in report-only mode unless the user also

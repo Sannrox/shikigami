@@ -106,11 +106,19 @@ Dependabot opens weekly cargo and GitHub Actions update PRs.
 Commit subjects: short imperative, Conventional Commits welcome
 (`feat:`, `fix:`, `docs:`, `chore:`).
 
-Maintainers prefer **rebase merges** so `main` stays linear:
+Publish PR tips with GitHub-verified commits:
 
 ```bash
-gh pr merge --rebase --delete-branch
+scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local
 ```
+
+Maintainers prefer **squash merges** so `main` stays linear and lands Verified:
+
+```bash
+gh pr merge --squash --delete-branch
+```
+
+Avoid GitHub rebase-merge when Verified history matters.
 
 ## Documentation
 
