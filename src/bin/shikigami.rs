@@ -4,11 +4,17 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
     Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions, StateRoot,
     VERSION,
 };
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ServeIntake {
+    Filesystem,
+    Plane,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -63,14 +69,23 @@ enum Command {
         #[arg(long)]
         answer_file: Option<PathBuf>,
     },
-    /// Long-running local-queue host (see docs/serve.md).
+    /// Long-running filesystem-queue or plane-claim host (see docs/serve.md).
     Serve {
+        /// Work intake source. Filesystem remains the offline default.
+        #[arg(long, value_enum, default_value_t = ServeIntake::Filesystem)]
+        intake: ServeIntake,
         /// Poll interval for the inbox in milliseconds.
         #[arg(long, default_value_t = 200)]
         poll_ms: u64,
         /// Exit after processing this many jobs (tests / oneshot drain).
         #[arg(long)]
         max_jobs: Option<u64>,
+        /// Stable runtime id used to filter and hold plane claims.
+        #[arg(long, default_value = "shikigami")]
+        runtime_id: String,
+        /// Plane claim lease TTL. Heartbeats run at one third of this duration.
+        #[arg(long, default_value_t = 60)]
+        claim_ttl_secs: u64,
     },
     /// MCP server over stdio (`doctor` + `run` tools). See docs/mcp.md.
     ///
@@ -197,28 +212,88 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("run reported failure");
             }
         }
-        Command::Serve { poll_ms, max_jobs } => {
+        Command::Serve {
+            intake,
+            poll_ms,
+            max_jobs,
+            runtime_id,
+            claim_ttl_secs,
+        } => {
             let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
-            let layout = QueueLayout::under_state(state.path());
-            layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
-            println!(
-                "serve inbox={} health={}",
-                layout.inbox.display(),
-                layout.health.display()
-            );
             let (tx, rx) = tokio::sync::watch::channel(false);
             let sig_tx = tx.clone();
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
                 let _ = sig_tx.send(true);
             });
-            let options = ServeOptions {
-                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
-                max_jobs,
+
+            let n = match intake {
+                ServeIntake::Filesystem => {
+                    let layout = QueueLayout::under_state(state.path());
+                    layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
+                    println!(
+                        "serve intake=filesystem inbox={} health={}",
+                        layout.inbox.display(),
+                        layout.health.display()
+                    );
+                    let options = ServeOptions {
+                        poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
+                        max_jobs,
+                    };
+                    shikigami::serve::run_serve(&harness, &layout, options, rx)
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?
+                }
+                ServeIntake::Plane => {
+                    if harness.config.governance.adapter != "sekai-chisei" {
+                        anyhow::bail!(
+                            "plane intake requires governance.adapter = \"sekai-chisei\""
+                        );
+                    }
+                    if runtime_id.trim().is_empty() {
+                        anyhow::bail!("--runtime-id must not be empty");
+                    }
+                    if claim_ttl_secs == 0 {
+                        anyhow::bail!("--claim-ttl-secs must be greater than zero");
+                    }
+                    #[cfg(feature = "governance-sekai-chisei")]
+                    {
+                        let ttl = std::time::Duration::from_secs(claim_ttl_secs);
+                        let client =
+                            shikigami::governance::sekai_chisei::SekaiClaimClient::from_config(
+                                &harness.config,
+                            )
+                            .map_err(|error| anyhow::anyhow!(error))?;
+                        let options = shikigami::PlaneServeOptions {
+                            poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
+                            max_jobs,
+                            claim_ttl: ttl,
+                            heartbeat_interval: ttl / 3,
+                            ack_retry_limit: 5,
+                            policy: shikigami::ClaimedWorkPolicy {
+                                expected_runtime: runtime_id.clone(),
+                                host_timeout: harness
+                                    .config
+                                    .run
+                                    .timeout_secs
+                                    .map(std::time::Duration::from_secs),
+                                ..Default::default()
+                            },
+                        };
+                        println!(
+                            "serve intake=plane runtime={} namespace={} ttl_secs={}",
+                            runtime_id, harness.config.governance.namespace, claim_ttl_secs
+                        );
+                        shikigami::run_plane_serve(&harness, &client, options, rx)
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error))?
+                    }
+                    #[cfg(not(feature = "governance-sekai-chisei"))]
+                    {
+                        anyhow::bail!("plane intake requires the governance-sekai-chisei feature");
+                    }
+                }
             };
-            let n = shikigami::serve::run_serve(&harness, &layout, options, rx)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
             println!("serve stopped after {n} job(s)");
             drop(tx);
         }

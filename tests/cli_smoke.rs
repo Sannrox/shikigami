@@ -95,3 +95,25 @@ adapter = "none"
         .success()
         .stdout(predicate::str::contains("success=true"));
 }
+
+#[test]
+fn plane_intake_rejects_ungoverned_host() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "serve",
+            "--intake",
+            "plane",
+            "--max-jobs",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "plane intake requires governance.adapter = \"sekai-chisei\"",
+        ));
+}

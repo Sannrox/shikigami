@@ -4,13 +4,16 @@
 //! supplies a claimed effect plus its ActionInstance parameters, then invokes the
 //! shared harness with the mapped request.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::watch;
 
+use crate::harness::{Harness, HarnessError};
 use crate::run::RunRequest;
+use crate::run::RunTermination;
 
 pub const RUNTIME_DISPATCH_KIND: &str = "runtime_dispatch";
 pub const CLAIMED_STATUS: &str = "claimed";
@@ -89,6 +92,276 @@ pub enum ClaimedWorkMappingError {
     InvalidKeepWorkspace,
     #[error("claimed Action artifact_refs must be an array of non-empty strings")]
     InvalidArtifactRefs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaneClaimLease {
+    pub runtime_id: String,
+    pub generation: u64,
+    pub fencing_token: String,
+    pub expires_at_ms: i64,
+    /// Local monotonic deadline bounded from the acquire/renew RPC start.
+    /// Fencing decisions never compare host and plane wall clocks.
+    pub valid_until: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaneClaim {
+    pub work: ClaimedPlaneWork,
+    pub lease: PlaneClaimLease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneAckOutcome {
+    Completed,
+    Failed,
+    Parked,
+}
+
+impl PlaneAckOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Parked => "parked",
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum PlaneIntakeError {
+    #[error("plane intake: {0}")]
+    Source(String),
+    #[error("plane intake fence lost: {0}")]
+    FenceLost(String),
+    #[error(transparent)]
+    Mapping(#[from] ClaimedWorkMappingError),
+    #[error(transparent)]
+    Harness(Box<HarnessError>),
+}
+
+impl From<HarnessError> for PlaneIntakeError {
+    fn from(value: HarnessError) -> Self {
+        Self::Harness(Box::new(value))
+    }
+}
+
+#[async_trait::async_trait]
+pub trait PlaneIntakePort: Send + Sync {
+    async fn claim_next(
+        &self,
+        runtime_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError>;
+
+    async fn heartbeat(
+        &self,
+        claim: &PlaneClaim,
+        ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError>;
+
+    async fn ack(
+        &self,
+        claim: &PlaneClaim,
+        outcome: PlaneAckOutcome,
+        reason: &str,
+    ) -> Result<(), PlaneIntakeError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaneServeOptions {
+    pub poll_interval: Duration,
+    pub max_jobs: Option<u64>,
+    pub claim_ttl: Duration,
+    pub heartbeat_interval: Duration,
+    pub ack_retry_limit: u32,
+    pub policy: ClaimedWorkPolicy,
+}
+
+impl Default for PlaneServeOptions {
+    fn default() -> Self {
+        let claim_ttl = Duration::from_secs(60);
+        Self {
+            poll_interval: Duration::from_millis(200),
+            max_jobs: None,
+            claim_ttl,
+            heartbeat_interval: claim_ttl / 3,
+            ack_retry_limit: 5,
+            policy: ClaimedWorkPolicy::default(),
+        }
+    }
+}
+
+/// Pull, claim, execute, heartbeat, harvest through [`Harness`], and
+/// acknowledge plane-admitted work until shutdown or `max_jobs`.
+pub async fn run_plane_serve(
+    harness: &Harness,
+    intake: &dyn PlaneIntakePort,
+    options: PlaneServeOptions,
+    shutdown: watch::Receiver<bool>,
+) -> Result<u64, PlaneIntakeError> {
+    if options.claim_ttl.is_zero() {
+        return Err(PlaneIntakeError::Source(
+            "claim_ttl must be greater than zero".into(),
+        ));
+    }
+    if options.heartbeat_interval.is_zero() || options.heartbeat_interval >= options.claim_ttl {
+        return Err(PlaneIntakeError::Source(
+            "heartbeat_interval must be positive and shorter than claim_ttl".into(),
+        ));
+    }
+    if options.ack_retry_limit == 0 {
+        return Err(PlaneIntakeError::Source(
+            "ack_retry_limit must be greater than zero".into(),
+        ));
+    }
+
+    let mut completed = 0u64;
+    loop {
+        if *shutdown.borrow() || options.max_jobs.is_some_and(|max| completed >= max) {
+            return Ok(completed);
+        }
+
+        let Some(mut claim) = intake
+            .claim_next(&options.policy.expected_runtime, options.claim_ttl)
+            .await?
+        else {
+            tokio::select! {
+                _ = tokio::time::sleep(options.poll_interval) => {}
+                _ = wait_for_shutdown(shutdown.clone()) => return Ok(completed),
+            }
+            continue;
+        };
+        completed += 1;
+
+        let mut request = match map_claimed_work(&claim.work, &options.policy) {
+            Ok(request) => request,
+            Err(error) => {
+                intake
+                    .ack_with_retry(
+                        &mut claim,
+                        PlaneAckOutcome::Failed,
+                        &bounded_reason(&error.to_string()),
+                        &options,
+                        &shutdown,
+                    )
+                    .await?;
+                continue;
+            }
+        };
+        request.cancel = Some(shutdown.clone());
+
+        let mut run = Box::pin(harness.run(request));
+        let run_result = loop {
+            tokio::select! {
+                result = &mut run => break result,
+                _ = tokio::time::sleep(options.heartbeat_interval) => {
+                    let call_window = claim_call_window(&claim, options.heartbeat_interval)?;
+                    claim.lease = tokio::time::timeout(
+                        call_window,
+                        intake.heartbeat(&claim, options.claim_ttl),
+                    )
+                    .await
+                    .map_err(|_| PlaneIntakeError::FenceLost(
+                        "heartbeat did not complete before the lease safety deadline".into(),
+                    ))??;
+                }
+            }
+        };
+
+        let (outcome, reason) = match run_result {
+            Ok(result) if result.termination == RunTermination::Parked => (
+                PlaneAckOutcome::Failed,
+                format!(
+                    "parked run cannot be resumed by plane intake yet; terminalized to prevent unsafe reclaim: {}",
+                    result.summary
+                ),
+            ),
+            Ok(result) if result.success => (PlaneAckOutcome::Completed, result.summary),
+            Ok(result) => (PlaneAckOutcome::Failed, result.summary),
+            Err(error) => (PlaneAckOutcome::Failed, error.to_string()),
+        };
+        intake
+            .ack_with_retry(
+                &mut claim,
+                outcome,
+                &bounded_reason(&reason),
+                &options,
+                &shutdown,
+            )
+            .await?;
+    }
+}
+
+trait PlaneIntakeAckExt {
+    async fn ack_with_retry(
+        &self,
+        claim: &mut PlaneClaim,
+        outcome: PlaneAckOutcome,
+        reason: &str,
+        options: &PlaneServeOptions,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Result<(), PlaneIntakeError>;
+}
+
+impl<T: PlaneIntakePort + ?Sized> PlaneIntakeAckExt for T {
+    async fn ack_with_retry(
+        &self,
+        claim: &mut PlaneClaim,
+        outcome: PlaneAckOutcome,
+        reason: &str,
+        options: &PlaneServeOptions,
+        shutdown: &watch::Receiver<bool>,
+    ) -> Result<(), PlaneIntakeError> {
+        let retry_interval = options
+            .poll_interval
+            .clamp(Duration::from_millis(100), Duration::from_millis(250));
+        for attempt in 1..=options.ack_retry_limit {
+            let call_window = claim_call_window(claim, options.heartbeat_interval)?;
+            let ack_error =
+                match tokio::time::timeout(call_window, self.ack(claim, outcome, reason)).await {
+                    Err(_) => PlaneIntakeError::Source(
+                        "acknowledgement timed out before the lease safety deadline".into(),
+                    ),
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(error @ PlaneIntakeError::FenceLost(_))) => return Err(error),
+                    Ok(Err(error)) => error,
+                };
+
+            if attempt == options.ack_retry_limit {
+                return Err(ack_error);
+            }
+            if *shutdown.borrow() {
+                return Err(PlaneIntakeError::Source(
+                    "shutdown requested while acknowledgement was retrying".into(),
+                ));
+            }
+
+            // Ack retry timing is independent of queue polling. Renew first so
+            // even a very large poll interval cannot consume the remaining
+            // lease before the next acknowledgement attempt.
+            let call_window = claim_call_window(claim, options.heartbeat_interval)?;
+            match tokio::time::timeout(call_window, self.heartbeat(claim, options.claim_ttl)).await
+            {
+                Ok(Ok(lease)) => claim.lease = lease,
+                Ok(Err(error @ PlaneIntakeError::FenceLost(_))) => return Err(error),
+                Ok(Err(_)) | Err(_) => {}
+            }
+            let safe_sleep = claim_call_window(claim, options.heartbeat_interval)? / 2;
+            let sleep_for = retry_interval
+                .min(options.heartbeat_interval / 2)
+                .min(safe_sleep);
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_for) => {}
+                _ = wait_for_shutdown(shutdown.clone()) => {
+                    return Err(PlaneIntakeError::Source(
+                        "shutdown requested while acknowledgement was retrying".into(),
+                    ));
+                }
+            }
+        }
+        unreachable!("positive acknowledgement retry limit validated")
+    }
 }
 
 /// Map a fenced, already-claimed plane effect into the stable harness request.
@@ -252,6 +525,32 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow() || shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn bounded_reason(reason: &str) -> String {
+    reason.chars().take(512).collect()
+}
+
+fn claim_call_window(claim: &PlaneClaim, maximum: Duration) -> Result<Duration, PlaneIntakeError> {
+    let remaining = claim
+        .lease
+        .valid_until
+        .saturating_duration_since(Instant::now());
+    if remaining <= Duration::from_millis(20) {
+        return Err(PlaneIntakeError::FenceLost(
+            "claim lease has no safe time remaining".into(),
+        ));
+    }
+    let safety = (remaining / 10).clamp(Duration::from_millis(10), Duration::from_millis(250));
+    Ok(maximum.min(remaining - safety))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +676,23 @@ mod tests {
                 actual: "other".into()
             }
         );
+    }
+
+    #[test]
+    fn lease_call_window_fails_before_expiry() {
+        let claim = PlaneClaim {
+            work: work(json!({"task": "demo"})),
+            lease: PlaneClaimLease {
+                runtime_id: "shikigami".into(),
+                generation: 1,
+                fencing_token: "fence-1".into(),
+                expires_at_ms: chrono::Utc::now().timestamp_millis() + 10,
+                valid_until: Instant::now() + Duration::from_millis(10),
+            },
+        };
+        assert!(matches!(
+            claim_call_window(&claim, Duration::from_secs(20)),
+            Err(PlaneIntakeError::FenceLost(_))
+        ));
     }
 }

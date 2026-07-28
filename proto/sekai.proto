@@ -1234,6 +1234,81 @@ message GuardedDeleteObjectRequest {
 }
 message GuardedDeleteObjectResponse {}
 
+// Governed ActionInstance admission and runtime claim subset consumed by
+// shikigami serve. Kept wire-compatible with sekai-chisei #397-#399.
+message ActionInstance {
+  string instance_id = 1;
+  string namespace = 2;
+  string type_id = 3;
+  string version = 4;
+  string principal = 5;
+  string parameters_json = 6;
+  string request_digest = 7;
+  string idempotency_key = 8;
+  string operation_id = 9;
+  string status = 10;
+  string deny_reason = 11;
+  repeated string evidence_submission_ids = 12;
+  string policy_decision = 13;
+  string budget_decision = 14;
+  int64 created_at_ms = 15;
+  int64 decided_at_ms = 16;
+}
+message GetActionInstanceRequest {
+  string instance_id = 1;
+  string namespace = 2;
+  string idempotency_key = 3;
+}
+message GetActionInstanceResponse { ActionInstance instance = 1; }
+
+message ActionEffect {
+  string effect_id = 1;
+  string instance_id = 2;
+  string namespace = 3;
+  string operation_id = 4;
+  string kind = 5;
+  string status = 6;
+  string payload_json = 7;
+  string failure_reason = 8;
+  int64 created_at_ms = 9;
+  int64 updated_at_ms = 10;
+  string claim_owner = 11;
+  uint64 claim_generation = 12;
+  string claim_fencing_token = 13;
+  int64 claim_expires_at_ms = 14;
+  string claim_request_id = 15;
+}
+message ListClaimableActionWorkRequest {
+  string namespace = 1;
+  string runtime_id = 2;
+  uint32 limit = 3;
+}
+message ListClaimableActionWorkResponse { repeated ActionEffect effects = 1; }
+message ClaimActionWorkRequest {
+  string effect_id = 1;
+  string runtime_id = 2;
+  string request_id = 3;
+  int64 ttl_ms = 4;
+}
+message ClaimActionWorkResponse { ActionEffect effect = 1; }
+message HeartbeatActionClaimRequest {
+  string effect_id = 1;
+  string runtime_id = 2;
+  uint64 claim_generation = 3;
+  string fencing_token = 4;
+  int64 ttl_ms = 5;
+}
+message HeartbeatActionClaimResponse { ActionEffect effect = 1; }
+message AckActionWorkRequest {
+  string effect_id = 1;
+  string runtime_id = 2;
+  uint64 claim_generation = 3;
+  string fencing_token = 4;
+  string outcome = 5;
+  string reason = 6;
+}
+message AckActionWorkResponse { ActionEffect effect = 1; }
+
 // --- Service ---
 
 // Durable, namespace-isolated facts for agent operations. Domain-specific
@@ -1323,6 +1398,11 @@ service SekaiService {
   rpc CreateActionType(CreateActionTypeRequest) returns (CreateActionTypeResponse);
   rpc ListActionTypes(ListActionTypesRequest) returns (ListActionTypesResponse);
   rpc DeleteActionType(DeleteActionTypeRequest) returns (DeleteActionTypeResponse);
+  rpc GetActionInstance(GetActionInstanceRequest) returns (GetActionInstanceResponse);
+  rpc ListClaimableActionWork(ListClaimableActionWorkRequest) returns (ListClaimableActionWorkResponse);
+  rpc ClaimActionWork(ClaimActionWorkRequest) returns (ClaimActionWorkResponse);
+  rpc HeartbeatActionClaim(HeartbeatActionClaimRequest) returns (HeartbeatActionClaimResponse);
+  rpc AckActionWork(AckActionWorkRequest) returns (AckActionWorkResponse);
   rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
   rpc SetActionPolicy(SetActionPolicyRequest) returns (SetActionPolicyResponse);
   rpc GetActionPolicy(GetActionPolicyRequest) returns (GetActionPolicyResponse);

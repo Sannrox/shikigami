@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Library mapping from already-claimed plane `runtime_dispatch` work to a
   correlation-safe, host-capped `RunRequest`.
+- Explicit `serve --intake plane` mode for fenced claim → run/harvest →
+  heartbeat/ack execution; filesystem intake remains the default.
 
 ## [1.0.3] — 2026-07-26
 
