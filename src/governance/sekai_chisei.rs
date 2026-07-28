@@ -1,6 +1,6 @@
 //! First-party sekai-chisei governance adapter.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tonic::metadata::{Ascii, MetadataValue};
@@ -38,6 +38,10 @@ use proto::chisei::{
 };
 use proto::sekai::ListSchemaTypesRequest;
 use proto::sekai::sekai_service_client::SekaiServiceClient;
+use proto::sekai::{
+    AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
+    HeartbeatActionClaimRequest, ListClaimableActionWorkRequest,
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
@@ -70,6 +74,24 @@ pub struct SekaiChiseiGovernance {
     token_env: Option<String>,
     max_tokens: i32,
     preferred_model: String,
+}
+
+/// Runtime-claim client used by the explicit plane intake mode of `serve`.
+///
+/// This client only claims and acknowledges already-admitted work. Governance
+/// planning, tool authorization, and harvest remain on [`SekaiChiseiGovernance`].
+pub struct SekaiClaimClient {
+    inner: SekaiChiseiGovernance,
+    namespace: String,
+}
+
+impl SekaiClaimClient {
+    pub fn from_config(config: &Config) -> Result<Self, GovernanceError> {
+        Ok(Self {
+            inner: SekaiChiseiGovernance::from_config(config)?,
+            namespace: config.governance.namespace.clone(),
+        })
+    }
 }
 
 impl SekaiChiseiGovernance {
@@ -230,6 +252,206 @@ impl SekaiChiseiGovernance {
             policy_project: handle.namespace.clone(),
         }
     }
+}
+
+#[async_trait]
+impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
+    async fn claim_next(
+        &self,
+        runtime_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<crate::plane_intake::PlaneClaim>, crate::plane_intake::PlaneIntakeError>
+    {
+        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
+        let listed = sekai
+            .list_claimable_action_work(ListClaimableActionWorkRequest {
+                namespace: self.namespace.clone(),
+                runtime_id: runtime_id.into(),
+                limit: 1,
+            })
+            .await
+            .map_err(|error| {
+                crate::plane_intake::PlaneIntakeError::Source(format!(
+                    "ListClaimableActionWork: {error}"
+                ))
+            })?
+            .into_inner();
+        let Some(candidate) = listed.effects.into_iter().next() else {
+            return Ok(None);
+        };
+        let effect = match sekai
+            .claim_action_work(ClaimActionWorkRequest {
+                effect_id: candidate.effect_id,
+                runtime_id: runtime_id.into(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                ttl_ms: duration_millis(ttl)?,
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(status) if is_claim_contention(&status) => return Ok(None),
+            Err(error) => {
+                return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
+                    "ClaimActionWork: {error}"
+                )));
+            }
+        }
+        .into_inner()
+        .effect
+        .ok_or_else(|| {
+            crate::plane_intake::PlaneIntakeError::Source(
+                "ClaimActionWork returned no effect".into(),
+            )
+        })?;
+        let instance = sekai
+            .get_action_instance(GetActionInstanceRequest {
+                instance_id: effect.instance_id.clone(),
+                namespace: String::new(),
+                idempotency_key: String::new(),
+            })
+            .await
+            .map_err(|error| {
+                crate::plane_intake::PlaneIntakeError::Source(format!("GetActionInstance: {error}"))
+            })?
+            .into_inner()
+            .instance
+            .ok_or_else(|| {
+                crate::plane_intake::PlaneIntakeError::Source(
+                    "GetActionInstance returned no instance".into(),
+                )
+            })?;
+        // Parameter lookup happens after claim and may consume most of the
+        // initial TTL. Revalidate and renew the same fence before the host is
+        // allowed to start the run.
+        let renew_started = Instant::now();
+        let effect = match sekai
+            .heartbeat_action_claim(HeartbeatActionClaimRequest {
+                effect_id: effect.effect_id,
+                runtime_id: effect.claim_owner,
+                claim_generation: effect.claim_generation,
+                fencing_token: effect.claim_fencing_token,
+                ttl_ms: duration_millis(ttl)?,
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(status) if is_claim_contention(&status) => return Ok(None),
+            Err(error) => {
+                return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
+                    "HeartbeatActionClaim before run: {error}"
+                )));
+            }
+        }
+        .into_inner()
+        .effect
+        .ok_or_else(|| {
+            crate::plane_intake::PlaneIntakeError::Source(
+                "HeartbeatActionClaim before run returned no effect".into(),
+            )
+        })?;
+
+        Ok(Some(crate::plane_intake::PlaneClaim {
+            work: crate::plane_intake::ClaimedPlaneWork {
+                effect_id: effect.effect_id,
+                instance_id: effect.instance_id,
+                operation_id: effect.operation_id,
+                kind: effect.kind,
+                status: effect.status,
+                payload_json: effect.payload_json,
+                parameters_json: instance.parameters_json,
+                resolved_task: None,
+            },
+            lease: crate::plane_intake::PlaneClaimLease {
+                runtime_id: effect.claim_owner,
+                generation: effect.claim_generation,
+                fencing_token: effect.claim_fencing_token,
+                expires_at_ms: effect.claim_expires_at_ms,
+                valid_until: renew_started + ttl,
+            },
+        }))
+    }
+
+    async fn heartbeat(
+        &self,
+        claim: &crate::plane_intake::PlaneClaim,
+        ttl: Duration,
+    ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
+        let renew_started = Instant::now();
+        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
+        let effect = sekai
+            .heartbeat_action_claim(HeartbeatActionClaimRequest {
+                effect_id: claim.work.effect_id.clone(),
+                runtime_id: claim.lease.runtime_id.clone(),
+                claim_generation: claim.lease.generation,
+                fencing_token: claim.lease.fencing_token.clone(),
+                ttl_ms: duration_millis(ttl)?,
+            })
+            .await
+            .map_err(|error| {
+                if is_claim_contention(&error) {
+                    crate::plane_intake::PlaneIntakeError::FenceLost(error.to_string())
+                } else {
+                    crate::plane_intake::PlaneIntakeError::Source(format!(
+                        "HeartbeatActionClaim: {error}"
+                    ))
+                }
+            })?
+            .into_inner()
+            .effect
+            .ok_or_else(|| {
+                crate::plane_intake::PlaneIntakeError::Source(
+                    "HeartbeatActionClaim returned no effect".into(),
+                )
+            })?;
+        Ok(crate::plane_intake::PlaneClaimLease {
+            runtime_id: effect.claim_owner,
+            generation: effect.claim_generation,
+            fencing_token: effect.claim_fencing_token,
+            expires_at_ms: effect.claim_expires_at_ms,
+            valid_until: renew_started + ttl,
+        })
+    }
+
+    async fn ack(
+        &self,
+        claim: &crate::plane_intake::PlaneClaim,
+        outcome: crate::plane_intake::PlaneAckOutcome,
+        reason: &str,
+    ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
+        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
+        sekai
+            .ack_action_work(AckActionWorkRequest {
+                effect_id: claim.work.effect_id.clone(),
+                runtime_id: claim.lease.runtime_id.clone(),
+                claim_generation: claim.lease.generation,
+                fencing_token: claim.lease.fencing_token.clone(),
+                outcome: outcome.as_str().into(),
+                reason: reason.into(),
+            })
+            .await
+            .map_err(|error| {
+                if is_claim_contention(&error) {
+                    crate::plane_intake::PlaneIntakeError::FenceLost(error.to_string())
+                } else {
+                    crate::plane_intake::PlaneIntakeError::Source(format!("AckActionWork: {error}"))
+                }
+            })?;
+        Ok(())
+    }
+}
+
+fn duration_millis(duration: Duration) -> Result<i64, crate::plane_intake::PlaneIntakeError> {
+    i64::try_from(duration.as_millis()).map_err(|_| {
+        crate::plane_intake::PlaneIntakeError::Source("claim TTL exceeds i64 milliseconds".into())
+    })
+}
+
+fn plane_intake_source(error: GovernanceError) -> crate::plane_intake::PlaneIntakeError {
+    crate::plane_intake::PlaneIntakeError::Source(error.to_string())
+}
+
+fn is_claim_contention(status: &Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
 }
 
 #[async_trait]
@@ -673,6 +895,15 @@ mod tests {
             assurance: None,
             permit: None,
         }
+    }
+
+    #[test]
+    fn only_failed_precondition_is_normal_claim_contention() {
+        assert!(is_claim_contention(&Status::failed_precondition(
+            "already claimed"
+        )));
+        assert!(!is_claim_contention(&Status::permission_denied("denied")));
+        assert!(!is_claim_contention(&Status::unavailable("offline")));
     }
 
     #[test]
