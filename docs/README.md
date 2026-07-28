@@ -11,6 +11,7 @@ Operator and contributor documentation for **shikigami**.
 | Understand architecture | [../DESIGN.md](../DESIGN.md) |
 | Configure profiles and env vars | [settings.md](settings.md) |
 | Run against sekai-chisei | [governed-path.md](governed-path.md) |
+| Operate Action admit → claim → run | [plane-action-run.md](plane-action-run.md) |
 | Map run outcomes to plane harvest | [harvest.md](harvest.md) |
 | Correlate run / operation / attempt ids | [identity.md](identity.md) |
 | Versioned prompts and attribution | [prompts.md](prompts.md) |
