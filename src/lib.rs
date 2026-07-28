@@ -53,8 +53,10 @@ pub use metrics::{Metrics, MetricsSnapshot};
 pub use model::{CostEstimate, TokenUsage};
 pub use plane_intake::{
     CLAIMED_STATUS, ClaimedPlaneWork, ClaimedWorkMappingError, ClaimedWorkPolicy,
-    DEFAULT_MAX_CLAIMED_TASK_BYTES, PlaneAckOutcome, PlaneClaim, PlaneClaimLease, PlaneIntakeError,
-    PlaneIntakePort, PlaneServeOptions, RUNTIME_DISPATCH_KIND, map_claimed_work, run_plane_serve,
+    DEFAULT_MAX_CLAIMED_TASK_BYTES, DEFAULT_MAX_CONTINUATION_BYTES, PlaneAck, PlaneAckOutcome,
+    PlaneCheckpoint, PlaneClaim, PlaneClaimEventKind, PlaneClaimLease, PlaneIntakeError,
+    PlaneIntakePort, PlaneServeOptions, PlaneWorkContinuation, RUNTIME_DISPATCH_KIND,
+    map_claimed_work, run_plane_serve,
 };
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};

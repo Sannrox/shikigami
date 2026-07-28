@@ -40,7 +40,7 @@ use proto::sekai::ListSchemaTypesRequest;
 use proto::sekai::sekai_service_client::SekaiServiceClient;
 use proto::sekai::{
     AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
-    HeartbeatActionClaimRequest, ListClaimableActionWorkRequest,
+    HeartbeatActionClaimRequest, ListClaimableActionWorkRequest, ReportActionClaimEventRequest,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -279,7 +279,7 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
         let Some(candidate) = listed.effects.into_iter().next() else {
             return Ok(None);
         };
-        let effect = match sekai
+        let claimed = match sekai
             .claim_action_work(ClaimActionWorkRequest {
                 effect_id: candidate.effect_id,
                 runtime_id: runtime_id.into(),
@@ -296,9 +296,50 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
                 )));
             }
         }
-        .into_inner()
-        .effect
-        .ok_or_else(|| {
+        .into_inner();
+        let continuation = match (claimed.continuation, claimed.park) {
+            (None, None) => None,
+            (Some(continuation), Some(park))
+                if continuation.park_id == park.park_id
+                    && continuation.effect_id == park.effect_id
+                    && continuation.operation_id == park.operation_id
+                    && continuation.park_generation == park.park_generation =>
+            {
+                let checkpoint = if park.checkpoint_store_id.is_empty()
+                    && park.checkpoint_ref.is_empty()
+                    && park.checkpoint_digest.is_empty()
+                {
+                    None
+                } else {
+                    Some(crate::plane_intake::PlaneCheckpoint {
+                        store_id: park.checkpoint_store_id,
+                        reference: park.checkpoint_ref,
+                        digest: park.checkpoint_digest,
+                    })
+                };
+                Some(crate::plane_intake::PlaneWorkContinuation {
+                    resolution_id: continuation.resolution_id,
+                    park_id: continuation.park_id,
+                    effect_id: continuation.effect_id,
+                    operation_id: continuation.operation_id,
+                    park_generation: continuation.park_generation,
+                    input_json: continuation.input_json,
+                    input_digest: continuation.input_digest,
+                    checkpoint,
+                })
+            }
+            (Some(_), Some(_)) => {
+                return Err(crate::plane_intake::PlaneIntakeError::Source(
+                    "ClaimActionWork returned mismatched continuation and park snapshots".into(),
+                ));
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(crate::plane_intake::PlaneIntakeError::Source(
+                    "ClaimActionWork returned an incomplete continuation snapshot".into(),
+                ));
+            }
+        };
+        let effect = claimed.effect.ok_or_else(|| {
             crate::plane_intake::PlaneIntakeError::Source(
                 "ClaimActionWork returned no effect".into(),
             )
@@ -360,6 +401,7 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
                 payload_json: effect.payload_json,
                 parameters_json: instance.parameters_json,
                 resolved_task: None,
+                continuation,
             },
             lease: crate::plane_intake::PlaneClaimLease {
                 runtime_id: effect.claim_owner,
@@ -415,8 +457,7 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
     async fn ack(
         &self,
         claim: &crate::plane_intake::PlaneClaim,
-        outcome: crate::plane_intake::PlaneAckOutcome,
-        reason: &str,
+        ack: &crate::plane_intake::PlaneAck,
     ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
         let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
         sekai
@@ -425,8 +466,24 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
                 runtime_id: claim.lease.runtime_id.clone(),
                 claim_generation: claim.lease.generation,
                 fencing_token: claim.lease.fencing_token.clone(),
-                outcome: outcome.as_str().into(),
-                reason: reason.into(),
+                outcome: ack.outcome.as_str().into(),
+                reason: ack.reason.clone(),
+                request_id: ack.request_id.clone(),
+                checkpoint_store_id: ack
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.store_id.clone())
+                    .unwrap_or_default(),
+                checkpoint_ref: ack
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.reference.clone())
+                    .unwrap_or_default(),
+                checkpoint_digest: ack
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.digest.clone())
+                    .unwrap_or_default(),
             })
             .await
             .map_err(|error| {
@@ -434,6 +491,39 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
                     crate::plane_intake::PlaneIntakeError::FenceLost(error.to_string())
                 } else {
                     crate::plane_intake::PlaneIntakeError::Source(format!("AckActionWork: {error}"))
+                }
+            })?;
+        Ok(())
+    }
+
+    async fn report_claim_event(
+        &self,
+        claim: &crate::plane_intake::PlaneClaim,
+        kind: crate::plane_intake::PlaneClaimEventKind,
+        checkpoint_digest: &str,
+        reason_code: &str,
+        request_id: &str,
+    ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
+        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
+        sekai
+            .report_action_claim_event(ReportActionClaimEventRequest {
+                effect_id: claim.work.effect_id.clone(),
+                runtime_id: claim.lease.runtime_id.clone(),
+                claim_generation: claim.lease.generation,
+                fencing_token: claim.lease.fencing_token.clone(),
+                kind: kind.as_str().into(),
+                checkpoint_digest: checkpoint_digest.into(),
+                reason_code: reason_code.into(),
+                request_id: request_id.into(),
+            })
+            .await
+            .map_err(|error| {
+                if is_claim_contention(&error) {
+                    crate::plane_intake::PlaneIntakeError::FenceLost(error.to_string())
+                } else {
+                    crate::plane_intake::PlaneIntakeError::Source(format!(
+                        "ReportActionClaimEvent: {error}"
+                    ))
                 }
             })?;
         Ok(())
