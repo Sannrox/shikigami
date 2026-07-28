@@ -33,6 +33,7 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod metrics;
 pub mod model;
+pub mod plane_intake;
 pub mod prompts;
 pub mod run;
 pub mod serve;
@@ -50,6 +51,10 @@ pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use model::{CostEstimate, TokenUsage};
+pub use plane_intake::{
+    CLAIMED_STATUS, ClaimedPlaneWork, ClaimedWorkMappingError, ClaimedWorkPolicy,
+    DEFAULT_MAX_CLAIMED_TASK_BYTES, RUNTIME_DISPATCH_KIND, map_claimed_work,
+};
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{QueueJob, QueueLayout, ServeOptions};
