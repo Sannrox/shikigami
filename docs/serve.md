@@ -47,6 +47,29 @@ queue/
 }
 ```
 
+## Plane claim mapping (library helper)
+
+Direct plane claim polling is implemented by the follow-up intake work, not by
+the filesystem daemon described above. The additive
+`map_claimed_work(ClaimedPlaneWork, ClaimedWorkPolicy)` library helper freezes
+the boundary between an already-claimed plane effect and `RunRequest`:
+
+- the claimed effect must be `runtime_dispatch` in `claimed` state;
+- the top-level effect id must be present; the instance/operation ids duplicated
+  in the v1 payload and the Action parameters digest must match;
+- the bound plane `operation_id` becomes
+  `RunRequest.logical_operation_id`;
+- inline `task` text is size-bounded, while `artifact_refs` require an
+  authorized host resolver to provide `resolved_task`;
+- host timeout is a cap (a plane hint may only narrow it);
+- `keep_workspace` remains false unless host policy explicitly permits it; and
+- unknown fields are ignored and cannot alter host configuration or grant
+  authority.
+
+The helper does not call claim RPCs, admit Action types, resolve artifacts, or
+execute the run. Those responsibilities remain with the thin host intake
+adapter and the existing `Harness`.
+
 ## Health
 
 `queue/health.json` example fields: `ok`, `product`, `version`, `queue_inbox`,
