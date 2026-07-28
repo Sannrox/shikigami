@@ -86,6 +86,9 @@ enum Command {
         /// Plane claim lease TTL. Heartbeats run at one third of this duration.
         #[arg(long, default_value_t = 60)]
         claim_ttl_secs: u64,
+        /// Plane-allowlisted logical checkpoint store id for local run checkpoints.
+        #[arg(long)]
+        checkpoint_store_id: Option<String>,
     },
     /// MCP server over stdio (`doctor` + `run` tools). See docs/mcp.md.
     ///
@@ -218,6 +221,7 @@ async fn run() -> anyhow::Result<()> {
             max_jobs,
             runtime_id,
             claim_ttl_secs,
+            checkpoint_store_id,
         } => {
             let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
             let (tx, rx) = tokio::sync::watch::channel(false);
@@ -256,6 +260,12 @@ async fn run() -> anyhow::Result<()> {
                     if claim_ttl_secs == 0 {
                         anyhow::bail!("--claim-ttl-secs must be greater than zero");
                     }
+                    if checkpoint_store_id
+                        .as_deref()
+                        .is_some_and(|store_id| store_id.trim().is_empty())
+                    {
+                        anyhow::bail!("--checkpoint-store-id must not be empty");
+                    }
                     #[cfg(feature = "governance-sekai-chisei")]
                     {
                         let ttl = std::time::Duration::from_secs(claim_ttl_secs);
@@ -270,6 +280,7 @@ async fn run() -> anyhow::Result<()> {
                             claim_ttl: ttl,
                             heartbeat_interval: ttl / 3,
                             ack_retry_limit: 5,
+                            checkpoint_store_id,
                             policy: shikigami::ClaimedWorkPolicy {
                                 expected_runtime: runtime_id.clone(),
                                 host_timeout: harness

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correlation-safe, host-capped `RunRequest`.
 - Explicit `serve --intake plane` mode for fenced claim → run/harvest →
   heartbeat/ack execution; filesystem intake remains the default.
+- Plane intake now acknowledges intentional parks, consumes governed
+  continuations, verifies optional local checkpoint handles and digests,
+  reports fenced resume/replacement events, and cancels active work fail closed
+  when claim authority is lost.
 
 ## [1.0.3] — 2026-07-26
 
