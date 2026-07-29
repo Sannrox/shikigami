@@ -51,10 +51,10 @@ adapters. `sekai-chisei` is the first-party production governance adapter.
               │ ports (selected by settings)
      ┌────────┼────────┬──────────┐
      ▼        ▼        ▼          ▼
- governance  model  workspace   events
- none/local  scripted directory stderr
- sekai-chisei http  git-worktree jsonl
-             plane              none
+ governance    model  workspace   events
+ none/local    scripted directory stderr
+ http-callback http    inplace   jsonl
+ sekai-chisei  plane   git-worktree none
 ```
 
 When governance is `sekai-chisei`, model turns use the plane
@@ -70,7 +70,7 @@ must not appear in harness process settings.
 | --- | --- |
 | Library (`Harness`) | Embeddable API for hosts |
 | CLI (`shikigami`) | Thin embedded host over the library |
-| Future daemon / `serve` | Optional; not required for v0 |
+| Daemon (`shikigami serve`) | Thin long-running host over `Harness`; accepts filesystem-queue or plane-claim intake |
 
 ## Core concepts
 
@@ -78,11 +78,11 @@ must not appear in harness process settings.
 | --- | --- |
 | **Harness** | This product: process that executes runs |
 | **Run** | One countable unit of work (workspace + turns + outcome) |
-| **Workspace** | Isolated tree for a run (`directory` or `git-worktree`) |
+| **Workspace** | Run working tree selected by the host (`directory`, `inplace`, or `git-worktree`) |
 | **Port** | Versioned boundary (governance, model, workspace, events) |
 | **Adapter** | Implementation of a port selected by settings |
 | **Governance plane** | Optional external system (e.g. sekai-chisei) for policy and governed model execution |
-| **Host** | CLI, embedder, or future daemon |
+| **Host** | CLI, embedder, MCP server, or `serve` daemon |
 
 ## State ownership
 
@@ -119,9 +119,9 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | --- | --- |
 | `src/harness.rs` | Public wiring: config → ports → doctor/run |
 | `src/run.rs` | Turn loop |
-| `src/governance/` | `none`, `local`, `sekai-chisei` |
+| `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei` |
 | `src/tools.rs` | Workspace-jailed tools |
-| `src/workspace.rs` | Directory and git-worktree materialization |
+| `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
 | `src/model.rs` | Scripted / HTTP (ungoverned) |
 | `src/events.rs` | stderr / jsonl / none |
 | `src/config.rs` | Versioned settings |
@@ -152,13 +152,13 @@ Shipped in the **1.0** tree (medium contract; see ADR 0004):
 - Settings + ports + doctor
 - Local scripted/HTTP runs
 - sekai-chisei PlanExecution path + external-action tool authz + harvest
-- Directory and git-worktree workspaces
+- Directory, in-place, and git-worktree workspaces
 - Embeddable `Harness` API + in-repo/external host proofs
 - Park/escalate resume, serve FS queue, metrics, MCP host/client (host-adjacent)
 
 Post-1.0 themes (not freeze-core):
 
-- Richer serve intake (HTTP/plane work-units)
+- Richer serve intake beyond the shipped filesystem queue and plane claim path
 - Deeper governance-native harvest objects
 - Delivery fleets and adapter ecosystem
 - Eval / quality-loop harnesses

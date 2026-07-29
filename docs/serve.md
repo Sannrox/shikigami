@@ -1,6 +1,6 @@
 # `shikigami serve` (filesystem queue or plane claim host)
 
-Long-running host over the same `Harness` library as one-shot `run`.
+Current long-running host over the same `Harness` library as one-shot `run`.
 Authority: [ADR 0003](decisions/0003-serve-daemon.md).
 
 ## What it is / is not
@@ -169,4 +169,6 @@ for resolution, retry, dead-letter, and authorization semantics.
 
 - Use the same config/env as `run` / `doctor`.
 - For fleets, put the binary under process supervision (systemd, tenkai, etc.).
-- HTTP and plane work-unit intake are **not** in v0.x; extend via ADR if needed.
+- Plane-claim intake is shipped. Additional intake transports, including direct
+  HTTP admission, require a separate contract and must preserve the same
+  `Harness` and governance boundaries.

@@ -42,8 +42,8 @@ Top-level `version` is required and must be `1`.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `adapter` | `"none"` | `none` \| `local` \| `sekai-chisei` |
-| `endpoint` | unset | Control plane base URL (required for fail-closed `sekai-chisei`) |
+| `adapter` | `"none"` | `none` \| `local` \| `http-callback` (`host-authz`) \| `sekai-chisei` |
+| `endpoint` | unset | Plane base URL for `sekai-chisei`, or authorization URL for `http-callback`; required by fail-closed plane use and all callback use |
 | `principal` | `"shikigami"` | Identity presented to the plane (not a secret) |
 | `namespace` | `"default"` | Plane namespace |
 | `fail_closed` | `false` | Fail doctor/run when governance is unhealthy |
@@ -94,6 +94,7 @@ When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never
 For `inplace`, place the harness **state** root (`--state` / `SHIKIGAMI_STATE`)
 **outside** `workspace.root`. Hosts must serialize concurrent runs against the
 same inplace root.
+
 | `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
 
 ### `[run]` (tool concurrency)

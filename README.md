@@ -156,11 +156,11 @@ Examples:
   operator / CI / embedder
             │
             ▼
-   ┌─────────────────┐     governance port      ┌────────────────┐
-   │  shikigami core  │────────────────────────▶│ none / local / │
-   │  run · tools ·   │                         │ sekai-chisei   │
-   │  workspace       │                         └────────────────┘
-   └─────────────────┘
+   ┌─────────────────┐     governance port      ┌───────────────────┐
+   │  shikigami core  │────────────────────────▶│ none / local /    │
+   │  run · tools ·   │                         │ http-callback /   │
+   │  workspace       │                         │ sekai-chisei      │
+   └─────────────────┘                         └───────────────────┘
             │
             │  (optional) install/upgrade binary
             ▼

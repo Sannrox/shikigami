@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Architecture, settings, adapter, and serve documentation now consistently
+  describes the shipped plane-claim host, HTTP callback governance, and
+  in-place workspace surfaces.
+
 ### Added
 
 - Library mapping from already-claimed plane `runtime_dispatch` work to a
