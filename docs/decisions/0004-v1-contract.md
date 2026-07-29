@@ -53,6 +53,18 @@ Ordered epics — **not** 1.0 blockers:
 4. **Adapter ecosystem** — documented out-of-tree ports; optional model/workspace adapters
 5. **Quality loop** — eval harnesses, prompt versioning experiments, metrics scrapers
 
+### Subsequent shipped intake work
+
+This decision recorded richer plane work-unit intake as future work at the
+time it was accepted. Issues #129–#132 and PRs #135–#138 subsequently shipped
+the plane-claim path: `shikigami serve --intake plane` claims already-admitted,
+fenced runtime work and executes it through the existing `Harness`. Filesystem
+queue intake remains the default.
+
+This does not revise the original 1.0 decision or make Shikigami an admission
+or control plane. Sekai-chisei still owns admission, claim state, fencing,
+governance, and durable operational truth.
+
 ### Evidence considered
 
 - Embed API freeze list (`docs/embedding.md`) and ADRs 0001–0003

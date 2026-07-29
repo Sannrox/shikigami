@@ -86,9 +86,14 @@ a local model adapter is configured for other profiles.
 | Id | Status | Role |
 | --- | --- | --- |
 | `directory` | stable for v0 | Sandbox directory under state runs or configured root |
+| `inplace` (alias `directory-inplace`) | stable for host-selected workspaces | Uses `workspace.root` directly; no per-run directory or automatic cleanup |
 | `git-worktree` | stable for v0 | `git worktree add` + branch; cleaned after successful runs |
 
-Requires `git` on `PATH` for `git-worktree`.
+`inplace` requires an existing directory, does not support snapshots, and
+requires the harness state root to be outside the workspace. Hosts must
+serialize concurrent runs against the same in-place root.
+
+`git-worktree` requires `git` on `PATH`.
 
 ## Events (`EventSink`)
 
