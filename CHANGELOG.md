@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Architecture, settings, adapter, and serve documentation now consistently
   describes the shipped plane-claim host, HTTP callback governance, and
   in-place workspace surfaces.
+- External Rust embedding remains supported under the 1.x compatibility
+  contract but is positioned as an advanced integration surface; CLI, `serve`,
+  and MCP are the common product entry points.
 
 ### Added
 

@@ -7,9 +7,9 @@ Shikigami speaks MCP in two directions:
 | **Client** | Attach remote MCP tools into the run-loop registry | `[[tools.mcp_servers]]` settings |
 | **Server** | Expose harness tools to MCP-native hosts | `shikigami mcp` (stdio): `doctor`, `run`, `run_start`, `run_status`, `run_wait` |
 
-Library embed (`Harness`) remains the **primary** in-process host path and CI
-host proof ([embedding.md](embedding.md), `examples/embed_smoke.rs`). The MCP
-server is an **optional** thin CLI host for stdio clients — **not** a multi-tenant
+Library embed (`Harness`) is the advanced in-process path and retains its CI
+contract proof ([embedding.md](embedding.md), `examples/embed_smoke.rs`). The
+MCP server is the process-host path for stdio clients — **not** a multi-tenant
 control plane, and **not** part of the 1.0 library freeze surface. Tenkai
 delivers the binary only.
 

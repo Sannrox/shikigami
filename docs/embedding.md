@@ -1,20 +1,33 @@
 # Embedding Shikigami
 
-The `shikigami` CLI is a thin host. Prefer the **library** when you need
-structured results, cancellation hooks, or an in-process UI.
+External Rust library embedding is a supported **advanced integration
+surface**. Prefer a process host unless the integration needs typed in-process
+results, cancellation, events, or metrics:
 
-## Host proof ranking (v0.2+)
+| Need | Recommended surface |
+| --- | --- |
+| One-shot operator or CI execution | CLI `doctor` / `run` |
+| Long-running filesystem or plane-claim intake | `shikigami serve` |
+| IDE or tool-client integration | MCP stdio |
+| Typed results, cancellation, events, or metrics in the same process | Rust library `Harness` |
 
-| Rank | Surface | Status | Proof |
-| --- | --- | --- | --- |
-| 1 | Library `Harness` (in-repo) | **Primary** offline host; ADR 0004 embed path | `cargo run --locked --example embed_smoke` — **CI-gated** on PR/`main` |
-| 1b | Library `Harness` (external) | ADR 0004 **external** embed smoke | [`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke) — out-of-tree consumer on git tag `v1.0.0`, CI `cargo run --locked` |
-| 2 | CLI (`doctor` / `run` / `serve` / `export`) | Operator path; thin over the same core | Offline `examples/local-run.toml` demo in README |
-| 3 | MCP stdio server (`shikigami mcp`) | **Optional** host for MCP-native clients | [mcp.md](mcp.md) + [examples/mcp-host.example.json](../examples/mcp-host.example.json) |
+The CLI, `serve`, and MCP hosts all use the same `Harness`; choosing a process
+host does not fork the turn loop or weaken governance.
 
-Do **not** treat MCP or a future interactive TUI as the 1.0 library freeze
-surface. The external consumer depends on a **released tag** of this crate and
-is maintained in a separate repository so the freeze checklist is not circular.
+## Compatibility proof
+
+| Proof | Purpose |
+| --- | --- |
+| `cargo run --locked --example embed_smoke` | In-repository, CI-gated proof of the freeze-core library path |
+| [`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke) | Out-of-tree consumer pinned to tag `v1.0.0` |
+
+These are compatibility proofs, not evidence of production adoption. The
+external consumer is maintainer-owned and exists to keep the freeze checklist
+non-circular.
+
+Positioning embedding as advanced does not weaken the 1.x compatibility
+contract. Do **not** treat MCP or a future interactive TUI as part of the
+library freeze surface.
 
 ## Minimal example
 
