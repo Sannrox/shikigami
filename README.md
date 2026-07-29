@@ -127,13 +127,19 @@ run needs it.
 
 ## Configuration
 
-Settings are versioned TOML. Use cases change by profile and adapter ids, not
-by patching the turn loop.
+Settings are versioned TOML. Use cases change through adapters and explicit
+policy settings, not by patching the turn loop. Version-1 profiles remain
+compatible, but new configurations should specify adapters and
+`governance.fail_closed` explicitly.
 
 | Profile | Intent |
 | --- | --- |
 | `local` (default) | Offline-friendly. Governance `none` or `local`. Model `scripted` or `http`. |
 | `governed` | Production path. Governance `sekai-chisei`, fail-closed, model turns via the plane. |
+
+The examples below include those explicit fields; the profile names remain for
+version-1 compatibility. See [docs/settings.md](docs/settings.md#profiles) for
+the preset and environment-resolution details.
 
 ```bash
 # Inspect effective wiring
