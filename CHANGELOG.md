@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - External Rust embedding remains supported under the 1.x compatibility
   contract but is positioned as an advanced integration surface; CLI, `serve`,
   and MCP are the common product entry points.
+- Behavioral profiles remain compatible in settings version 1 but are
+  deprecated for new configuration authoring in favor of explicit adapters and
+  `governance.fail_closed`; a future-schema proposal is tracked in Discussion
+  #146.
 
 ### Added
 

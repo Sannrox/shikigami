@@ -20,13 +20,31 @@ not errors.
 
 ## Profiles
 
+Behavioral profiles are retained unchanged for settings version 1
+compatibility, but are deprecated for **new configuration authoring**. Prefer
+explicit governance/model adapters and `governance.fail_closed`, as shown in
+the repository examples. A future schema direction is proposed in
+[Discussion #146](https://github.com/Sannrox/shikigami/discussions/146).
+
 | Name | Effect |
 | --- | --- |
 | `local` | Default. Offline-friendly. Does not force a plane. |
 | `governed` | Sets governance to `sekai-chisei` if still `none`, forces `fail_closed = true`, prefers model adapter `plane`. |
 
 Custom profile names are allowed as labels; only `governed` applies the preset
-above today.
+above today. Version 1 expands a file profile before applying environment
+overrides. Changing `SHIKIGAMI_PROFILE` later does not reverse values already
+expanded from the file:
+
+| File settings | Environment | Effective result |
+| --- | --- | --- |
+| none | none | profile `local`; governance `none`; model `scripted`; fail-open |
+| profile `governed` only | none | profile `governed`; governance `sekai-chisei`; model `plane`; fail-closed |
+| explicit governed example | `SHIKIGAMI_PROFILE=local` | profile label `local`; explicit plane adapters and fail-closed remain |
+| explicit local example | `SHIKIGAMI_PROFILE=governed`, adapters overridden back to `local` / `scripted` | profile `governed`; local/scripted adapters; fail-closed remains |
+
+These combinations are documented compatibility behavior, not recommended
+recipes. Always inspect the complete effective wiring with `doctor`.
 
 ## Schema (`version = 1`)
 
@@ -89,13 +107,12 @@ When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never
 | --- | --- | --- |
 | `adapter` | `"directory"` | `directory` \| `inplace` (`directory-inplace`) \| `git-worktree` |
 | `root` | `"."` | Parent/repo root for materialization; for `inplace`, the workspace path itself |
+| `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
 | `snapshot` | `false` | After materialize, copy workspace to `state/runs/<id>/snapshots/initial` (not supported with `inplace`) |
 
 For `inplace`, place the harness **state** root (`--state` / `SHIKIGAMI_STATE`)
 **outside** `workspace.root`. Hosts must serialize concurrent runs against the
 same inplace root.
-
-| `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
 
 ### `[run]` (tool concurrency)
 

@@ -27,6 +27,7 @@ Operator and contributor documentation for **shikigami**.
 | Embed the library | [embedding.md](embedding.md) |
 | 1.0 freeze audit (research closeout) | [1.0-freeze-audit.md](1.0-freeze-audit.md) |
 | External embedding product position (research #141) | [research/141-external-embedding-position.md](research/141-external-embedding-position.md) |
+| Profile and adapter configuration recommendation (research #142) | [research/142-profile-adapter-configuration.md](research/142-profile-adapter-configuration.md) |
 | Plane work intake recommendation (research #129) | [research/129-plane-work-intake.md](research/129-plane-work-intake.md) |
 | See accepted design decisions | [decisions/](decisions/) |
 | Contribute code | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
