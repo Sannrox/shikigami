@@ -2,17 +2,17 @@
 
 Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 
-## Host surfaces
+## Examples by purpose
 
-| Priority | Artifact | Role |
+| Purpose | Artifact | Role |
 | --- | --- | --- |
-| **Primary CI proof** | [`embed_smoke.rs`](embed_smoke.rs) | Offline library host (`Harness` + events + export). Gated on PR/`main` CI. |
+| Library contract proof | [`embed_smoke.rs`](embed_smoke.rs) | Advanced in-process host (`Harness` + events + export). Gated on PR/`main` CI. |
 | Operator CLI | [`local-run.toml`](local-run.toml) | Offline profile for `doctor` / `run` demos |
 | Optional MCP host | [`mcp-host.example.json`](mcp-host.example.json) | Cursor/Claude Desktop-style stdio config for `shikigami mcp` |
 | Governed wiring | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Plane profile (needs reachable sekai-chisei) |
 | Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
 
-See [docs/embedding.md](../docs/embedding.md) (host ranking + freeze list) and
+See [docs/embedding.md](../docs/embedding.md) (host selection + freeze list) and
 [docs/mcp.md](../docs/mcp.md) (MCP tools including `run_start` / `run_status` / `run_wait`).
 
 ## Offline demo

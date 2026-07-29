@@ -32,8 +32,9 @@ Most coding agents stop at a chat window or a one-off CLI:
 - The same execution core cannot run unattended in CI or on a fleet host.
 - Desktop shells reimplement the loop instead of sharing a testable library.
 
-Shikigami is the **execution plane**: library-first, headless by default,
-fail-closed when governance is required, and pluggable when it is not.
+Shikigami is the **execution plane**: built on one shared library core,
+headless by default, fail-closed when governance is required, and pluggable
+when it is not.
 
 ## Requirements
 
@@ -61,10 +62,10 @@ cargo build --release
 Expect a successful run that writes `SHIKIGAMI_OK.txt` under the run workspace
 and prints `success=true`.
 
-### Library embed smoke (host proof)
+### Library embed smoke (contract proof)
 
-**Primary** offline proof that a host can drive `Harness` without shelling the CLI.
-PR and `main` CI run the same command after `cargo test`:
+This offline check proves that an out-of-process host is not required to drive
+`Harness`. PR and `main` CI run the same command after `cargo test`:
 
 ```bash
 cargo run --locked --example embed_smoke
@@ -77,11 +78,13 @@ Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript ex
 depends on git tag `v1.0.0` and runs the same offline doctor + scripted run +
 export pattern under its own CI.
 
-Optional host surfaces (not the library freeze proof):
+Choose a process host for the common integration paths:
 
-- CLI operator path: `doctor` / `run` above
-- MCP stdio: `shikigami mcp` — [docs/mcp.md](docs/mcp.md), [examples/mcp-host.example.json](examples/mcp-host.example.json)
-- Embed API freeze guidance: [docs/embedding.md](docs/embedding.md)
+- CLI: one-shot operator and CI use (`doctor` / `run`)
+- `serve`: long-running filesystem or plane-claim intake
+- MCP stdio: IDE and tool clients — [docs/mcp.md](docs/mcp.md)
+- Library: advanced in-process integrations that need direct results,
+  cancellation, events, or metrics — [docs/embedding.md](docs/embedding.md)
 
 ### Prebuilt binaries
 
@@ -180,7 +183,9 @@ Details: [DESIGN.md](DESIGN.md), [ADR 0001](docs/decisions/0001-ports-and-settin
 
 ## Library embedding
 
-The CLI is a thin host. Prefer the library when you need structured results:
+External library embedding is an advanced integration surface. Use it when a
+process boundary through the CLI, `serve`, or MCP would lose required
+in-process behavior such as typed results, cancellation, events, or metrics:
 
 ```rust
 use shikigami::{Config, Harness, RunRequest, StateRoot};

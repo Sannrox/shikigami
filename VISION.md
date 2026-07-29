@@ -34,7 +34,8 @@ with local adapters.
 ## Principles
 
 1. **Headless by default.** UI is a client, not the runtime.
-2. **Library-first.** CLI and embedders share one core (`Harness`).
+2. **Shared core.** CLI, `serve`, MCP, and advanced embedders share one
+   library core (`Harness`); process hosts are the common product entry points.
 3. **Ports + settings.** Use cases change by configuration, not forks.
 4. **Fail closed when required.** Governed profiles do not silently degrade.
 5. **Runs are the unit of work.** The product name is not the instance name.
@@ -63,7 +64,7 @@ Freeze-core surfaces follow semver from crate `1.0.0`.
 | --- | --- |
 | OSS contributor | Clone, `cargo test`, offline `run` succeeds with no plane |
 | Operator | `doctor` explains effective adapters; governed path fails closed without a plane |
-| Integrator | Embeds `Harness` without forking the turn loop |
+| Integrator | Uses CLI/MCP/serve by default, or embeds `Harness` when in-process control is required |
 | Production (stack) | Runs constrained and recorded through sekai-chisei; binary deliverable via tenkai |
 
 ## Status
