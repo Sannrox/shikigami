@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [1.0.4] — 2026-07-30
+
+### Security
 
 - Hardened opt-in `web_fetch` against DNS and redirect SSRF and bounded response
   bodies while streaming.
