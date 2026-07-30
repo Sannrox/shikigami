@@ -13,7 +13,9 @@ use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
 use super::catalog::definitions_for_enabled;
 use super::executor::{BashArgs, ToolExecutor};
 use super::todo::{TodoItem, apply_todo_write, format_todo_summary};
-use super::web_fetch::{WebFetchArgs, WebFetcher, default_web_fetcher, validate_web_fetch_url};
+use super::web_fetch::{
+    WEB_FETCH_MAX_REDIRECTS, WebFetchArgs, WebFetcher, default_web_fetcher, validate_web_fetch_url,
+};
 use super::{ToolDef, ToolError, ToolOutput, parse};
 
 /// External tool provider (e.g. MCP-backed tool).
@@ -278,22 +280,27 @@ impl ToolRegistry {
 
     async fn web_fetch(&self, args_json: &str) -> Result<String, ToolError> {
         let args: WebFetchArgs = parse("web_fetch", args_json)?;
-        let url = args.url.trim();
-        validate_web_fetch_url(url)?;
-        self.network
-            .check_http_url(url)
-            .map_err(ToolError::Message)?;
-        let resp = self.web_fetcher.get(url).await?;
-        // Re-check final URL host policy (redirects).
-        if resp.final_url != url {
-            validate_web_fetch_url(&resp.final_url)?;
+        let mut url = args.url.trim().to_string();
+        for redirects in 0..=WEB_FETCH_MAX_REDIRECTS {
+            validate_web_fetch_url(&url)?;
             self.network
-                .check_http_url(&resp.final_url)
+                .check_http_url(&url)
                 .map_err(ToolError::Message)?;
+            let resp = self.web_fetcher.get(&url).await?;
+            if resp.final_url != url {
+                if redirects == WEB_FETCH_MAX_REDIRECTS {
+                    return Err(ToolError::Message(format!(
+                        "web_fetch exceeded {WEB_FETCH_MAX_REDIRECTS} redirects"
+                    )));
+                }
+                url = resp.final_url;
+                continue;
+            }
+            return Ok(format!(
+                "status={}\nfinal_url={}\n\n{}",
+                resp.status, resp.final_url, resp.body
+            ));
         }
-        Ok(format!(
-            "status={}\nfinal_url={}\n\n{}",
-            resp.status, resp.final_url, resp.body
-        ))
+        unreachable!("bounded redirect loop always returns")
     }
 }

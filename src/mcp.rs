@@ -15,6 +15,9 @@ use tokio::sync::Mutex;
 use crate::config::{Config, McpServerSettings};
 use crate::tools::{ExternalTool, ToolDef, ToolError, ToolRegistry};
 
+pub(crate) const MAX_MCP_FRAME_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_MCP_HEADER_BYTES: usize = 8 * 1024;
+
 /// Attach MCP tools named `mcp.<server>.<tool>` to a registry.
 pub async fn attach_mcp_servers(
     registry: &mut ToolRegistry,
@@ -287,22 +290,41 @@ impl McpStdioClient {
 
     async fn read_message(&mut self) -> Result<Value, ToolError> {
         let mut content_length = None;
+        let mut header_bytes = 0usize;
         loop {
             let mut line = String::new();
-            let n = self
-                .stdout
+            let n = (&mut self.stdout)
+                .take((MAX_MCP_HEADER_BYTES + 1) as u64)
                 .read_line(&mut line)
                 .await
                 .map_err(|e| ToolError::Message(e.to_string()))?;
             if n == 0 {
                 return Err(ToolError::Message("mcp stdout closed".into()));
             }
+            header_bytes = header_bytes.saturating_add(n);
+            if header_bytes > MAX_MCP_HEADER_BYTES {
+                return Err(ToolError::Message(format!(
+                    "mcp headers exceed {MAX_MCP_HEADER_BYTES} bytes"
+                )));
+            }
             let line = line.trim_end();
             if line.is_empty() {
                 break;
             }
             if let Some(rest) = line.strip_prefix("Content-Length:") {
-                content_length = rest.trim().parse::<usize>().ok();
+                if content_length.is_some() {
+                    return Err(ToolError::Message("mcp duplicate Content-Length".into()));
+                }
+                let length = rest
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| ToolError::Message("mcp invalid Content-Length".into()))?;
+                if length > MAX_MCP_FRAME_BYTES {
+                    return Err(ToolError::Message(format!(
+                        "mcp Content-Length {length} exceeds {MAX_MCP_FRAME_BYTES} bytes"
+                    )));
+                }
+                content_length = Some(length);
             }
         }
         let len = content_length
