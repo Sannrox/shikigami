@@ -167,6 +167,25 @@ pub enum PermissionMode {
     WorkspaceExec,
 }
 
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::Read => "read",
+            Self::Workspace => "workspace",
+            Self::WorkspaceExec => "workspace_exec",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAuthoritySummary {
+    pub configured_enabled: Vec<String>,
+    pub preset_enabled: Vec<String>,
+    pub excluded_by_intersection: Vec<String>,
+    pub effective_enabled: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsSettings {
@@ -284,6 +303,27 @@ impl ToolsSettings {
         base.into_iter()
             .filter(|t| self.enabled.iter().any(|e| e == t))
             .collect()
+    }
+
+    pub fn authority_summary(&self) -> ToolAuthoritySummary {
+        let preset_enabled = Self::tools_for_mode(self.mode);
+        let effective_enabled = self.effective_enabled();
+        let excluded_by_intersection =
+            if matches!(self.mode, PermissionMode::Custom) || self.enabled.is_empty() {
+                Vec::new()
+            } else {
+                preset_enabled
+                    .iter()
+                    .filter(|tool| !effective_enabled.contains(tool))
+                    .cloned()
+                    .collect()
+            };
+        ToolAuthoritySummary {
+            configured_enabled: self.enabled.clone(),
+            preset_enabled,
+            excluded_by_intersection,
+            effective_enabled,
+        }
     }
 }
 
@@ -916,6 +956,54 @@ unknown_thing = true
         c.tools.enabled = vec!["read_file".into(), "bash".into()];
         let e = c.tools.effective_enabled();
         assert_eq!(e, vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn tool_authority_summary_characterizes_all_compositions() {
+        let custom_default = ToolsSettings::default().authority_summary();
+        assert_eq!(
+            custom_default.effective_enabled,
+            ToolsSettings::default_coding_tools()
+        );
+        assert!(custom_default.configured_enabled.is_empty());
+        assert!(custom_default.excluded_by_intersection.is_empty());
+
+        let custom_explicit = ToolsSettings {
+            enabled: vec!["report".into()],
+            ..Default::default()
+        }
+        .authority_summary();
+        assert_eq!(custom_explicit.effective_enabled, vec!["report"]);
+        assert!(custom_explicit.excluded_by_intersection.is_empty());
+
+        let read = ToolsSettings {
+            mode: PermissionMode::Read,
+            ..Default::default()
+        }
+        .authority_summary();
+        assert!(read.effective_enabled.contains(&"read_file".into()));
+        assert!(!read.effective_enabled.contains(&"write_file".into()));
+
+        let workspace = ToolsSettings {
+            mode: PermissionMode::Workspace,
+            enabled: vec!["read_file".into(), "bash".into()],
+            ..Default::default()
+        }
+        .authority_summary();
+        assert_eq!(workspace.effective_enabled, vec!["read_file"]);
+        assert!(
+            workspace
+                .excluded_by_intersection
+                .contains(&"write_file".into())
+        );
+        assert!(!workspace.excluded_by_intersection.contains(&"bash".into()));
+
+        let workspace_exec = ToolsSettings {
+            mode: PermissionMode::WorkspaceExec,
+            ..Default::default()
+        }
+        .authority_summary();
+        assert!(workspace_exec.effective_enabled.contains(&"bash".into()));
     }
 
     #[test]

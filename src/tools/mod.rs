@@ -11,7 +11,7 @@ mod web_fetch;
 
 pub use catalog::{
     ToolDef, builtin_catalog, definitions_for_enabled, is_parallel_safe_tool,
-    must_be_exclusive_batch,
+    model_visible_builtin_definitions, must_be_exclusive_batch,
 };
 pub use executor::ToolExecutor;
 pub use path::{is_unsafe_relative_path, path_is_ignored};

@@ -105,6 +105,8 @@ surfaces (MCP, hooks, TUI remain non-core).
 
 ### Changed (since 0.2.0)
 
+- `doctor` now explains configured, preset, excluded, implicit, effective, and
+  model-visible builtin tool authority without changing permission semantics.
 - Agent closeout: `AGENTS.md` / `deliver-ready-issue` require shared
   `autoreview` (not vendored) before ship; CI is not a substitute.
 - Product status is **1.0 stable** for freeze-core surfaces (no longer “0.x may

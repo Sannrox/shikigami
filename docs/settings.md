@@ -153,6 +153,25 @@ context is needed to disambiguate. Caps: 16 files, 32 hunks, 64KiB JSON payload.
 
 Modes are host policy, not an OS sandbox.
 
+`shikigami doctor` explains this composition without changing it:
+
+| Doctor field | Meaning |
+| --- | --- |
+| `tools.mode` | Configured permission mode |
+| `tools.configured` | Explicit `tools.enabled` input, or `(none)` |
+| `tools.preset` | Complete tool set supplied by the selected mode |
+| `tools.excluded` | Preset tools removed by a non-`custom` intersection |
+| `tools.implicit` | Model-visible helpers sharing parent authority (currently background helpers when `bash` is effective) |
+| `tools.effective` | Final configured enforcement allow-list before implicit expansion |
+| `tools.visible` | Model-visible builtin tools after implicit expansion |
+| `tools.external` | Configured MCP servers whose definitions are resolved at run start |
+
+These diagnostics are compatibility-only visibility: empty `custom`, explicit
+custom lists, named presets, and named-preset intersections retain their
+existing behavior. No configuration migration is required, and doctor does not
+grant tools. Governed external-action authorization and any OS isolation apply
+in addition to this host policy.
+
 When `respect_ignore = true` (default), search tools skip heavy dirs (`node_modules`,
 `target`, `.git`, …) and patterns from workspace `.shikigamiignore` / `.gitignore`
 (no negation/`!` in v1; pure matcher, no git binary). **`read_file` of an explicit

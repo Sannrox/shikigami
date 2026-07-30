@@ -10,7 +10,7 @@ use tokio::process::Command;
 use crate::config::NetworkSettings;
 
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
-use super::catalog::definitions_for_enabled;
+use super::catalog::model_visible_builtin_definitions;
 use super::executor::{BashArgs, ToolExecutor};
 use super::todo::{TodoItem, apply_todo_write, format_todo_summary};
 use super::web_fetch::{
@@ -110,16 +110,7 @@ impl ToolRegistry {
 
     /// Model-facing tool definitions for enabled builtins + external tools.
     pub fn definitions(&self) -> Vec<ToolDef> {
-        let mut enabled = self.executor.enabled.clone();
-        // Background job tools share bash authority.
-        if enabled.iter().any(|e| e == "bash") {
-            for extra in ["bash_background", "bash_job_status", "bash_job_logs"] {
-                if !enabled.iter().any(|e| e == extra) {
-                    enabled.push(extra.into());
-                }
-            }
-        }
-        let mut defs = definitions_for_enabled(&enabled);
+        let mut defs = model_visible_builtin_definitions(&self.executor.enabled);
         for t in &self.external {
             defs.push(t.definition());
         }

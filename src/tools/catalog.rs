@@ -117,3 +117,17 @@ pub fn definitions_for_enabled(enabled: &[String]) -> Vec<ToolDef> {
         .filter(|d| enabled.iter().any(|e| e == d.name.as_str()))
         .collect()
 }
+
+/// Model-visible builtin definitions, including helpers that share bash
+/// authority and excluding unknown configured names.
+pub fn model_visible_builtin_definitions(enabled: &[String]) -> Vec<ToolDef> {
+    let mut expanded = enabled.to_vec();
+    if enabled.iter().any(|tool| tool == "bash") {
+        for implicit in ["bash_background", "bash_job_status", "bash_job_logs"] {
+            if !expanded.iter().any(|tool| tool == implicit) {
+                expanded.push(implicit.into());
+            }
+        }
+    }
+    definitions_for_enabled(&expanded)
+}

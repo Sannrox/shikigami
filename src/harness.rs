@@ -10,6 +10,7 @@ use crate::metrics::Metrics;
 use crate::model::{self, ModelError, ModelPort};
 use crate::run::{Engine, RunError, RunRequest, RunResult, RunTermination};
 use crate::state::{StateError, StateRoot};
+use crate::tools::model_visible_builtin_definitions;
 use crate::workspace::{self, WorkspaceError, WorkspacePort};
 
 #[derive(Debug, thiserror::Error)]
@@ -133,11 +134,58 @@ impl Harness {
         ));
         lines.push(format!("events:    {} — {}", self.events.id(), ev_detail));
         lines.push(format!("model:     {}", self.model.id()));
+        let tool_authority = self.config.tools.authority_summary();
         lines.push(format!(
-            "tools:     mode={:?} [{}]",
-            self.config.tools.mode,
-            self.config.tools.effective_enabled().join(", ")
+            "tools.mode:       {}",
+            self.config.tools.mode.as_str()
         ));
+        lines.push(format!(
+            "tools.configured: {}",
+            display_tools(&tool_authority.configured_enabled)
+        ));
+        lines.push(format!(
+            "tools.preset:     {}",
+            display_tools(&tool_authority.preset_enabled)
+        ));
+        lines.push(format!(
+            "tools.excluded:   {}",
+            display_tools(&tool_authority.excluded_by_intersection)
+        ));
+        let model_visible_builtins =
+            model_visible_builtin_definitions(&tool_authority.effective_enabled)
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>();
+        let implicit_enabled = model_visible_builtins
+            .iter()
+            .filter(|tool| !tool_authority.effective_enabled.contains(tool))
+            .cloned()
+            .collect::<Vec<_>>();
+        lines.push(format!(
+            "tools.implicit:   {}",
+            display_tools(&implicit_enabled)
+        ));
+        lines.push(format!(
+            "tools.effective:  {}",
+            display_tools(&tool_authority.effective_enabled)
+        ));
+        lines.push(format!(
+            "tools.visible:    {}",
+            display_tools(&model_visible_builtins)
+        ));
+        if !self.config.tools.mcp_servers.is_empty() {
+            let servers: Vec<_> = self
+                .config
+                .tools
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect();
+            lines.push(format!(
+                "tools.external:   MCP servers [{}] (resolved at run start)",
+                servers.join(", ")
+            ));
+        }
         lines.push(format!(
             "network:   egress={:?} allow_hosts={}",
             self.config.network.egress,
@@ -278,6 +326,14 @@ impl Harness {
     }
 }
 
+fn display_tools(tools: &[String]) -> String {
+    if tools.is_empty() {
+        "(none)".into()
+    } else {
+        format!("[{}]", tools.join(", "))
+    }
+}
+
 /// Summarize credential *sources* without values (for doctor).
 pub fn credential_summary(config: &Config) -> String {
     let plane = match &config.governance.token_env {
@@ -375,6 +431,56 @@ mod tests {
         assert!(!report.ok);
         assert_eq!(report.schema_version, 1);
         assert_eq!(report.governance, "sekai-chisei");
+    }
+
+    #[test]
+    fn doctor_explains_intersection_and_implicit_tool_authority() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.tools.enabled = vec!["read_file".into(), "bash".into()];
+        let harness = Harness::from_config(config, state).unwrap();
+
+        let report = harness.doctor();
+        assert!(
+            report
+                .lines
+                .contains(&"tools.mode:       workspace_exec".into())
+        );
+        assert!(
+            report
+                .lines
+                .contains(&"tools.configured: [read_file, bash]".into())
+        );
+        assert!(report.lines.iter().any(|line| {
+            line.starts_with("tools.excluded:")
+                && line.contains("write_file")
+                && !line.contains("bash]")
+        }));
+        assert!(report.lines.contains(
+            &"tools.implicit:   [bash_background, bash_job_status, bash_job_logs]".into()
+        ));
+        assert!(report.lines.iter().any(|line| {
+            line == "tools.visible:    [read_file, bash, bash_background, bash_job_status, bash_job_logs]"
+        }));
+    }
+
+    #[test]
+    fn doctor_does_not_report_unknown_custom_names_as_visible() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.tools.enabled = vec!["obsolete_tool".into(), "report".into()];
+        let harness = Harness::from_config(config, state).unwrap();
+
+        let report = harness.doctor();
+        assert!(
+            report
+                .lines
+                .contains(&"tools.effective:  [obsolete_tool, report]".into())
+        );
+        assert!(report.lines.contains(&"tools.visible:    [report]".into()));
     }
 
     #[test]
