@@ -60,6 +60,10 @@ pub enum CheckpointError {
     Missing(String),
     #[error("checkpoint prompt id mismatch")]
     PromptMismatch,
+    #[error("checkpoint run id must be a non-empty opaque ASCII identifier")]
+    InvalidRunId,
+    #[error("checkpoint run id does not match requested run")]
+    RunIdMismatch,
 }
 
 /// Versioned prompt id for a body (defaults to the `harness-v1` name prefix
@@ -79,8 +83,19 @@ pub fn path_for(state_runs: &Path, run_id: &str) -> PathBuf {
     state_runs.join(run_id).join(CHECKPOINT_FILENAME)
 }
 
+pub fn is_safe_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id.len() <= 128
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 impl Checkpoint {
     pub fn save(&self, state_runs: &Path) -> Result<PathBuf, CheckpointError> {
+        if !is_safe_run_id(&self.run_id) {
+            return Err(CheckpointError::InvalidRunId);
+        }
         let path = path_for(state_runs, &self.run_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -91,6 +106,9 @@ impl Checkpoint {
     }
 
     pub fn load(state_runs: &Path, run_id: &str) -> Result<Self, CheckpointError> {
+        if !is_safe_run_id(run_id) {
+            return Err(CheckpointError::InvalidRunId);
+        }
         let path = path_for(state_runs, run_id);
         if !path.is_file() {
             return Err(CheckpointError::Missing(run_id.into()));
@@ -102,6 +120,9 @@ impl Checkpoint {
                 found: cp.version,
                 expected: CHECKPOINT_VERSION,
             });
+        }
+        if cp.run_id != run_id {
+            return Err(CheckpointError::RunIdMismatch);
         }
         Ok(cp)
     }
@@ -141,5 +162,41 @@ mod tests {
         assert_eq!(loaded, cp);
         loaded.validate_prompt("p").unwrap();
         assert!(loaded.validate_prompt("other").is_err());
+    }
+
+    #[test]
+    fn load_rejects_path_like_and_mismatched_run_ids() {
+        let dir = tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        assert!(matches!(
+            Checkpoint::load(&runs, "../other"),
+            Err(CheckpointError::InvalidRunId)
+        ));
+        assert!(matches!(
+            Checkpoint::load(&runs, "/tmp/other"),
+            Err(CheckpointError::InvalidRunId)
+        ));
+
+        let requested = "requested";
+        let path = path_for(&runs, requested);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let cp = Checkpoint {
+            version: CHECKPOINT_VERSION,
+            run_id: "different".into(),
+            task: "t".into(),
+            prompt_id: prompt_id("p"),
+            messages: vec![],
+            completed_turns: 0,
+            workspace: runs.join(requested).join("workspace"),
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: None,
+            todos: vec![],
+        };
+        std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
+        assert!(matches!(
+            Checkpoint::load(&runs, requested),
+            Err(CheckpointError::RunIdMismatch)
+        ));
     }
 }

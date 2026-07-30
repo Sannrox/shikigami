@@ -109,6 +109,7 @@ pub(crate) fn parse<T: for<'de> Deserialize<'de>>(tool: &str, raw: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::path::glob_match;
@@ -392,6 +393,50 @@ mod tests {
                 "url={bad} err={err}"
             );
         }
+    }
+
+    struct RedirectFetcher {
+        calls: Arc<AtomicUsize>,
+        destination: String,
+    }
+
+    #[async_trait::async_trait]
+    impl WebFetcher for RedirectFetcher {
+        async fn get(&self, url: &str) -> Result<WebFetchResponse, ToolError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(WebFetchResponse {
+                status: 302,
+                final_url: self.destination.clone(),
+                body: format!("redirected from {url}"),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_redirect_destination_before_second_request() {
+        let dir = tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["web_fetch".into()],
+            30,
+            NetworkSettings {
+                egress: crate::config::EgressMode::Unrestricted,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        registry.set_web_fetcher(Arc::new(RedirectFetcher {
+            calls: Arc::clone(&calls),
+            destination: "http://127.0.0.1/admin".into(),
+        }));
+
+        let err = registry
+            .execute("web_fetch", r#"{"url":"https://example.com/start"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

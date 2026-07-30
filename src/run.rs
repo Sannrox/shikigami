@@ -112,6 +112,109 @@ impl RunRequest {
     }
 }
 
+fn configured_workspace_adapter(config: &Config) -> &str {
+    match config.workspace.adapter.as_str() {
+        "directory-inplace" => "inplace",
+        other => other,
+    }
+}
+
+fn canonical_workspace_below(root: &Path, suffix: &[&str]) -> Result<PathBuf, RunError> {
+    let trusted_root = root.canonicalize().map_err(|error| {
+        RunError::Message(format!(
+            "configured workspace root cannot be resolved: {}: {error}",
+            root.display()
+        ))
+    })?;
+    let mut candidate = root.to_path_buf();
+    for component in suffix {
+        candidate.push(component);
+        let metadata = std::fs::symlink_metadata(&candidate).map_err(|error| {
+            RunError::Message(format!(
+                "expected checkpoint workspace cannot be inspected: {}: {error}",
+                candidate.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(RunError::Message(format!(
+                "checkpoint workspace path must not contain symlinks: {}",
+                candidate.display()
+            )));
+        }
+    }
+    let expected = candidate.canonicalize().map_err(|error| {
+        RunError::Message(format!(
+            "expected checkpoint workspace cannot be resolved: {}: {error}",
+            candidate.display()
+        ))
+    })?;
+    if !expected.starts_with(&trusted_root) {
+        return Err(RunError::Message(format!(
+            "checkpoint workspace {} escapes configured root {}",
+            expected.display(),
+            trusted_root.display()
+        )));
+    }
+    Ok(expected)
+}
+
+fn validate_resumed_workspace(
+    config: &Config,
+    state_runs: &Path,
+    resume_id: &str,
+    checkpoint: &Checkpoint,
+) -> Result<PathBuf, RunError> {
+    let actual = checkpoint.workspace.canonicalize().map_err(|error| {
+        RunError::Message(format!(
+            "checkpoint workspace cannot be resolved: {}: {error}",
+            checkpoint.workspace.display()
+        ))
+    })?;
+    let configured_adapter = configured_workspace_adapter(config);
+    let checkpoint_adapter = if checkpoint.workspace_adapter.is_empty() {
+        configured_adapter
+    } else {
+        checkpoint.workspace_adapter.as_str()
+    };
+    if checkpoint_adapter != configured_adapter {
+        return Err(RunError::Message(format!(
+            "checkpoint workspace adapter `{checkpoint_adapter}` does not match configured adapter `{configured_adapter}`"
+        )));
+    }
+    let expected = match configured_adapter {
+        "directory" => {
+            let root = PathBuf::from(&config.workspace.root);
+            if root.as_os_str() == "." {
+                canonical_workspace_below(state_runs, &[resume_id, "workspace"])?
+            } else {
+                canonical_workspace_below(&root, &["shikigami-runs", resume_id])?
+            }
+        }
+        "git-worktree" => canonical_workspace_below(state_runs, &[resume_id, "worktree"])?,
+        "inplace" => PathBuf::from(&config.workspace.root)
+            .canonicalize()
+            .map_err(|error| {
+                RunError::Message(format!(
+                    "configured workspace root cannot be resolved: {}: {error}",
+                    config.workspace.root
+                ))
+            })?,
+        other => {
+            return Err(RunError::Message(format!(
+                "cannot validate checkpoint workspace for adapter `{other}`"
+            )));
+        }
+    };
+    if actual != expected {
+        return Err(RunError::Message(format!(
+            "checkpoint workspace {} does not match configured workspace {}",
+            actual.display(),
+            expected.display()
+        )));
+    }
+    Ok(actual)
+}
+
 #[derive(Debug, Clone)]
 pub struct RunResult {
     pub run_id: String,
@@ -242,19 +345,15 @@ impl Engine {
             if let Some(resume_id) = &request.resume_run_id {
                 let cp = Checkpoint::load(&self.state_runs, resume_id)?;
                 cp.validate_prompt(SYSTEM_PROMPT)?;
-                if !cp.workspace.is_dir() {
-                    return Err(RunError::Message(format!(
-                        "checkpoint workspace missing: {}",
-                        cp.workspace.display()
-                    )));
-                }
+                let resumed_workspace =
+                    validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &cp)?;
                 self.events.emit(HarnessEvent::Status {
                     status: "resuming".into(),
                 });
                 let ws = MaterializedWorkspace {
-                    path: cp.workspace.clone(),
+                    path: resumed_workspace,
                     adapter: if cp.workspace_adapter.is_empty() {
-                        "resumed".into()
+                        configured_workspace_adapter(&self.config).into()
                     } else {
                         cp.workspace_adapter.clone()
                     },
@@ -899,6 +998,81 @@ mod tests {
         assert_eq!(msgs[0].content, "m0");
         assert!(msgs[1].content.contains("compacted"));
         assert_eq!(msgs.last().unwrap().content, "m19");
+    }
+
+    #[test]
+    fn resumed_workspace_must_match_configured_run_boundary() {
+        let dir = tempdir().unwrap();
+        let state_runs = dir.path().join("state").join("runs");
+        let run_id = "abc-123";
+        let expected = state_runs.join(run_id).join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&expected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut config = Config::default();
+        config.workspace.adapter = "directory".into();
+        config.workspace.root = ".".into();
+        let mut checkpoint = Checkpoint {
+            version: checkpoint::CHECKPOINT_VERSION,
+            run_id: run_id.into(),
+            task: "t".into(),
+            prompt_id: checkpoint::prompt_id(SYSTEM_PROMPT),
+            messages: vec![],
+            completed_turns: 0,
+            workspace: outside,
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: None,
+            todos: vec![],
+        };
+
+        let err =
+            validate_resumed_workspace(&config, &state_runs, run_id, &checkpoint).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        checkpoint.workspace = expected.canonicalize().unwrap();
+        let validated =
+            validate_resumed_workspace(&config, &state_runs, run_id, &checkpoint).unwrap();
+        assert_eq!(validated, checkpoint.workspace);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resumed_workspace_rejects_symlink_substitution() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let state_runs = dir.path().join("state").join("runs");
+        let run_id = "abc-123";
+        let run_dir = state_runs.join(run_id);
+        let expected = run_dir.join("workspace");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &expected).unwrap();
+        let mut config = Config::default();
+        config.workspace.adapter = "directory".into();
+        config.workspace.root = ".".into();
+        let checkpoint = Checkpoint {
+            version: checkpoint::CHECKPOINT_VERSION,
+            run_id: run_id.into(),
+            task: "t".into(),
+            prompt_id: checkpoint::prompt_id(SYSTEM_PROMPT),
+            messages: vec![],
+            completed_turns: 0,
+            workspace: expected,
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: None,
+            todos: vec![],
+        };
+
+        let err =
+            validate_resumed_workspace(&config, &state_runs, run_id, &checkpoint).unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain symlinks"),
+            "{err}"
+        );
     }
 
     fn base_config(dir: &tempfile::TempDir) -> Config {

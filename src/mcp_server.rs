@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::events::{ChannelSink, HarnessEvent};
 use crate::harness::Harness;
 use crate::identity::{PRODUCT, VERSION};
+use crate::mcp::{MAX_MCP_FRAME_BYTES, MAX_MCP_HEADER_BYTES};
 use crate::model::TokenUsage;
 use crate::run::{ParkInfo, RunRequest, RunResult};
 
@@ -382,6 +383,12 @@ fn build_request(args: &Value) -> Result<RunRequest, String> {
         .get("resume_run_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    if resume_run_id
+        .as_deref()
+        .is_some_and(|run_id| !crate::checkpoint::is_safe_run_id(run_id))
+    {
+        return Err("resume_run_id must be an opaque ASCII run id".into());
+    }
     let task = args
         .get("task")
         .and_then(|v| v.as_str())
@@ -442,21 +449,39 @@ async fn write_message<W: AsyncWriteExt + Unpin>(
 
 async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Value, String> {
     let mut content_length = None;
+    let mut header_bytes = 0usize;
     loop {
         let mut line = String::new();
-        let n = reader
+        let n = (&mut *reader)
+            .take((MAX_MCP_HEADER_BYTES + 1) as u64)
             .read_line(&mut line)
             .await
             .map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("eof".into());
         }
+        header_bytes = header_bytes.saturating_add(n);
+        if header_bytes > MAX_MCP_HEADER_BYTES {
+            return Err(format!("mcp headers exceed {MAX_MCP_HEADER_BYTES} bytes"));
+        }
         let line = line.trim_end();
         if line.is_empty() {
             break;
         }
         if let Some(rest) = line.strip_prefix("Content-Length:") {
-            content_length = rest.trim().parse::<usize>().ok();
+            if content_length.is_some() {
+                return Err("mcp duplicate Content-Length".into());
+            }
+            let length = rest
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "mcp invalid Content-Length".to_string())?;
+            if length > MAX_MCP_FRAME_BYTES {
+                return Err(format!(
+                    "mcp Content-Length {length} exceeds {MAX_MCP_FRAME_BYTES} bytes"
+                ));
+            }
+            content_length = Some(length);
         }
     }
     let len = content_length.ok_or_else(|| "mcp missing Content-Length".to_string())?;
@@ -492,6 +517,31 @@ mod tests {
         config.events.adapter = "none".into();
         config.workspace.root = dir.join("ws-root").to_string_lossy().into();
         Harness::from_config(config, state).unwrap()
+    }
+
+    #[tokio::test]
+    async fn framing_rejects_oversized_and_duplicate_lengths_before_body_read() {
+        let oversized = format!("Content-Length: {}\r\n\r\n", MAX_MCP_FRAME_BYTES + 1);
+        let mut reader = BufReader::new(oversized.as_bytes());
+        let err = read_message(&mut reader).await.unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+
+        let duplicate = b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}";
+        let mut reader = BufReader::new(&duplicate[..]);
+        let err = read_message(&mut reader).await.unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+
+        let oversized_header = format!("X-Fill: {}\r\n\r\n", "x".repeat(MAX_MCP_HEADER_BYTES));
+        let mut reader = BufReader::new(oversized_header.as_bytes());
+        let err = read_message(&mut reader).await.unwrap_err();
+        assert!(err.contains("headers exceed"), "{err}");
+    }
+
+    #[test]
+    fn mcp_resume_id_rejects_path_components() {
+        let err = build_request(&json!({"resume_run_id": "../other"})).unwrap_err();
+        assert!(err.contains("opaque ASCII run id"), "{err}");
+        build_request(&json!({"resume_run_id": "abc-123"})).unwrap();
     }
 
     #[tokio::test]

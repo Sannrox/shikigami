@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Hardened opt-in `web_fetch` against DNS and redirect SSRF and bounded response
+  bodies while streaming.
+- Bound MCP stdio headers and frames before allocation.
+- Bound checkpoint resume identifiers and stored workspaces to the configured
+  run and workspace roots.
+
 ### Changed
 
 - Architecture, settings, adapter, and serve documentation now consistently
