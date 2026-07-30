@@ -26,7 +26,13 @@ fn doctor_succeeds_on_local_defaults() {
         .success()
         .stdout(predicate::str::contains("status: ok"))
         .stdout(predicate::str::contains("profile:   local"))
-        .stdout(predicate::str::contains("gov:       none"));
+        .stdout(predicate::str::contains("gov:       none"))
+        .stdout(predicate::str::contains("tools.mode:       custom"))
+        .stdout(predicate::str::contains("tools.configured: (none)"))
+        .stdout(predicate::str::contains("tools.implicit:   (none)"))
+        .stdout(predicate::str::contains(
+            "tools.visible:    [read_file, write_file",
+        ));
 }
 
 #[test]
