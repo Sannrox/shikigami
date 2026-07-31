@@ -2,6 +2,7 @@
 
 mod bash;
 mod catalog;
+mod environment;
 mod executor;
 mod fs;
 mod path;
@@ -165,6 +166,75 @@ mod tests {
             panic!()
         };
         assert!(log_text.contains("hello-bg"), "{log_text}");
+        reg.kill_background_jobs().await;
+    }
+
+    #[tokio::test]
+    async fn bash_environment_protects_credentials_foreground_and_background() {
+        let dir = tempdir().unwrap();
+        let safe_name = "SHIKIGAMI_TEST_SAFE_BUILD_FLAG_153";
+        let token_name = "SHIKIGAMI_TEST_SYNTHETIC_PLANE_TOKEN_153";
+        // SAFETY: unique test-only names are removed immediately after the
+        // registry snapshots the parent environment.
+        unsafe {
+            std::env::set_var(safe_name, "visible");
+            std::env::set_var(token_name, "must-not-reach-tools");
+        }
+        let protected = vec![token_name.into()];
+        let reg = ToolRegistry::with_builtins_protected_environment(
+            dir.path(),
+            vec!["bash".into()],
+            30,
+            NetworkSettings::default(),
+            true,
+            &protected,
+        )
+        .unwrap();
+        // SAFETY: cleanup of the unique test-only names above.
+        unsafe {
+            std::env::remove_var(safe_name);
+            std::env::remove_var(token_name);
+        }
+
+        let foreground = reg
+            .execute(
+                "bash",
+                r#"{"command":"printf '%s|%s|%s' \"${SHIKIGAMI_TEST_SAFE_BUILD_FLAG_153-unset}\" \"${SHIKIGAMI_TEST_SYNTHETIC_PLANE_TOKEN_153-unset}\" \"${BASH_ENV-unset}\""}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreground, ToolOutput::Text("visible|unset|unset".into()));
+
+        let start = reg
+            .execute(
+                "bash_background",
+                r#"{"command":"printf '%s|%s|%s' \"${SHIKIGAMI_TEST_SAFE_BUILD_FLAG_153-unset}\" \"${SHIKIGAMI_TEST_SYNTHETIC_PLANE_TOKEN_153-unset}\" \"${BASH_ENV-unset}\""}"#,
+            )
+            .await
+            .unwrap();
+        let ToolOutput::Text(start_text) = start else {
+            panic!("expected background job metadata");
+        };
+        let job_id = start_text
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id="))
+            .expect("job id")
+            .to_string();
+        for _ in 0..50 {
+            let status = reg
+                .execute("bash_job_status", &format!(r#"{{"job_id":"{job_id}"}}"#))
+                .await
+                .unwrap();
+            if matches!(status, ToolOutput::Text(ref text) if text.contains("exited")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let logs = reg
+            .execute("bash_job_logs", &format!(r#"{{"job_id":"{job_id}"}}"#))
+            .await
+            .unwrap();
+        assert_eq!(logs, ToolOutput::Text("visible|unset|unset".into()));
         reg.kill_background_jobs().await;
     }
 

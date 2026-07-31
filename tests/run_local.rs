@@ -97,6 +97,64 @@ async fn live_event_stream_receives_scripted_sequence() {
     );
 }
 
+#[tokio::test]
+async fn bash_tool_events_cannot_emit_configured_harness_credentials() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let token_name = "SHIKIGAMI_TEST_EVENT_PLANE_TOKEN_153";
+    let token_value = "must-not-reach-events";
+    // SAFETY: unique integration-test name, removed immediately after the run.
+    unsafe {
+        std::env::set_var(token_name, token_value);
+    }
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.governance.token_env = Some(token_name.into());
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"bash","args_json":"{\"command\":\"printf '%s' \\\"${SHIKIGAMI_TEST_EVENT_PLANE_TOKEN_153-unset}\\\"\"}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"credential isolated\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+    config.tools.enabled = vec!["bash".into(), "report".into()];
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("prove credential isolation");
+    request.keep_workspace = true;
+    let result = harness.run_with_events(request, Some(Arc::new(sink))).await;
+    // SAFETY: cleanup of the unique integration-test name above.
+    unsafe {
+        std::env::remove_var(token_name);
+    }
+    let result = result.unwrap();
+    assert!(result.success);
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolEnd {
+                name,
+                ok: true,
+                detail
+            } if name == "bash" && detail == "unset"
+        )),
+        "missing isolated Bash ToolEnd: {events:?}"
+    );
+    assert!(
+        !format!("{events:?}").contains(token_value),
+        "synthetic credential appeared in event stream"
+    );
+}
+
 /// Denied authorize_tool must not execute the host tool (allow-list path).
 /// Governed external-action deny uses the same run-loop branch.
 #[tokio::test]

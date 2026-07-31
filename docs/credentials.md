@@ -50,6 +50,21 @@ doctor lines (`[REDACTED]`).
 Harness event sinks must not include bearer tokens or API keys. Tool args and
 model content are host/workspace data — do not put secrets there.
 
+## Bash subprocesses
+
+Foreground and background Bash environments are explicitly reconstructed from
+the parent environment. Any configured plane token, active HTTP model key, or
+MCP bearer-token env name is removed, so those harness credentials cannot be
+expanded or printed by Bash. Shell-startup controls are also removed and Bash
+startup files are disabled.
+
+The supported 1.x API intentionally preserves other parent variables for local
+compatibility. Managed hosts must therefore launch Shikigami with an allowlist
+containing only the process variables tools require. Provider keys should stay
+in the external model/governance service rather than the Shikigami process.
+This protection covers Bash child environments; an OS sandbox or container is
+still required to isolate files, processes, and network access.
+
 ## Optional: OS keyring (operators)
 
 For interactive operator machines, load env vars from the OS keychain before

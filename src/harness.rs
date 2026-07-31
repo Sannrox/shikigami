@@ -173,6 +173,10 @@ impl Harness {
             "tools.visible:    {}",
             display_tools(&model_visible_builtins)
         ));
+        lines.push(format!(
+            "tools.environment: parent minus protected/startup controls; protected={}",
+            display_tools(&self.config.protected_tool_environment_names()),
+        ));
         if !self.config.tools.mcp_servers.is_empty() {
             let servers: Vec<_> = self
                 .config
@@ -440,6 +444,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
         config.tools.enabled = vec!["read_file".into(), "bash".into()];
+        config.governance.token_env = Some("PLANE_TOKEN".into());
         let harness = Harness::from_config(config, state).unwrap();
 
         let report = harness.doctor();
@@ -464,6 +469,10 @@ mod tests {
         assert!(report.lines.iter().any(|line| {
             line == "tools.visible:    [read_file, bash, bash_background, bash_job_status, bash_job_logs]"
         }));
+        assert!(report.lines.contains(
+            &"tools.environment: parent minus protected/startup controls; protected=[PLANE_TOKEN]"
+                .into()
+        ));
     }
 
     #[test]

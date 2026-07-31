@@ -797,6 +797,27 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Credential environment names consumed by the harness and never exposed
+    /// to agent-controlled Bash subprocesses.
+    pub(crate) fn protected_tool_environment_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(name) = &self.governance.token_env {
+            names.push(name.clone());
+        }
+        if self.model.adapter == "http" {
+            names.push(self.model.api_key_env.clone());
+        }
+        names.extend(
+            self.tools
+                .mcp_servers
+                .iter()
+                .filter_map(|server| server.token_env.clone()),
+        );
+        names.sort_by_key(|name| name.to_ascii_uppercase());
+        names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        names
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -857,6 +878,34 @@ script_json = "[]"
         let (c, _) = Config::resolve(&path).unwrap();
         assert_eq!(c.governance.adapter, "local");
         assert_eq!(c.model.adapter, "scripted");
+    }
+
+    #[test]
+    fn configured_harness_credentials_are_protected_from_tools() {
+        let mut config = Config::default();
+        config.governance.token_env = Some("PLANE_TOKEN".into());
+        config.model.adapter = "http".into();
+        config.model.api_key_env = "MODEL_KEY".into();
+        config.tools.mcp_servers.push(McpServerSettings {
+            name: "remote".into(),
+            command: String::new(),
+            args: Vec::new(),
+            transport: "http".into(),
+            url: Some("https://mcp.example".into()),
+            token_env: Some("MCP_TOKEN".into()),
+        });
+
+        assert_eq!(
+            config.protected_tool_environment_names(),
+            vec!["MCP_TOKEN", "MODEL_KEY", "PLANE_TOKEN"]
+        );
+
+        config.model.adapter = "scripted".into();
+        assert!(
+            !config
+                .protected_tool_environment_names()
+                .contains(&"MODEL_KEY".into())
+        );
     }
 
     #[test]

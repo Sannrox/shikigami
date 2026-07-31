@@ -56,13 +56,32 @@ impl ToolRegistry {
         network: NetworkSettings,
         respect_ignore: bool,
     ) -> Result<Self, ToolError> {
+        Self::with_builtins_protected_environment(
+            workspace,
+            enabled,
+            bash_timeout_secs,
+            network,
+            respect_ignore,
+            &[],
+        )
+    }
+
+    pub(crate) fn with_builtins_protected_environment(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+        network: NetworkSettings,
+        respect_ignore: bool,
+        protected_environment_names: &[String],
+    ) -> Result<Self, ToolError> {
         let web_fetcher = default_web_fetcher()?;
         Ok(Self {
-            executor: ToolExecutor::new_with_ignore(
+            executor: ToolExecutor::new_with_protected_environment(
                 workspace,
                 enabled,
                 bash_timeout_secs,
                 respect_ignore,
+                protected_environment_names,
             )?,
             external: Vec::new(),
             todos: Arc::new(Mutex::new(Vec::new())),
@@ -190,14 +209,18 @@ impl ToolRegistry {
         let log_file = std::fs::File::create(&log_path)?;
         let stdout = Stdio::from(log_file.try_clone()?);
         let stderr = Stdio::from(log_file);
-        let child = Command::new("bash")
-            .arg("-lc")
+        let mut command = Command::new("bash");
+        command
+            .arg("--noprofile")
+            .arg("--norc")
+            .arg("-c")
             .arg(&args.command)
             .current_dir(&self.executor.workspace)
             .stdout(stdout)
             .stderr(stderr)
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        self.executor.environment.apply(&mut command);
+        let child = command.spawn()?;
         guard.jobs.insert(
             job_id.clone(),
             BgJob {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Foreground and background Bash now clear ambient child-process inheritance,
+  reconstruct the compatible parent environment, and always remove configured
+  harness credentials and shell-startup control variables.
+
 ## [1.0.4] — 2026-07-30
 
 ### Security

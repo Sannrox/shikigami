@@ -41,7 +41,8 @@ Operators and integrators should understand:
 - **Tool jail.** File tools reject absolute paths and parent traversal. This is
   not a full OS sandbox; treat host compromise assumptions accordingly.
 - **Bash is opt-in.** Default tool allow-lists exclude `bash`. Enabling it
-  increases blast radius inside the workspace process environment.
+  increases blast radius. Bash receives an explicitly constructed environment;
+  configured harness credential variables are always removed.
 - **Governance fail-closed.** Profiles with `fail_closed` or `governed` must not
   run when the plane is missing or unhealthy. If you need offline operation,
   use the `local` profile deliberately.
@@ -57,6 +58,8 @@ Operators and integrators should understand:
 
 - Prefer `profile = local` for demos and CI without a plane.
 - Keep `bash` out of `tools.enabled` unless required.
+- For managed Bash runs, launch Shikigami with an allowlisted parent
+  environment containing only variables tools require.
 - Set `fail_closed = true` only when a plane is actually operated.
 - Run untrusted tasks in disposable workspaces; use `--keep-workspace` only when
   you need forensic inspection.
@@ -81,6 +84,8 @@ Operators and integrators should understand:
 - Relative-path jail for file tools; parent and absolute paths rejected
 - Default tool allow-list excludes `bash`
 - Output and file size caps in the tool executor
+- Explicit foreground/background Bash environments with mandatory harness
+  credential and shell-startup-variable removal
 - Fail-closed doctor/run for governed profiles without a healthy plane
 - Secrets via env / `token_env`, not TOML
 
