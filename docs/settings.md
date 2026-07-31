@@ -140,6 +140,18 @@ Background jobs (when bash is enabled): start with `bash_background`, poll with
 `bash_job_status` / `bash_job_logs`. Jobs are killed when the run finishes
 (success, failure, or park). Max 4 concurrent jobs; logs capped at 256KiB.
 
+Foreground and background Bash share one explicitly reconstructed child
+environment. For 1.x compatibility, ordinary parent variables remain
+available, while active `governance.token_env`, HTTP `model.api_key_env`, MCP
+bearer-token env names, and shell-startup controls are removed. Bash startup
+files are disabled so they cannot repopulate the child environment.
+
+Managed hosts must launch Shikigami with an allowlisted parent environment when
+additional ambient variables are untrusted or sensitive. A configurable child
+environment policy would change the public Rust settings shape and is deferred
+to a future major-version API/schema decision. Environment filtering does not
+provide filesystem, PID, or network isolation.
+
 Coding default includes `todo_write` (run-scoped checklist; max 32 items).
 It is **not** a plane work-unit API and does not replace `escalate`/park.
 
@@ -165,6 +177,7 @@ Modes are host policy, not an OS sandbox.
 | `tools.effective` | Final configured enforcement allow-list before implicit expansion |
 | `tools.visible` | Model-visible builtin tools after implicit expansion |
 | `tools.external` | Configured MCP servers whose definitions are resolved at run start |
+| `tools.environment` | Fixed v1 child-environment rule and protected variable names; never values |
 
 These diagnostics are compatibility-only visibility: empty `custom`, explicit
 custom lists, named presets, and named-preset intersections retain their

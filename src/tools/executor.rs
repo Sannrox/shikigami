@@ -10,6 +10,7 @@ use tokio::time::timeout;
 
 use super::bash::MAX_BASH_OUTPUT_BYTES;
 use super::catalog::{builtin_catalog, definitions_for_enabled};
+use super::environment::ToolEnvironment;
 use super::fs::{
     ApplyPatchArgs, EditArgs, GlobArgs, GrepArgs, MAX_APPLY_PATCH_BYTES, MAX_SEARCH_MATCHES,
     MultiEditArgs, PathArgs, WriteArgs,
@@ -23,6 +24,7 @@ pub struct ToolExecutor {
     pub(crate) workspace: PathBuf,
     pub(crate) enabled: Vec<String>,
     pub(crate) bash_timeout: Duration,
+    pub(crate) environment: ToolEnvironment,
     /// Patterns for glob/grep filtering (empty when respect_ignore is false).
     pub(crate) ignore_patterns: Vec<String>,
 }
@@ -48,6 +50,22 @@ impl ToolExecutor {
         bash_timeout_secs: u64,
         respect_ignore: bool,
     ) -> Result<Self, ToolError> {
+        Self::new_with_protected_environment(
+            workspace,
+            enabled,
+            bash_timeout_secs,
+            respect_ignore,
+            &[],
+        )
+    }
+
+    pub(crate) fn new_with_protected_environment(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+        respect_ignore: bool,
+        protected_environment_names: &[String],
+    ) -> Result<Self, ToolError> {
         let workspace = std::fs::canonicalize(workspace.into())?;
         let ignore_patterns = if respect_ignore {
             load_ignore_patterns(&workspace)
@@ -58,6 +76,7 @@ impl ToolExecutor {
             workspace,
             enabled,
             bash_timeout: Duration::from_secs(bash_timeout_secs.max(1)),
+            environment: ToolEnvironment::resolve(protected_environment_names),
             ignore_patterns,
         })
     }
@@ -154,14 +173,18 @@ impl ToolExecutor {
     }
 
     async fn bash(&self, script: &str, limit: Duration) -> Result<String, ToolError> {
-        let child = Command::new("bash")
-            .arg("-lc")
+        let mut command = Command::new("bash");
+        command
+            .arg("--noprofile")
+            .arg("--norc")
+            .arg("-c")
             .arg(script)
             .current_dir(&self.workspace)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        self.environment.apply(&mut command);
+        let child = command.spawn()?;
 
         let output = match timeout(limit, child.wait_with_output()).await {
             Ok(Ok(o)) => o,
