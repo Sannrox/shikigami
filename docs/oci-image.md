@@ -69,7 +69,7 @@ argument; the release workflow additionally rejects versions below `1.0.5`.
 docker buildx build --platform linux/amd64 --load --tag shikigami:smoke \
   --build-arg VERSION=1.0.5 \
   --build-arg VCS_REF=$(git rev-parse HEAD) .
-scripts/oci-image-smoke.sh shikigami:smoke 1.0.5 $(git rev-parse HEAD)
+bash scripts/oci-image-smoke.sh shikigami:smoke 1.0.5 $(git rev-parse HEAD)
 ```
 
 The same check runs in CI and before release publication. It verifies startup,

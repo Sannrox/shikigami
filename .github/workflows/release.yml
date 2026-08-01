@@ -101,7 +101,7 @@ jobs:
             VCS_REF=${{ github.sha }}
 
       - name: Run deterministic image smoke
-        run: ./scripts/oci-image-smoke.sh shikigami:release-smoke "${{ steps.release.outputs.version }}" "${{ github.sha }}"
+        run: bash scripts/oci-image-smoke.sh shikigami:release-smoke "${{ steps.release.outputs.version }}" "${{ github.sha }}"
 
   oci-image:
     name: Publish OCI image
