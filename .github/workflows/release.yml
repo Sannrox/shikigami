@@ -48,3 +48,132 @@ jobs:
           locked: true
           build-tool: ${{ matrix.build_tool || 'cargo' }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  oci-smoke:
+    name: OCI image smoke
+    needs: create-release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify supported release version
+        id: release
+        shell: bash
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" != "$tag_version" ]]; then
+            echo "release tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+          if [[ "$version" == *-* ]]; then
+            echo "OCI publication requires a stable release version (got $version)" >&2
+            exit 1
+          fi
+          if [[ "$version" == *+* ]]; then
+            echo "OCI publication requires a registry-safe version without build metadata (got $version)" >&2
+            exit 1
+          fi
+          minimum="$(printf '%s\n' "$version" 1.0.5 | sort -V | head -n1)"
+          if [[ "$minimum" != "1.0.5" ]]; then
+            echo "OCI publication requires Shikigami 1.0.5 or newer (got $version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/amd64 image for smoke
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: shikigami:release-smoke
+          build-args: |
+            VERSION=${{ steps.release.outputs.version }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Run deterministic image smoke
+        run: ./scripts/oci-image-smoke.sh shikigami:release-smoke "${{ steps.release.outputs.version }}" "${{ github.sha }}"
+
+  oci-image:
+    name: Publish OCI image
+    needs: [create-release, oci-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve repository-scoped image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and publish digest-pinned image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+            ${{ steps.image.outputs.name }}:${{ needs.oci-smoke.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.oci-smoke.outputs.version }}
+          build-args: |
+            VERSION=${{ needs.oci-smoke.outputs.version }}
+            VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Record immutable image reference
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ needs.oci-smoke.outputs.version }}
+          REVISION: ${{ github.sha }}
+        shell: bash
+        run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "build did not return an immutable OCI digest: $DIGEST" >&2
+            exit 1
+          fi
+          metadata_file="shikigami-${VERSION}-oci.json"
+          jq -n \
+            --arg image "$IMAGE" \
+            --arg digest "$DIGEST" \
+            --arg version "$VERSION" \
+            --arg revision "$REVISION" \
+            '{schema_version: 1, image: $image, digest: $digest, reference: ($image + "@" + $digest), version: $version, revision: $revision, architecture: "linux/amd64", provenance: "BuildKit provenance mode=max", sbom: "BuildKit SBOM attestation"}' \
+            > "$metadata_file"
+          gh release upload "$GITHUB_REF_NAME" "$metadata_file" --clobber
+          {
+            echo "### OCI image"
+            echo
+            echo "\`$IMAGE@$DIGEST\`"
+            echo
+            echo "Metadata, provenance, and SBOM attestations were attached to the published image."
+          } >> "$GITHUB_STEP_SUMMARY"

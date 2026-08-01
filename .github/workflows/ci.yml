@@ -57,3 +57,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --locked
       - run: cargo clippy --all-targets -- -D warnings
+
+  oci-smoke:
+    name: OCI image smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Read package metadata
+        id: package
+        shell: bash
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: shikigami:ci
+          build-args: |
+            VERSION=${{ steps.package.outputs.version }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Run deterministic image smoke
+        run: ./scripts/oci-image-smoke.sh shikigami:ci "${{ steps.package.outputs.version }}" "${{ github.sha }}"

@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconstruct the compatible parent environment, and always remove configured
   harness credentials and shell-startup control variables.
 
+### Added
+
+- Digest-pinned linux/amd64 OCI image publication for supported stable `1.0.5`
+  and newer releases, with non-root startup smoke coverage, OCI metadata,
+  provenance, and SBOM attestations.
+
 ## [1.0.4] — 2026-07-30
 
 ### Security
