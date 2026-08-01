@@ -19,6 +19,7 @@ Operator and contributor documentation for **shikigami**.
 | Plane/model credential patterns | [credentials.md](credentials.md) |
 | Run the local-queue daemon | [serve.md](serve.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
+| Build or consume the OCI image | [oci-image.md](oci-image.md) |
 | Run metrics export | [metrics.md](metrics.md) |
 | Network egress policy | [network.md](network.md) |
 | MCP client and server host | [mcp.md](mcp.md) |
