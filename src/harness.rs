@@ -112,6 +112,11 @@ impl Harness {
         Self::new(config, ConfigSource::Defaults, state)
     }
 
+    /// Whether the configured governance adapter currently reports healthy.
+    pub fn governance_ok(&self) -> bool {
+        self.governance.health_ok()
+    }
+
     pub fn doctor(&self) -> DoctorReport {
         let mut lines = Vec::new();
         let gov_ok = self.governance.health_ok();

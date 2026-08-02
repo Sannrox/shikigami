@@ -1,0 +1,94 @@
+# Minimal Kubernetes sketch for a plane-intake Shikigami worker.
+# Illustrates readiness, liveness, and SIGTERM drain against the
+# shikigami.worker_lifecycle contract (schema_version 1).
+#
+# Not a complete production chart: supply image, secrets, ConfigMap, and
+# Tenkai/env-specific values. Filesystem-queue intake is intentionally out of
+# scope for managed pools (Tenkai ADR 0011).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shikigami-plane-worker
+  labels:
+    app: shikigami-plane-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shikigami-plane-worker
+  template:
+    metadata:
+      labels:
+        app: shikigami-plane-worker
+    spec:
+      # Give the process time to stop claiming and finish or drop the active run.
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: shikigami
+          # Requires a build that includes worker lifecycle (#155). Pin a
+          # digest from that release or newer — do not use 1.0.5 or earlier.
+          image: ghcr.io/sannrox/shikigami:REPLACE_WITH_LIFECYCLE_RELEASE
+          args:
+            - serve
+            - --intake=plane
+            - --runtime-id=shikigami
+            - --claim-ttl-secs=60
+            - --lifecycle-listen=0.0.0.0:8080
+            - --worker-id=$(POD_NAME)
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SHIKIGAMI_PROFILE
+              value: governed
+            - name: SHIKIGAMI_CONTROL_PLANE
+              value: http://sekai-chisei.example:50051
+            - name: SHIKIGAMI_STATE
+              value: /var/lib/shikigami
+            # Map token via secret; never bake credentials into the image.
+            - name: SEKAI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: shikigami-plane
+                  key: token
+          ports:
+            - name: lifecycle
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: lifecycle
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: lifecycle
+            periodSeconds: 15
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Extra beat so kubelet marks NotReady before SIGTERM races a claim.
+              exec:
+                command: ["/bin/sh", "-c", "sleep 2"]
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/shikigami
+            - name: config
+              mountPath: /etc/shikigami
+              readOnly: true
+          # Prefer a non-root image user; writable state only under SHIKIGAMI_STATE.
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: shikigami-config
+---
+# Drain / failure notes for operators and Tenkai:
+# - Scale-down or rollout sends SIGTERM → lifecycle state=draining, accepting_claims=false.
+# - /readyz returns 503 while draining, governance_unavailable, fence_lost, or unhealthy.
+# - Forced kill without ack leaves work on the plane lease-expiry/reclaim path.
+# - Do not scrape task payloads from the pod; lifecycle JSON has opaque counters only.

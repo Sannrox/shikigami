@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
     Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions, StateRoot,
-    VERSION,
+    VERSION, WorkerLifecycle, WorkerLifecycleIdentity, serve_lifecycle_http,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -89,6 +89,14 @@ enum Command {
         /// Plane-allowlisted logical checkpoint store id for local run checkpoints.
         #[arg(long)]
         checkpoint_store_id: Option<String>,
+        /// Opaque worker identity written into the plane lifecycle snapshot.
+        /// Defaults to hostname or `shikigami-worker`.
+        #[arg(long, env = "SHIKIGAMI_WORKER_ID")]
+        worker_id: Option<String>,
+        /// Optional loopback HTTP bind for lifecycle probes (e.g. `127.0.0.1:8080`).
+        /// Serves GET /lifecycle, /readyz, /livez. Plane intake only.
+        #[arg(long, env = "SHIKIGAMI_LIFECYCLE_LISTEN")]
+        lifecycle_listen: Option<String>,
     },
     /// MCP server over stdio (`doctor` + `run` tools). See docs/mcp.md.
     ///
@@ -114,6 +122,14 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn default_worker_id() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "shikigami-worker".into())
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -222,6 +238,8 @@ async fn run() -> anyhow::Result<()> {
             runtime_id,
             claim_ttl_secs,
             checkpoint_store_id,
+            worker_id,
+            lifecycle_listen,
         } => {
             let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
             let (tx, rx) = tokio::sync::watch::channel(false);
@@ -230,9 +248,29 @@ async fn run() -> anyhow::Result<()> {
                 let _ = tokio::signal::ctrl_c().await;
                 let _ = sig_tx.send(true);
             });
+            // Also handle SIGTERM on Unix for fleet drain (K8s/Tenkai).
+            #[cfg(unix)]
+            {
+                let sig_tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut sig = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::terminate(),
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    let _ = sig.recv().await;
+                    let _ = sig_tx.send(true);
+                });
+            }
 
             let n = match intake {
                 ServeIntake::Filesystem => {
+                    if lifecycle_listen.is_some() {
+                        anyhow::bail!(
+                            "--lifecycle-listen applies only to plane intake (managed fleet contract)"
+                        );
+                    }
                     let layout = QueueLayout::under_state(state.path());
                     layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
                     println!(
@@ -249,6 +287,9 @@ async fn run() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!(e))?
                 }
                 ServeIntake::Plane => {
+                    // Drop any prior process snapshot immediately so a failed
+                    // restart cannot leave fleet-ready state on disk.
+                    let _ = std::fs::remove_file(shikigami::lifecycle_path(state.path()));
                     if harness.config.governance.adapter != "sekai-chisei" {
                         anyhow::bail!(
                             "plane intake requires governance.adapter = \"sekai-chisei\""
@@ -269,11 +310,85 @@ async fn run() -> anyhow::Result<()> {
                     #[cfg(feature = "governance-sekai-chisei")]
                     {
                         let ttl = std::time::Duration::from_secs(claim_ttl_secs);
+                        let worker_id = worker_id.unwrap_or_else(default_worker_id);
+                        // Open lifecycle before any other fallible plane startup so
+                        // supervisors never keep a prior process's ready snapshot.
+                        let lifecycle = WorkerLifecycle::open(
+                            state.path(),
+                            WorkerLifecycleIdentity {
+                                worker_id: worker_id.clone(),
+                                namespace: harness.config.governance.namespace.clone(),
+                                runtime_id: runtime_id.clone(),
+                            },
+                        )
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                        let startup_fail =
+                            |lc: &WorkerLifecycle, kind: &str, err: anyhow::Error| {
+                                let _ = lc.set_unhealthy(kind);
+                                let _ = std::fs::remove_file(lc.path());
+                                err
+                            };
                         let client =
                             shikigami::governance::sekai_chisei::SekaiClaimClient::from_config(
                                 &harness.config,
                             )
-                            .map_err(|error| anyhow::anyhow!(error))?;
+                            .map_err(|error| {
+                                startup_fail(
+                                    &lifecycle,
+                                    "plane_client_failed",
+                                    anyhow::anyhow!(error),
+                                )
+                            })?;
+                        let report = harness.doctor();
+                        if !report.ok {
+                            return Err(startup_fail(
+                                &lifecycle,
+                                "doctor_failed",
+                                anyhow::anyhow!(
+                                    "doctor failed before plane serve; fix configuration first: {}",
+                                    report.lines.join("; ")
+                                ),
+                            ));
+                        }
+                        if let Some(bind) = &lifecycle_listen {
+                            let addr: std::net::SocketAddr = bind.parse().map_err(|e| {
+                                startup_fail(
+                                    &lifecycle,
+                                    "lifecycle_listen_invalid",
+                                    anyhow::anyhow!("invalid --lifecycle-listen: {e}"),
+                                )
+                            })?;
+                            // Loopback for local probes; unspecified (0.0.0.0 / ::) for
+                            // in-pod K8s probes. Never bind a concrete public interface —
+                            // the surface is unauthenticated operational JSON only.
+                            if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
+                                return Err(startup_fail(
+                                    &lifecycle,
+                                    "lifecycle_listen_invalid",
+                                    anyhow::anyhow!(
+                                        "--lifecycle-listen must be loopback or unspecified (0.0.0.0/[::]), got {addr}"
+                                    ),
+                                ));
+                            }
+                            let listen_rx = rx.clone();
+                            let bound = serve_lifecycle_http(addr, lifecycle.clone(), listen_rx)
+                                .await
+                                .map_err(|e| {
+                                    startup_fail(
+                                        &lifecycle,
+                                        "lifecycle_listen_failed",
+                                        anyhow::anyhow!(e),
+                                    )
+                                })?;
+                            println!(
+                                "serve lifecycle http={} file={}",
+                                bound,
+                                lifecycle.path().display()
+                            );
+                        } else {
+                            println!("serve lifecycle file={}", lifecycle.path().display());
+                        }
+                        lifecycle.mark_serving().map_err(|e| anyhow::anyhow!(e))?;
                         let options = shikigami::PlaneServeOptions {
                             poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
                             max_jobs,
@@ -290,10 +405,14 @@ async fn run() -> anyhow::Result<()> {
                                     .map(std::time::Duration::from_secs),
                                 ..Default::default()
                             },
+                            lifecycle: Some(lifecycle),
                         };
                         println!(
-                            "serve intake=plane runtime={} namespace={} ttl_secs={}",
-                            runtime_id, harness.config.governance.namespace, claim_ttl_secs
+                            "serve intake=plane runtime={} namespace={} ttl_secs={} worker={}",
+                            runtime_id,
+                            harness.config.governance.namespace,
+                            claim_ttl_secs,
+                            worker_id
                         );
                         shikigami::run_plane_serve(&harness, &client, options, rx)
                             .await
@@ -301,6 +420,7 @@ async fn run() -> anyhow::Result<()> {
                     }
                     #[cfg(not(feature = "governance-sekai-chisei"))]
                     {
+                        let _ = (worker_id, lifecycle_listen);
                         anyhow::bail!("plane intake requires the governance-sekai-chisei feature");
                     }
                 }

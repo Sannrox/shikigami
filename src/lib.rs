@@ -40,6 +40,7 @@ pub mod serve;
 pub mod state;
 pub mod tools;
 pub mod transcript;
+pub mod worker_lifecycle;
 pub mod workspace;
 
 pub use config::{
@@ -65,6 +66,12 @@ pub use state::{StateError, StateRoot};
 pub use tools::{TodoItem, TodoStatus};
 pub use transcript::{
     ExportOptions, TRANSCRIPT_SCHEMA_VERSION, TranscriptError, export_run_transcript,
+};
+pub use worker_lifecycle::{
+    TerminalOutcome, WORKER_LIFECYCLE_CONCURRENCY_V1, WORKER_LIFECYCLE_PROTOCOL,
+    WORKER_LIFECYCLE_SCHEMA_VERSION, WorkerLifecycle, WorkerLifecycleError,
+    WorkerLifecycleIdentity, WorkerLifecycleSnapshot, WorkerLifecycleState, lifecycle_path,
+    resolve_state, serve_lifecycle_http,
 };
 
 /// Library liveness probe.

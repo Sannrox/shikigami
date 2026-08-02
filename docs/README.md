@@ -17,7 +17,7 @@ Operator and contributor documentation for **shikigami**.
 | Versioned prompts and attribution | [prompts.md](prompts.md) |
 | Runtime skill packs | [skills.md](skills.md) |
 | Plane/model credential patterns | [credentials.md](credentials.md) |
-| Run the local-queue daemon | [serve.md](serve.md) |
+| Run serve (queue or plane claim) + worker lifecycle | [serve.md](serve.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
 | Run metrics export | [metrics.md](metrics.md) |
