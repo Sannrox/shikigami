@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::config::{Config, ConfigError, ConfigSource};
 use crate::events::{self, EventError, EventSink, FanoutSink};
-use crate::governance::{self, GovernanceError, GovernancePort};
+use crate::governance::{self, AvailableModel, GovernanceError, GovernancePort};
 use crate::metrics::Metrics;
 use crate::model::{self, ModelError, ModelPort};
 use crate::run::{Engine, RunError, RunRequest, RunResult, RunTermination};
@@ -104,7 +104,31 @@ impl Harness {
         state: StateRoot,
         cwd: &Path,
     ) -> Result<Self, HarnessError> {
+        Self::resolve_with_model(explicit_config, state, cwd, None)
+    }
+
+    /// Resolve settings and apply an optional final model selection.
+    ///
+    /// Hosts use this for a CLI/operator override. It must happen before the
+    /// governance and model ports are constructed so every adapter observes
+    /// the same selected model.
+    pub fn resolve_with_model(
+        explicit_config: Option<&Path>,
+        state: StateRoot,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<Self, HarnessError> {
         let (config, source) = state.config_search(explicit_config, cwd)?;
+        let mut config = config;
+        if let Some(model) = model.map(str::trim) {
+            if model.is_empty() {
+                return Err(HarnessError::Config(ConfigError::Invalid(
+                    "model override must not be empty".into(),
+                )));
+            }
+            config.model.model = model.into();
+            config.validate()?;
+        }
         Self::new(config, source, state)
     }
 
@@ -115,6 +139,28 @@ impl Harness {
     /// Whether the configured governance adapter currently reports healthy.
     pub fn governance_ok(&self) -> bool {
         self.governance.health_ok()
+    }
+
+    /// Return the model name selected by the configured adapter.
+    pub fn effective_model_name(&self) -> String {
+        model::effective_model_name(&self.config)
+    }
+
+    /// Return the effective model catalog for this harness.
+    ///
+    /// Sekai-Chisei is authoritative for governed availability. Ungoverned
+    /// adapters expose their configured model as a compact local catalog.
+    pub async fn available_models(&self) -> Result<Vec<AvailableModel>, HarnessError> {
+        if self.config.governance.adapter == "sekai-chisei" {
+            return Ok(self.governance.available_models().await?);
+        }
+        let model = self.effective_model_name();
+        Ok(vec![AvailableModel {
+            provider: self.config.model.adapter.clone(),
+            upstream_model: model.clone(),
+            canonical_model: model,
+            lifecycle: "configured".into(),
+        }])
     }
 
     pub fn doctor(&self) -> DoctorReport {
@@ -424,6 +470,25 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "missing key {key}");
         }
+    }
+
+    #[tokio::test]
+    async fn local_available_models_report_configured_model() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.model.model = "local-model".into();
+        let harness = Harness::from_config(config, state).unwrap();
+
+        assert_eq!(
+            harness.available_models().await.unwrap(),
+            vec![AvailableModel {
+                provider: "scripted".into(),
+                upstream_model: "local-model".into(),
+                canonical_model: "local-model".into(),
+                lifecycle: "configured".into(),
+            }]
+        );
     }
 
     #[test]

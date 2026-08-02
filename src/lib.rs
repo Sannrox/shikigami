@@ -47,6 +47,7 @@ pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpServerSettings, PermissionMode,
 };
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
+pub use governance::AvailableModel;
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;

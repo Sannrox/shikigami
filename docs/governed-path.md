@@ -26,6 +26,8 @@ export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
 
 ```bash
 cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml doctor
+# Include concrete models authorized by the plane plus the `auto` route.
+cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml doctor --models
 # or JSON:
 cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml doctor --json
 ```

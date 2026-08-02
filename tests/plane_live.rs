@@ -52,6 +52,25 @@ async fn doctor_probes_live_plane() {
 
 #[tokio::test]
 #[ignore = "requires live sekai-chisei; set SEKAI_LIVE=1 and SHIKIGAMI_CONTROL_PLANE"]
+async fn available_models_reads_plane_catalog() {
+    if !live_enabled() {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let harness = Harness::from_config(governed_config(), state).unwrap();
+    let models = harness.available_models().await.unwrap();
+    assert!(!models.is_empty(), "plane should return at least one model");
+    assert!(
+        models
+            .iter()
+            .any(|model| model.canonical_model == "openai/gpt-4.1-mini"),
+        "expected the configured plane catalog to include gpt-4.1-mini: {models:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live sekai-chisei; set SEKAI_LIVE=1 and SHIKIGAMI_CONTROL_PLANE"]
 async fn doctor_fails_closed_when_endpoint_wrong() {
     if !live_enabled() {
         return;
