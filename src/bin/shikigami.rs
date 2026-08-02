@@ -322,11 +322,12 @@ async fn run() -> anyhow::Result<()> {
                             },
                         )
                         .map_err(|e| anyhow::anyhow!(e))?;
-                        let startup_fail = |lc: &WorkerLifecycle, kind: &str, err: anyhow::Error| {
-                            let _ = lc.set_unhealthy(kind);
-                            let _ = std::fs::remove_file(lc.path());
-                            err
-                        };
+                        let startup_fail =
+                            |lc: &WorkerLifecycle, kind: &str, err: anyhow::Error| {
+                                let _ = lc.set_unhealthy(kind);
+                                let _ = std::fs::remove_file(lc.path());
+                                err
+                            };
                         let client =
                             shikigami::governance::sekai_chisei::SekaiClaimClient::from_config(
                                 &harness.config,
@@ -370,16 +371,15 @@ async fn run() -> anyhow::Result<()> {
                                 ));
                             }
                             let listen_rx = rx.clone();
-                            let bound =
-                                serve_lifecycle_http(addr, lifecycle.clone(), listen_rx)
-                                    .await
-                                    .map_err(|e| {
-                                        startup_fail(
-                                            &lifecycle,
-                                            "lifecycle_listen_failed",
-                                            anyhow::anyhow!(e),
-                                        )
-                                    })?;
+                            let bound = serve_lifecycle_http(addr, lifecycle.clone(), listen_rx)
+                                .await
+                                .map_err(|e| {
+                                    startup_fail(
+                                        &lifecycle,
+                                        "lifecycle_listen_failed",
+                                        anyhow::anyhow!(e),
+                                    )
+                                })?;
                             println!(
                                 "serve lifecycle http={} file={}",
                                 bound,
@@ -388,9 +388,7 @@ async fn run() -> anyhow::Result<()> {
                         } else {
                             println!("serve lifecycle file={}", lifecycle.path().display());
                         }
-                        lifecycle
-                            .mark_serving()
-                            .map_err(|e| anyhow::anyhow!(e))?;
+                        lifecycle.mark_serving().map_err(|e| anyhow::anyhow!(e))?;
                         let options = shikigami::PlaneServeOptions {
                             poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
                             max_jobs,
