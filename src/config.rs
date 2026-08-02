@@ -421,7 +421,7 @@ fn default_model_adapter() -> String {
     "scripted".into()
 }
 fn default_model_name() -> String {
-    "gpt-4.1-mini".into()
+    "auto".into()
 }
 fn default_api_key_env() -> String {
     "OPENAI_API_KEY".into()
@@ -857,6 +857,7 @@ name = "governed"
         assert_eq!(c.governance.adapter, "sekai-chisei");
         assert!(c.governance.fail_closed);
         assert_eq!(c.model.adapter, "plane");
+        assert_eq!(c.model.model, "auto");
     }
 
     #[test]

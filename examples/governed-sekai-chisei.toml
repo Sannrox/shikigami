@@ -28,4 +28,4 @@ adapter = "stderr"
 
 [model]
 adapter = "plane"
-model = "gpt-4.1-mini"
+model = "auto"

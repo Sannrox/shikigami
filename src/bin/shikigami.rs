@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
-    Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions, StateRoot,
-    VERSION, WorkerLifecycle, WorkerLifecycleIdentity, serve_lifecycle_http,
+    AvailableModel, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions,
+    StateRoot, VERSION, WorkerLifecycle, WorkerLifecycleIdentity, serve_lifecycle_http,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long, global = true, env = "SHIKIGAMI_CONFIG")]
     config: Option<PathBuf>,
 
+    /// Override the configured model; use `auto` for plane routing.
+    #[arg(long, global = true, env = "SHIKIGAMI_MODEL")]
+    model: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -44,6 +48,9 @@ enum Command {
     Doctor {
         #[arg(long)]
         json: bool,
+        /// Include the available model catalog (or the configured local model).
+        #[arg(long)]
+        models: bool,
     },
     /// Execute a harness run.
     Run {
@@ -135,6 +142,7 @@ fn default_worker_id() -> String {
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
+    let model = cli.model.as_deref();
     let state = match cli.state {
         Some(path) => StateRoot::new(path),
         None => StateRoot::default_in(&cwd),
@@ -155,20 +163,56 @@ async fn run() -> anyhow::Result<()> {
                 println!("{PRODUCT} {VERSION}");
             }
         }
-        Command::Doctor { json } => {
-            let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
+        Command::Doctor { json, models } => {
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             let report = harness.doctor_async().await;
+            let (available_models, model_catalog_error) = if models {
+                match harness.available_models().await {
+                    Ok(models) => (Some(with_auto_route(&harness, models)), None),
+                    Err(error) => (Some(Vec::new()), Some(error.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+            let doctor_ok = report.ok && model_catalog_error.is_none();
             if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                let mut output = report.to_json_value();
+                if let Some(models) = available_models {
+                    output["available_models"] = serde_json::to_value(models)?;
+                    output["default_model"] = serde_json::json!(harness.effective_model_name());
+                }
+                if let Some(error) = &model_catalog_error {
+                    output["ok"] = serde_json::json!(false);
+                    output["model_catalog_error"] = serde_json::json!(error);
+                }
+                println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 println!("{PRODUCT} doctor");
                 println!("  version:  {VERSION}");
                 for line in &report.lines {
                     println!("  {line}");
                 }
-                println!("status: {}", if report.ok { "ok" } else { "fail" });
+                if let Some(models) = available_models {
+                    let default_model = harness.effective_model_name();
+                    println!("  models:");
+                    for model in models {
+                        let marker = if model.canonical_model == default_model {
+                            " (default)"
+                        } else {
+                            ""
+                        };
+                        println!("    {}{}", model.canonical_model, marker);
+                    }
+                    if let Some(error) = &model_catalog_error {
+                        println!("    error: {error}");
+                    }
+                }
+                println!("status: {}", if doctor_ok { "ok" } else { "fail" });
             }
-            if !report.ok {
+            if !doctor_ok {
+                if let Some(error) = model_catalog_error {
+                    anyhow::bail!("model catalog unavailable: {error}");
+                }
                 anyhow::bail!("doctor found problems");
             }
         }
@@ -199,7 +243,7 @@ async fn run() -> anyhow::Result<()> {
                 (None, Some(path)) => Some(std::fs::read_to_string(path)?),
                 (None, None) => None,
             };
-            let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             let mut request = RunRequest::new(task);
             request.keep_workspace = keep_workspace;
             request.timeout = timeout_secs.map(std::time::Duration::from_secs);
@@ -241,7 +285,8 @@ async fn run() -> anyhow::Result<()> {
             worker_id,
             lifecycle_listen,
         } => {
-            let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
+            let harness =
+                Harness::resolve_with_model(cli.config.as_deref(), state.clone(), &cwd, model)?;
             let (tx, rx) = tokio::sync::watch::channel(false);
             let sig_tx = tx.clone();
             tokio::spawn(async move {
@@ -433,13 +478,14 @@ async fn run() -> anyhow::Result<()> {
             eprintln!(
                 "{PRODUCT} mcp server (stdio) — tools: doctor, run, run_start, run_status, run_wait"
             );
-            let harness = Harness::resolve(cli.config.as_deref(), state, &cwd)?;
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             shikigami::mcp_server::run_stdio(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Export { run_id, output } => {
-            let harness = Harness::resolve(cli.config.as_deref(), state.clone(), &cwd)?;
+            let harness =
+                Harness::resolve_with_model(cli.config.as_deref(), state.clone(), &cwd, model)?;
             let opts = shikigami::ExportOptions {
                 max_field_chars: 2_000,
                 config: Some(harness.config.clone()),
@@ -459,4 +505,21 @@ async fn run() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn with_auto_route(harness: &Harness, mut models: Vec<AvailableModel>) -> Vec<AvailableModel> {
+    if harness.config.governance.adapter == "sekai-chisei"
+        && !models.iter().any(|model| model.canonical_model == "auto")
+    {
+        models.insert(
+            0,
+            AvailableModel {
+                provider: "sekai-chisei".into(),
+                upstream_model: "auto".into(),
+                canonical_model: "auto".into(),
+                lifecycle: "routing".into(),
+            },
+        );
+    }
+    models
 }

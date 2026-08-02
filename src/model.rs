@@ -242,6 +242,18 @@ pub struct HttpModel {
     api_key: String,
 }
 
+const DEFAULT_HTTP_MODEL: &str = "gpt-4.1-mini";
+
+/// Resolve the model name an adapter will actually use.
+pub fn effective_model_name(config: &Config) -> String {
+    if config.model.adapter == "http" && config.model.model == "auto" && !config.uses_plane_model()
+    {
+        DEFAULT_HTTP_MODEL.into()
+    } else {
+        config.model.model.clone()
+    }
+}
+
 #[cfg(feature = "model-http")]
 impl HttpModel {
     pub fn from_config(config: &Config) -> Result<Self, ModelError> {
@@ -260,7 +272,10 @@ impl HttpModel {
         Ok(Self {
             client: reqwest::Client::new(),
             base_url,
-            model: config.model.model.clone(),
+            // `auto` is the governed routing default. Preserve a useful
+            // direct HTTP default when users switch adapters without adding a
+            // model field to their local config.
+            model: effective_model_name(config),
             api_key,
         })
     }
@@ -434,5 +449,20 @@ mod cost_tests {
         assert_eq!(c.input_usd_micros, 1_000_000);
         assert_eq!(c.output_usd_micros, 1_000_000);
         assert_eq!(c.total_usd_micros, 2_000_000);
+    }
+
+    #[test]
+    fn auto_resolves_to_http_fallback_only_for_http_adapter() {
+        let mut config = Config::default();
+        assert_eq!(effective_model_name(&config), "auto");
+
+        config.model.adapter = "http".into();
+        assert_eq!(effective_model_name(&config), "gpt-4.1-mini");
+
+        config.governance.adapter = "sekai-chisei".into();
+        assert_eq!(effective_model_name(&config), "auto");
+
+        config.model.model = "openai/gpt-5.5".into();
+        assert_eq!(effective_model_name(&config), "openai/gpt-5.5");
     }
 }

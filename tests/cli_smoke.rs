@@ -36,6 +36,38 @@ fn doctor_succeeds_on_local_defaults() {
 }
 
 #[test]
+fn doctor_models_reports_default_auto_route() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+
+    cargo_bin_cmd!("shikigami")
+        .args(["--state", state.to_str().unwrap(), "doctor", "--models"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("models:"))
+        .stdout(predicate::str::contains("auto (default)"));
+}
+
+#[test]
+fn doctor_model_flag_overrides_configured_model() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "doctor",
+            "--models",
+            "--model",
+            "local-selected-model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local-selected-model (default)"));
+}
+
+#[test]
 fn doctor_fails_governed_without_endpoint() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
@@ -61,6 +93,38 @@ name = "governed"
         .assert()
         .failure()
         .stdout(predicate::str::contains("status: fail"));
+}
+
+#[test]
+fn doctor_models_preserves_report_when_catalog_unavailable() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let config = dir.path().join("governed.toml");
+    fs::write(
+        &config,
+        r#"
+version = 1
+[profile]
+name = "governed"
+"#,
+    )
+    .expect("write config");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "doctor",
+            "--models",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"ok\": false"))
+        .stdout(predicate::str::contains("\"available_models\": []"))
+        .stdout(predicate::str::contains("model_catalog_error"));
 }
 
 #[test]

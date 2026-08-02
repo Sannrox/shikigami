@@ -77,7 +77,7 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `adapter` | `"scripted"` | `scripted` \| `http` \| `plane` |
 | `script_json` | built-in demo script | JSON array of turns for `scripted` |
 | `base_url` | OpenAI-compatible default | Base URL for `http` |
-| `model` | `"gpt-4.1-mini"` | Model id for `http` / plane preferred model |
+| `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. |
 | `api_key_env` | `"OPENAI_API_KEY"` | Env var for HTTP API key |
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
@@ -306,7 +306,12 @@ Adapter semantics: [adapters.md](adapters.md).
 
 ## Doctor JSON (`schema_version` = 1)
 
-`shikigami doctor --json` emits a `DoctorReport` object:
+`shikigami doctor --json` emits a `DoctorReport` object. Add `--models` to
+include `available_models` and `default_model`; governed runs read the catalog
+from sekai-chisei and prepend the synthetic `auto` routing option.
+Use the global `--model MODEL` flag (or `SHIKIGAMI_MODEL`) for a final
+operator override; it is applied before adapter construction, so governed
+requests and model discovery use the same selection.
 
 | Field | Type | Meaning |
 | --- | --- | --- |

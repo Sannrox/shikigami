@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `shikigami doctor --models` to print the effective model catalog, including
+  the `auto` sekai-chisei routing option; new settings default the preferred
+  model to `auto` while preserving `gpt-4.1-mini` for direct HTTP fallback.
+- Global `--model` / `SHIKIGAMI_MODEL` selection for direct CLI model overrides.
 - Versioned plane-worker lifecycle contract (`shikigami.worker_lifecycle`
   schema_version 1): `$SHIKIGAMI_STATE/worker/lifecycle.json`, optional
   `--lifecycle-listen` probes (`/readyz`, `/livez`; full `/lifecycle` only on

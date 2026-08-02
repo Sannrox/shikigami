@@ -14,6 +14,18 @@ pub use http_callback::HttpCallbackGovernance;
 pub use local::LocalGovernance;
 pub use none::NoneGovernance;
 
+/// A model exposed by the configured governance/model source.
+///
+/// Governed model availability is authoritative in sekai-chisei. Local
+/// adapters may report only their configured model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AvailableModel {
+    pub provider: String,
+    pub upstream_model: String,
+    pub canonical_model: String,
+    pub lifecycle: String,
+}
+
 #[cfg(feature = "governance-sekai-chisei")]
 pub mod sekai_chisei;
 
@@ -58,6 +70,17 @@ pub trait GovernancePort: Send + Sync {
     fn id(&self) -> &'static str;
     fn health_detail(&self) -> String;
     fn health_ok(&self) -> bool;
+
+    /// Return the models currently available to this governance adapter.
+    ///
+    /// The default is intentionally unsupported: model catalogs are an
+    /// adapter capability, not part of the turn-loop contract.
+    async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
+        Err(GovernanceError::Message(format!(
+            "available model catalog is not supported by governance adapter `{}`",
+            self.id()
+        )))
+    }
 
     /// Start a run. `logical_operation_id` maps to plane `operation_id` /
     /// `logical_operation_id` (defaults to `run_id` when `None`).

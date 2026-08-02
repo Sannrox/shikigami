@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::model::{ChatMessage, ModelTurn, ToolCall};
 use crate::tools::ToolDef;
 
-use super::{GovernanceError, GovernancePort, RunHandle, RunOutcome};
+use super::{AvailableModel, GovernanceError, GovernancePort, RunHandle, RunOutcome};
 
 pub mod proto {
     pub mod chisei {
@@ -33,8 +33,8 @@ use proto::chisei::chisei_service_client::ChiseiServiceClient;
 use proto::chisei::{
     AuthorizeExternalActionRequest, AuthorizeOperationReporterRequest,
     ChatMessage as ProtoChatMessage, ExecutePlanRequest, ExecutionInput, ExternalActionDecision,
-    ExternalActionRequest, PlanExecutionRequest, ReportOperationEventRequest,
-    ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
+    ExternalActionRequest, ListAvailableModelsRequest, PlanExecutionRequest,
+    ReportOperationEventRequest, ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
 };
 use proto::sekai::ListSchemaTypesRequest;
 use proto::sekai::sekai_service_client::SekaiServiceClient;
@@ -562,6 +562,28 @@ impl GovernancePort for SekaiChiseiGovernance {
 
     fn health_ok(&self) -> bool {
         !self.endpoint.trim().is_empty()
+    }
+
+    async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
+        let (mut chisei, _sekai) = self.connect().await?;
+        let response = chisei
+            .list_available_models(ListAvailableModelsRequest {
+                namespace: self.namespace.clone(),
+                provider: String::new(),
+            })
+            .await
+            .map_err(|e| GovernanceError::Message(format!("ListAvailableModels: {e}")))?
+            .into_inner();
+        Ok(response
+            .models
+            .into_iter()
+            .map(|model| AvailableModel {
+                provider: model.provider,
+                upstream_model: model.upstream_model,
+                canonical_model: model.canonical_model,
+                lifecycle: model.lifecycle,
+            })
+            .collect())
     }
 
     async fn begin_run(

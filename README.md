@@ -110,7 +110,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | Command | Purpose |
 | --- | --- |
 | `version [--json]` | Product identity |
-| `doctor [--json]` | Effective profile, adapters, and health (probes the plane when configured) |
+| `doctor [--json] [--models]` | Effective profile, adapters, health, and optionally available models |
 | `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
 | `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host ([docs/serve.md](docs/serve.md)) |
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([docs/mcp.md](docs/mcp.md)) |
@@ -120,6 +120,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | --- | --- |
 | `--state` / `SHIKIGAMI_STATE` | State root (default: `./.shikigami-state`) |
 | `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
+| `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
 | `run --keep-workspace` | Keep the workspace after a successful run |
 
 There is **no** `init` command. Config is optional; disk state is created when a
@@ -148,6 +149,8 @@ the preset and environment-resolution details.
 # Governed example (requires a reachable plane)
 export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
 ./target/release/shikigami --config examples/governed-sekai-chisei.toml doctor
+# Include the plane-authorized model catalog (`auto` is the routing option)
+./target/release/shikigami --config examples/governed-sekai-chisei.toml doctor --models
 ```
 
 Full schema, environment variables, and resolution order:
