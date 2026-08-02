@@ -104,13 +104,55 @@ The helper does not call claim RPCs, admit Action types, resolve artifacts, or
 execute the run. Those responsibilities remain with the thin host intake
 adapter and the existing `Harness`.
 
+### Worker lifecycle contract (fleet hosts)
+
+Plane intake publishes a **versioned worker-host lifecycle snapshot** for
+Tenkai, Kubernetes, or systemd supervisors. Ownership boundary:
+
+| Concern | Owner |
+| --- | --- |
+| Deploy, replicas, rollout, SIGTERM drain, pool recovery | Tenkai / K8s / systemd |
+| Admission, claims, leases, fencing, receipts | Sekai Chisei |
+| Execute runs + lifecycle snapshot | Shikigami |
+
+Canonical file: `$SHIKIGAMI_STATE/worker/lifecycle.json`  
+Protocol: `shikigami.worker_lifecycle` · `schema_version`: `1`
+
+Primary `state` (precedence highest first): `unhealthy` →
+`governance_unavailable` → `fence_lost` → `draining` → `active` → `ready`.
+
+Drain: **SIGINT / SIGTERM** sets draining and **stops new claims**. Active work
+is cancelled without a terminal ack so the plane can reclaim via lease expiry.
+The snapshot never includes task text, prompts, or credentials.
+
+Optional probe HTTP (plane intake only):
+
+```bash
+shikigami serve --intake plane \
+  --lifecycle-listen 0.0.0.0:8080 \
+  --worker-id "$HOSTNAME"
+```
+
+| Path | Meaning |
+| --- | --- |
+| `GET /readyz` | 200 when `ready` or `active`; 503 otherwise |
+| `GET /livez` | 200 unless `unhealthy` |
+| `GET /lifecycle` | Full JSON **only** on loopback binds; 404 on `0.0.0.0` |
+
+Prefer the state file for detailed snapshots; cluster HTTP is probe-only so
+pod-network peers cannot scrape claim identifiers.
+
+Filesystem intake is **not** covered by this managed contract (see Tenkai ADR
+0011). Example manifest: [examples/k8s-worker-lifecycle.yaml](../examples/k8s-worker-lifecycle.yaml).
+
 ### Health and recovery
 
 - Run `shikigami doctor` with the same config before starting the process.
   Governed/fail-closed profiles report an unhealthy or missing plane as an
   error.
-- Process supervision is the plane-intake liveness signal in this slice. The
-  filesystem `queue/health.json` file describes filesystem intake only.
+- Fleet readiness uses the worker lifecycle snapshot / `/readyz` for plane
+  intake. The filesystem `queue/health.json` file describes filesystem intake
+  only.
 - Heartbeats fail closed: loss or expiry cancels the active harness future
   within a bounded grace period. The host never continues execution without a
   live fence. Terminal acknowledgement retries with the same fence
@@ -162,13 +204,17 @@ for resolution, retry, dead-letter, and authorization semantics.
 
 ## Health
 
-`queue/health.json` example fields: `ok`, `product`, `version`, `queue_inbox`,
-`running`, `last_run_id`.
+**Filesystem intake:** `queue/health.json` fields: `ok`, `product`, `version`,
+`queue_inbox`, `running`, `last_run_id`.
+
+**Plane intake:** `$SHIKIGAMI_STATE/worker/lifecycle.json` (and optional
+`--lifecycle-listen` probes). See *Worker lifecycle contract* above.
 
 ## Operator notes
 
 - Use the same config/env as `run` / `doctor`.
-- For fleets, put the binary under process supervision (systemd, tenkai, etc.).
+- For fleets, put the binary under process supervision (systemd, tenkai, etc.)
+  and drain with SIGTERM; watch `/readyz` or the lifecycle file.
 - Plane-claim intake is shipped. Additional intake transports, including direct
   HTTP admission, require a separate contract and must preserve the same
   `Harness` and governance boundaries.

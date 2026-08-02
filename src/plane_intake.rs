@@ -238,6 +238,8 @@ pub struct PlaneServeOptions {
     /// work starts a replacement attempt.
     pub checkpoint_store_id: Option<String>,
     pub policy: ClaimedWorkPolicy,
+    /// Optional fleet worker lifecycle publisher (plane intake only).
+    pub lifecycle: Option<crate::worker_lifecycle::WorkerLifecycle>,
 }
 
 impl Default for PlaneServeOptions {
@@ -251,6 +253,7 @@ impl Default for PlaneServeOptions {
             ack_retry_limit: 5,
             checkpoint_store_id: None,
             policy: ClaimedWorkPolicy::default(),
+            lifecycle: None,
         }
     }
 }
@@ -279,23 +282,90 @@ pub async fn run_plane_serve(
         ));
     }
 
+    if let Some(lc) = &options.lifecycle {
+        // Demote only: never auto-clear a runtime governance failure from a
+        // static adapter health check alone.
+        if !harness.governance_ok() {
+            let _ = lc.set_governance_ok(false);
+        }
+        let _ = lc.publish();
+    }
+
     let mut completed = 0u64;
     loop {
-        if *shutdown.borrow() || options.max_jobs.is_some_and(|max| completed >= max) {
+        if *shutdown.borrow() {
+            if let Some(lc) = &options.lifecycle {
+                lifecycle_set_draining(lc);
+            }
+            return Ok(completed);
+        }
+        if options.max_jobs.is_some_and(|max| completed >= max) {
+            if let Some(lc) = &options.lifecycle {
+                lifecycle_set_draining(lc);
+            }
             return Ok(completed);
         }
 
-        let Some(mut claim) = intake
-            .claim_next(&options.policy.expected_runtime, options.claim_ttl)
-            .await?
+        if let Some(lc) = &options.lifecycle {
+            if !harness.governance_ok() {
+                let _ = lc.set_governance_ok(false);
+            }
+            if !lc.accepting_claims() {
+                // Drain or governance/fence/unhealthy: do not start new claims.
+                if lc.snapshot().state == crate::worker_lifecycle::WorkerLifecycleState::Draining
+                    || *shutdown.borrow()
+                {
+                    return Ok(completed);
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(options.poll_interval) => {}
+                    _ = wait_for_shutdown(shutdown.clone()) => {
+                        lifecycle_set_draining(lc);
+                        return Ok(completed);
+                    }
+                }
+                continue;
+            }
+        }
+
+        let claim_result = tokio::select! {
+            result = intake.claim_next(&options.policy.expected_runtime, options.claim_ttl) => result,
+            _ = wait_for_shutdown(shutdown.clone()) => {
+                if let Some(lc) = &options.lifecycle {
+                    lifecycle_set_draining(lc);
+                }
+                return Ok(completed);
+            }
+        };
+        let Some(mut claim) = claim_result.inspect_err(|error| {
+            lifecycle_observe_error(&options, None, error);
+        })?
         else {
             tokio::select! {
                 _ = tokio::time::sleep(options.poll_interval) => {}
-                _ = wait_for_shutdown(shutdown.clone()) => return Ok(completed),
+                _ = wait_for_shutdown(shutdown.clone()) => {
+                    if let Some(lc) = &options.lifecycle {
+                        lifecycle_set_draining(lc);
+                    }
+                    return Ok(completed);
+                }
             }
             continue;
         };
+        // select! may pick claim_next even when shutdown is also ready; recheck
+        // so SIGTERM never starts side effects for a newly acquired claim.
+        if *shutdown.borrow() {
+            if let Some(lc) = &options.lifecycle {
+                lifecycle_set_draining(lc);
+            }
+            // Leave the plane claim unacked so lease expiry can reclaim it.
+            return Ok(completed);
+        }
         completed += 1;
+        let claim_id = claim.work.effect_id.clone();
+        if let Some(lc) = &options.lifecycle {
+            let _ = lc.begin_claim(&claim_id);
+        }
 
         let mut prepared = match prepare_claimed_run(harness, &claim.work, &options) {
             Ok(request) => request,
@@ -306,9 +376,19 @@ pub async fn run_plane_serve(
                     request_id: Uuid::new_v4().to_string(),
                     checkpoint: None,
                 };
-                intake
+                if let Err(ack_err) = intake
                     .ack_with_retry(&mut claim, &ack, &options, &shutdown)
-                    .await?;
+                    .await
+                {
+                    lifecycle_observe_error(&options, Some(&claim_id), &ack_err);
+                    return Err(ack_err);
+                }
+                if let Some(lc) = &options.lifecycle {
+                    let _ = lc.end_claim_terminal(
+                        &claim_id,
+                        crate::worker_lifecycle::TerminalOutcome::Failed,
+                    );
+                }
                 continue;
             }
         };
@@ -316,19 +396,54 @@ pub async fn run_plane_serve(
             report_claim_event_with_retry(
                 intake, &mut claim, kind, &digest, &reason, &options, &shutdown,
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                lifecycle_observe_error(&options, Some(&claim_id), error);
+            })?;
         }
-        if prepared.resumed || prepared.replacement {
-            let call_window = claim_call_window(&claim, options.heartbeat_interval)?;
-            claim.lease =
-                tokio::time::timeout(call_window, intake.heartbeat(&claim, options.claim_ttl))
-                    .await
-                    .map_err(|_| {
-                        PlaneIntakeError::FenceLost(
-                            "pre-run heartbeat did not complete before the lease safety deadline"
-                                .into(),
-                        )
-                    })??;
+        // Always revalidate the fence after claim acquisition (and any
+        // synchronous lifecycle publication) before starting the harness run.
+        {
+            let call_window = match claim_call_window(&claim, options.heartbeat_interval) {
+                Ok(window) => window,
+                Err(error) => {
+                    lifecycle_observe_error(&options, Some(&claim_id), &error);
+                    return Err(error);
+                }
+            };
+            claim.lease = tokio::select! {
+                result = tokio::time::timeout(
+                    call_window,
+                    intake.heartbeat(&claim, options.claim_ttl),
+                ) => {
+                    result
+                        .map_err(|_| {
+                            let err = PlaneIntakeError::FenceLost(
+                                "pre-run heartbeat did not complete before the lease safety deadline"
+                                    .into(),
+                            );
+                            lifecycle_observe_error(&options, Some(&claim_id), &err);
+                            err
+                        })?
+                        .inspect_err(|error| {
+                            lifecycle_observe_error(&options, Some(&claim_id), error);
+                        })?
+                }
+                _ = wait_for_shutdown(shutdown.clone()) => {
+                    if let Some(lc) = &options.lifecycle {
+                        lifecycle_set_draining(lc);
+                        let _ = lc.drop_active_claim(&claim_id);
+                    }
+                    return Ok(completed);
+                }
+            };
+        }
+        if *shutdown.borrow() {
+            if let Some(lc) = &options.lifecycle {
+                lifecycle_set_draining(lc);
+                let _ = lc.drop_active_claim(&claim_id);
+            }
+            return Ok(completed);
         }
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -342,6 +457,7 @@ pub async fn run_plane_serve(
                         Ok(window) => window,
                         Err(error) => {
                             let _ = cancel_tx.send(true);
+                            lifecycle_observe_error(&options, Some(&claim_id), &error);
                             return Err(error);
                         }
                     };
@@ -358,17 +474,23 @@ pub async fn run_plane_serve(
                             // the harness future stops polling it after fence
                             // loss.
                             let _ = cancel_tx.send(true);
+                            lifecycle_observe_error(&options, Some(&claim_id), &error);
                             return Err(error);
                         }
                         Err(_) => {
                             let _ = cancel_tx.send(true);
-                            return Err(PlaneIntakeError::FenceLost(
+                            let error = PlaneIntakeError::FenceLost(
                                 "heartbeat did not complete before the lease safety deadline".into(),
-                            ));
+                            );
+                            lifecycle_observe_error(&options, Some(&claim_id), &error);
+                            return Err(error);
                         }
                     }
                 }
                 _ = wait_for_shutdown(shutdown.clone()) => {
+                    if let Some(lc) = &options.lifecycle {
+                        lifecycle_set_draining(lc);
+                    }
                     let grace = claim_call_window(&claim, options.heartbeat_interval)
                         .unwrap_or(Duration::ZERO);
                     cancel_and_drain(&cancel_tx, &mut run, grace).await;
@@ -376,6 +498,9 @@ pub async fn run_plane_serve(
                     // terminal outcome. Dropping the drained future stops
                     // local execution; the plane lease may then expire and
                     // safely admit a replacement generation.
+                    if let Some(lc) = &options.lifecycle {
+                        let _ = lc.drop_active_claim(&claim_id);
+                    }
                     return Ok(completed);
                 }
             }
@@ -391,43 +516,130 @@ pub async fn run_plane_serve(
                 &options,
                 &shutdown,
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                lifecycle_observe_error(&options, Some(&claim_id), error);
+            })?;
         }
 
-        let ack = match run_result {
+        let (ack, governance_abort) = match run_result {
             Ok(result) if result.termination == RunTermination::Parked => {
                 let checkpoint = options.checkpoint_store_id.as_deref().and_then(|store_id| {
                     checkpoint_for_park(harness, store_id, &result.run_id).ok()
                 });
-                PlaneAck {
-                    outcome: PlaneAckOutcome::Parked,
-                    reason: bounded_reason(&park_reason(&result)),
-                    request_id: Uuid::new_v4().to_string(),
-                    checkpoint,
-                }
+                (
+                    PlaneAck {
+                        outcome: PlaneAckOutcome::Parked,
+                        reason: bounded_reason(&park_reason(&result)),
+                        request_id: Uuid::new_v4().to_string(),
+                        checkpoint,
+                    },
+                    false,
+                )
             }
-            Ok(result) if result.success => PlaneAck {
-                outcome: PlaneAckOutcome::Completed,
-                reason: bounded_reason(&result.summary),
-                request_id: Uuid::new_v4().to_string(),
-                checkpoint: None,
-            },
-            Ok(result) => PlaneAck {
-                outcome: PlaneAckOutcome::Failed,
-                reason: bounded_reason(&result.summary),
-                request_id: Uuid::new_v4().to_string(),
-                checkpoint: None,
-            },
-            Err(error) => PlaneAck {
-                outcome: PlaneAckOutcome::Failed,
-                reason: bounded_reason(&error.to_string()),
-                request_id: Uuid::new_v4().to_string(),
-                checkpoint: None,
-            },
+            Ok(result) if result.success => (
+                PlaneAck {
+                    outcome: PlaneAckOutcome::Completed,
+                    reason: bounded_reason(&result.summary),
+                    request_id: Uuid::new_v4().to_string(),
+                    checkpoint: None,
+                },
+                false,
+            ),
+            Ok(result) => (
+                PlaneAck {
+                    outcome: PlaneAckOutcome::Failed,
+                    reason: bounded_reason(&result.summary),
+                    request_id: Uuid::new_v4().to_string(),
+                    checkpoint: None,
+                },
+                false,
+            ),
+            Err(error) => {
+                let governance_fail = harness_error_is_governance(&error);
+                if let Some(lc) = &options.lifecycle
+                    && governance_fail
+                {
+                    let _ = lc.set_governance_ok(false);
+                }
+                (
+                    PlaneAck {
+                        outcome: PlaneAckOutcome::Failed,
+                        reason: bounded_reason(&error.to_string()),
+                        request_id: Uuid::new_v4().to_string(),
+                        checkpoint: None,
+                    },
+                    governance_fail,
+                )
+            }
         };
         intake
             .ack_with_retry(&mut claim, &ack, &options, &shutdown)
-            .await?;
+            .await
+            .inspect_err(|error| {
+                lifecycle_observe_error(&options, Some(&claim_id), error);
+            })?;
+        if let Some(lc) = &options.lifecycle {
+            let terminal = match ack.outcome {
+                PlaneAckOutcome::Completed => crate::worker_lifecycle::TerminalOutcome::Completed,
+                PlaneAckOutcome::Failed => crate::worker_lifecycle::TerminalOutcome::Failed,
+                PlaneAckOutcome::Parked => crate::worker_lifecycle::TerminalOutcome::Parked,
+            };
+            let _ = lc.end_claim_terminal(&claim_id, terminal);
+        }
+        if governance_abort {
+            // Exit so process supervision can replace the worker; staying up
+            // permanently refusing claims is worse than a restart.
+            return Err(PlaneIntakeError::Source(
+                "governance unavailable during run; plane serve exiting for replacement".into(),
+            ));
+        }
+    }
+}
+
+fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecycle) {
+    if let Err(error) = lc.set_draining() {
+        eprintln!(
+            "warning: worker lifecycle drain publish failed: {error}; removed stale snapshot if present"
+        );
+    }
+}
+
+fn harness_error_is_governance(error: &HarnessError) -> bool {
+    match error {
+        HarnessError::Governance(_) => true,
+        HarnessError::Run(run_error) => {
+            matches!(run_error, crate::run::RunError::Governance(_))
+        }
+        // Doctor failures can be model/workspace/events; do not mislabel them
+        // as governance_unavailable or force process exit.
+        _ => false,
+    }
+}
+
+fn lifecycle_observe_error(
+    options: &PlaneServeOptions,
+    claim_id: Option<&str>,
+    error: &PlaneIntakeError,
+) {
+    let Some(lc) = &options.lifecycle else {
+        return;
+    };
+    if let Some(id) = claim_id {
+        let _ = lc.drop_active_claim(id);
+    }
+    match error {
+        PlaneIntakeError::FenceLost(kind) => {
+            let _ = lc.set_fence_lost(kind);
+        }
+        PlaneIntakeError::Source(msg) if msg.contains("shutdown requested") => {
+            lifecycle_set_draining(lc);
+        }
+        PlaneIntakeError::Source(_) | PlaneIntakeError::Harness(_) => {
+            // Plane connectivity / operational failure: stop advertising ready.
+            let _ = lc.set_governance_ok(false);
+        }
+        PlaneIntakeError::Mapping(_) => {}
     }
 }
 
@@ -562,7 +774,6 @@ struct PreparedClaimedRun {
     request: RunRequest,
     before_run_events: Vec<(PlaneClaimEventKind, String, String)>,
     resumed: bool,
-    replacement: bool,
     checkpoint_digest: String,
 }
 
@@ -577,7 +788,6 @@ fn prepare_claimed_run(
             request,
             before_run_events: vec![],
             resumed: false,
-            replacement: false,
             checkpoint_digest: String::new(),
         });
     };
@@ -621,7 +831,6 @@ fn prepare_claimed_run(
                     String::new(),
                 )],
                 resumed: true,
-                replacement: false,
                 checkpoint_digest: checkpoint.digest.clone(),
             });
         }
@@ -641,7 +850,6 @@ fn prepare_claimed_run(
                 ),
             ],
             resumed: false,
-            replacement: true,
             checkpoint_digest: checkpoint.digest.clone(),
         });
     }
@@ -655,7 +863,6 @@ fn prepare_claimed_run(
             "no_checkpoint".into(),
         )],
         resumed: false,
-        replacement: true,
         checkpoint_digest: String::new(),
     })
 }

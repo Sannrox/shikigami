@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Versioned plane-worker lifecycle contract (`shikigami.worker_lifecycle`
+  schema_version 1): `$SHIKIGAMI_STATE/worker/lifecycle.json`, optional
+  `--lifecycle-listen` probes (`/readyz`, `/livez`; full `/lifecycle` only on
+  loopback), SIGTERM drain that stops new claims without force-acking, and a
+  minimal Kubernetes host example.
+
 ## [1.0.5] — 2026-08-01
 
 ### Security

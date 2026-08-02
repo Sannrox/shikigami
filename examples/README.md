@@ -11,6 +11,7 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | Optional MCP host | [`mcp-host.example.json`](mcp-host.example.json) | Cursor/Claude Desktop-style stdio config for `shikigami mcp` |
 | Governed wiring | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Plane profile (needs reachable sekai-chisei) |
 | Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
+| Plane worker fleet sketch | [`k8s-worker-lifecycle.yaml`](k8s-worker-lifecycle.yaml) | Readiness/liveness/SIGTERM drain for managed plane workers |
 
 See [docs/embedding.md](../docs/embedding.md) (host selection + freeze list) and
 [docs/mcp.md](../docs/mcp.md) (MCP tools including `run_start` / `run_status` / `run_wait`).

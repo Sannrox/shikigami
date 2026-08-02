@@ -58,7 +58,9 @@ the plane and the host state is intended to support parked-run resume. See
    before the same effect becomes claimable again.
 
 The plane never starts the shikigami process. A supervisor such as systemd,
-Tenkai, Kubernetes, or a local operator owns host lifecycle.
+Tenkai, Kubernetes, or a local operator owns host lifecycle. For readiness,
+drain, and failure signals on plane workers, see the worker lifecycle contract
+in [serve.md](serve.md) and [examples/k8s-worker-lifecycle.yaml](../examples/k8s-worker-lifecycle.yaml).
 
 ## Correlation identifiers
 

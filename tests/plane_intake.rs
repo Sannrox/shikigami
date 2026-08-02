@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use shikigami::{
     ClaimedPlaneWork, Config, Harness, PlaneAck, PlaneAckOutcome, PlaneClaim, PlaneClaimEventKind,
     PlaneClaimLease, PlaneIntakeError, PlaneIntakePort, PlaneServeOptions, PlaneWorkContinuation,
-    StateRoot, run_plane_serve,
+    StateRoot, WorkerLifecycle, WorkerLifecycleIdentity, WorkerLifecycleState, run_plane_serve,
 };
 use tempfile::tempdir;
 
@@ -292,4 +292,351 @@ async fn park_resolve_reclaim_resumes_same_checkpoint_and_operation() {
             PlaneClaimEventKind::ResumeSucceeded
         ]
     );
+}
+
+struct CountingIntake {
+    claims: Mutex<VecDeque<PlaneClaim>>,
+    claim_calls: Mutex<u32>,
+}
+
+#[async_trait]
+impl PlaneIntakePort for CountingIntake {
+    async fn claim_next(
+        &self,
+        _runtime_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError> {
+        *self.claim_calls.lock().unwrap() += 1;
+        Ok(self.claims.lock().unwrap().pop_front())
+    }
+
+    async fn heartbeat(
+        &self,
+        claim: &PlaneClaim,
+        ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        let mut lease = claim.lease.clone();
+        lease.valid_until = std::time::Instant::now() + ttl;
+        Ok(lease)
+    }
+
+    async fn ack(&self, _claim: &PlaneClaim, _ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+
+    async fn report_claim_event(
+        &self,
+        _claim: &PlaneClaim,
+        _kind: PlaneClaimEventKind,
+        _checkpoint_digest: &str,
+        _reason_code: &str,
+        _request_id: &str,
+    ) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+}
+
+fn sample_claim(effect_id: &str) -> PlaneClaim {
+    let parameters_json = json!({"task": "work"}).to_string();
+    let parameters_digest = Sha256::digest(parameters_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    PlaneClaim {
+        work: ClaimedPlaneWork {
+            effect_id: effect_id.into(),
+            instance_id: "instance-1".into(),
+            operation_id: "operation-1".into(),
+            kind: "runtime_dispatch".into(),
+            status: "claimed".into(),
+            payload_json: json!({
+                "runtime": "shikigami",
+                "instance_id": "instance-1",
+                "operation_id": "operation-1",
+                "parameters_digest": parameters_digest,
+            })
+            .to_string(),
+            parameters_json,
+            resolved_task: None,
+            continuation: None,
+        },
+        lease: PlaneClaimLease {
+            runtime_id: "shikigami".into(),
+            generation: 1,
+            fencing_token: "fence-1".into(),
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            valid_until: std::time::Instant::now() + Duration::from_secs(60),
+        },
+    }
+}
+
+#[tokio::test]
+async fn drain_stops_new_plane_claims() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let state = StateRoot::new(&state_path);
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+
+    let lifecycle = WorkerLifecycle::open(
+        &state_path,
+        WorkerLifecycleIdentity {
+            worker_id: "w1".into(),
+            namespace: "ns".into(),
+            runtime_id: "shikigami".into(),
+        },
+    )
+    .unwrap();
+    lifecycle.mark_serving().unwrap();
+    lifecycle.set_draining().unwrap();
+    assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::Draining);
+
+    let intake = CountingIntake {
+        claims: Mutex::new(VecDeque::from([sample_claim("effect-should-not-run")])),
+        claim_calls: Mutex::new(0),
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        max_jobs: Some(1),
+        poll_interval: Duration::from_millis(10),
+        lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+
+    let completed = run_plane_serve(&harness, &intake, options, rx)
+        .await
+        .unwrap();
+    assert_eq!(completed, 0);
+    assert_eq!(*intake.claim_calls.lock().unwrap(), 0);
+    assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::Draining);
+}
+
+#[tokio::test]
+async fn lifecycle_ready_active_and_terminal_counters() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let state = StateRoot::new(&state_path);
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+
+    let lifecycle = WorkerLifecycle::open(
+        &state_path,
+        WorkerLifecycleIdentity {
+            worker_id: "w1".into(),
+            namespace: "ns".into(),
+            runtime_id: "shikigami".into(),
+        },
+    )
+    .unwrap();
+    lifecycle.mark_serving().unwrap();
+    assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::Ready);
+
+    let intake = MockPlaneIntake {
+        claims: Mutex::new(VecDeque::from([sample_claim("effect-lc")])),
+        acks: Mutex::new(Vec::new()),
+        ack_attempts: Mutex::new(0),
+        transient_ack_failures: Mutex::new(0),
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        max_jobs: Some(1),
+        lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+    let completed = run_plane_serve(&harness, &intake, options, rx)
+        .await
+        .unwrap();
+    assert_eq!(completed, 1);
+    let snap = lifecycle.snapshot();
+    // max_jobs exit publishes draining so a dead worker is not fleet-ready.
+    assert_eq!(snap.state, WorkerLifecycleState::Draining);
+    assert_eq!(snap.terminal_completed, 1);
+    assert!(snap.active_claim_ids.is_empty());
+    assert!(
+        !std::fs::read_to_string(lifecycle.path())
+            .unwrap()
+            .contains("complete the claimed")
+    );
+}
+
+struct ClaimErrorIntake;
+
+#[async_trait]
+impl PlaneIntakePort for ClaimErrorIntake {
+    async fn claim_next(
+        &self,
+        _runtime_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError> {
+        Err(PlaneIntakeError::Source("plane unreachable".into()))
+    }
+
+    async fn heartbeat(
+        &self,
+        _claim: &PlaneClaim,
+        _ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        unreachable!("claim_next fails first")
+    }
+
+    async fn ack(&self, _claim: &PlaneClaim, _ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
+        unreachable!("claim_next fails first")
+    }
+
+    async fn report_claim_event(
+        &self,
+        _claim: &PlaneClaim,
+        _kind: PlaneClaimEventKind,
+        _checkpoint_digest: &str,
+        _reason_code: &str,
+        _request_id: &str,
+    ) -> Result<(), PlaneIntakeError> {
+        unreachable!("claim_next fails first")
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_marks_governance_unavailable_on_claim_error() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let state = StateRoot::new(&state_path);
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+    let lifecycle = WorkerLifecycle::open(
+        &state_path,
+        WorkerLifecycleIdentity {
+            worker_id: "w1".into(),
+            namespace: "ns".into(),
+            runtime_id: "shikigami".into(),
+        },
+    )
+    .unwrap();
+    lifecycle.mark_serving().unwrap();
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+    let err = run_plane_serve(&harness, &ClaimErrorIntake, options, rx)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlaneIntakeError::Source(_)), "{err}");
+    assert_eq!(
+        lifecycle.snapshot().state,
+        WorkerLifecycleState::GovernanceUnavailable
+    );
+    assert!(!lifecycle.accepting_claims());
+}
+
+struct FenceFailIntake {
+    claims: Mutex<VecDeque<PlaneClaim>>,
+}
+
+#[async_trait]
+impl PlaneIntakePort for FenceFailIntake {
+    async fn claim_next(
+        &self,
+        _runtime_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError> {
+        Ok(self.claims.lock().unwrap().pop_front())
+    }
+
+    async fn heartbeat(
+        &self,
+        _claim: &PlaneClaim,
+        _ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        Err(PlaneIntakeError::FenceLost("lease_fenced".into()))
+    }
+
+    async fn ack(&self, _claim: &PlaneClaim, _ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+
+    async fn report_claim_event(
+        &self,
+        _claim: &PlaneClaim,
+        _kind: PlaneClaimEventKind,
+        _checkpoint_digest: &str,
+        _reason_code: &str,
+        _request_id: &str,
+    ) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_records_fence_lost() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let state = StateRoot::new(&state_path);
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+
+    let lifecycle = WorkerLifecycle::open(
+        &state_path,
+        WorkerLifecycleIdentity {
+            worker_id: "w1".into(),
+            namespace: "ns".into(),
+            runtime_id: "shikigami".into(),
+        },
+    )
+    .unwrap();
+    lifecycle.mark_serving().unwrap();
+
+    // Replacement path heartbeats before the run; fail that heartbeat to hit fence_lost.
+    let mut claim = sample_claim("effect-fence");
+    let input_json = json!({"answer": "retry"}).to_string();
+    let input_digest = Sha256::digest(input_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    claim.work.continuation = Some(PlaneWorkContinuation {
+        resolution_id: "resolution-1".into(),
+        park_id: "park-1".into(),
+        effect_id: claim.work.effect_id.clone(),
+        operation_id: claim.work.operation_id.clone(),
+        park_generation: 1,
+        input_json,
+        input_digest: format!("sha256:{input_digest}"),
+        checkpoint: Some(shikigami::PlaneCheckpoint {
+            store_id: "missing-store".into(),
+            reference: "run-missing".into(),
+            digest: "sha256:deadbeef".into(),
+        }),
+    });
+
+    let intake = FenceFailIntake {
+        claims: Mutex::new(VecDeque::from([claim])),
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        max_jobs: Some(1),
+        checkpoint_store_id: Some("shikigami-local".into()),
+        lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+    let err = run_plane_serve(&harness, &intake, options, rx)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlaneIntakeError::FenceLost(_)), "{err}");
+    assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::FenceLost);
+    assert!(!lifecycle.accepting_claims());
 }
