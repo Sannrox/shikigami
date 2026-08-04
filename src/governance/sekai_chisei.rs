@@ -1,15 +1,15 @@
 //! First-party sekai-chisei governance adapter.
 
 use std::collections::{BTreeMap, HashMap};
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tonic::metadata::{Ascii, MetadataValue};
-use tonic::service::Interceptor;
-use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Status};
+use futures_util::StreamExt;
+use sekai_client::{
+    CallContext, CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, SdkError, SdkErrorCode,
+};
 
 use crate::checkpoint::{
     GovernanceCheckpoint, GovernanceEvidenceReference, PendingGovernanceEvent, StagedToolExecution,
@@ -21,27 +21,15 @@ use crate::tools::ToolDef;
 
 use super::{AvailableModel, GovernanceError, GovernancePort, RunHandle, RunOutcome};
 
-pub mod proto {
-    pub mod chisei {
-        tonic::include_proto!("chisei");
-    }
-    pub mod sekai {
-        tonic::include_proto!("sekai");
-    }
-}
-
+pub use sekai_client::protocol as proto;
 use sha2::{Digest, Sha256};
 
-use proto::chisei::chisei_service_client::ChiseiServiceClient;
 use proto::chisei::{
-    AuthorizeExternalActionRequest, ChatMessage as ProtoChatMessage, ExecutePlanRequest,
-    ExecutionInput, ExternalActionDecision, ExternalActionRequest,
-    GetEffectivePolicySummaryRequest, GetOperationReceiptRequest, PlanExecutionRequest,
-    RedeemExternalActionPermitRequest, ReportOperationEventRequest, ToolCall as ProtoToolCall,
-    ToolDef as ProtoToolDef,
+    AuthorizeExternalActionRequest, ChatMessage as ProtoChatMessage, ExecutionInput,
+    ExternalActionDecision, ExternalActionRequest, GetEffectivePolicySummaryRequest,
+    GetOperationReceiptRequest, RedeemExternalActionPermitRequest, ReportOperationEventRequest,
+    ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
 };
-use proto::sekai::ListSchemaTypesRequest;
-use proto::sekai::sekai_service_client::SekaiServiceClient;
 use proto::sekai::{
     AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
     HeartbeatActionClaimRequest, ListClaimableActionWorkRequest, ReportActionClaimEventRequest,
@@ -49,6 +37,9 @@ use proto::sekai::{
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
+const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
+
+type PlaneClient = CoreLoopClient<GrpcTransport>;
 
 fn available_model(model: proto::chisei::AvailableModelRecord) -> AvailableModel {
     AvailableModel {
@@ -68,12 +59,6 @@ fn available_models_from_summary(
     response.models.into_iter().map(available_model).collect()
 }
 
-#[derive(Clone)]
-struct AuthInterceptor {
-    principal: MetadataValue<Ascii>,
-    token: Option<MetadataValue<Ascii>>,
-}
-
 #[derive(Default)]
 struct HarvestState {
     host_operation_id: Option<String>,
@@ -85,28 +70,6 @@ struct HarvestState {
     pending_tool_reports: Vec<StagedToolReport>,
     pending_tool_executions: Vec<StagedToolExecution>,
 }
-
-impl Interceptor for AuthInterceptor {
-    fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
-        req.metadata_mut()
-            .insert("x-principal", self.principal.clone());
-        req.metadata_mut().insert(
-            "x-sekai-auth-source",
-            if self.token.is_some() {
-                MetadataValue::from_static("token")
-            } else {
-                MetadataValue::from_static("local")
-            },
-        );
-        if let Some(token) = &self.token {
-            req.metadata_mut().insert("authorization", token.clone());
-        }
-        Ok(req)
-    }
-}
-
-type Chisei = ChiseiServiceClient<InterceptedService<Channel, AuthInterceptor>>;
-type Sekai = SekaiServiceClient<InterceptedService<Channel, AuthInterceptor>>;
 
 pub struct SekaiChiseiGovernance {
     endpoint: String,
@@ -494,31 +457,88 @@ impl SekaiChiseiGovernance {
             .collect()
     }
 
+    fn auth_source(&self) -> &'static str {
+        self.token_env
+            .as_ref()
+            .and_then(|name| env::var(name).ok())
+            .filter(|token| !token.trim().is_empty())
+            .map(|_| "token")
+            .unwrap_or("local")
+    }
+
+    fn sdk_call_options(
+        &self,
+        namespace: Option<&str>,
+        operation_id: Option<&str>,
+        request_id: Option<&str>,
+    ) -> CallOptions {
+        let context =
+            CallContext::default().with_metadata(AUTH_SOURCE_METADATA, self.auth_source());
+        let mut options = CallOptions::new()
+            .with_timeout(RPC_TIMEOUT)
+            .with_context(context);
+        if let Some(namespace) = namespace {
+            options = options.with_namespace(namespace);
+        }
+        if let Some(operation_id) = operation_id {
+            options = options.with_operation_id(operation_id);
+        }
+        if let Some(request_id) = request_id {
+            options = options.with_request_id(request_id);
+        }
+        options
+    }
+
+    fn sdk_error(operation: &str, error: SdkError) -> GovernanceError {
+        let detail = format!("{operation}: {error}");
+        match error.code {
+            SdkErrorCode::Unavailable | SdkErrorCode::DeadlineExceeded => {
+                GovernanceError::Unavailable(detail)
+            }
+            _ => GovernanceError::Message(detail),
+        }
+    }
+
+    fn token(&self) -> Option<String> {
+        let token = self
+            .token_env
+            .as_ref()
+            .and_then(|name| env::var(name).ok())
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())?;
+        Some(
+            token
+                .strip_prefix("Bearer ")
+                .unwrap_or(&token)
+                .trim()
+                .to_string(),
+        )
+    }
+
     async fn send_pending_harvest_event(
         &self,
         pending: &PendingGovernanceEvent,
     ) -> Result<proto::chisei::ReportOperationEventResponse, GovernanceError> {
-        let (mut chisei, _) = self.connect().await?;
-        chisei
-            .report_operation_event(ReportOperationEventRequest {
-                operation_id: pending.operation_id.clone(),
-                event_id: pending.event_id.clone(),
-                parent_event_id: pending.parent_event_id.clone(),
-                timestamp_ms: pending.timestamp_ms,
-                kind: pending.kind.clone(),
-                attributes: pending.attributes.clone().into_iter().collect(),
-                references: Self::proto_event_references(&pending.references),
-            })
+        let client = self.connect().await?;
+        client
+            .report_operation_event(
+                ReportOperationEventRequest {
+                    operation_id: pending.operation_id.clone(),
+                    event_id: pending.event_id.clone(),
+                    parent_event_id: pending.parent_event_id.clone(),
+                    timestamp_ms: pending.timestamp_ms,
+                    kind: pending.kind.clone(),
+                    attributes: pending.attributes.clone().into_iter().collect(),
+                    references: Self::proto_event_references(&pending.references),
+                },
+                self.sdk_call_options(
+                    Some(&self.namespace),
+                    Some(&pending.operation_id),
+                    Some(&pending.event_id),
+                ),
+            )
             .await
-            .map_err(|error| match error.code() {
-                tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
-                    GovernanceError::Message(format!(
-                        "operation-event reporting authorization failed: {error}"
-                    ))
-                }
-                _ => GovernanceError::Message(format!("ReportOperationEvent: {error}")),
-            })
-            .map(tonic::Response::into_inner)
+            .map_err(|error| Self::sdk_error("ReportOperationEvent", error))
     }
 
     async fn retry_pending_harvest_event(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
@@ -687,69 +707,52 @@ impl SekaiChiseiGovernance {
         handle: &RunHandle,
     ) -> Result<proto::chisei::GetOperationReceiptResponse, GovernanceError> {
         let operation_id = self.host_harvest_operation_id(handle)?;
-        let (mut chisei, _) = self.connect().await?;
-        chisei
-            .get_operation_receipt(GetOperationReceiptRequest {
-                operation_id,
-                request_id: String::new(),
-                caller_scope: String::new(),
-                attempt: 0,
-            })
+        let client = self.connect().await?;
+        client
+            .get_operation_receipt(
+                GetOperationReceiptRequest {
+                    operation_id: operation_id.clone(),
+                    request_id: String::new(),
+                    caller_scope: String::new(),
+                    attempt: 0,
+                },
+                self.sdk_call_options(Some(&self.namespace), Some(&operation_id), None),
+            )
             .await
-            .map_err(|error| match error.code() {
-                tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
-                    GovernanceError::Message(format!(
-                        "operation receipt inspection authorization failed: {error}"
-                    ))
-                }
-                _ => GovernanceError::Message(format!("GetOperationReceipt: {error}")),
-            })
-            .map(tonic::Response::into_inner)
+            .map_err(|error| Self::sdk_error("GetOperationReceipt", error))
     }
 
-    async fn connect(&self) -> Result<(Chisei, Sekai), GovernanceError> {
+    async fn connect(&self) -> Result<PlaneClient, GovernanceError> {
         if self.endpoint.trim().is_empty() {
             return Err(GovernanceError::Unavailable(
                 "sekai-chisei endpoint not set (governance.endpoint or SHIKIGAMI_CONTROL_PLANE)"
                     .into(),
             ));
         }
-        let channel = Endpoint::from_shared(self.endpoint.clone())
-            .map_err(|e| GovernanceError::Unavailable(e.to_string()))?
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(RPC_TIMEOUT)
-            .connect()
+        let mut config = ClientConfig::new(self.endpoint.clone(), self.principal.clone())
+            .with_namespace(self.namespace.clone())
+            .with_default_timeout(CONNECT_TIMEOUT);
+        if let Some(token) = self.token() {
+            config = config
+                .with_token(token)
+                .map_err(|error| Self::sdk_error("configure plane credential", error))?;
+        }
+        CoreLoopClient::connect(config)
             .await
-            .map_err(|e| GovernanceError::Unavailable(format!("connect {e}")))?;
-
-        let principal = MetadataValue::try_from(self.principal.as_str())
-            .map_err(|e| GovernanceError::Message(e.to_string()))?;
-        let token = self
-            .token_env
-            .as_ref()
-            .and_then(|k| std::env::var(k).ok())
-            .filter(|t| !t.is_empty())
-            .and_then(|t| {
-                let value = if t.starts_with("Bearer ") {
-                    t
-                } else {
-                    format!("Bearer {t}")
-                };
-                MetadataValue::try_from(value.as_str()).ok()
-            });
-        let interceptor = AuthInterceptor { principal, token };
-        Ok((
-            ChiseiServiceClient::with_interceptor(channel.clone(), interceptor.clone()),
-            SekaiServiceClient::with_interceptor(channel, interceptor),
-        ))
+            .map_err(|error| Self::sdk_error("connect", error))
     }
 
     async fn probe(&self) -> Result<(), GovernanceError> {
-        let (_chisei, mut sekai) = self.connect().await?;
-        sekai
-            .list_schema_types(ListSchemaTypesRequest {})
+        let client = self.connect().await?;
+        let _: proto::sekai::ListSchemaTypesResponse = client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ListSchemaTypes",
+                proto::sekai::ListSchemaTypesRequest {},
+                self.sdk_call_options(Some(&self.namespace), None, None),
+            )
             .await
-            .map_err(|e| GovernanceError::Unavailable(format!("probe: {e}")))?;
+            .map_err(|error| Self::sdk_error("probe", error))?;
         Ok(())
     }
 
@@ -908,19 +911,18 @@ impl SekaiChiseiGovernance {
         // host plan is intentionally never sent to ExecutePlanStream; the
         // host lifecycle is filled by authenticated ReportOperationEvent
         // events below, while each model turn owns its own executed plan.
-        let (mut chisei, _) = self.connect().await?;
-        let plan = chisei
-            .plan_execution(PlanExecutionRequest {
-                input: Some(self.host_receipt_input(run_id, task, logical_operation_id)),
-                gunshi_allocation: None,
-            })
+        let client = self.connect().await?;
+        let plan = client
+            .plan_execution(
+                self.host_receipt_input(run_id, task, logical_operation_id),
+                self.sdk_call_options(
+                    Some(&self.namespace),
+                    Some(logical_operation_id),
+                    Some(&format!("shikigami-host:{run_id}")),
+                ),
+            )
             .await
-            .map_err(|error| {
-                GovernanceError::Message(format!("PlanExecution host receipt: {error}"))
-            })?
-            .into_inner()
-            .plan
-            .ok_or_else(|| GovernanceError::Message("missing host receipt plan".into()))?;
+            .map_err(|error| Self::sdk_error("PlanExecution host receipt", error))?;
         if plan.budget.as_ref().is_some_and(|budget| !budget.allowed) {
             return Err(GovernanceError::Denied(
                 plan.budget
@@ -1136,41 +1138,52 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
         ttl: Duration,
     ) -> Result<Option<crate::plane_intake::PlaneClaim>, crate::plane_intake::PlaneIntakeError>
     {
-        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
-        let listed = sekai
-            .list_claimable_action_work(ListClaimableActionWorkRequest {
-                namespace: self.namespace.clone(),
-                runtime_id: runtime_id.into(),
-                limit: 1,
-            })
+        let client = self.inner.connect().await.map_err(plane_intake_source)?;
+        let listed: proto::sekai::ListClaimableActionWorkResponse = client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ListClaimableActionWork",
+                ListClaimableActionWorkRequest {
+                    namespace: self.namespace.clone(),
+                    runtime_id: runtime_id.into(),
+                    limit: 1,
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, None),
+            )
             .await
             .map_err(|error| {
                 crate::plane_intake::PlaneIntakeError::Source(format!(
                     "ListClaimableActionWork: {error}"
                 ))
-            })?
-            .into_inner();
+            })?;
         let Some(candidate) = listed.effects.into_iter().next() else {
             return Ok(None);
         };
-        let claimed = match sekai
-            .claim_action_work(ClaimActionWorkRequest {
-                effect_id: candidate.effect_id,
-                runtime_id: runtime_id.into(),
-                request_id: uuid::Uuid::new_v4().to_string(),
-                ttl_ms: duration_millis(ttl)?,
-            })
+        let claim_request_id = uuid::Uuid::new_v4().to_string();
+        let claimed: proto::sekai::ClaimActionWorkResponse = match client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ClaimActionWork",
+                ClaimActionWorkRequest {
+                    effect_id: candidate.effect_id,
+                    runtime_id: runtime_id.into(),
+                    request_id: claim_request_id.clone(),
+                    ttl_ms: duration_millis(ttl)?,
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, Some(&claim_request_id)),
+            )
             .await
         {
             Ok(response) => response,
-            Err(status) if is_claim_contention(&status) => return Ok(None),
+            Err(error) if is_claim_contention(&error) => return Ok(None),
             Err(error) => {
                 return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
                     "ClaimActionWork: {error}"
                 )));
             }
-        }
-        .into_inner();
+        };
         let continuation = match (claimed.continuation, claimed.park) {
             (None, None) => None,
             (Some(continuation), Some(park))
@@ -1218,48 +1231,56 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
                 "ClaimActionWork returned no effect".into(),
             )
         })?;
-        let instance = sekai
-            .get_action_instance(GetActionInstanceRequest {
-                instance_id: effect.instance_id.clone(),
-                namespace: String::new(),
-                idempotency_key: String::new(),
-            })
+        let instance_response: proto::sekai::GetActionInstanceResponse = client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/GetActionInstance",
+                GetActionInstanceRequest {
+                    instance_id: effect.instance_id.clone(),
+                    namespace: String::new(),
+                    idempotency_key: String::new(),
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, None),
+            )
             .await
             .map_err(|error| {
                 crate::plane_intake::PlaneIntakeError::Source(format!("GetActionInstance: {error}"))
-            })?
-            .into_inner()
-            .instance
-            .ok_or_else(|| {
-                crate::plane_intake::PlaneIntakeError::Source(
-                    "GetActionInstance returned no instance".into(),
-                )
             })?;
+        let instance = instance_response.instance.ok_or_else(|| {
+            crate::plane_intake::PlaneIntakeError::Source(
+                "GetActionInstance returned no instance".into(),
+            )
+        })?;
         // Parameter lookup happens after claim and may consume most of the
         // initial TTL. Revalidate and renew the same fence before the host is
         // allowed to start the run.
         let renew_started = Instant::now();
-        let effect = match sekai
-            .heartbeat_action_claim(HeartbeatActionClaimRequest {
-                effect_id: effect.effect_id,
-                runtime_id: effect.claim_owner,
-                claim_generation: effect.claim_generation,
-                fencing_token: effect.claim_fencing_token,
-                ttl_ms: duration_millis(ttl)?,
-            })
+        let effect_response: proto::sekai::HeartbeatActionClaimResponse = match client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/HeartbeatActionClaim",
+                HeartbeatActionClaimRequest {
+                    effect_id: effect.effect_id,
+                    runtime_id: effect.claim_owner,
+                    claim_generation: effect.claim_generation,
+                    fencing_token: effect.claim_fencing_token,
+                    ttl_ms: duration_millis(ttl)?,
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, None),
+            )
             .await
         {
             Ok(response) => response,
-            Err(status) if is_claim_contention(&status) => return Ok(None),
+            Err(error) if is_claim_contention(&error) => return Ok(None),
             Err(error) => {
                 return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
                     "HeartbeatActionClaim before run: {error}"
                 )));
             }
-        }
-        .into_inner()
-        .effect
-        .ok_or_else(|| {
+        };
+        let effect = effect_response.effect.ok_or_else(|| {
             crate::plane_intake::PlaneIntakeError::Source(
                 "HeartbeatActionClaim before run returned no effect".into(),
             )
@@ -1293,15 +1314,21 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
         ttl: Duration,
     ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
         let renew_started = Instant::now();
-        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
-        let effect = sekai
-            .heartbeat_action_claim(HeartbeatActionClaimRequest {
-                effect_id: claim.work.effect_id.clone(),
-                runtime_id: claim.lease.runtime_id.clone(),
-                claim_generation: claim.lease.generation,
-                fencing_token: claim.lease.fencing_token.clone(),
-                ttl_ms: duration_millis(ttl)?,
-            })
+        let client = self.inner.connect().await.map_err(plane_intake_source)?;
+        let response: proto::sekai::HeartbeatActionClaimResponse = client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/HeartbeatActionClaim",
+                HeartbeatActionClaimRequest {
+                    effect_id: claim.work.effect_id.clone(),
+                    runtime_id: claim.lease.runtime_id.clone(),
+                    claim_generation: claim.lease.generation,
+                    fencing_token: claim.lease.fencing_token.clone(),
+                    ttl_ms: duration_millis(ttl)?,
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, None),
+            )
             .await
             .map_err(|error| {
                 if is_claim_contention(&error) {
@@ -1311,14 +1338,12 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
                         "HeartbeatActionClaim: {error}"
                     ))
                 }
-            })?
-            .into_inner()
-            .effect
-            .ok_or_else(|| {
-                crate::plane_intake::PlaneIntakeError::Source(
-                    "HeartbeatActionClaim returned no effect".into(),
-                )
             })?;
+        let effect = response.effect.ok_or_else(|| {
+            crate::plane_intake::PlaneIntakeError::Source(
+                "HeartbeatActionClaim returned no effect".into(),
+            )
+        })?;
         Ok(crate::plane_intake::PlaneClaimLease {
             runtime_id: effect.claim_owner,
             generation: effect.claim_generation,
@@ -1333,32 +1358,38 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
         claim: &crate::plane_intake::PlaneClaim,
         ack: &crate::plane_intake::PlaneAck,
     ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
-        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
-        sekai
-            .ack_action_work(AckActionWorkRequest {
-                effect_id: claim.work.effect_id.clone(),
-                runtime_id: claim.lease.runtime_id.clone(),
-                claim_generation: claim.lease.generation,
-                fencing_token: claim.lease.fencing_token.clone(),
-                outcome: ack.outcome.as_str().into(),
-                reason: ack.reason.clone(),
-                request_id: ack.request_id.clone(),
-                checkpoint_store_id: ack
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.store_id.clone())
-                    .unwrap_or_default(),
-                checkpoint_ref: ack
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.reference.clone())
-                    .unwrap_or_default(),
-                checkpoint_digest: ack
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.digest.clone())
-                    .unwrap_or_default(),
-            })
+        let client = self.inner.connect().await.map_err(plane_intake_source)?;
+        let _: proto::sekai::AckActionWorkResponse = client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/AckActionWork",
+                AckActionWorkRequest {
+                    effect_id: claim.work.effect_id.clone(),
+                    runtime_id: claim.lease.runtime_id.clone(),
+                    claim_generation: claim.lease.generation,
+                    fencing_token: claim.lease.fencing_token.clone(),
+                    outcome: ack.outcome.as_str().into(),
+                    reason: ack.reason.clone(),
+                    request_id: ack.request_id.clone(),
+                    checkpoint_store_id: ack
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.store_id.clone())
+                        .unwrap_or_default(),
+                    checkpoint_ref: ack
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.reference.clone())
+                        .unwrap_or_default(),
+                    checkpoint_digest: ack
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.digest.clone())
+                        .unwrap_or_default(),
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, Some(&ack.request_id)),
+            )
             .await
             .map_err(|error| {
                 if is_claim_contention(&error) {
@@ -1378,18 +1409,24 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
         reason_code: &str,
         request_id: &str,
     ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
-        let (_chisei, mut sekai) = self.inner.connect().await.map_err(plane_intake_source)?;
-        sekai
-            .report_action_claim_event(ReportActionClaimEventRequest {
-                effect_id: claim.work.effect_id.clone(),
-                runtime_id: claim.lease.runtime_id.clone(),
-                claim_generation: claim.lease.generation,
-                fencing_token: claim.lease.fencing_token.clone(),
-                kind: kind.as_str().into(),
-                checkpoint_digest: checkpoint_digest.into(),
-                reason_code: reason_code.into(),
-                request_id: request_id.into(),
-            })
+        let client = self.inner.connect().await.map_err(plane_intake_source)?;
+        let _: proto::sekai::ReportActionClaimEventResponse = client
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ReportActionClaimEvent",
+                ReportActionClaimEventRequest {
+                    effect_id: claim.work.effect_id.clone(),
+                    runtime_id: claim.lease.runtime_id.clone(),
+                    claim_generation: claim.lease.generation,
+                    fencing_token: claim.lease.fencing_token.clone(),
+                    kind: kind.as_str().into(),
+                    checkpoint_digest: checkpoint_digest.into(),
+                    reason_code: reason_code.into(),
+                    request_id: request_id.into(),
+                },
+                self.inner
+                    .sdk_call_options(Some(&self.namespace), None, Some(request_id)),
+            )
             .await
             .map_err(|error| {
                 if is_claim_contention(&error) {
@@ -1414,8 +1451,8 @@ fn plane_intake_source(error: GovernanceError) -> crate::plane_intake::PlaneInta
     crate::plane_intake::PlaneIntakeError::Source(error.to_string())
 }
 
-fn is_claim_contention(status: &Status) -> bool {
-    status.code() == tonic::Code::FailedPrecondition
+fn is_claim_contention(error: &SdkError) -> bool {
+    error.code == SdkErrorCode::FailedPrecondition
 }
 
 #[async_trait]
@@ -1439,15 +1476,19 @@ impl GovernancePort for SekaiChiseiGovernance {
     }
 
     async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
-        let (mut chisei, _sekai) = self.connect().await?;
-        let response = chisei
-            .get_effective_policy_summary(GetEffectivePolicySummaryRequest {
-                namespace: self.namespace.clone(),
-                provider: String::new(),
-            })
+        let client = self.connect().await?;
+        let response: proto::chisei::GetEffectivePolicySummaryResponse = client
+            .raw()
+            .unary(
+                "/chisei.ChiseiService/GetEffectivePolicySummary",
+                GetEffectivePolicySummaryRequest {
+                    namespace: self.namespace.clone(),
+                    provider: String::new(),
+                },
+                self.sdk_call_options(Some(&self.namespace), None, None),
+            )
             .await
-            .map_err(|e| GovernanceError::Message(format!("GetEffectivePolicySummary: {e}")))?
-            .into_inner();
+            .map_err(|error| Self::sdk_error("GetEffectivePolicySummary", error))?;
         Ok(available_models_from_summary(response))
     }
 
@@ -1491,7 +1532,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         tools: &[ToolDef],
         _local_model: &dyn crate::model::ModelPort,
     ) -> Result<ModelTurn, GovernanceError> {
-        let (mut chisei, _sekai) = self.connect().await?;
+        let client = self.connect().await?;
         let request_id = uuid::Uuid::new_v4().to_string();
         let input = ExecutionInput {
             request_id: request_id.clone(),
@@ -1540,18 +1581,17 @@ impl GovernancePort for SekaiChiseiGovernance {
             route_override: String::new(),
         };
 
-        let plan_resp = chisei
-            .plan_execution(PlanExecutionRequest {
-                input: Some(input),
-                gunshi_allocation: None,
-            })
+        let plan = client
+            .plan_execution(
+                input,
+                self.sdk_call_options(
+                    Some(&handle.namespace),
+                    Some(&handle.operation_id),
+                    Some(&request_id),
+                ),
+            )
             .await
-            .map_err(|e| GovernanceError::Message(format!("PlanExecution: {e}")))?
-            .into_inner();
-
-        let plan = plan_resp
-            .plan
-            .ok_or_else(|| GovernanceError::Message("missing plan".into()))?;
+            .map_err(|error| Self::sdk_error("PlanExecution", error))?;
         let plan_id = plan.plan_id.clone();
         self.update_harvest_plan(&handle.run_id, plan_id.clone())?;
 
@@ -1577,30 +1617,32 @@ impl GovernancePort for SekaiChiseiGovernance {
             return Err(GovernanceError::Denied(reason));
         }
 
-        let mut stream = match chisei
-            .execute_plan_stream(ExecutePlanRequest { plan: Some(plan) })
+        let mut stream = match client
+            .execute_plan_stream(
+                plan,
+                self.sdk_call_options(
+                    Some(&handle.namespace),
+                    Some(&handle.operation_id),
+                    Some(&request_id),
+                ),
+            )
             .await
         {
-            Ok(stream) => stream.into_inner(),
+            Ok(stream) => stream,
             Err(error) => {
                 self.report_failed_model_event(handle).await?;
-                return Err(GovernanceError::Message(format!(
-                    "ExecutePlanStream: {error}"
-                )));
+                return Err(Self::sdk_error("ExecutePlanStream", error));
             }
         };
 
         let mut final_response = None;
-        loop {
-            let event = match stream.message().await {
+        while let Some(event) = stream.next().await {
+            let event = match event {
                 Ok(event) => event,
                 Err(error) => {
                     self.report_failed_model_event(handle).await?;
-                    return Err(GovernanceError::Message(format!("stream: {error}")));
+                    return Err(Self::sdk_error("ExecutePlanStream", error));
                 }
-            };
-            let Some(event) = event else {
-                break;
             };
             if event.response.is_some() {
                 final_response = event.response;
@@ -1654,7 +1696,7 @@ impl GovernancePort for SekaiChiseiGovernance {
             return Ok(());
         }
 
-        let (mut chisei, _) = match self.connect().await {
+        let client = match self.connect().await {
             Ok(c) => c,
             Err(e) => {
                 if self.fail_closed {
@@ -1673,66 +1715,77 @@ impl GovernancePort for SekaiChiseiGovernance {
                 return Ok(());
             }
         };
-        let response = match chisei
-            .authorize_external_action(AuthorizeExternalActionRequest {
-                request: Some(request.clone()),
-                offline: false,
-            })
+        let response: proto::chisei::AuthorizeExternalActionResponse = match client
+            .raw()
+            .unary(
+                "/chisei.ChiseiService/AuthorizeExternalAction",
+                AuthorizeExternalActionRequest {
+                    request: Some(request.clone()),
+                    offline: false,
+                },
+                self.sdk_call_options(
+                    Some(&handle.namespace),
+                    Some(&request.operation_id),
+                    Some(&request.request_id),
+                ),
+            )
             .await
         {
             Ok(r) => r,
-            Err(e) => {
+            Err(error) => {
                 if self.fail_closed {
-                    return Err(GovernanceError::Unavailable(format!(
-                        "AuthorizeExternalAction: {e}"
-                    )));
+                    return Err(Self::sdk_error("AuthorizeExternalAction", error));
                 }
                 return Ok(());
             }
         };
 
-        let response = response.into_inner();
         let decision = response
             .decision
             .ok_or_else(|| GovernanceError::Message("external-action missing decision".into()))?;
         let permit = Self::permit_for_decision(&decision, response.permit)?;
-        let redemption_response = match chisei
-            .redeem_external_action_permit(RedeemExternalActionPermitRequest {
-                permit: Some(permit.clone()),
-                executor: request.intended_executor.clone(),
-                requesting_harness: request.requesting_harness.clone(),
-                canonical_arguments_digest: request.canonical_arguments_digest.clone(),
-                target_selectors: request.target_selectors.clone(),
-                observed_preconditions: request.immutable_preconditions.clone(),
-                host_capabilities: request.required_host_capabilities.clone(),
-                idempotency_key: request.idempotency_key.clone(),
-                execution_id: format!(
-                    "shikigami-execution:{}",
-                    Self::arguments_digest(&format!("{}:{call_id}", handle.run_id))
+        let redemption_response: proto::chisei::RedeemExternalActionPermitResponse = match client
+            .raw()
+            .unary(
+                "/chisei.ChiseiService/RedeemExternalActionPermit",
+                RedeemExternalActionPermitRequest {
+                    permit: Some(permit.clone()),
+                    executor: request.intended_executor.clone(),
+                    requesting_harness: request.requesting_harness.clone(),
+                    canonical_arguments_digest: request.canonical_arguments_digest.clone(),
+                    target_selectors: request.target_selectors.clone(),
+                    observed_preconditions: request.immutable_preconditions.clone(),
+                    host_capabilities: request.required_host_capabilities.clone(),
+                    idempotency_key: request.idempotency_key.clone(),
+                    execution_id: format!(
+                        "shikigami-execution:{}",
+                        Self::arguments_digest(&format!("{}:{call_id}", handle.run_id))
+                    ),
+                    invoked_at_ms: 0,
+                },
+                self.sdk_call_options(
+                    Some(&handle.namespace),
+                    Some(&request.operation_id),
+                    Some(&request.request_id),
                 ),
-                invoked_at_ms: 0,
-            })
+            )
             .await
         {
             Ok(response) => response,
             Err(error) => {
                 let security_sensitive_failure = matches!(
-                    error.code(),
-                    tonic::Code::PermissionDenied
-                        | tonic::Code::Unauthenticated
-                        | tonic::Code::FailedPrecondition
-                        | tonic::Code::InvalidArgument
+                    error.code,
+                    SdkErrorCode::PermissionDenied
+                        | SdkErrorCode::Unauthenticated
+                        | SdkErrorCode::FailedPrecondition
+                        | SdkErrorCode::InvalidArgument
                 );
-                let governance_error = match error.code() {
-                    tonic::Code::Unauthenticated => {
-                        GovernanceError::Unavailable(format!("RedeemExternalActionPermit: {error}"))
-                    }
-                    _ if security_sensitive_failure => {
-                        GovernanceError::Message(format!("RedeemExternalActionPermit: {error}"))
-                    }
-                    _ => {
-                        GovernanceError::Unavailable(format!("RedeemExternalActionPermit: {error}"))
-                    }
+                let governance_error = if error.code == SdkErrorCode::Unauthenticated {
+                    GovernanceError::Unavailable(format!("RedeemExternalActionPermit: {error}"))
+                } else if security_sensitive_failure {
+                    GovernanceError::Message(format!("RedeemExternalActionPermit: {error}"))
+                } else {
+                    Self::sdk_error("RedeemExternalActionPermit", error)
                 };
                 if self.fail_closed || security_sensitive_failure {
                     return Err(governance_error);
@@ -1741,7 +1794,6 @@ impl GovernancePort for SekaiChiseiGovernance {
             }
         };
         let redemption = redemption_response
-            .into_inner()
             .redemption
             .ok_or_else(|| GovernanceError::Message("external-action redemption missing".into()))?;
         if redemption.permit_id != permit.permit_id
@@ -2165,39 +2217,17 @@ mod tests {
     }
 
     #[test]
-    fn auth_interceptor_uses_v1_principal_and_token_metadata() {
-        let mut interceptor = AuthInterceptor {
-            principal: MetadataValue::try_from("agent:test").unwrap(),
-            token: Some(MetadataValue::try_from("Bearer synthetic").unwrap()),
-        };
-        let request = interceptor.call(Request::new(())).unwrap();
+    fn sdk_call_options_preserve_auth_source_and_correlation() {
+        let governance = SekaiChiseiGovernance::from_config(&Config::default()).unwrap();
+        let options =
+            governance.sdk_call_options(Some("default"), Some("operation-1"), Some("request-1"));
         assert_eq!(
-            request
-                .metadata()
-                .get("x-principal")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "agent:test"
+            options.context.metadata,
+            vec![(AUTH_SOURCE_METADATA.into(), "local".into())]
         );
-        assert_eq!(
-            request
-                .metadata()
-                .get("x-sekai-auth-source")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "token"
-        );
-        assert_eq!(
-            request
-                .metadata()
-                .get("authorization")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "Bearer synthetic"
-        );
+        assert_eq!(options.context.namespace.as_deref(), Some("default"));
+        assert_eq!(options.context.operation_id.as_deref(), Some("operation-1"));
+        assert_eq!(options.request_id.as_deref(), Some("request-1"));
     }
 
     #[test]
@@ -2267,11 +2297,15 @@ mod tests {
 
     #[test]
     fn only_failed_precondition_is_normal_claim_contention() {
-        assert!(is_claim_contention(&Status::failed_precondition(
-            "already claimed"
+        assert!(is_claim_contention(&SdkError::new(
+            SdkErrorCode::FailedPrecondition,
         )));
-        assert!(!is_claim_contention(&Status::permission_denied("denied")));
-        assert!(!is_claim_contention(&Status::unavailable("offline")));
+        assert!(!is_claim_contention(&SdkError::new(
+            SdkErrorCode::PermissionDenied,
+        )));
+        assert!(!is_claim_contention(&SdkError::new(
+            SdkErrorCode::Unavailable
+        )));
     }
 
     #[test]

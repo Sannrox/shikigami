@@ -7,7 +7,6 @@ readme = "README.md"
 description = "Open-source local-first headless agent harness with pluggable governance adapters."
 repository = "https://github.com/Sannrox/shikigami"
 publish = false
-build = "build.rs"
 
 [[bin]]
 name = "shikigami"
@@ -15,7 +14,7 @@ path = "src/bin/shikigami.rs"
 
 [features]
 default = ["governance-sekai-chisei", "model-http"]
-governance-sekai-chisei = ["dep:tonic", "dep:tonic-prost", "dep:prost"]
+governance-sekai-chisei = ["dep:futures-util", "dep:sekai-client"]
 model-http = ["dep:reqwest"]
 
 [dependencies]
@@ -30,20 +29,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 toml = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures-util = { version = "0.3", optional = true }
 
-# Optional: sekai-chisei gRPC
-tonic = { version = "0.14", features = ["tls-webpki-roots", "tls-ring"], optional = true }
-tonic-prost = { version = "0.14", optional = true }
-prost = { version = "0.14", optional = true }
+# Optional: sekai-chisei Rust SDK
+sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "2cd541225d4cdfab9a40acdaba692100afa5fcac", version = "0.1.1", optional = true }
 
 # Optional: OpenAI-compatible HTTP model for local/ungoverned runs
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 regex = "1.13.1"
 url = "2.5.8"
-
-[build-dependencies]
-tonic-prost-build = "0.14"
-protoc-bin-vendored = "3"
 
 [dev-dependencies]
 assert_cmd = "2"

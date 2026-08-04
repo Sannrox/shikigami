@@ -49,4 +49,6 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# The Rust facade is merged upstream but is not published to crates.io yet;
+# Cargo.toml pins the exact commit until registry publication.
+allow-git = ["https://github.com/Sannrox/sekai-chisei.git"]

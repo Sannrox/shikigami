@@ -126,13 +126,13 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/events.rs` | stderr / jsonl / none |
 | `src/config.rs` | Versioned settings |
 | `src/bin/shikigami.rs` | CLI host |
-| `proto/` | Vendored protos for sekai-chisei (feature-gated build) |
+| `sekai-client` dependency | Versioned Rust facade over canonical sekai-chisei gRPC contracts |
 
 ## Cargo features
 
 | Feature | Default | Purpose |
 | --- | --- | --- |
-| `governance-sekai-chisei` | on | gRPC client + proto compile |
+| `governance-sekai-chisei` | on | SDK-backed sekai-chisei governance adapter |
 | `model-http` | on | OpenAI-compatible HTTP model |
 
 ## Security posture (summary)
