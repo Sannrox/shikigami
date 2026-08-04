@@ -8,8 +8,7 @@ WORKDIR /src
 
 # Keep the build context limited to files needed for compilation. The final
 # stage copies only the executable and empty operator-owned directories.
-COPY Cargo.toml Cargo.lock README.md LICENSE build.rs ./
-COPY proto ./proto
+COPY Cargo.toml Cargo.lock README.md LICENSE ./
 COPY src ./src
 
 ENV CARGO_INCREMENTAL=0 \

@@ -43,8 +43,8 @@ when it is not.
 - Optional: a running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) for the governed path
 - Optional: OpenAI-compatible HTTP endpoint for ungoverned `http` model turns
 
-`protoc` is supplied by a vendored build dependency when the
-`governance-sekai-chisei` feature is enabled (default).
+The governed adapter uses the pinned upstream `sekai-client` Rust facade and
+canonical `sekai-proto` dependency; no local `protoc` installation is needed.
 
 ## Quickstart (offline)
 
@@ -239,7 +239,7 @@ Cargo features (defaults on):
 
 | Feature | Purpose |
 | --- | --- |
-| `governance-sekai-chisei` | gRPC client + vendored protos |
+| `governance-sekai-chisei` | Versioned `sekai-client` Rust facade |
 | `model-http` | OpenAI-compatible HTTP model adapter |
 
 Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Agent/repo operating rules:

@@ -9,10 +9,11 @@ ports, `src/run.rs` owns the turn loop, `src/governance/` holds governance
 adapters (`none`, `local`, `sekai-chisei`), `src/tools.rs` implements
 workspace-jailed tools, `src/workspace.rs` materializes sandboxes,
 `src/model.rs` supplies ungoverned model turns, and `src/events.rs` sinks
-harness-local progress. Protocol definitions for the sekai-chisei adapter live
-in `proto/`. Integration tests live in `tests/`. Optional host state defaults
-under `.shikigami-state/`; do not commit local state, run workspaces, or
-generated runtime artifacts.
+harness-local progress. The sekai-chisei adapter consumes the versioned
+upstream `sekai-client` Rust facade and its canonical `sekai-proto` dependency;
+Shikigami does not carry a second protocol snapshot. Integration tests live in
+`tests/`. Optional host state defaults under `.shikigami-state/`; do not commit
+local state, run workspaces, or generated runtime artifacts.
 
 Architecture is **ports + settings**
 ([ADR 0001](docs/decisions/0001-ports-and-settings.md)): the turn loop depends

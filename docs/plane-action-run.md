@@ -87,9 +87,9 @@ Use the plane as the operational source of truth:
 - Through the deployed sekai-chisei API or its admin tooling,
   `GetActionEffect(effect_id)` or `ListActionEffects(instance_id)` shows
   lifecycle, claim owner/generation, retry counters, park generation, and
-  terminal state. Shikigami's vendored client schema contains only the
-  claim/heartbeat/ack subset it consumes; the shikigami CLI does not expose
-  these inspection RPCs.
+  terminal state. The versioned `sekai-client` facade exposes the claim,
+  heartbeat, acknowledgement, and event subset consumed by Shikigami; the
+  shikigami CLI does not expose these inspection RPCs.
 - `GetOperationReceipt(host_plan_id)` reconstructs the host planning receipt,
   attempt, model, tool, intervention, resume/replacement, and outcome events.
   Each `model_called` event links to the corresponding executed model receipt;

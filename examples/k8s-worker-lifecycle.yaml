@@ -44,7 +44,7 @@ spec:
             - name: SHIKIGAMI_PROFILE
               value: governed
             - name: SHIKIGAMI_CONTROL_PLANE
-              value: http://sekai-chisei.example:50051
+              value: https://sekai-chisei.example:443
             - name: SHIKIGAMI_STATE
               value: /var/lib/shikigami
             # Map token via secret; never bake credentials into the image.

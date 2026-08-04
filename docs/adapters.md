@@ -51,8 +51,15 @@ for `decision`). Timeout or HTTP failure denies when `fail_closed` is true.
 Read/search/report/todo tools skip the host callback after the local allow-list
 check. Requires the `model-http` feature (default) for the HTTP client.
 
-Feature flag: `governance-sekai-chisei` (default **on**) compiles the client from
-vendored protos in [`../proto/`](../proto/).
+Feature flag: `governance-sekai-chisei` (default **on**) enables the pinned
+`sekai-client` Rust facade. It owns connection setup, authentication metadata,
+deadlines, typed core-loop errors, streaming, operation events, and receipts;
+the adapter uses its bounded raw escape hatch for supported RPCs without a
+typed helper yet. The facade consumes the canonical upstream `sekai-proto`
+crate, so Shikigami does not carry a second protocol snapshot. The supported
+boundary is `sekai-client` 0.1.x with `sekai-proto` 1.x, pinned in
+`Cargo.toml`/`Cargo.lock`; the SDK permits plain HTTP only for loopback
+development endpoints, so use HTTPS for non-loopback production planes.
 
 ### Fail-closed behavior
 

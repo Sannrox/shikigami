@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and reporter-preflight RPC are no longer compiled. External-action tools
   build the versioned risk/project request, require the signed permit, and
   redeem it before host execution.
+- Migrated the governed adapter to the pinned `sekai-client` Rust facade
+  (`0.1.0` at the merged upstream SDK revision). Core-loop connection,
+  authentication metadata, deadlines, typed errors, streaming, operation
+  events, and receipt lookup are SDK-owned; discovery, external-action, and
+  plane-intake calls use its bounded raw escape hatch. The local protocol
+  snapshot and build-time code generation were removed. The SDK transport
+  guard now permits plaintext gRPC only for loopback development endpoints;
+  non-loopback planes must use HTTPS.
 
 ## [1.0.5] — 2026-08-01
 
