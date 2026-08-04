@@ -1616,8 +1616,8 @@ dependencies = [
 
 [[package]]
 name = "sekai-client"
-version = "0.1.0"
-source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=4d61ce1d4590f5ba9ca80cc033218ee9300351f1#4d61ce1d4590f5ba9ca80cc033218ee9300351f1"
+version = "0.1.1"
+source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=2cd541225d4cdfab9a40acdaba692100afa5fcac#2cd541225d4cdfab9a40acdaba692100afa5fcac"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1637,8 +1637,8 @@ dependencies = [
 
 [[package]]
 name = "sekai-proto"
-version = "1.0.0"
-source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=4d61ce1d4590f5ba9ca80cc033218ee9300351f1#4d61ce1d4590f5ba9ca80cc033218ee9300351f1"
+version = "1.0.1"
+source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=2cd541225d4cdfab9a40acdaba692100afa5fcac#2cd541225d4cdfab9a40acdaba692100afa5fcac"
 dependencies = [
  "prost",
  "prost-types",

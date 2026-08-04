@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build the versioned risk/project request, require the signed permit, and
   redeem it before host execution.
 - Migrated the governed adapter to the pinned `sekai-client` Rust facade
-  (`0.1.0` at the merged upstream SDK revision). Core-loop connection,
+  (`0.1.1` at the license-compatible upstream SDK revision). Core-loop connection,
   authentication metadata, deadlines, typed errors, streaming, operation
   events, and receipt lookup are SDK-owned; discovery, external-action, and
   plane-intake calls use its bounded raw escape hatch. The local protocol
