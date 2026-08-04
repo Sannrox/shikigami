@@ -138,7 +138,7 @@ impl HttpCallbackGovernance {
 
     fn unavailable(&self, message: String) -> Result<(), GovernanceError> {
         if self.fail_closed {
-            Err(GovernanceError::Denied(message))
+            Err(GovernanceError::Unavailable(message))
         } else {
             // Fail-open: host/broker unreachable → allow tool (operator accepted risk).
             Ok(())

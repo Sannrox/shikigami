@@ -1,5 +1,6 @@
 //! Local run checkpoints (harness scratch, not plane truth).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,84 @@ pub struct ParkedState {
     pub tool_call_id: String,
 }
 
+/// Governance correlation that must survive a local resume. This is a
+/// transport/retry aid only; the plane receipt remains authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GovernanceCheckpoint {
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub logical_operation_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_operation_id: String,
+    #[serde(default)]
+    pub model_reported: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_event_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_event: Option<PendingGovernanceEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tool_reports: Vec<StagedToolReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tool_executions: Vec<StagedToolExecution>,
+}
+
+/// Host-side tool outcome staged before authenticated reporting. The host may
+/// already have applied the effect when a report transport fails, so resume
+/// replays this intent with its stable tool-call id instead of executing it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StagedToolReport {
+    pub call_id: String,
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStatus {
+    Authorizing,
+    Started,
+    Completed,
+}
+
+/// Durable host-effect state. An `authorizing` record is safe to retry with
+/// the same stable permit identity. A `started` record is deliberately
+/// treated as in-doubt on resume; shikigami never blindly replays an effect
+/// whose process may have exited after applying it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StagedToolExecution {
+    pub call_id: String,
+    pub name: String,
+    pub args_json: String,
+    pub status: ToolExecutionStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingGovernanceEvent {
+    pub operation_id: String,
+    pub event_id: String,
+    pub parent_event_id: String,
+    pub timestamp_ms: i64,
+    pub kind: String,
+    pub attributes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<GovernanceEvidenceReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovernanceEvidenceReference {
+    pub kind: String,
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disclosed_fields: Vec<String>,
+    #[serde(default)]
+    pub omitted: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub omission_reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Checkpoint {
     pub version: u32,
@@ -46,6 +125,9 @@ pub struct Checkpoint {
     /// Run-scoped todo checklist (from `todo_write`); empty on older checkpoints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todos: Vec<TodoItem>,
+    /// Governed receipt/event retry state; absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance: Option<GovernanceCheckpoint>,
 }
 
 #[derive(Debug, Error)]
@@ -156,6 +238,24 @@ mod tests {
             workspace_adapter: "directory".into(),
             park: None,
             todos: vec![],
+            governance: Some(GovernanceCheckpoint {
+                operation_id: "host-plan".into(),
+                logical_operation_id: "logical-op".into(),
+                model_operation_id: "model-plan".into(),
+                model_reported: true,
+                last_event_id: "report:host-plan:event".into(),
+                pending_event: Some(PendingGovernanceEvent {
+                    operation_id: "host-plan".into(),
+                    event_id: "report:host-plan:pending".into(),
+                    parent_event_id: "report:host-plan:event".into(),
+                    timestamp_ms: 42,
+                    kind: "action_performed".into(),
+                    attributes: BTreeMap::from([(String::from("tool"), String::from("bash"))]),
+                    references: vec![],
+                }),
+                pending_tool_reports: vec![],
+                pending_tool_executions: vec![],
+            }),
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -192,6 +292,7 @@ mod tests {
             workspace_adapter: "directory".into(),
             park: None,
             todos: vec![],
+            governance: None,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(

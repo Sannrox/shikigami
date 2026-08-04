@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback), SIGTERM drain that stops new claims without force-acking, and a
   minimal Kubernetes host example.
 
+### Changed
+
+- Migrated the governed adapter and vendored Sekai/Chisei schemas to the 1.0
+  control-plane contract. Model discovery now uses
+  `GetEffectivePolicySummary`; governed harvest uses canonical receipt events
+  with authenticated, causally linked reporting; and the removed LLM protocol
+  and reporter-preflight RPC are no longer compiled. External-action tools
+  build the versioned risk/project request, require the signed permit, and
+  redeem it before host execution.
+
 ## [1.0.5] — 2026-08-01
 
 ### Security

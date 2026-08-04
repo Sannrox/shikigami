@@ -8,12 +8,17 @@ use thiserror::Error;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::checkpoint::{self, Checkpoint, CheckpointError, ParkedState};
+use crate::checkpoint::{
+    self, Checkpoint, CheckpointError, ParkedState, StagedToolExecution, StagedToolReport,
+    ToolExecutionStatus,
+};
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort, RunOutcome};
 use crate::hooks::{self, HookEvent};
-use crate::model::{ChatMessage, CostEstimate, ModelError, ModelPort, TokenUsage, ToolCall};
+use crate::model::{
+    ChatMessage, CostEstimate, ModelError, ModelPort, ModelTurn, TokenUsage, ToolCall,
+};
 use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 use serde_json::json;
@@ -274,6 +279,18 @@ impl RunError {
             _ => RunTermination::Failed,
         }
     }
+
+    /// These failures leave a local checkpoint that is intentionally
+    /// resumable. Keep the governed receipt open so the resumed run can
+    /// continue its causal event sequence instead of writing a terminal
+    /// outcome against an incomplete local attempt.
+    fn leaves_governance_open(&self) -> bool {
+        match self {
+            Self::Cancelled | Self::TimedOut(_) | Self::MaxTurns(_) => true,
+            Self::Governance(error) => !matches!(error, GovernanceError::Denied(_)),
+            _ => false,
+        }
+    }
 }
 
 pub struct Engine {
@@ -286,6 +303,53 @@ pub struct Engine {
 }
 
 impl Engine {
+    async fn report_governance_tool_with_id(
+        &self,
+        handle: &crate::governance::RunHandle,
+        call_id: &str,
+        name: &str,
+        ok: bool,
+        detail: &str,
+    ) -> Result<(), RunError> {
+        if let Err(error) = self
+            .governance
+            .report_tool_with_id(handle, call_id, name, ok, detail)
+            .await
+            && self.config.requires_governance()
+        {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    async fn report_governance_model(
+        &self,
+        handle: &crate::governance::RunHandle,
+    ) -> Result<(), RunError> {
+        if let Err(error) = self.governance.report_model_turn(handle, true).await
+            && self.config.requires_governance()
+        {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn stable_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
+        if call.id.is_empty() {
+            format!("tool-{turn}-{index}")
+        } else {
+            format!("tool-{turn}-{index}-{}", call.id)
+        }
+    }
+
+    fn conversation_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
+        if call.id.is_empty() {
+            format!("tool-{turn}-{index}")
+        } else {
+            call.id.clone()
+        }
+    }
+
     fn check_bounds(
         &self,
         request: &RunRequest,
@@ -330,6 +394,7 @@ impl Engine {
             workspace_adapter: workspace_adapter.into(),
             park,
             todos,
+            governance: self.governance.checkpoint_state(run_id),
         };
         cp.save(&self.state_runs)?;
         Ok(())
@@ -341,83 +406,93 @@ impl Engine {
             .timeout
             .or_else(|| self.config.run.timeout_secs.map(Duration::from_secs));
 
-        let (run_id, mut messages, mut turns, ws, task, keep_workspace, initial_todos) =
-            if let Some(resume_id) = &request.resume_run_id {
-                let cp = Checkpoint::load(&self.state_runs, resume_id)?;
-                cp.validate_prompt(SYSTEM_PROMPT)?;
-                let resumed_workspace =
-                    validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &cp)?;
-                self.events.emit(HarnessEvent::Status {
-                    status: "resuming".into(),
-                });
-                let ws = MaterializedWorkspace {
-                    path: resumed_workspace,
-                    adapter: if cp.workspace_adapter.is_empty() {
-                        configured_workspace_adapter(&self.config).into()
-                    } else {
-                        cp.workspace_adapter.clone()
-                    },
-                    cleanup: if cp.keep_workspace || cp.workspace_adapter == "inplace" {
-                        WorkspaceCleanup::None
-                    } else {
-                        WorkspaceCleanup::RemoveDir
-                    },
-                };
-                let task = if request.task.is_empty() {
-                    cp.task.clone()
+        let (
+            run_id,
+            mut messages,
+            mut turns,
+            ws,
+            task,
+            keep_workspace,
+            initial_todos,
+            governance_checkpoint,
+        ) = if let Some(resume_id) = &request.resume_run_id {
+            let cp = Checkpoint::load(&self.state_runs, resume_id)?;
+            cp.validate_prompt(SYSTEM_PROMPT)?;
+            let resumed_workspace =
+                validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &cp)?;
+            self.events.emit(HarnessEvent::Status {
+                status: "resuming".into(),
+            });
+            let ws = MaterializedWorkspace {
+                path: resumed_workspace,
+                adapter: if cp.workspace_adapter.is_empty() {
+                    configured_workspace_adapter(&self.config).into()
                 } else {
-                    request.task.clone()
-                };
-                let mut messages = cp.messages;
-                if let Some(park) = &cp.park {
-                    let answer = request.resume_answer.as_ref().ok_or_else(|| {
+                    cp.workspace_adapter.clone()
+                },
+                cleanup: if cp.keep_workspace || cp.workspace_adapter == "inplace" {
+                    WorkspaceCleanup::None
+                } else {
+                    WorkspaceCleanup::RemoveDir
+                },
+            };
+            let task = if request.task.is_empty() {
+                cp.task.clone()
+            } else {
+                request.task.clone()
+            };
+            let mut messages = cp.messages;
+            if let Some(park) = &cp.park {
+                let answer = request.resume_answer.as_ref().ok_or_else(|| {
                         RunError::Message(format!(
                             "run {resume_id} is parked (reason: {}); supply resume_answer / --answer to continue",
                             park.reason
                         ))
                     })?;
-                    messages.push(ChatMessage {
-                        role: "tool".into(),
-                        content: format!("operator answer: {answer}"),
-                        tool_call_id: park.tool_call_id.clone(),
-                        tool_calls: vec![],
-                    });
-                } else if request.resume_answer.is_some() {
-                    return Err(RunError::Message(
-                        "resume_answer provided but run is not parked".into(),
-                    ));
-                }
-                (
-                    cp.run_id,
-                    messages,
-                    cp.completed_turns,
-                    ws,
-                    task,
-                    cp.keep_workspace || request.keep_workspace,
-                    cp.todos,
-                )
-            } else {
-                let run_id = Uuid::new_v4().to_string();
-                self.events.emit(HarnessEvent::Status {
-                    status: "starting".into(),
-                });
-                let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
-                let messages = vec![ChatMessage {
-                    role: "user".into(),
-                    content: request.task.clone(),
-                    tool_call_id: String::new(),
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: format!("operator answer: {answer}"),
+                    tool_call_id: park.tool_call_id.clone(),
                     tool_calls: vec![],
-                }];
-                (
-                    run_id,
-                    messages,
-                    0u32,
-                    ws,
-                    request.task.clone(),
-                    request.keep_workspace,
-                    Vec::new(),
-                )
-            };
+                });
+            } else if request.resume_answer.is_some() {
+                return Err(RunError::Message(
+                    "resume_answer provided but run is not parked".into(),
+                ));
+            }
+            (
+                cp.run_id,
+                messages,
+                cp.completed_turns,
+                ws,
+                task,
+                cp.keep_workspace || request.keep_workspace,
+                cp.todos,
+                cp.governance,
+            )
+        } else {
+            let run_id = Uuid::new_v4().to_string();
+            self.events.emit(HarnessEvent::Status {
+                status: "starting".into(),
+            });
+            let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
+            let messages = vec![ChatMessage {
+                role: "user".into(),
+                content: request.task.clone(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            }];
+            (
+                run_id,
+                messages,
+                0u32,
+                ws,
+                request.task.clone(),
+                request.keep_workspace,
+                Vec::new(),
+                None,
+            )
+        };
 
         let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
         let project_rules = crate::context::load_project_rules(&ws.path, &self.config.context);
@@ -429,11 +504,6 @@ impl Engine {
                 "restore_snapshot is not supported with workspace adapter `inplace`".into(),
             ));
         }
-        let handle = self
-            .governance
-            .begin_run(&run_id, &task, request.logical_operation_id.as_deref())
-            .await?;
-
         self.events.emit(HarnessEvent::Prompt {
             prompt_id: prompt_id.clone(),
         });
@@ -491,20 +561,80 @@ impl Engine {
         let mut success = false;
         let mut termination = RunTermination::Completed;
         let mut usage = TokenUsage::default();
+        // A checkpoint taken after model execution but before governance
+        // reporting ends with the assistant message. Reuse that durable
+        // result on resume instead of charging the plane for a new model call.
+        let governed_model_checkpoint = request.resume_run_id.is_some()
+            && governance_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| !checkpoint.model_operation_id.is_empty());
+        let mut staged_turn = governed_model_checkpoint
+            .then(|| {
+                messages
+                    .last()
+                    .filter(|message| message.role == "assistant")
+                    .map(|message| ModelTurn {
+                        content: message.content.clone(),
+                        tool_calls: message.tool_calls.clone(),
+                        usage: None,
+                    })
+            })
+            .flatten();
 
-        hooks::run_hooks(
-            &self.config.hooks,
-            HookEvent::PreRun,
-            json!({
-                "run_id": run_id,
-                "task": task,
-                "resume": request.resume_run_id.is_some(),
-            }),
-        )
-        .await
-        .map_err(RunError::Message)?;
+        let handle = self
+            .governance
+            .begin_run_with_checkpoint(
+                &run_id,
+                &task,
+                request.logical_operation_id.as_deref(),
+                governance_checkpoint.as_ref(),
+            )
+            .await?;
 
-        // Persist initial checkpoint so resume works mid-run.
+        // Persist the host receipt correlation before any resumable work. A
+        // fresh run (or a legacy deferred checkpoint) has no durable host id
+        // yet; if this write fails, compensate the newly created remote
+        // receipt so retry cannot orphan it.
+        let host_receipt_was_durable = governance_checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| !checkpoint.operation_id.is_empty());
+        if let Err(error) = self.save_checkpoint(
+            &run_id,
+            &task,
+            &messages,
+            turns,
+            &ws.path,
+            keep_workspace,
+            None,
+            tools.todos(),
+            &ws.adapter,
+        ) {
+            if !host_receipt_was_durable
+                && let Err(compensation) = self
+                    .governance
+                    .abort_uncheckpointed_run(
+                        &handle,
+                        &format!("initial checkpoint failed: {error}"),
+                    )
+                    .await
+            {
+                return Err(RunError::Message(format!(
+                    "initial checkpoint failed: {error}; governance receipt compensation failed: {compensation}"
+                )));
+            }
+            return Err(error);
+        }
+
+        self.governance
+            .recover_staged_tool_executions(&handle)
+            .await?;
+        if let Err(error) = self.governance.replay_staged_tool_reports(&handle).await
+            && self.config.requires_governance()
+        {
+            return Err(error.into());
+        }
+
+        // Persist any replay cursor changes before the first turn begins.
         self.save_checkpoint(
             &run_id,
             &task,
@@ -517,15 +647,37 @@ impl Engine {
             &ws.adapter,
         )?;
 
+        if let Err(error) = hooks::run_hooks(
+            &self.config.hooks,
+            HookEvent::PreRun,
+            json!({
+                "run_id": run_id,
+                "task": task,
+                "resume": request.resume_run_id.is_some(),
+            }),
+        )
+        .await
+        {
+            return Err(RunError::Governance(GovernanceError::Message(format!(
+                "pre-run hook failed; governed state remains checkpointed for resume: {error}"
+            ))));
+        }
+
+        // Preserve an escalation park if reporting that park fails after the
+        // park has already been durably written.
+        let mut pending_park: Option<ParkedState> = None;
+
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
         let result: Result<Option<ParkInfo>, RunError> = async {
             loop {
                 self.check_bounds(&request, started, timeout)?;
 
-                if turns >= max_turns {
+                if staged_turn.is_none() && turns >= max_turns {
                     return Err(RunError::MaxTurns(max_turns));
                 }
-                if let Some(threshold) = self.config.run.compact_after_messages {
+                if staged_turn.is_none()
+                    && let Some(threshold) = self.config.run.compact_after_messages
+                {
                     let keep = self.config.run.compact_keep_tail.max(2) as usize;
                     if let Some((before, after)) =
                         compact_messages(&mut messages, threshold as usize, keep)
@@ -537,46 +689,83 @@ impl Engine {
                 self.events.emit(HarnessEvent::Status {
                     status: "planning".into(),
                 });
-                let turn = self
-                    .governance
-                    .plan_turn(
-                        &handle,
-                        &system_prompt,
+                let turn = if let Some(turn) = staged_turn.take() {
+                    // The assistant result is already in the checkpoint. A
+                    // stable plane event id makes this retry idempotent if the
+                    // prior process reported it before failing to advance.
+                    self.report_governance_model(&handle).await?;
+                    self.save_checkpoint(
+                        &run_id,
+                        &task,
                         &messages,
-                        &tool_defs,
-                        self.model.as_ref(),
-                    )
-                    .await?;
-                turns += 1;
-                if let Some(u) = turn.usage {
-                    usage.input_tokens = usage.input_tokens.saturating_add(u.input_tokens);
-                    usage.output_tokens = usage.output_tokens.saturating_add(u.output_tokens);
-                }
-                self.events.emit(HarnessEvent::ModelTurn {
-                    turn: turns,
-                    content_preview: turn.content.chars().take(200).collect(),
-                });
+                        turns,
+                        &ws.path,
+                        keep_workspace,
+                        None,
+                        tools.todos(),
+                        &ws.adapter,
+                    )?;
+                    turn
+                } else {
+                    let turn = self
+                        .governance
+                        .plan_turn(
+                            &handle,
+                            &system_prompt,
+                            &messages,
+                            &tool_defs,
+                            self.model.as_ref(),
+                        )
+                        .await?;
+                    turns += 1;
+                    if let Some(u) = turn.usage {
+                        usage.input_tokens = usage.input_tokens.saturating_add(u.input_tokens);
+                        usage.output_tokens = usage.output_tokens.saturating_add(u.output_tokens);
+                    }
+                    self.events.emit(HarnessEvent::ModelTurn {
+                        turn: turns,
+                        content_preview: turn.content.chars().take(200).collect(),
+                    });
 
+                    messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: turn.content.clone(),
+                        tool_call_id: String::new(),
+                        tool_calls: turn.tool_calls.clone(),
+                    });
+
+                    // The model result is durable before any remote harvest
+                    // report can fail or before host tools can run.
+                    self.save_checkpoint(
+                        &run_id,
+                        &task,
+                        &messages,
+                        turns,
+                        &ws.path,
+                        keep_workspace,
+                        None,
+                        tools.todos(),
+                        &ws.adapter,
+                    )?;
+                    self.report_governance_model(&handle).await?;
+                    self.save_checkpoint(
+                        &run_id,
+                        &task,
+                        &messages,
+                        turns,
+                        &ws.path,
+                        keep_workspace,
+                        None,
+                        tools.todos(),
+                        &ws.adapter,
+                    )?;
+                    turn
+                };
+
+                // Cancellation is checked after the returned model turn is
+                // durable and its receipt event is acknowledged. A stopped
+                // run can therefore resume without repeating that call.
                 self.check_bounds(&request, started, timeout)?;
-
-                messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: turn.content.clone(),
-                    tool_call_id: String::new(),
-                    tool_calls: turn.tool_calls.clone(),
-                });
-
-                self.save_checkpoint(
-                    &run_id,
-                    &task,
-                    &messages,
-                    turns,
-                    &ws.path,
-                    keep_workspace,
-                    None,
-                    tools.todos(),
-                    &ws.adapter,
-                )?;
 
                 if turn.tool_calls.is_empty() {
                     final_summary = if turn.content.is_empty() {
@@ -629,7 +818,11 @@ impl Engine {
                     && turn
                         .tool_calls
                         .iter()
-                        .all(|c| tools::is_parallel_safe_tool(&c.name));
+                        .all(|c| tools::is_parallel_safe_tool(&c.name))
+                    && turn
+                        .tool_calls
+                        .iter()
+                        .all(|c| !self.governance.tool_requires_execution_checkpoint(&c.name));
 
                 // Ordered ToolStart for stable live streams.
                 for call in &turn.tool_calls {
@@ -651,8 +844,14 @@ impl Engine {
                         let sem = Arc::clone(&sem);
                         set.spawn(async move {
                             let _permit = sem.acquire().await.expect("semaphore");
+                            let stable_call_id = Engine::stable_tool_call_id(&call, turns, i);
                             if let Err(e) = gov
-                                .authorize_tool(&handle, &call.name, &call.args_json)
+                                .authorize_tool_with_id(
+                                    &handle,
+                                    &stable_call_id,
+                                    &call.name,
+                                    &call.args_json,
+                                )
                                 .await
                             {
                                 return (i, call, Err(e.to_string()));
@@ -676,7 +875,7 @@ impl Engine {
                     raw.into_iter().map(|(_, call, res)| (call, res)).collect()
                 } else {
                     let mut out = Vec::with_capacity(turn.tool_calls.len());
-                    for call in &turn.tool_calls {
+                    for (index, call) in turn.tool_calls.iter().enumerate() {
                         self.check_bounds(&request, started, timeout)?;
                         if let Err(e) = hooks::run_hooks(
                             &self.config.hooks,
@@ -692,13 +891,65 @@ impl Engine {
                             out.push((call.clone(), Err(e)));
                             continue;
                         }
+                        let stable_call_id = Self::stable_tool_call_id(call, turns, index);
+                        if self
+                            .governance
+                            .tool_requires_execution_checkpoint(&call.name)
+                        {
+                            self.governance
+                                .stage_tool_execution(
+                                    &handle,
+                                    StagedToolExecution {
+                                        call_id: stable_call_id.clone(),
+                                        name: call.name.clone(),
+                                        args_json: call.args_json.clone(),
+                                        status: ToolExecutionStatus::Authorizing,
+                                    },
+                                )
+                                .await?;
+                            self.save_checkpoint(
+                                &run_id,
+                                &task,
+                                &messages,
+                                turns,
+                                &ws.path,
+                                keep_workspace,
+                                None,
+                                tools.todos(),
+                                &ws.adapter,
+                            )?;
+                        }
                         if let Err(e) = self
                             .governance
-                            .authorize_tool(&handle, &call.name, &call.args_json)
+                            .authorize_tool_with_id(
+                                &handle,
+                                &stable_call_id,
+                                &call.name,
+                                &call.args_json,
+                            )
                             .await
                         {
                             out.push((call.clone(), Err(e.to_string())));
                             continue;
+                        }
+                        if self
+                            .governance
+                            .tool_requires_execution_checkpoint(&call.name)
+                        {
+                            self.governance
+                                .mark_tool_execution_started(&handle, &stable_call_id)
+                                .await?;
+                            self.save_checkpoint(
+                                &run_id,
+                                &task,
+                                &messages,
+                                turns,
+                                &ws.path,
+                                keep_workspace,
+                                None,
+                                tools.todos(),
+                                &ws.adapter,
+                            )?;
                         }
                         match tools.execute(&call.name, &call.args_json).await {
                             Ok(o) => out.push((call.clone(), Ok(o))),
@@ -708,13 +959,102 @@ impl Engine {
                     out
                 };
 
-                for (call, outcome) in batch_outcomes {
+                // The execution phase above completes every call in the
+                // batch before this reporting phase starts. Stage the entire
+                // batch first so a required governance error cannot leave
+                // later host-side effects absent from the resume checkpoint.
+                for (call, outcome) in &batch_outcomes {
+                    match outcome {
+                        Ok(ToolOutput::Text(text)) => messages.push(ChatMessage {
+                            role: "tool".into(),
+                            content: text.clone(),
+                            tool_call_id: call.id.clone(),
+                            tool_calls: vec![],
+                        }),
+                        Ok(ToolOutput::Report(report)) => messages.push(ChatMessage {
+                            role: "tool".into(),
+                            content: format!("report: {}", report.summary),
+                            tool_call_id: call.id.clone(),
+                            tool_calls: vec![],
+                        }),
+                        Ok(ToolOutput::Park(_)) => {}
+                        Err(detail) => messages.push(ChatMessage {
+                            role: "tool".into(),
+                            content: detail.clone(),
+                            tool_call_id: call.id.clone(),
+                            tool_calls: vec![],
+                        }),
+                    }
+                }
+
+                for (index, (call, _)) in batch_outcomes.iter().enumerate() {
+                    if self
+                        .governance
+                        .tool_requires_execution_checkpoint(&call.name)
+                    {
+                        self.governance
+                            .mark_tool_execution_complete(
+                                &handle,
+                                &Self::stable_tool_call_id(call, turns, index),
+                            )
+                            .await?;
+                    }
+                }
+                let staged_reports = batch_outcomes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (call, outcome))| StagedToolReport {
+                        call_id: Self::stable_tool_call_id(call, turns, index),
+                        name: call.name.clone(),
+                        ok: match outcome {
+                            Ok(ToolOutput::Text(_)) => true,
+                            Ok(ToolOutput::Report(report)) => report.success,
+                            Ok(ToolOutput::Park(_)) | Err(_) => false,
+                        },
+                        detail: match outcome {
+                            Ok(ToolOutput::Text(text)) => text.clone(),
+                            Ok(ToolOutput::Report(report)) => report.summary.clone(),
+                            Ok(ToolOutput::Park(park)) => format!("parked: {}", park.reason),
+                            Err(detail) => detail.clone(),
+                        },
+                    })
+                    .collect();
+                self.governance
+                    .stage_tool_reports(&handle, staged_reports)
+                    .await?;
+                // The completed execution markers are no longer needed once
+                // the report intents are staged in memory. Clear them before
+                // the single checkpoint that makes those replayable reports
+                // durable; a saved checkpoint never contains both a completed
+                // effect marker and a safe report replay queue.
+                self.governance
+                    .clear_staged_tool_executions(&handle)
+                    .await?;
+                self.save_checkpoint(
+                    &run_id,
+                    &task,
+                    &messages,
+                    turns,
+                    &ws.path,
+                    keep_workspace,
+                    None,
+                    tools.todos(),
+                    &ws.adapter,
+                )?;
+
+                let mut terminal_report = false;
+                for (index, (call, outcome)) in batch_outcomes.into_iter().enumerate() {
+                    let report_call_id = Self::stable_tool_call_id(&call, turns, index);
                     match outcome {
                         Ok(ToolOutput::Text(text)) => {
-                            let _ = self
-                                .governance
-                                .report_tool(&handle, &call.name, true, &text)
-                                .await;
+                            self.report_governance_tool_with_id(
+                                &handle,
+                                &report_call_id,
+                                &call.name,
+                                true,
+                                &text,
+                            )
+                            .await?;
                             if call.name == "todo_write" {
                                 let items = tools.todos();
                                 self.events.emit(HarnessEvent::TodosUpdated {
@@ -737,18 +1077,16 @@ impl Engine {
                                 }),
                             )
                             .await;
-                            messages.push(ChatMessage {
-                                role: "tool".into(),
-                                content: text,
-                                tool_call_id: call.id.clone(),
-                                tool_calls: vec![],
-                            });
                         }
                         Ok(ToolOutput::Report(report)) => {
-                            let _ = self
-                                .governance
-                                .report_tool(&handle, "report", report.success, &report.summary)
-                                .await;
+                            self.report_governance_tool_with_id(
+                                &handle,
+                                &report_call_id,
+                                "report",
+                                report.success,
+                                &report.summary,
+                            )
+                            .await?;
                             self.events.emit(HarnessEvent::ToolEnd {
                                 name: "report".into(),
                                 ok: report.success,
@@ -757,31 +1095,48 @@ impl Engine {
                             final_summary = report.summary;
                             success = report.success;
                             termination = RunTermination::Completed;
-                            messages.push(ChatMessage {
-                                role: "tool".into(),
-                                content: format!("report: {}", final_summary),
-                                tool_call_id: call.id.clone(),
-                                tool_calls: vec![],
-                            });
+                            terminal_report = true;
+                        }
+                        Ok(ToolOutput::Park(park)) => {
+                            let detail = format!("parked: {}", park.reason);
+                            let parked = ParkedState {
+                                reason: park.reason.clone(),
+                                question: park.question.clone(),
+                                tool_call_id: Self::conversation_tool_call_id(&call, turns, index),
+                            };
+                            let info = ParkInfo {
+                                reason: park.reason.clone(),
+                                question: park.question.clone(),
+                                tool_call_id: Self::conversation_tool_call_id(&call, turns, index),
+                            };
+                            final_summary = park.reason.clone();
+                            success = false;
+                            termination = RunTermination::Parked;
+                            pending_park = Some(parked.clone());
+                            let report_result = self
+                                .report_governance_tool_with_id(
+                                    &handle,
+                                    &report_call_id,
+                                    "escalate",
+                                    false,
+                                    &detail,
+                                )
+                                .await;
+                            // Save before reporting so a resume checkpoint
+                            // carries the park state and the exact pending
+                            // event for retry if the report fails.
                             self.save_checkpoint(
                                 &run_id,
                                 &task,
                                 &messages,
                                 turns,
                                 &ws.path,
-                                keep_workspace,
-                                None,
+                                true,
+                                Some(parked),
                                 tools.todos(),
                                 &ws.adapter,
                             )?;
-                            return Ok(None);
-                        }
-                        Ok(ToolOutput::Park(park)) => {
-                            let detail = format!("parked: {}", park.reason);
-                            let _ = self
-                                .governance
-                                .report_tool(&handle, "escalate", false, &detail)
-                                .await;
+                            report_result?;
                             self.events.emit(HarnessEvent::ToolEnd {
                                 name: "escalate".into(),
                                 ok: false,
@@ -797,37 +1152,17 @@ impl Engine {
                                 }),
                             )
                             .await;
-                            let parked = ParkedState {
-                                reason: park.reason.clone(),
-                                question: park.question.clone(),
-                                tool_call_id: call.id.clone(),
-                            };
-                            let info = ParkInfo {
-                                reason: park.reason.clone(),
-                                question: park.question.clone(),
-                                tool_call_id: call.id.clone(),
-                            };
-                            final_summary = park.reason;
-                            success = false;
-                            termination = RunTermination::Parked;
-                            self.save_checkpoint(
-                                &run_id,
-                                &task,
-                                &messages,
-                                turns,
-                                &ws.path,
-                                true,
-                                Some(parked),
-                                tools.todos(),
-                                &ws.adapter,
-                            )?;
                             return Ok(Some(info));
                         }
                         Err(detail) => {
-                            let _ = self
-                                .governance
-                                .report_tool(&handle, &call.name, false, &detail)
-                                .await;
+                            self.report_governance_tool_with_id(
+                                &handle,
+                                &report_call_id,
+                                &call.name,
+                                false,
+                                &detail,
+                            )
+                            .await?;
                             self.events.emit(HarnessEvent::ToolEnd {
                                 name: call.name.clone(),
                                 ok: false,
@@ -843,14 +1178,19 @@ impl Engine {
                                 }),
                             )
                             .await;
-                            messages.push(ChatMessage {
-                                role: "tool".into(),
-                                content: detail,
-                                tool_call_id: call.id.clone(),
-                                tool_calls: vec![],
-                            });
                         }
                     }
+                    self.save_checkpoint(
+                        &run_id,
+                        &task,
+                        &messages,
+                        turns,
+                        &ws.path,
+                        keep_workspace,
+                        None,
+                        tools.todos(),
+                        &ws.adapter,
+                    )?;
                 }
                 self.save_checkpoint(
                     &run_id,
@@ -863,6 +1203,9 @@ impl Engine {
                     tools.todos(),
                     &ws.adapter,
                 )?;
+                if terminal_report {
+                    return Ok(None);
+                }
             }
             Ok(None)
         }
@@ -878,6 +1221,8 @@ impl Engine {
             Err(e) => {
                 let summary = e.to_string();
                 tools.kill_background_jobs().await;
+                // The complete batch was staged before reporting, so this
+                // checkpoint cannot replay an already executed host tool.
                 let _ = self.save_checkpoint(
                     &run_id,
                     &task,
@@ -885,23 +1230,53 @@ impl Engine {
                     turns,
                     &ws.path,
                     true, // keep workspace on failure for resume/inspection
-                    None,
+                    pending_park.clone(),
                     tools.todos(),
                     &ws.adapter,
                 );
-                let _ = self
-                    .governance
-                    .complete_run(
-                        &handle,
-                        RunOutcome {
-                            success: false,
-                            summary: summary.clone(),
+                if !e.leaves_governance_open() {
+                    let completion = self
+                        .governance
+                        .complete_run(
+                            &handle,
+                            RunOutcome {
+                                success: false,
+                                summary: summary.clone(),
+                                turns,
+                                termination: e.termination().as_str().into(),
+                                workspace: ws.path.display().to_string(),
+                            },
+                        )
+                        .await;
+                    if completion.is_err() {
+                        let _ = self.save_checkpoint(
+                            &run_id,
+                            &task,
+                            &messages,
                             turns,
-                            termination: e.termination().as_str().into(),
-                            workspace: ws.path.display().to_string(),
-                        },
-                    )
-                    .await;
+                            &ws.path,
+                            true,
+                            pending_park.clone(),
+                            tools.todos(),
+                            &ws.adapter,
+                        );
+                    } else {
+                        // `complete_run` has forgotten the in-memory receipt
+                        // state; persist that finalized boundary so a later
+                        // resume cannot reuse a terminal plane receipt.
+                        let _ = self.save_checkpoint(
+                            &run_id,
+                            &task,
+                            &messages,
+                            turns,
+                            &ws.path,
+                            true,
+                            pending_park.clone(),
+                            tools.todos(),
+                            &ws.adapter,
+                        );
+                    }
+                }
                 // Do not delete workspace on cancel/timeout/max-turns so resume works.
                 self.events.emit(HarnessEvent::RunFinished {
                     run_id: run_id.clone(),
@@ -912,18 +1287,49 @@ impl Engine {
             }
         };
 
-        self.governance
-            .complete_run(
-                &handle,
-                RunOutcome {
-                    success,
-                    summary: final_summary.clone(),
+        if termination != RunTermination::Parked {
+            let completion = self
+                .governance
+                .complete_run(
+                    &handle,
+                    RunOutcome {
+                        success,
+                        summary: final_summary.clone(),
+                        turns,
+                        termination: termination.as_str().into(),
+                        workspace: ws.path.display().to_string(),
+                    },
+                )
+                .await;
+            if let Err(error) = completion {
+                let _ = self.save_checkpoint(
+                    &run_id,
+                    &task,
+                    &messages,
                     turns,
-                    termination: termination.as_str().into(),
-                    workspace: ws.path.display().to_string(),
-                },
-            )
-            .await?;
+                    &ws.path,
+                    true,
+                    None,
+                    tools.todos(),
+                    &ws.adapter,
+                );
+                return Err(error.into());
+            }
+            // Successful completion clears adapter-owned receipt correlation
+            // from the durable checkpoint. Parked runs intentionally retain
+            // it for their governed continuation.
+            self.save_checkpoint(
+                &run_id,
+                &task,
+                &messages,
+                turns,
+                &ws.path,
+                keep_workspace,
+                None,
+                tools.todos(),
+                &ws.adapter,
+            )?;
+        }
 
         // Keep workspace on park; only delete on successful non-park completion.
         if !keep_workspace && success && termination != RunTermination::Parked {
@@ -1026,6 +1432,7 @@ mod tests {
             workspace_adapter: "directory".into(),
             park: None,
             todos: vec![],
+            governance: None,
         };
 
         let err =
@@ -1067,6 +1474,7 @@ mod tests {
             workspace_adapter: "directory".into(),
             park: None,
             todos: vec![],
+            governance: None,
         };
 
         let err =
