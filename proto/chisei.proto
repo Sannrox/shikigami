@@ -30,53 +30,6 @@ message PolicyResolution {
   repeated string fallback_models = 9;
 }
 
-message PortfolioPoint {
-  string model = 1;
-  double quality_score = 2;
-  int64 cost_usd_micros = 3;
-  int64 sample_count = 4;
-  int64 updated_at = 5;
-  string prompt_variant = 6;
-}
-
-message PortfolioObjective {
-  string namespace = 1;
-  // "maximize_value" or "minimize_cost".
-  string mode = 2;
-  int64 budget_usd_micros = 3;
-  double quality_bar = 4;
-  int64 min_samples = 5;
-  int64 updated_at = 6;
-}
-
-message PortfolioTaskDemand {
-  string task_class = 1;
-  int64 expected_calls = 2;
-  // Set has_quality_bar=false to inherit the objective's default bar.
-  double quality_bar = 3;
-  bool has_quality_bar = 4;
-}
-
-message PortfolioAllocation {
-  string task_class = 1;
-  string model = 2;
-  double quality_score = 3;
-  int64 cost_per_call_usd_micros = 4;
-  int64 expected_calls = 5;
-  string prompt_variant = 6;
-}
-
-message PipelineRequest {
-  string request_id = 1;
-  string namespace = 2;
-  string spec = 3;
-  string model = 4;
-  string runtime = 5;
-  string task_type = 6;
-  int32 priority = 7;
-  string task_class = 8;
-}
-
 message StepDecision {
   string step = 1;
   string action = 2;
@@ -86,13 +39,24 @@ message StepDecision {
   string value = 6;
 }
 
-message PipelineRunResult {
-  string request_id = 1;
-  repeated StepDecision steps = 2;
-  int64 timestamp = 3;
-  string prepared_spec = 4;
-  repeated ContextEvidenceReference evidence_references = 5;
-  repeated MemoryContextReference memory_references = 6;
+// Versioned, source-neutral epistemic metadata. The three status dimensions
+// are independent; "unknown" is explicit when the authoritative projection
+// cannot establish a value. Payload content is never carried here.
+message EpistemicDescriptor {
+  string contract_version = 1;
+  string origin_class = 2; // asserted | derived | hypothesis | unknown
+  string evidence_status = 3; // supported | contested | insufficient | unknown
+  string lifecycle_status = 4; // current | stale | retracted | superseded | unknown
+  optional uint32 producer_confidence_bps = 5;
+  string confidence_basis = 6; // producer_input when present
+  optional int64 observed_at_ms = 7;
+  string derivation_ref = 8;
+  repeated string source_refs = 9;
+  repeated string source_digests = 10;
+  optional uint32 source_row_count = 11;
+  bool source_rows_truncated = 12;
+  optional uint32 supporting_evidence_count = 13;
+  optional uint32 contradicting_evidence_count = 14;
 }
 
 message MemoryContextReference {
@@ -103,6 +67,7 @@ message MemoryContextReference {
   string applicability = 5;
   repeated string evidence_operation_ids = 6;
   string content_digest = 7;
+  EpistemicDescriptor descriptor = 8;
 }
 
 message MemoryHoldoutReference {
@@ -126,6 +91,7 @@ message ContextEvidenceReference {
   string classification = 11;
   string projection_version = 12;
   repeated string disclosed_fields = 13;
+  EpistemicDescriptor descriptor = 14;
 }
 
 message ChatMessage {
@@ -214,6 +180,26 @@ message ExecutionPlan {
   repeated MemoryContextReference memory_references = 27;
   string planning_actor = 28;
   repeated MemoryHoldoutReference memory_holdouts = 29;
+  string context_admission_policy_version = 30;
+  string context_admission_descriptor_version = 31;
+  string context_admission_decision = 32;
+  repeated string context_admission_reasons = 33;
+  repeated string context_admission_source_digests = 34;
+  bool context_admission_requires_review = 35;
+  bool context_admission_requires_verification = 36;
+  uint64 context_bytes = 37;
+  uint64 context_tokens = 38;
+  uint64 context_projection_latency_ms = 39;
+  bool context_truncated = 40;
+  // Present only when this plan is bound to a durable Gunshi allocation.
+  string gunshi_issuance_id = 41;
+  string gunshi_allocation_id = 42;
+  string gunshi_agent_id = 43;
+  string gunshi_policy_version = 44;
+  string gunshi_input_fingerprint = 45;
+  int64 gunshi_budget_ceiling_usd_micros = 46;
+  uint32 gunshi_max_attempts = 47;
+  bool gunshi_human_review_required = 48;
 }
 
 message EgressDecision {
@@ -233,12 +219,6 @@ message PlannedChatResponse {
   string provider = 6;
   int32 cache_read_input_tokens = 7;
   int32 cache_creation_input_tokens = 8;
-}
-
-message AffinityResult {
-  repeated string namespaces = 1;
-  string best_model = 2;
-  bool low_success = 3;
 }
 
 message EvalAssertion {
@@ -278,43 +258,346 @@ message EvalRun {
   repeated CaseResult results = 4;
   int64 timestamp = 5;
 }
+message GetEvalSuiteRequest { string id = 1; }
+message GetEvalSuiteResponse { EvalSuite suite = 1; }
+message GetEvalRunRequest { string id = 1; }
+message GetEvalRunResponse { EvalRun run = 1; }
+message ListEvalRunsRequest { string suite_id = 1; }
+message ListEvalRunsResponse { repeated EvalRun runs = 1; }
+
+// Immutable, operator-controlled deterministic evaluator metadata. This
+// registers deployed implementation identity; it never uploads executable code.
+message EvaluatorResourceLimits {
+  uint64 timeout_ms = 1;
+  uint64 max_input_bytes = 2;
+  uint64 max_output_bytes = 3;
+  uint32 max_evidence_items = 4;
+}
+// Situation-specific model evaluation policy. Integer units make the policy
+// canonical across runtimes: scores are millionths, pass rate is basis points,
+// temperature is thousandths, and top-p is millionths.
+message StochasticEvaluatorPolicy {
+  string provider = 1;
+  string model = 2;
+  string prompt_profile = 3;
+  string prompt_profile_digest = 4;
+  string result_schema = 5;
+  uint32 trial_count = 6;
+  uint32 temperature_millis = 7;
+  uint32 top_p_millionths = 8;
+  bool seed_supported = 9;
+  int64 base_seed = 10;
+  string aggregation_rule = 11; // mean_score_with_variance/v1
+  uint32 minimum_mean_score_micros = 12;
+  uint32 minimum_pass_rate_basis_points = 13;
+  uint64 maximum_score_variance_micros_squared = 14;
+  bool gate_eligible = 15;
+  uint32 max_retries_per_trial = 16;
+  uint32 max_tokens_per_trial = 17;
+  uint32 max_total_tokens = 18;
+  string egress_policy = 19; // local_only/v1 | allowlisted_external/v1
+  string raw_response_retention = 20; // none/v1
+}
+message EvaluatorDefinition {
+  string contract_version = 1; // chisei.evaluator-definition/v1
+  string definition_id = 2;
+  string namespace = 3;
+  string evaluator_id = 4;
+  string version = 5;
+  string implementation_digest = 6;
+  string execution_class = 7; // deterministic_builtin/v1
+  repeated string supported_predicate_kinds = 8;
+  repeated string supported_input_schemas = 9;
+  repeated string supported_result_schemas = 10;
+  // Closed v1 JSON-Schema subset: a flat object of typed scalar parameters.
+  string parameter_schema_json = 11;
+  repeated string evidence_classifications = 12;
+  EvaluatorResourceLimits resource_limits = 13;
+  string source_ref = 14;
+  string content_digest = 15;
+  string created_by = 16;
+  int64 created_at_ms = 17;
+  optional StochasticEvaluatorPolicy stochastic_policy = 18;
+  // HTTPS endpoint for an operator-deployed external_adapter/v1 evaluator.
+  // This never uploads executable code and is empty for built-in/stochastic definitions.
+  string adapter_endpoint = 19;
+}
+message EvaluatorAvailability {
+  string definition_id = 1;
+  string state = 2; // enabled | disabled | superseded
+  string superseded_by_definition_id = 3;
+  string reason = 4;
+  string request_id = 5;
+  string request_digest = 6;
+  string changed_by = 7;
+  int64 changed_at_ms = 8;
+}
+message EvaluatorDefinitionRecord {
+  EvaluatorDefinition definition = 1;
+  EvaluatorAvailability availability = 2;
+  // Capability discovery: metadata may be published while the exact implementation
+  // is not executable in this Chisei process.
+  bool implementation_executable = 3;
+  string implementation_status = 4; // executable | unavailable | unsupported
+}
+message PutEvaluatorDefinitionRequest {
+  EvaluatorDefinition definition = 1;
+  // When definition is omitted, mutate the lifecycle of an existing exact version.
+  string definition_id = 2;
+  string availability_state = 3;
+  string superseded_by_definition_id = 4;
+  string reason = 5;
+  string request_id = 6;
+}
+message PutEvaluatorDefinitionResponse { EvaluatorDefinitionRecord record = 1; }
+
+// A situation-specific immutable plan over exact evaluator and invariant
+// versions. Nodes are deterministic evaluation only; they cannot execute
+// actions, scripts, deployments, or caller-defined reducers.
+message EvaluationInputBinding {
+  string name = 1;
+  string source_kind = 2; // subject | invariant | evidence
+  string schema_id = 3;
+}
+message EvaluationPlanNode {
+  string node_id = 1;
+  string evaluator_definition_id = 2;
+  repeated string depends_on_node_ids = 3;
+  repeated EvaluationInputBinding input_bindings = 4;
+  string parameters_json = 5;
+  repeated string invariant_version_ids = 6;
+  string classification = 7; // required | advisory
+}
+message EvaluationPlan {
+  string contract_version = 1; // chisei.evaluation-plan/v1
+  string plan_version_id = 2;
+  string namespace = 3;
+  string plan_id = 4;
+  string version = 5;
+  repeated string accepted_subject_profiles = 6;
+  repeated EvaluationPlanNode nodes = 7;
+  string reducer = 8; // required_all_pass_advisory_observed/v1
+  string source_ref = 9;
+  string content_digest = 10;
+  string created_by = 11;
+  int64 created_at_ms = 12;
+}
+message PutEvaluationPlanRequest { EvaluationPlan plan = 1; }
+message PutEvaluationPlanResponse { EvaluationPlan plan = 1; }
+
+// Resolves immutable plan, subject, invariant, waiver, evaluator, and evidence
+// inputs into durable content-bound execution evidence. Resolution performs no
+// evaluator execution and grants no action authority.
+message EvaluationResolutionRequest {
+  string contract_version = 1; // chisei.evaluation-resolution-request/v1
+  string resolver_version = 2; // chisei.evaluation-resolver/v1
+  string namespace = 3;
+  string request_id = 4;
+  string plan_version_id = 5;
+  string subject_profile = 6;
+  string subject_identity = 7;
+  string subject_content_digest = 8;
+  repeated string evidence_object_ids = 9;
+  int64 evaluation_time_ms = 10;
+}
+message ResolvedEvaluatorBinding {
+  string definition_id = 1;
+  string definition_digest = 2;
+  string implementation_digest = 3;
+  optional StochasticEvaluatorPolicy stochastic_policy = 4;
+}
+message ResolvedEvidenceBinding {
+  string evidence_object_id = 1;
+  string submission_id = 2;
+  string content_digest = 3;
+  string evidence_type = 4;
+  string schema_id = 5;
+  string schema_version = 6;
+  string classification = 7;
+  int64 observed_at_ms = 8;
+  int64 expires_at_ms = 9; // zero means the admitted envelope has no expiry
+  string source_identity_digest = 10;
+}
+message ResolvedWaiverBinding {
+  string waiver_version_id = 1;
+  string content_digest = 2;
+  repeated string evidence_object_ids = 3;
+  repeated string invariant_version_ids = 4;
+}
+message ResolvedRequirementBinding {
+  string requirement_version_id = 1;
+  string content_digest = 2;
+  repeated string provenance_evidence_object_ids = 3;
+}
+message ResolvedInvariantBinding {
+  string invariant_version_id = 1;
+  string content_digest = 2;
+  string predicate_kind = 3;
+  string input_schema = 4;
+  string result_schema = 5;
+  repeated string evidence_types = 6;
+  repeated string provenance_evidence_object_ids = 7;
+  repeated string waiver_version_ids = 8;
+}
+message ResolvedInputBinding {
+  string name = 1;
+  string source_kind = 2;
+  string schema_id = 3;
+}
+message ResolvedEvaluationNode {
+  string node_id = 1;
+  ResolvedEvaluatorBinding evaluator = 2;
+  repeated string depends_on_node_ids = 3;
+  repeated ResolvedInputBinding input_bindings = 4;
+  string parameters_json = 5;
+  repeated ResolvedInvariantBinding invariants = 6;
+  repeated string evidence_object_ids = 7;
+  string classification = 8;
+}
+message ResolvedEvaluationManifest {
+  string contract_version = 1; // chisei.resolved-evaluation-manifest/v1
+  string resolver_version = 2;
+  string manifest_id = 3;
+  string manifest_digest = 4;
+  string namespace = 5;
+  string plan_version_id = 6;
+  string plan_digest = 7;
+  string subject_profile = 8;
+  string subject_identity = 9;
+  string subject_content_digest = 10;
+  string invariant_set_id = 11;
+  string invariant_set_digest = 12;
+  string invariant_profile_digest = 13;
+  int64 evaluation_time_ms = 14;
+  string resolved_by = 15;
+  repeated ResolvedEvaluationNode nodes = 16;
+  repeated ResolvedEvidenceBinding evidence = 17;
+  repeated ResolvedWaiverBinding waivers = 18;
+  int64 created_at_ms = 19;
+  repeated ResolvedRequirementBinding requirements = 20;
+}
+message EvaluationResolutionFinding {
+  string code = 1;
+  string severity = 2; // blocking | advisory
+  string node_id = 3; // empty when disclosure would be unsafe
+  string invariant_version_id = 4; // empty when disclosure would be unsafe
+}
+message ResolveEvaluationPlanRequest {
+  EvaluationResolutionRequest resolution = 1;
+}
+message ResolveEvaluationPlanResponse {
+  string status = 1; // resolved | unknown | unavailable
+  ResolvedEvaluationManifest manifest = 2;
+  repeated EvaluationResolutionFinding findings = 3;
+}
+
+// Executes one exact resolved manifest through compiled deterministic
+// implementations. The manifest digest is the execution idempotency key.
+message EvaluationExecutionRequest {
+  string contract_version = 1; // chisei.evaluation-execution-request/v1
+  string executor_version = 2; // chisei.deterministic-evaluation-executor/v1
+  string namespace = 3;
+  string manifest_digest = 4;
+  uint64 max_total_duration_ms = 5; // zero selects the bounded server default
+}
+message StochasticTrialEvidence {
+  uint32 trial_index = 1;
+  int64 seed = 2;
+  uint32 attempt_count = 3;
+  string status = 4;
+  string reason_code = 5;
+  uint32 score_micros = 6;
+  uint32 input_tokens = 7;
+  uint32 output_tokens = 8;
+  string result_digest = 9;
+  // Full per-attempt ceiling charged when a retryable provider error cannot
+  // report partial usage.
+  uint32 retry_accounted_tokens = 10;
+}
+message StochasticStepEvidence {
+  string contract_version = 1; // chisei.stochastic-step-evidence/v1
+  string provider = 2;
+  string model = 3;
+  string prompt_profile = 4;
+  string prompt_profile_digest = 5;
+  string result_schema = 6;
+  uint32 trial_count = 7;
+  string aggregation_rule = 8;
+  uint32 minimum_mean_score_micros = 9;
+  uint32 minimum_pass_rate_basis_points = 10;
+  uint64 maximum_score_variance_micros_squared = 11;
+  bool gate_eligible = 12;
+  uint32 completed_trial_count = 13;
+  uint32 mean_score_micros = 14;
+  uint32 pass_rate_basis_points = 15;
+  uint64 score_variance_micros_squared = 16;
+  uint32 total_input_tokens = 17;
+  uint32 total_output_tokens = 18;
+  repeated StochasticTrialEvidence trials = 19;
+  string aggregate_digest = 20;
+  uint32 total_retry_accounted_tokens = 21;
+}
+message EvaluationStepReceipt {
+  string contract_version = 1; // chisei.evaluation-step-receipt/v1
+  string manifest_digest = 2;
+  string node_id = 3;
+  string classification = 4; // required | advisory
+  string status = 5; // pass | fail | unknown | unavailable | error | skipped
+  string reason_code = 6;
+  string input_digest = 7;
+  string parameters_digest = 8;
+  string evaluator_definition_digest = 9;
+  string implementation_digest = 10;
+  repeated string evidence_digests = 11;
+  repeated string dependency_result_digests = 12;
+  reserved 13; // evaluator output content is never persisted or disclosed
+  string result_digest = 14;
+  string step_receipt_digest = 15;
+  optional StochasticStepEvidence stochastic_evidence = 16;
+}
+message InvariantCoverageDecision {
+  string invariant_version_id = 1;
+  repeated string covered_by_node_ids = 2;
+  repeated string waiver_version_ids = 3;
+  bool satisfied = 4;
+}
+message EvaluationGateDecision {
+  string contract_version = 1; // chisei.evaluation-gate-decision/v1
+  string manifest_digest = 2;
+  string reducer = 3;
+  string verdict = 4; // allow | deny | unknown | unavailable
+  string reason_code = 5;
+  repeated string step_receipt_digests = 6;
+  repeated InvariantCoverageDecision invariant_coverage = 7;
+  string decision_digest = 8;
+}
+message EvaluationExecutionProjection {
+  string manifest_digest = 1;
+  string operation_id = 2;
+  string namespace = 3;
+  string status = 4; // running | cancelled | allow | deny | unknown | unavailable
+  repeated EvaluationStepReceipt steps = 5;
+  EvaluationGateDecision decision = 6;
+}
+message ExecuteEvaluationManifestRequest {
+  EvaluationExecutionRequest execution = 1;
+}
+message ExecuteEvaluationManifestResponse {
+  EvaluationExecutionProjection execution = 1;
+}
+message CancelEvaluationExecutionRequest {
+  string namespace = 1;
+  string manifest_digest = 2;
+}
+message CancelEvaluationExecutionResponse {
+  EvaluationExecutionProjection execution = 1;
+}
 
 message GateDecision {
   string verdict = 1;
   string reason = 2;
   double baseline_score = 3;
   double candidate_score = 4;
-}
-
-message EvalVarianceCase {
-  string case_id = 1;
-  int32 run_count = 2;
-  double pass_rate = 3;
-  double mean_score = 4;
-  double min_score = 5;
-  double max_score = 6;
-  double std_dev = 7;
-}
-
-message EvalVariance {
-  string suite_id = 1;
-  string config_ref = 2;
-  int32 run_count = 3;
-  double mean_score = 4;
-  double std_dev = 5;
-  double min_score = 6;
-  double max_score = 7;
-  repeated EvalVarianceCase cases = 8;
-}
-
-message EvalModelVariance {
-  string model_id = 1;
-  EvalVariance variance = 2;
-}
-
-message EvalModelComparison {
-  string suite_id = 1;
-  repeated EvalModelVariance models = 2;
 }
 
 message EvalIteration {
@@ -331,108 +614,73 @@ message EvalIteration {
   int64 created = 11;
 }
 
-message EvolveRecommendation {
-  string action = 1;
-  string reason = 2;
-}
-
-message EvolveSuggestion {
-  string message = 1;
-  double confidence = 2;
-  string category = 3;
-}
-
-message EvolvePattern {
-  string pattern = 1;
-  int32 occurrences = 2;
-  double success_rate = 3;
-  string category = 4;
-}
-
-message EvolveVarianceWindow {
-  string window = 1;
-  int32 total = 2;
-  int32 succeeded = 3;
-  double success_rate = 4;
-}
-
-message EvolvePatternVariance {
-  string pattern = 1;
-  int32 sample_size = 2;
-  double mean_success_rate = 3;
-  double std_dev = 4;
-  double ci_95_lower = 5;
-  double ci_95_upper = 6;
-  bool risk_flag = 7;
-  string trend = 8;
-  repeated EvolveVarianceWindow windows = 9;
-}
-
-message EvolveVarianceReport {
-  repeated EvolvePatternVariance patterns = 1;
-  repeated string insights = 2;
-}
-
-message EvolveReport {
-  int32 total_tasks = 1;
-  int32 succeeded = 2;
-  int32 failed = 3;
-  double success_rate = 4;
-  repeated EvolvePattern patterns = 5;
-}
-
-message EvolveTemplate {
-  string id = 1;
-  string name = 2;
-  string content = 3;
-  int64 created = 4;
-}
-
-message EvolveAbGroup {
-  int32 total = 1;
-  int32 succeeded = 2;
-  double success_rate = 3;
-}
-
-message EvolveAbReport {
-  EvolveAbGroup enhanced = 1;
-  EvolveAbGroup non_enhanced = 2;
-}
-
 // --- Request/Response wrappers ---
 
-message CheckBudgetRequest {
-  string user_id = 1;
-  int32 estimated_tokens = 2;
-  string subject = 3;
-  string project = 4;
-  string agent = 5;
-  string key_id = 6;
-  // Leaf scope under project/agent in the budget hierarchy chain
-  // (project -> agent -> work_unit). Ignored when `subject` is set.
-  string work_unit = 7;
-  // Optional metric selector for this limit check. Supported values:
-  // - "tokens" (default): compare against token usage
-  // - "requests": compare against request counts
-  string metric = 8;
-  // Routing value class used for budget-aware model selection. Only explicitly
-  // downgrade-eligible classes (background/bulk/batch/small-fast) may receive
-  // a cheap bias; unknown and reasoning/primary classes fail safe to capable.
+message DecideGatewayExecutionRequest {
+  // Must be gateway.decide/v2. Version 2 makes the policy decision complete
+  // enough for the gateway to remain a translator rather than a policy engine.
+  string contract_version = 1;
+  string namespace = 2;
+  string requested_model = 3;
+  string operation_class = 4;
+  int64 estimated_cost_usd_micros = 5;
+  string correlation_operation_id = 6;
+  uint32 correlation_attempt = 7;
+  // Token estimate for canonical budget preflight.
+  int32 estimated_tokens = 8;
   string task_class = 9;
-  // True only for a continuation of an already-started unit of work. A hard
-  // cap warns and permits the continuation instead of failing it mid-task.
-  bool mid_task = 10;
-  // The caller can execute an allowed local model without metered cloud cost.
-  bool local_free_available = 11;
+  string preferred_runtime = 10;
+  // Optional budget hierarchy fields (project defaults to namespace).
+  string project = 11;
+  string agent = 12;
+  string key_id = 13;
+  string work_unit = 14;
+  bool local_free_available = 15;
+  // Subject and policy-resolution inputs required for the gateway's single
+  // canonical admission decision.
+  string user_id = 16;
+  string route_override = 17;
+  bytes capability_requirements_json = 18;
+  int64 expected_calls = 19;
+  // Request text used by the control plane's internal sampling pipeline.
+  // The gateway receives only the governed prepared form needed when a
+  // sampled outcome is retained.
+  string pipeline_spec = 20;
 }
-message CheckBudgetResponse {
-  bool allowed = 1;
-  BudgetUsage usage = 2;
-  // Advisory model-routing bias. Enforcement remains represented by `allowed`.
-  string route_bias = 3;
-  // capable, cheap_cloud, local_free, warn, or hard_cap.
-  string degradation_level = 4;
-  bool warning = 5;
+
+message DecideGatewayExecutionResponse {
+  string contract_version = 1;
+  // When false, deny_reason is set and the edge must not contact upstream.
+  bool admitted = 2;
+  // unauthorized | capability_unsupported | policy_denied | budget_denied |
+  // residency_denied | invalid_request
+  string deny_reason = 3;
+  string deny_message = 4;
+  string resolved_runtime = 5;
+  string resolved_model = 6;
+  string policy_version = 7;
+  string budget_scope = 8;
+  // Opaque grant stamp for usage recording / receipt correlation.
+  string budget_grant_id = 9;
+  string route_bias = 10;
+  string degradation_level = 11;
+  bool budget_warning = 12;
+  // Complete policy provenance and enforcement inputs returned to the thin
+  // gateway PEP so it never reconstructs policy locally.
+  string policy_scope = 13;
+  string data_class = 14;
+  repeated string fallback_models = 15;
+  bool eval_regressed = 16;
+  string eval_regression_reason = 17;
+  string context_admission_policy_version = 18;
+  string context_admission_descriptor_version = 19;
+  string context_admission_decision = 20;
+  repeated string context_admission_reasons = 21;
+  bool sampling_evaluated = 22;
+  bool sampled = 23;
+  double sample_rate = 24;
+  string sample_reason = 25;
+  string prepared_spec = 26;
 }
 message RecordUsageRequest {
   string user_id = 1;
@@ -449,8 +697,17 @@ message RecordUsageRequest {
   // Stable caller-generated key. Replays with the same key are acknowledged
   // without applying the usage delta twice.
   string idempotency_key = 9;
+  // Optional complete canonical receipt finalized by the trusted gateway for
+  // the same request. Receipt persistence is idempotent and independent from
+  // the accounting delta.
+  string operation_receipt_json = 10;
+  // Optional sampled outcome captured by the same trusted accounting write.
+  SampleObservation sample_observation = 11;
 }
-message RecordUsageResponse { BudgetUsage usage = 1; }
+message RecordUsageResponse {
+  BudgetUsage usage = 1;
+  bool sample_recorded = 2;
+}
 message SetBudgetLimitRequest {
   string user_id = 1;
   int32 max_tokens = 2;
@@ -466,33 +723,6 @@ message SetBudgetLimitRequest {
 }
 message SetBudgetLimitResponse {}
 
-message RecordPortfolioObservationRequest {
-  string namespace = 1;
-  string task_class = 2;
-  string model = 3;
-  double quality_score = 4;
-  int64 cost_usd_micros = 5;
-  int64 sample_count = 6;
-  int64 updated_at = 7;
-  // Omitted or empty values use the reserved legacy@1 identity.
-  string prompt_variant = 8;
-}
-message RecordPortfolioObservationResponse { repeated PortfolioPoint frontier = 1; }
-message GetPortfolioFrontierRequest { string namespace = 1; string task_class = 2; }
-message GetPortfolioFrontierResponse { repeated PortfolioPoint frontier = 1; }
-message SetPortfolioObjectiveRequest { PortfolioObjective objective = 1; }
-message SetPortfolioObjectiveResponse { PortfolioObjective objective = 1; }
-message AllocatePortfolioRequest {
-  string namespace = 1;
-  repeated PortfolioTaskDemand demands = 2;
-}
-message AllocatePortfolioResponse {
-  PortfolioObjective objective = 1;
-  repeated PortfolioAllocation allocations = 2;
-  int64 total_cost_usd_micros = 3;
-  double total_value = 4;
-}
-
 message SetNamespacePolicyRequest {
   string namespace = 1;
   repeated string allowed_runtimes = 2;
@@ -500,34 +730,13 @@ message SetNamespacePolicyRequest {
   string default_runtime = 4;
   string default_model = 5;
   string data_class = 6;
+  // Canonical JSON for the opt-in chisei.context-admission/v1 policy.
+  // Empty preserves an existing context policy; JSON null clears it.
+  string context_admission_policy_json = 7;
 }
 message SetNamespacePolicyResponse { PolicyResolution resolution = 1; }
 
-message ResolvePolicyRequest {
-  string namespace = 1;
-  string preferred_runtime = 2;
-  string preferred_model = 3;
-  string subject = 4;
-  string project = 5;
-  string agent = 6;
-  string key_id = 7;
-  string task_class = 8;
-  string user_id = 9;
-  // Expected calls remaining in the allocation horizon. Defaults to one.
-  int64 expected_calls = 10;
-  // Advisory bias returned by CheckBudget (cheap or local_free).
-  string budget_route_bias = 11;
-  // Optional canonical provider/model pinned for this one governed resolution.
-  string route_override = 12;
-  // Gateway-derived request capabilities used to exclude unusable routes before
-  // selection. JSON encoding preserves backwards compatibility for callers
-  // that do not perform model routing.
-  bytes capability_requirements_json = 13;
-}
-message ResolvePolicyResponse { PolicyResolution resolution = 1; }
-
-message GetEffectivePolicySummaryRequest { string namespace = 1; }
-message ListAvailableModelsRequest {
+message GetEffectivePolicySummaryRequest {
   string namespace = 1;
   string provider = 2;
 }
@@ -560,16 +769,6 @@ message AvailableModelRecord {
   AvailableModelCapabilities capabilities = 5;
   AvailableModelPricing pricing = 6;
 }
-message ListAvailableModelsResponse {
-  string version = 1;
-  string namespace = 2;
-  repeated AvailableModelRecord models = 3;
-}
-message SetNamespaceWorkerPolicyRequest {
-  string namespace = 1;
-  string contention_scope_id = 2;
-}
-message SetNamespaceWorkerPolicyResponse {}
 message EffectiveRoutingSummary {
   bool configured = 1;
   string status = 2;
@@ -600,38 +799,15 @@ message EffectiveActionPolicySummary {
   string policy_scope = 7;
   string policy_version = 8;
 }
-message EffectiveWorkerConcurrencySummary {
-  bool configured = 1;
-  string status = 2;
-  int32 max_concurrency = 3;
-  string policy_scope = 4;
-  string policy_version = 5;
-}
 message GetEffectivePolicySummaryResponse {
   string namespace = 1;
   EffectiveRoutingSummary routing = 2;
   EffectiveBudgetSummary budgets = 3;
   EffectiveActionPolicySummary actions = 4;
-  EffectiveWorkerConcurrencySummary worker_concurrency = 5;
-}
-message CheckEgressRequest {
-  string namespace = 1;
-  string payload = 2;
-  string provider = 3;
-  string task_class = 4;
-}
-message CheckEgressResponse {
-  bool allowed = 1;
-  repeated EgressDecision findings = 2;
-  // Content hash of the namespace policy revision that supplied the data
-  // class for this check. Empty when no policy applied.
-  string policy_version = 3;
+  string available_models_version = 5;
+  repeated AvailableModelRecord models = 6;
 }
 
-message RunPipelineRequest { PipelineRequest request = 1; }
-message RunPipelineResponse { PipelineRunResult result = 1; }
-message ListPipelineRunsRequest { int32 limit = 1; }
-message ListPipelineRunsResponse { repeated PipelineRunResult runs = 1; }
 message SampleObservation {
   string request_id = 1;
   string namespace = 2;
@@ -646,24 +822,32 @@ message SampleObservation {
   string task_class = 11;
   int64 cost_usd_micros = 12;
 }
-message RecordSampleObservationRequest { SampleObservation observation = 1; }
-message RecordSampleObservationResponse { bool recorded = 1; }
-message GatewayAuditEvent {
-  string id = 1;
-  int64 timestamp = 2;
-  string actor = 3;
-  string action = 4;
-  string reason = 5;
-  map<string, string> evidence = 6;
-  string target_id = 7;
-  string outcome = 8;
+message GetSampleObservationRequest {
+  string request_id = 1;
+  string namespace = 2;
 }
-message RecordGatewayAuditRequest { GatewayAuditEvent event = 1; }
-message RecordGatewayAuditResponse { GatewayAuditEvent event = 1; }
-message PlanExecutionRequest { ExecutionInput input = 1; }
+message SampleObservationReadback {
+  string request_id = 1;
+  string namespace = 2;
+  string observation_digest = 3;
+  string state = 4;
+  int64 observed_at = 5;
+  int64 read_at = 6;
+}
+message GetSampleObservationResponse { SampleObservationReadback observation = 1; }
+// Binds one native execution to a previously issued Gunshi fleet allocation.
+// The server reloads the durable allocation and rejects caller-modified JSON.
+message GunshiAllocationBinding {
+  string issuance_id = 1;
+  string allocation_json = 2;
+}
+
+message PlanExecutionRequest {
+  ExecutionInput input = 1;
+  GunshiAllocationBinding gunshi_allocation = 2;
+}
 message PlanExecutionResponse { ExecutionPlan plan = 1; }
 message ExecutePlanRequest { ExecutionPlan plan = 1; }
-message ExecutePlanResponse { PlannedChatResponse response = 1; int64 executed_at = 2; }
 message ExecutePlanStreamEvent {
   string content_delta = 1;
   PlannedChatResponse response = 2;
@@ -697,17 +881,6 @@ message ReportOperationEventResponse {
   repeated string missing_surfaces = 4;
 }
 
-message AuthorizeOperationReporterRequest {
-  string operation_id = 1;
-  string principal = 2;
-  repeated string event_kinds = 3;
-}
-
-message AuthorizeOperationReporterResponse {
-  bool authorized = 1;
-  bool changed = 2;
-}
-
 message GetOperationReceiptRequest {
   string operation_id = 1;
   string request_id = 2;
@@ -715,24 +888,14 @@ message GetOperationReceiptRequest {
   uint32 attempt = 4;
 }
 
-message ReserveGatewayRequestAliasRequest {
-  string caller_scope = 1;
-  string request_alias = 2;
-  string request_id = 3;
-  string operation_id = 4;
-}
-
-message ReserveGatewayRequestAliasResponse {
-  bool reserved = 1;
-}
-message ClaimGatewayRequestAliasDispatchRequest {
+message ClaimGatewayDispatchRequest {
   string caller_scope = 1;
   string request_alias = 2;
   string request_id = 3;
   string operation_id = 4;
   string dispatch_token = 5;
 }
-message ClaimGatewayRequestAliasDispatchResponse {
+message ClaimGatewayDispatchResponse {
   bool claimed = 1;
 }
 message GetOperationReceiptResponse {
@@ -741,129 +904,11 @@ message GetOperationReceiptResponse {
   repeated string missing_surfaces = 3;
 }
 
-message QueryOperationStatisticsRequest {
-  repeated string namespaces = 1;
-  int64 start_timestamp_ms = 2;
-  int64 end_timestamp_ms = 3;
-}
-
-message OperationStatisticValue {
-  map<string, string> labels = 1;
-  int64 value = 2;
-}
-
-message OperationStatisticsTotals {
-  int64 logical_operations = 1;
-  int64 receipts = 2;
-  int64 model_calls = 3;
-  int64 priced_model_calls = 4;
-  int64 unpriced_model_calls = 5;
-  int64 model_calls_without_model = 6;
-  int64 total_cost_usd_micros = 7;
-  int64 waiting_operations = 8;
-  int64 waiting_time_ms = 9;
-}
-
-message OperationOutcomeCounts {
-  int64 verified = 1;
-  int64 failed = 2;
-  int64 parked = 3;
-  int64 rejected = 4;
-  int64 unverified = 5;
-  int64 unknown = 6;
-}
-
-message OperationLearningCounts {
-  int64 learnings_admitted = 1;
-  int64 enrichments_served = 2;
-  int64 escalations_answered = 3;
-}
-
-message QueryOperationStatisticsResponse {
-  OperationStatisticsTotals totals = 1;
-  repeated OperationStatisticValue daily_spend = 2;
-  repeated OperationStatisticValue namespace_model_spend = 3;
-  repeated OperationStatisticValue spend_caps = 4;
-  OperationOutcomeCounts outcomes = 5;
-  OperationLearningCounts learning = 6;
-}
-
-message GetAffinityRequest {
-  reserved 1;
-  reserved "agent_id";
-  string namespace = 2;
-}
-message GetAffinityResponse { AffinityResult result = 1; }
-
-message CreateEvalSuiteRequest { EvalSuite suite = 1; }
-message CreateEvalSuiteResponse { EvalSuite suite = 1; }
-message ListEvalSuitesRequest {}
-message ListEvalSuitesResponse { repeated EvalSuite suites = 1; }
-message GetEvalSuiteRequest { string id = 1; }
-message GetEvalSuiteResponse { EvalSuite suite = 1; }
-message CreateEvalRunRequest {
-  EvalRun run = 1;
-  string changed_file = 2;
-  string diff_hash = 3;
-}
-message CreateEvalRunResponse { EvalRun run = 1; }
-message GetEvalRunRequest { string id = 1; }
-message GetEvalRunResponse { EvalRun run = 1; }
-message ListEvalRunsRequest { string suite_id = 1; }
-message ListEvalRunsResponse { repeated EvalRun runs = 1; }
-message TrackEvalIterationRequest { string suite_id = 1; string run_id = 2; string changed_file = 3; string diff_hash = 4; }
-message TrackEvalIterationResponse { EvalIteration iteration = 1; }
-message GetLatestEvalIterationRequest { string changed_file = 1; }
-message GetLatestEvalIterationResponse { EvalIteration iteration = 1; }
-message ListEvalIterationsRequest { string suite_id = 1; string changed_file = 2; }
-message ListEvalIterationsResponse { repeated EvalIteration iterations = 1; }
-message CompareRunsRequest { string baseline_id = 1; string candidate_id = 2; }
-message CompareRunsResponse { GateDecision decision = 1; }
-message GetEvidenceContextGateRequest {
-  string namespace = 1;
-  string evidence_type = 2;
-  string source_type = 3;
-}
-message EvidenceContextGate {
-  string evidence_type = 1;
-  string profile_key = 2;
-  bool allowed = 3;
-  string verdict = 4;
-  string reason = 5;
-  string iteration_id = 6;
-  string baseline_run_id = 7;
-  string candidate_run_id = 8;
-  string expected_baseline_config_ref = 9;
-  string expected_candidate_config_ref = 10;
-  string source_type = 11;
-}
-message GetEvidenceContextGateResponse { EvidenceContextGate gate = 1; }
-message EvalVarianceRequest { string suite_id = 1; string config_ref = 2; }
-message EvalVarianceResponse { EvalVariance variance = 1; }
-message EvalModelCompareRequest { string suite_id = 1; }
-message EvalModelCompareResponse { EvalModelComparison comparison = 1; }
-
-message EvolveSuggestRequest { string request_id = 1; }
-message EvolveSuggestResponse { repeated EvolveSuggestion suggestions = 1; }
-message EvolveEnhanceRequest { string request_id = 1; string spec = 2; }
-message EvolveEnhanceResponse { string enhanced_spec = 1; bool modified = 2; }
-message EvolveRecommendRequest { string request_id = 1; }
-message EvolveRecommendResponse { EvolveRecommendation recommendation = 1; }
-message EvolveReportRequest {}
-message EvolveReportResponse { EvolveReport report = 1; }
-message EvolvePatternsRequest {}
-message EvolvePatternsResponse { repeated EvolvePattern patterns = 1; }
-message EvolveVarianceRequest {}
-message EvolveVarianceResponse { EvolveVarianceReport report = 1; }
-message EvolveAbResultsRequest {}
-message EvolveAbResultsResponse { EvolveAbReport report = 1; }
-message EvolveTemplatesRequest {}
-message EvolveTemplatesResponse { repeated EvolveTemplate templates = 1; }
-
 message ListKiokuCandidatesRequest {
   string namespace = 1;
   string operation_class = 2;
   uint32 limit = 3;
+  string page_token = 4;
 }
 message KiokuCandidateRecord {
   string memory_json = 1;
@@ -873,24 +918,24 @@ message KiokuCandidateRecord {
   uint32 supporting_evidence = 5;
   uint32 contradicting_evidence = 6;
 }
-message ListKiokuCandidatesResponse { repeated KiokuCandidateRecord candidates = 1; }
+message ListKiokuCandidatesResponse {
+  repeated KiokuCandidateRecord candidates = 1;
+  string next_page_token = 2;
+}
 message ReviewKiokuMemoryRequest {
   string memory_id = 1;
   uint32 memory_version = 2;
   string action = 3;
   string rationale = 4;
+  string reassessment_key = 5;
+  repeated string evidence_basis_json = 6;
 }
 message ReviewKiokuMemoryResponse {
   string memory_json = 1;
   repeated string lifecycle_events_json = 2;
+  repeated string evidence_json = 3;
+  bool idempotent = 4;
 }
-message RecordGunshiFeedbackRequest {
-  string plan_json = 1;
-  string choice_json = 2;
-  string outcome_json = 3;
-  string issuance_id = 4;
-}
-message RecordGunshiFeedbackResponse { string feedback_json = 1; }
 message IssueGunshiRecommendationsRequest {
   string input_json = 1;
   string issuance_id = 2;
@@ -898,14 +943,44 @@ message IssueGunshiRecommendationsRequest {
 message IssueGunshiRecommendationsResponse {
   string allocation_json = 1;
   string issuance_id = 2;
+  // Entries align with allocation.plans. Authorization is evaluated as part
+  // of recommendation issuance so there is no second dispatch RPC.
+  repeated string auto_dispatch_authorization_json = 3;
+  repeated string receipt_attributes_json = 4;
 }
-message GetGunshiScorecardRequest { string namespace = 1; }
-message GetGunshiScorecardResponse { string scorecard_json = 1; }
+// One declarative Gunshi allocation-policy mutation surface. `operation` is
+// install, promote, rollback, auto_opt_in, kill_switch, feedback, or
+// promote_feedback. Only fields required by the selected operation are
+// accepted.
+message SetGunshiAllocationPolicyRequest {
+  string namespace = 1;
+  string operation = 2;
+  string snapshot_json = 3;
+  string gate_json = 4;
+  string candidate_json = 5;
+  string baseline_evaluation_json = 6;
+  string candidate_evaluation_json = 7;
+  string expected_revision = 8;
+  string reason = 9;
+  bool enabled = 10;
+  string issuance_id = 11;
+  string allocation_json = 12;
+  string choice_json = 13;
+  string outcome_json = 14;
+  string suite_id = 15;
+  string allocation_id = 16;
+}
+message SetGunshiAllocationPolicyResponse { string status_json = 1; }
+message GetGunshiAllocationStatusRequest { string namespace = 1; }
+message GetGunshiAllocationStatusResponse {
+  string status_json = 1;
+  string scorecard_json = 2;
+}
 
 // --- Host-executed external-action authorization ---
 // These contracts describe bounded authority and causal evidence. Chisei does
-// not execute host actions, and v1 authorization decisions do not issue a
-// signed permit; permit issuance is a separate protocol stage.
+// not execute host actions. An allowed authorization returns its signed permit
+// directly so callers do not coordinate a second issuance lifecycle.
 message ExternalActionRequest {
   string version = 1; // external-action.request/v1
   string operation_id = 2;
@@ -990,6 +1065,8 @@ message ExternalActionPermit {
   string initiating_actor = 44; // immutable actor that began the chain
   bool offline_revocation_unavailable = 45;
   string policy_scope = 46;
+  // Region/site pin for online redeem (#293). Empty means default "local".
+  string site_id = 47;
 }
 
 message ExternalActionRedemption {
@@ -1000,6 +1077,8 @@ message ExternalActionRedemption {
   int64 redeemed_at_ms = 5;
   uint32 invocation_ordinal = 6;
   int64 evidence_due_at_ms = 7; // terminal host evidence deadline from the signed permit window
+  // Site pin that performed the redeem (#293).
+  string site_id = 8;
 }
 
 message ExternalActionEvidence {
@@ -1044,35 +1123,14 @@ message ExternalActionDecision {
   ExternalActionPermit permit = 13;
 }
 
-message AuthorizeExternalActionRequest { ExternalActionRequest request = 1; }
-message AuthorizeExternalActionResponse { ExternalActionDecision decision = 1; }
-message ResolveExternalActionApprovalRequest {
-  string authorization_id = 1;
-  bool approve = 2;
-  string reason = 3;
+message AuthorizeExternalActionRequest {
+  ExternalActionRequest request = 1;
+  bool offline = 2; // requires explicit action eligibility in stored permit policy
 }
-message ResolveExternalActionApprovalResponse { ExternalActionDecision decision = 1; }
-message CancelExternalActionAuthorizationRequest {
-  string authorization_id = 1;
-  string reason = 2;
+message AuthorizeExternalActionResponse {
+  ExternalActionDecision decision = 1;
+  ExternalActionPermit permit = 2;
 }
-message CancelExternalActionAuthorizationResponse { ExternalActionDecision decision = 1; }
-message IssueExternalActionPermitRequest {
-  string authorization_id = 1;
-  string idempotency_key = 2;
-  bool offline = 3; // requires explicit action eligibility in stored permit policy
-}
-message IssueExternalActionPermitResponse { ExternalActionPermit permit = 1; }
-message VerifyExternalActionPermitRequest {
-  ExternalActionPermit permit = 1;
-  string executor = 2;
-  string requesting_harness = 3;
-  string canonical_arguments_digest = 4;
-  repeated string target_selectors = 5;
-  map<string, string> observed_preconditions = 6;
-  repeated string host_capabilities = 7;
-}
-message VerifyExternalActionPermitResponse { bool valid = 1; string reason = 2; }
 message RedeemExternalActionPermitRequest {
   ExternalActionPermit permit = 1;
   string executor = 2;
@@ -1086,15 +1144,6 @@ message RedeemExternalActionPermitRequest {
   int64 invoked_at_ms = 10; // required for offline reconciliation; zero for online pre-execution redemption
 }
 message RedeemExternalActionPermitResponse { ExternalActionRedemption redemption = 1; }
-message RevokeExternalActionPermitRequest { string revocation_handle = 1; string reason = 2; }
-message RevokeExternalActionPermitResponse { bool revoked = 1; }
-message SetExternalActionKillSwitchRequest {
-  string scope_kind = 1; // action_type | executor | harness | namespace | signing_key
-  string scope_value = 2;
-  bool enabled = 3;
-  string reason = 4;
-}
-message SetExternalActionKillSwitchResponse { bool changed = 1; }
 message ExternalPermitPolicy {
   string scope = 1;
   repeated string offline_action_types = 2;
@@ -1103,21 +1152,119 @@ message ExternalPermitPolicy {
   repeated string permitted_delegators = 5;
   uint32 max_delegation_depth = 6;
 }
-message SetExternalPermitPolicyRequest { ExternalPermitPolicy policy = 1; }
-message SetExternalPermitPolicyResponse { ExternalPermitPolicy policy = 1; }
-message DelegateExternalActionPermitRequest {
-  ExternalActionPermit parent = 1;
-  string subject_actor = 2;
-  repeated string target_selectors = 3;
-  repeated string allowed_effects = 4;
-  uint64 budget_micros = 5;
-  uint64 volume_limit = 6;
-  uint32 blast_radius_limit = 7;
-  uint32 max_invocations = 8;
-  int64 expires_at_ms = 9;
-  string risk_class = 10;
+// approve | deny | cancel | revoke | delegate
+message TransitionExternalActionRequest {
+  string transition = 1;
+  string authorization_id = 2;
+  string reason = 3;
+  string revocation_handle = 4;
+  ExternalActionPermit parent = 5;
+  string subject_actor = 6;
+  repeated string target_selectors = 7;
+  repeated string allowed_effects = 8;
+  uint64 budget_micros = 9;
+  uint64 volume_limit = 10;
+  uint32 blast_radius_limit = 11;
+  uint32 max_invocations = 12;
+  int64 expires_at_ms = 13;
+  string risk_class = 14;
+  bool offline = 15;
 }
-message DelegateExternalActionPermitResponse { ExternalActionPermit permit = 1; }
+message TransitionExternalActionResponse {
+  ExternalActionDecision decision = 1;
+  ExternalActionPermit permit = 2;
+  bool changed = 3;
+}
+
+// set_policy | kill_switch
+message SetExternalActionPolicyRequest {
+  string operation = 1;
+  ExternalPermitPolicy policy = 2;
+  string scope_kind = 3; // action_type | executor | harness | namespace | signing_key
+  string scope_value = 4;
+  bool enabled = 5;
+  string reason = 6;
+}
+message SetExternalActionPolicyResponse {
+  ExternalPermitPolicy policy = 1;
+  bool changed = 2;
+}
+
+// --- Governed immutable-subject evaluation ---
+// The core envelope contains identifiers and digests only. Registered profile
+// adapters validate domain fields before constructing this payload.
+message GovernedSubjectReference {
+  string kind = 1;
+  string reference = 2;
+  string content_digest = 3;
+  int64 observed_at_ms = 4;
+}
+message GovernedSubjectEnvelope {
+  string version = 1; // chisei.governed-subject/v1
+  string namespace = 2;
+  string request_id = 3;
+  string subject_profile = 4;
+  string subject_identity = 5;
+  string content_digest = 6;
+  repeated GovernedSubjectReference references = 7;
+  string evaluation_profile = 8;
+}
+message EvaluateGovernedSubjectRequest { GovernedSubjectEnvelope subject = 1; }
+message GovernedSubjectResult {
+  string version = 1; // chisei.governed-subject-result/v1
+  string decision = 2; // allow | deny | unavailable | unknown
+  string operation_id = 3;
+  string receipt_schema = 4;
+  string receipt_digest = 5;
+  repeated GovernedSubjectReference references = 6;
+  bool fresh = 7;
+  string failure_code = 8;
+  string failure_message = 9;
+}
+message EvaluateGovernedSubjectResponse { GovernedSubjectResult result = 1; }
+
+// Authenticated evidence export for Tenkai's single compiled governed-subject
+// admission profile. This is not an arbitrary receipt-signing API.
+message ExportGovernedSubjectProvenanceRequest {
+  string export_id = 1;
+  string operation_id = 2;
+  string expected_subject_identity = 3;
+  string expected_manifest_digest = 4;
+  string expected_artifact_digest = 5;
+  string expected_receipt_digest = 6;
+  string expected_subject_content_digest = 7;
+}
+message GovernedSubjectProvenanceReference {
+  string kind = 1;
+  string id = 2;
+  string digest = 3;
+}
+message GovernedSubjectProvenanceEnvelope {
+  string profile = 1; // example.governed-subject-receipt/v1
+  string issuer = 2; // sekai-chisei
+  string issuer_key_id = 3;
+  string subject = 4;
+  string content_digest = 5;
+  string decision = 6; // allow
+  string receipt_schema = 7; // chisei.governed-subject-receipt/v1
+  string receipt_digest = 8;
+  repeated GovernedSubjectProvenanceReference governed_references = 9;
+  int64 observed_at_unix_ms = 10;
+  int64 expires_at_unix_ms = 11;
+  string signature = 12;
+}
+message ExportGovernedSubjectProvenanceResponse {
+  GovernedSubjectProvenanceEnvelope envelope = 1;
+  string envelope_digest = 2;
+  bool replayed = 3;
+  GovernedSubjectProvenanceTrustRoot trust_root = 4;
+}
+message GovernedSubjectProvenanceTrustRoot {
+  uint32 version = 1;
+  string key_id = 2;
+  string identity = 3;
+  string public_key = 4;
+}
 
 // --- Service ---
 
@@ -1125,85 +1272,46 @@ message DelegateExternalActionPermitResponse { ExternalActionPermit permit = 1; 
 // evaluation, approvals, and learning. Agent runtimes remain replaceable
 // clients of this service.
 service ChiseiService {
+  rpc EvaluateGovernedSubject(EvaluateGovernedSubjectRequest) returns (EvaluateGovernedSubjectResponse);
+  rpc ExportGovernedSubjectProvenance(ExportGovernedSubjectProvenanceRequest) returns (ExportGovernedSubjectProvenanceResponse);
+  rpc ExecuteEvaluationManifest(ExecuteEvaluationManifestRequest) returns (ExecuteEvaluationManifestResponse);
+  rpc CancelEvaluationExecution(CancelEvaluationExecutionRequest) returns (CancelEvaluationExecutionResponse);
   rpc AuthorizeExternalAction(AuthorizeExternalActionRequest) returns (AuthorizeExternalActionResponse);
-  rpc ResolveExternalActionApproval(ResolveExternalActionApprovalRequest) returns (ResolveExternalActionApprovalResponse);
-  rpc CancelExternalActionAuthorization(CancelExternalActionAuthorizationRequest) returns (CancelExternalActionAuthorizationResponse);
-  rpc IssueExternalActionPermit(IssueExternalActionPermitRequest) returns (IssueExternalActionPermitResponse);
-  rpc VerifyExternalActionPermit(VerifyExternalActionPermitRequest) returns (VerifyExternalActionPermitResponse);
+  rpc TransitionExternalAction(TransitionExternalActionRequest) returns (TransitionExternalActionResponse);
   rpc RedeemExternalActionPermit(RedeemExternalActionPermitRequest) returns (RedeemExternalActionPermitResponse);
-  rpc RevokeExternalActionPermit(RevokeExternalActionPermitRequest) returns (RevokeExternalActionPermitResponse);
-  rpc SetExternalActionKillSwitch(SetExternalActionKillSwitchRequest) returns (SetExternalActionKillSwitchResponse);
-  rpc SetExternalPermitPolicy(SetExternalPermitPolicyRequest) returns (SetExternalPermitPolicyResponse);
-  rpc DelegateExternalActionPermit(DelegateExternalActionPermitRequest) returns (DelegateExternalActionPermitResponse);
+  rpc SetExternalActionPolicy(SetExternalActionPolicyRequest) returns (SetExternalActionPolicyResponse);
   // Budget
-  rpc CheckBudget(CheckBudgetRequest) returns (CheckBudgetResponse);
   rpc RecordUsage(RecordUsageRequest) returns (RecordUsageResponse);
   rpc SetBudgetLimit(SetBudgetLimitRequest) returns (SetBudgetLimitResponse);
-
-  // Intelligence portfolio
-  rpc RecordPortfolioObservation(RecordPortfolioObservationRequest) returns (RecordPortfolioObservationResponse);
-  rpc GetPortfolioFrontier(GetPortfolioFrontierRequest) returns (GetPortfolioFrontierResponse);
-  rpc SetPortfolioObjective(SetPortfolioObjectiveRequest) returns (SetPortfolioObjectiveResponse);
-  rpc AllocatePortfolio(AllocatePortfolioRequest) returns (AllocatePortfolioResponse);
+  // Single fat decide for gateway PEP thinning (Issue #163).
+  rpc DecideGatewayExecution(DecideGatewayExecutionRequest) returns (DecideGatewayExecutionResponse);
 
   // Model Policy
   rpc SetNamespacePolicy(SetNamespacePolicyRequest) returns (SetNamespacePolicyResponse);
-  rpc ResolvePolicy(ResolvePolicyRequest) returns (ResolvePolicyResponse);
   // Read-only, operator-safe live projection of effective namespace policy.
   rpc GetEffectivePolicySummary(GetEffectivePolicySummaryRequest) returns (GetEffectivePolicySummaryResponse);
-  // Compact namespace-authorized projection of the governed routing availability map.
-  rpc ListAvailableModels(ListAvailableModelsRequest) returns (ListAvailableModelsResponse);
-  rpc SetNamespaceWorkerPolicy(SetNamespaceWorkerPolicyRequest) returns (SetNamespaceWorkerPolicyResponse);
-  rpc CheckEgress(CheckEgressRequest) returns (CheckEgressResponse);
-
   // Pipeline
-  rpc RunPipeline(RunPipelineRequest) returns (RunPipelineResponse);
-  rpc ListPipelineRuns(ListPipelineRunsRequest) returns (ListPipelineRunsResponse);
-  rpc RecordSampleObservation(RecordSampleObservationRequest) returns (RecordSampleObservationResponse);
-  rpc RecordGatewayAudit(RecordGatewayAuditRequest) returns (RecordGatewayAuditResponse);
   // Native governed entry path. Planning resolves policy, context, routing,
   // budget, and evaluation state before a provider call is allowed.
   rpc PlanExecution(PlanExecutionRequest) returns (PlanExecutionResponse);
   // Executes a previously governed plan through the selected provider adapter.
-  rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse);
   rpc ExecutePlanStream(ExecutePlanRequest) returns (stream ExecutePlanStreamEvent);
   rpc ReportOperationEvent(ReportOperationEventRequest) returns (ReportOperationEventResponse);
-  rpc AuthorizeOperationReporter(AuthorizeOperationReporterRequest) returns (AuthorizeOperationReporterResponse);
   rpc GetOperationReceipt(GetOperationReceiptRequest) returns (GetOperationReceiptResponse);
-  rpc QueryOperationStatistics(QueryOperationStatisticsRequest) returns (QueryOperationStatisticsResponse);
   rpc ListKiokuCandidates(ListKiokuCandidatesRequest) returns (ListKiokuCandidatesResponse);
   rpc ReviewKiokuMemory(ReviewKiokuMemoryRequest) returns (ReviewKiokuMemoryResponse);
   rpc IssueGunshiRecommendations(IssueGunshiRecommendationsRequest) returns (IssueGunshiRecommendationsResponse);
-  rpc RecordGunshiFeedback(RecordGunshiFeedbackRequest) returns (RecordGunshiFeedbackResponse);
-  rpc GetGunshiScorecard(GetGunshiScorecardRequest) returns (GetGunshiScorecardResponse);
-  rpc ReserveGatewayRequestAlias(ReserveGatewayRequestAliasRequest) returns (ReserveGatewayRequestAliasResponse);
-  rpc ClaimGatewayRequestAliasDispatch(ClaimGatewayRequestAliasDispatchRequest) returns (ClaimGatewayRequestAliasDispatchResponse);
-
-  // Affinity
-  rpc GetAffinity(GetAffinityRequest) returns (GetAffinityResponse);
+  rpc SetGunshiAllocationPolicy(SetGunshiAllocationPolicyRequest) returns (SetGunshiAllocationPolicyResponse);
+  rpc GetGunshiAllocationStatus(GetGunshiAllocationStatusRequest) returns (GetGunshiAllocationStatusResponse);
+  rpc ClaimGatewayDispatch(ClaimGatewayDispatchRequest) returns (ClaimGatewayDispatchResponse);
 
   // Eval
-  rpc CreateEvalSuite(CreateEvalSuiteRequest) returns (CreateEvalSuiteResponse);
-  rpc ListEvalSuites(ListEvalSuitesRequest) returns (ListEvalSuitesResponse);
+  rpc PutEvaluatorDefinition(PutEvaluatorDefinitionRequest) returns (PutEvaluatorDefinitionResponse);
+  rpc PutEvaluationPlan(PutEvaluationPlanRequest) returns (PutEvaluationPlanResponse);
+  rpc ResolveEvaluationPlan(ResolveEvaluationPlanRequest) returns (ResolveEvaluationPlanResponse);
   rpc GetEvalSuite(GetEvalSuiteRequest) returns (GetEvalSuiteResponse);
-  rpc CreateEvalRun(CreateEvalRunRequest) returns (CreateEvalRunResponse);
   rpc GetEvalRun(GetEvalRunRequest) returns (GetEvalRunResponse);
   rpc ListEvalRuns(ListEvalRunsRequest) returns (ListEvalRunsResponse);
-  rpc TrackEvalIteration(TrackEvalIterationRequest) returns (TrackEvalIterationResponse);
-  rpc GetLatestEvalIteration(GetLatestEvalIterationRequest) returns (GetLatestEvalIterationResponse);
-  rpc ListEvalIterations(ListEvalIterationsRequest) returns (ListEvalIterationsResponse);
-  rpc CompareRuns(CompareRunsRequest) returns (CompareRunsResponse);
-  rpc GetEvidenceContextGate(GetEvidenceContextGateRequest) returns (GetEvidenceContextGateResponse);
-  rpc EvalVariance(EvalVarianceRequest) returns (EvalVarianceResponse);
-  rpc EvalModelCompare(EvalModelCompareRequest) returns (EvalModelCompareResponse);
+  rpc GetSampleObservation(GetSampleObservationRequest) returns (GetSampleObservationResponse);
 
-  // Evolve
-  rpc EvolveSuggest(EvolveSuggestRequest) returns (EvolveSuggestResponse);
-  rpc EvolveEnhance(EvolveEnhanceRequest) returns (EvolveEnhanceResponse);
-  rpc EvolveRecommend(EvolveRecommendRequest) returns (EvolveRecommendResponse);
-  rpc EvolveReport(EvolveReportRequest) returns (EvolveReportResponse);
-  rpc EvolvePatterns(EvolvePatternsRequest) returns (EvolvePatternsResponse);
-  rpc EvolveVariance(EvolveVarianceRequest) returns (EvolveVarianceResponse);
-  rpc EvolveAbResults(EvolveAbResultsRequest) returns (EvolveAbResultsResponse);
-  rpc EvolveTemplates(EvolveTemplatesRequest) returns (EvolveTemplatesResponse);
 }

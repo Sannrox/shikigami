@@ -80,9 +80,12 @@ The harness always creates a distinct `run_id` for the attempt. A host-supplied
 
 - `PlanExecution.ExecutionInput.logical_operation_id = operation_id`;
 - `attempt_id = run_id`;
-- `shikigami.run.begin`, tool, and completion events are reported against the
-  same operation; and
-- `GetOperationReceipt(operation_id)` reconstructs the plane-visible history.
+- the 1.0 plane generates a host `PlanExecution.plan_id` receipt identity;
+  attempt, model, tool, and completion events are reported against that host
+  receipt with causal parents, while each model call has its own executed
+  `PlanExecution` receipt; and
+- `GetOperationReceipt(host_plan_id)` reconstructs the plane-visible host
+  history, with model receipt ids linked from `model_called` attributes.
 
 Direct claim intake should therefore use the ActionInstance-bound
 `operation_id` as `RunRequest.logical_operation_id`; it must not mint a second

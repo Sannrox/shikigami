@@ -93,7 +93,7 @@ authorized through the plane’s host-executed external-action API
 
 | Decision | Host behavior |
 | --- | --- |
-| `permit` | Execute the tool |
+| `permit` | Redeem the signed permit, then execute only after redemption succeeds |
 | `deny` | Do **not** execute; surface denial on the tool result / events |
 | `require_approval` | Do **not** execute (headless path cannot wait for interactive approval) |
 | missing / unknown | Fail closed as denial |
@@ -102,8 +102,13 @@ authorized through the plane’s host-executed external-action API
 Offline adapters (`none`, `local`) do **not** call external-action; they only
 enforce the local tool allow-list.
 
-Action type is `shikigami.tool.<name>`. Arguments are summarized as a SHA-256
-digest (`canonical_arguments_digest`); full args stay on the host.
+Action type is `shikigami.tool.<name>.<risk_class>/v1`, with the risk class
+derived from the tool (`read`, `write`, or `destructive`). Arguments are
+summarized as a SHA-256 digest (`canonical_arguments_digest`); full args stay
+on the host. A permitted action also binds the executor, harness, argument
+digest, project-scoped target selector, host capability, and idempotency key;
+the host redeems that signed permit through `RedeemExternalActionPermit`
+before running the tool.
 
 ### Tests
 

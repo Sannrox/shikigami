@@ -16,10 +16,13 @@ plane receipts cannot be joined across shikigami and peer hosts (e.g. onmyoji).
 1. **`run_id` is the attempt id.** Generated as a UUID by the harness (or
    restored on resume). It is the stable key for local checkpoints under
    `.shikigami-state/runs/<run_id>/`.
-2. **`operation_id` is the logical operation id.** It is the key for plane
-   `ReportOperationEvent`, `GetOperationReceipt`, and
-   `ExecutionInput.logical_operation_id`. Default: equal to `run_id` when the
-   caller does not supply a parent logical operation.
+2. **`RunHandle.operation_id` is the logical lineage id.** It is sent as
+   `ExecutionInput.logical_operation_id` and defaults to `run_id` when the
+   caller does not supply a parent logical operation. Sekai/Chisei 1.0 owns a
+   separate receipt identities: the host `PlanExecution.plan_id` aggregates
+   the run lifecycle, while each model `PlanExecution.plan_id` records one
+   executed model call. Authenticated host harvest events and
+   `GetOperationReceipt` use the host-generated id.
 3. **`attempt_id` equals `run_id`.** Populated on PlanExecution and harvest
    attributes so plane field names match harness terms without inventing a
    second UUID.
@@ -36,7 +39,8 @@ plane receipts cannot be joined across shikigami and peer hosts (e.g. onmyoji).
 - Default offline and CLI runs keep a one-line identity (`run_id ==
   operation_id == attempt_id`).
 - Hosted / onmyoji embeddings can join multi-step workflows by sharing
-  `logical_operation_id` across attempts.
+  `logical_operation_id` across attempts; each run has one host receipt and
+  each model call has its own receipt id for causal reporting.
 - Changing plane core id generation remains out of scope (non-goal of this ADR).
 
 ## Correlation example

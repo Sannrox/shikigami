@@ -8,19 +8,22 @@ How shikigami identifiers map to sekai-chisei plane fields. Authority:
 | Shikigami | Plane / stack field | Default |
 | --- | --- | --- |
 | `RunResult.run_id` | `attempt_id`, checkpoint dir name | New UUID per attempt |
-| `RunHandle.operation_id` | `operation_id`, `logical_operation_id` | Same as `run_id` unless overridden |
-| `RunRequest.logical_operation_id` | seeds `operation_id` | Optional; host-supplied |
+| `RunHandle.operation_id` | `ExecutionInput.logical_operation_id` | Same as `run_id` unless overridden |
+| `RunRequest.logical_operation_id` | seeds logical lineage | Optional; host-supplied |
+| host `PlanExecution.plan_id` | aggregate receipt `operation_id` | Plane-generated host lifecycle receipt; created once per run |
+| model `PlanExecution.plan_id` | per-turn model receipt | Plane-generated receipt executed for each governed model call |
 | resume `resume_run_id` | continues same attempt | Loads checkpoint for that `run_id` |
 
 ### Governed path population
 
 | Surface | Fields set |
 | --- | --- |
-| `PlanExecution` / `ExecutionInput` | `logical_operation_id = operation_id`, `attempt_id = run_id` |
-| External-action request | `operation_id`, `attempt_id = run_id` |
-| Harvest `shikigami.run.begin` | `run_id`, `attempt_id`, `logical_operation_id`, `operation_id` |
-| Harvest tool / complete | events keyed by `operation_id` |
-| Receipts | `GetOperationReceipt(operation_id)` |
+| `PlanExecution` / `ExecutionInput` | `logical_operation_id = RunHandle.operation_id`, `attempt_id = run_id` |
+| Host receipt | `PlanExecution` records intent, policy, routing, and budget; authenticated events add attempt, model, tool, and outcome facts |
+| Model receipt | `PlanExecution` + `ExecutePlanStream` records one governed model call and its terminal outcome |
+| External-action request | `operation_id = host PlanExecution.plan_id`, `attempt_id = run_id` |
+| Host event links | `model_called.plan_operation_id` points to the model receipt; `action_performed` carries tool result attributes |
+| Receipts | `GetOperationReceipt(host_plan_id)`; follow model receipt ids from `model_called` |
 
 Offline adapters do not write plane fields; local handles still set
 `operation_id` for in-process consistency (`local-` prefix when no override).
@@ -43,8 +46,11 @@ operation_id=3fa8…   # unless logical_operation_id was set
 HarnessEvent / doctor: run_id=3fa8…
 
 # 3) Plane
-GetOperationReceipt { operation_id: "3fa8…" }
-# → receipt_json + event kinds shikigami.run.begin | shikigami.tool | shikigami.run.complete
+host_plan_id=plane-generated-host-plan-id
+GetOperationReceipt { operation_id: host_plan_id }
+# → host planning spine + attempt_started + model_called + action_performed*
+#   + outcome_recorded
+# model_called.plan_operation_id identifies the per-turn model receipt.
 
 # 4) Parent-owned operation (embedder)
 RunRequest {
@@ -52,7 +58,8 @@ RunRequest {
   logical_operation_id: Some(parent_op.to_string()), // plane key
   ..
 }
-# run_id is still a new attempt UUID; receipts live under parent_op
+# run_id is still a new attempt UUID; host and model receipt ids are generated
+# by PlanExecution and the logical id remains in their intent lineage.
 ```
 
 ```rust
@@ -68,6 +75,7 @@ async fn under_parent_op(parent_op: &str) -> shikigami::RunResult {
 
 ## Resume
 
-Resume reuses the same `run_id` (attempt). Prefer keeping the original
-`logical_operation_id` if the host supplied one on the first attempt so plane
-events stay on the same operation.
+Resume reuses the same `run_id` (attempt). The governance checkpoint preserves
+the original logical lineage, host/model receipt ids, and any pending report;
+an explicit `RunRequest.logical_operation_id` still takes precedence when a
+host intentionally changes the correlation.

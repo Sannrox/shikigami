@@ -6,6 +6,7 @@ mod none;
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::checkpoint::{GovernanceCheckpoint, StagedToolExecution, StagedToolReport};
 use crate::config::Config;
 use crate::model::{ChatMessage, ModelTurn};
 use crate::tools::ToolDef;
@@ -91,6 +92,31 @@ pub trait GovernancePort: Send + Sync {
         logical_operation_id: Option<&str>,
     ) -> Result<RunHandle, GovernanceError>;
 
+    /// Start or restore a run with durable governance correlation state.
+    /// Adapters that have no remote receipt state use the ordinary begin path.
+    async fn begin_run_with_checkpoint(
+        &self,
+        run_id: &str,
+        task: &str,
+        logical_operation_id: Option<&str>,
+        _checkpoint: Option<&GovernanceCheckpoint>,
+    ) -> Result<RunHandle, GovernanceError> {
+        self.begin_run(run_id, task, logical_operation_id).await
+    }
+
+    /// Return adapter-owned correlation/retry state for the next local
+    /// checkpoint. The plane remains authoritative for the receipt itself.
+    fn checkpoint_state(&self, _run_id: &str) -> Option<GovernanceCheckpoint> {
+        None
+    }
+
+    /// Whether a tool can apply a host-side effect that must not be replayed
+    /// after an interrupted process. Adapters may refine this from policy
+    /// risk; the conservative default protects unknown tools.
+    fn tool_requires_execution_checkpoint(&self, _name: &str) -> bool {
+        true
+    }
+
     /// Produce the next model turn. Local adapters use the provided model port
     /// callback; sekai-chisei uses PlanExecution on the plane.
     async fn plan_turn(
@@ -102,12 +128,98 @@ pub trait GovernancePort: Send + Sync {
         local_model: &dyn crate::model::ModelPort,
     ) -> Result<ModelTurn, GovernanceError>;
 
+    /// Report the model result after the engine has durably staged it in the
+    /// local checkpoint. Adapters without remote harvest treat this as a no-op.
+    async fn report_model_turn(
+        &self,
+        _handle: &RunHandle,
+        _ok: bool,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    /// Stage host tool outcomes before their effects are reported. This is
+    /// kept separate from `report_tool` so a resume can drain the same list.
+    async fn stage_tool_reports(
+        &self,
+        _handle: &RunHandle,
+        _reports: Vec<StagedToolReport>,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    /// Replay staged reports after restoring a checkpoint. Implementations
+    /// must use stable call ids and idempotent report keys.
+    async fn replay_staged_tool_reports(&self, _handle: &RunHandle) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    /// Persist an in-doubt marker before invoking a host-side effect.
+    async fn stage_tool_execution(
+        &self,
+        _handle: &RunHandle,
+        _execution: StagedToolExecution,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    /// Transition an authorization marker to the point immediately before
+    /// the host effect begins. This boundary is what makes a resumed
+    /// execution in-doubt rather than safely retryable.
+    async fn mark_tool_execution_started(
+        &self,
+        _handle: &RunHandle,
+        _call_id: &str,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    /// Advance an in-doubt marker after the host call returns. The marker is
+    /// cleared only after a checkpoint containing the staged report exists.
+    async fn mark_tool_execution_complete(
+        &self,
+        _handle: &RunHandle,
+        _call_id: &str,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    async fn clear_staged_tool_executions(
+        &self,
+        _handle: &RunHandle,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    /// Restored authorization-only markers may be retried with stable permit
+    /// identities. Restored started/completed markers are in-doubt and must
+    /// not be executed again without an operator decision.
+    async fn recover_staged_tool_executions(
+        &self,
+        _handle: &RunHandle,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
     async fn authorize_tool(
         &self,
         handle: &RunHandle,
         name: &str,
         args_json: &str,
     ) -> Result<(), GovernanceError>;
+
+    /// Authorize a tool with the stable conversation/tool identity that will
+    /// also be used for durable execution and permit idempotency. Adapters
+    /// without identity-sensitive authorization retain the ordinary path.
+    async fn authorize_tool_with_id(
+        &self,
+        handle: &RunHandle,
+        _call_id: &str,
+        name: &str,
+        args_json: &str,
+    ) -> Result<(), GovernanceError> {
+        self.authorize_tool(handle, name, args_json).await
+    }
 
     async fn report_tool(
         &self,
@@ -116,6 +228,27 @@ pub trait GovernancePort: Send + Sync {
         ok: bool,
         detail: &str,
     ) -> Result<(), GovernanceError>;
+
+    async fn report_tool_with_id(
+        &self,
+        _handle: &RunHandle,
+        _call_id: &str,
+        name: &str,
+        ok: bool,
+        detail: &str,
+    ) -> Result<(), GovernanceError> {
+        self.report_tool(_handle, name, ok, detail).await
+    }
+
+    /// Compensate a remote host receipt when its correlation could not be
+    /// durably checkpointed. Adapters without remote receipts do nothing.
+    async fn abort_uncheckpointed_run(
+        &self,
+        _handle: &RunHandle,
+        _reason: &str,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
 
     async fn complete_run(
         &self,

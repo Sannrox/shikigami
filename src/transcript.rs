@@ -251,6 +251,7 @@ mod tests {
                 content: "step".into(),
                 status: TodoStatus::Completed,
             }],
+            governance: None,
         };
         cp.save(&runs).unwrap();
 
@@ -300,6 +301,7 @@ mod tests {
                 tool_call_id: "t".into(),
             }),
             todos: vec![],
+            governance: None,
         };
         cp.save(&runs).unwrap();
 

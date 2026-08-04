@@ -90,8 +90,11 @@ Use the plane as the operational source of truth:
   terminal state. Shikigami's vendored client schema contains only the
   claim/heartbeat/ack subset it consumes; the shikigami CLI does not expose
   these inspection RPCs.
-- `GetOperationReceipt(operation_id)` reconstructs planning, run, tool,
-  intervention, resume/replacement, and outcome events.
+- `GetOperationReceipt(host_plan_id)` reconstructs the host planning receipt,
+  attempt, model, tool, intervention, resume/replacement, and outcome events.
+  Each `model_called` event links to the corresponding executed model receipt;
+  the logical `operation_id` remains the parent lineage used to correlate
+  replacement attempts.
 
 Local events and checkpoints help diagnose one host, but they do not override
 plane state. For detailed event fields, see [harvest.md](harvest.md) and

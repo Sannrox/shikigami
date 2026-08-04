@@ -4,7 +4,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Always rebuild metadata; proto compile only when the feature is on.
     println!("cargo:rerun-if-changed=proto/sekai.proto");
     println!("cargo:rerun-if-changed=proto/chisei.proto");
-    println!("cargo:rerun-if-changed=proto/llm.proto");
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(feature = "governance-sekai-chisei")]
@@ -13,7 +12,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let protos = [
             proto_dir.join("sekai.proto"),
             proto_dir.join("chisei.proto"),
-            proto_dir.join("llm.proto"),
         ];
         // SAFETY: build scripts routinely set PROTOC for the compile step only.
         unsafe {
