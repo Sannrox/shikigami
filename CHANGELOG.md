@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Deterministic project verification through `scripts/verify.sh`, including
-  changed-file routing, Markdown link validation, full Rust gates, JSON
-  evidence, and a pinned Rust toolchain for local agents and CI.
+- Deterministic project verification through Make targets for formatting,
+  validation, unit tests, integration tests, and the embed smoke, plus a pinned
+  Rust toolchain for local agents and CI.
 - `shikigami doctor --models` to print the effective model catalog, including
   the `auto` sekai-chisei routing option; new settings default the preferred
   model to `auto` while preserving `gpt-4.1-mini` for direct HTTP fallback.

@@ -25,17 +25,19 @@ Run the narrowest useful checks first, then expand according to change risk.
    | configuration | parsing/default tests, `.env.example`, configuration docs |
    | docs/templates/Skills | syntax, links or commands where practical; Skill validator for Skills |
 
-3. Before ship-level handoff, use the repository verifier for the normal gates
-   unless the user explicitly requested a narrower check:
+3. Before ship-level handoff, use the repository Make targets for the normal
+   gates unless the user explicitly requested a narrower check:
 
    ```bash
-   ./scripts/verify.sh verify --all --json
+   make update
+   make validate
+   make test
+   make test-integration
    ```
 
-   For a focused local pass, use `./scripts/verify.sh verify` and let its
-   changed-file routing select the checks. The verifier is the source of truth
-   for command selection; do not ask an agent to reproduce that routing from
-   prose.
+   Run `make embed` for changes affecting the host proof or public embedding
+   path. The Makefile is the source of truth for the command; do not ask an
+   agent to reproduce it from prose.
 
    Run `cargo build --locked` when packaging, feature selection, or binaries
    changed independently of tests. Complete when every applicable local gate

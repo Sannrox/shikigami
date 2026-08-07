@@ -35,11 +35,12 @@ Human documentation index: [docs/README.md](docs/README.md).
 - `cargo run --locked --example embed_smoke` is the offline library host proof
   (also gated on PR/`main` CI Build & Test).
 - `cargo build --release` builds an optimized binary.
-- `./scripts/verify.sh plan --base origin/main --json` reports the checks
-  selected from the working tree and branch diff.
-- `./scripts/verify.sh verify` runs the deterministic changed-file gate.
-- `./scripts/verify.sh verify --all --json` runs the complete project gate and
-  emits machine-readable evidence. See [docs/project-verification.md](docs/project-verification.md).
+- `make all` builds all targets.
+- `make update` applies repository formatting updates.
+- `make validate` runs Markdown-link, formatting, and Clippy checks.
+- `make test` runs unit tests; `make test-integration` runs integration tests.
+- `make embed` runs the offline library host proof.
+  See [docs/project-verification.md](docs/project-verification.md).
 - `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
   runs the ignored live plane probe when a local sekai-chisei is available.
 
@@ -59,9 +60,9 @@ under `.agents/skills/`. Read `DESIGN.md`, `VISION.md`, and accepted ADRs under
 review. For non-trivial implementation work (any behavior, security, settings,
 or public-API change) that will be **committed, pushed, or opened as a PR**:
 
-1. Run focused checks via `./scripts/verify.sh verify` and the `verify-change`
-   Skill. Before shipping, run `./scripts/verify.sh verify --all --json` so the
-   complete deterministic evidence is available.
+1. Run `make update`, `make validate`, `make test`, and
+   `make test-integration` via the `verify-change` Skill. Run `make embed` when
+   the host proof is affected.
 2. Run **`autoreview`** before the ship commit (or before push if the commit
    already exists). **Do not vendor** the autoreview skill into this repo;
    resolve the helper from the shared skill install (first match wins):
