@@ -10,9 +10,7 @@
 
 ## Validation
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo test --locked`
-- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `./scripts/verify.sh verify --all --json`
 - [ ] Additional focused or smoke tests are listed below
 
 <!-- List additional commands and results. Offline suite must pass without a plane. -->

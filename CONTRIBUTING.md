@@ -33,12 +33,10 @@ use the **Ideas** category until then.
 ```bash
 git clone https://github.com/Sannrox/shikigami.git
 cd shikigami
-cargo test
-cargo fmt
-cargo build --all-targets
+./scripts/verify.sh verify --all
 ```
 
-Requirements: a recent Rust toolchain with **2024 edition** support.
+Requirements: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ### Offline vs live tests
 
@@ -99,7 +97,8 @@ Dependabot opens weekly cargo and GitHub Actions update PRs.
 
 1. Keep the change focused (one outcome per PR).
 2. Include tests for behavior changes.
-3. Run `cargo fmt` and `cargo test`.
+3. Run `./scripts/verify.sh verify --all` and include the JSON evidence or
+   equivalent command results in the PR description.
 4. Describe behavior, risk, and test evidence in the PR body.
 5. Link an Issue when one exists.
 

@@ -17,7 +17,7 @@ Run the narrowest useful checks first, then expand according to change risk.
 
    | Surface | Required evidence |
    | --- | --- |
-   | Rust source | focused tests, `cargo fmt --check`, relevant Clippy/build |
+   | Rust source | focused tests plus the repository verifier’s source gate |
    | public or multi-component behavior | affected integration test plus normal suite |
    | gateway | deterministic `scripts/chisei_gateway_smoke.sh` |
    | protocol | generated build, service/client/example coverage, compatibility review |
@@ -25,14 +25,17 @@ Run the narrowest useful checks first, then expand according to change risk.
    | configuration | parsing/default tests, `.env.example`, configuration docs |
    | docs/templates/Skills | syntax, links or commands where practical; Skill validator for Skills |
 
-3. Before ship-level handoff, run the normal repository gates unless the user
-   explicitly requested a narrower check:
+3. Before ship-level handoff, use the repository verifier for the normal gates
+   unless the user explicitly requested a narrower check:
 
    ```bash
-   cargo fmt --check
-   cargo test --locked
-   cargo clippy --all-targets -- -D warnings
+   ./scripts/verify.sh verify --all --json
    ```
+
+   For a focused local pass, use `./scripts/verify.sh verify` and let its
+   changed-file routing select the checks. The verifier is the source of truth
+   for command selection; do not ask an agent to reproduce that routing from
+   prose.
 
    Run `cargo build --locked` when packaging, feature selection, or binaries
    changed independently of tests. Complete when every applicable local gate
