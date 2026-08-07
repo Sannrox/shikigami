@@ -37,6 +37,7 @@ make update
 make validate
 make test
 make test-integration
+make test-e2e
 ```
 
 Requirements: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolchain.toml).
@@ -100,9 +101,8 @@ Dependabot opens weekly cargo and GitHub Actions update PRs.
 
 1. Keep the change focused (one outcome per PR).
 2. Include tests for behavior changes.
-3. Run `make update`, `make validate`, `make test`, and
-   `make test-integration`, then include the command results in the PR
-   description.
+3. Run `make update`, `make validate`, `make test`, `make test-integration`,
+   and `make test-e2e`, then include the command results in the PR description.
 4. Describe behavior, risk, and test evidence in the PR body.
 5. Link an Issue when one exists.
 

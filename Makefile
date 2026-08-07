@@ -1,25 +1,29 @@
+# Make targets are thin wrappers around deterministic repository scripts.
+.EXPORT_ALL_VARIABLES:
+
 CARGO ?= cargo
+WHAT ?=
 
-.PHONY: all build update validate test test-integration embed
+.PHONY: all build validate update test test-integration test-e2e embed
 
-all: build
+all:
+	./scripts/make-targets/build.sh $(WHAT)
 
-build:
-	$(CARGO) build --locked --all-targets
-
-update:
-	$(CARGO) fmt --all
+build: all
 
 validate:
-	python3 scripts/validate-docs.py
-	$(CARGO) fmt --all -- --check
-	$(CARGO) clippy --all-targets --locked -- -D warnings
+	./scripts/make-targets/validate.sh
+
+update:
+	./scripts/make-targets/update.sh
 
 test:
-	$(CARGO) test --locked --lib
+	./scripts/make-targets/test.sh $(WHAT)
 
 test-integration:
-	$(CARGO) test --locked --tests
+	./scripts/make-targets/test-integration.sh $(WHAT)
 
-embed:
-	$(CARGO) run --locked --example embed_smoke
+test-e2e:
+	./scripts/make-targets/test-e2e.sh
+
+embed: test-e2e

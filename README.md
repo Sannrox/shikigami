@@ -223,6 +223,7 @@ make update
 make validate
 make test
 make test-integration
+make test-e2e
 ```
 
 The deterministic project gate is documented in

@@ -35,8 +35,8 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
-      - name: Embed smoke (host proof)
-        run: make embed
+      - name: End-to-end smoke (host proof)
+        run: make test-e2e
 
   fmt:
     name: Rustfmt

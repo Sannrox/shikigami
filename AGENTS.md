@@ -36,10 +36,10 @@ Human documentation index: [docs/README.md](docs/README.md).
   (also gated on PR/`main` CI Build & Test).
 - `cargo build --release` builds an optimized binary.
 - `make all` builds all targets.
-- `make update` applies repository formatting updates.
-- `make validate` runs Markdown-link, formatting, and Clippy checks.
+- `make update` runs sorted `scripts/update-*.sh` update scripts.
+- `make validate` runs sorted `scripts/validate-*.sh` validation scripts.
 - `make test` runs unit tests; `make test-integration` runs integration tests.
-- `make embed` runs the offline library host proof.
+- `make test-e2e` runs the offline library host proof (`make embed` is an alias).
   See [docs/project-verification.md](docs/project-verification.md).
 - `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
   runs the ignored live plane probe when a local sekai-chisei is available.
@@ -61,8 +61,8 @@ review. For non-trivial implementation work (any behavior, security, settings,
 or public-API change) that will be **committed, pushed, or opened as a PR**:
 
 1. Run `make update`, `make validate`, `make test`, and
-   `make test-integration` via the `verify-change` Skill. Run `make embed` when
-   the host proof is affected.
+   `make test-integration` via the `verify-change` Skill. Run `make test-e2e`
+   when the host proof is affected.
 2. Run **`autoreview`** before the ship commit (or before push if the commit
    already exists). **Do not vendor** the autoreview skill into this repo;
    resolve the helper from the shared skill install (first match wins):
