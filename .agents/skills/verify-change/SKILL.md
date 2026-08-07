@@ -35,7 +35,7 @@ Run the narrowest useful checks first, then expand according to change risk.
    make test-integration
    ```
 
-   Run `make embed` for changes affecting the host proof or public embedding
+   Run `make test-e2e` for changes affecting the host proof or public embedding
    path. The Makefile is the source of truth for the command; do not ask an
    agent to reproduce it from prose.
 
