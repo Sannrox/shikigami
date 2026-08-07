@@ -35,6 +35,12 @@ Human documentation index: [docs/README.md](docs/README.md).
 - `cargo run --locked --example embed_smoke` is the offline library host proof
   (also gated on PR/`main` CI Build & Test).
 - `cargo build --release` builds an optimized binary.
+- `make all` builds all targets.
+- `make update` applies repository formatting updates.
+- `make validate` runs Markdown-link, formatting, and Clippy checks.
+- `make test` runs unit tests; `make test-integration` runs integration tests.
+- `make embed` runs the offline library host proof.
+  See [docs/project-verification.md](docs/project-verification.md).
 - `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
   runs the ignored live plane probe when a local sekai-chisei is available.
 
@@ -54,8 +60,9 @@ under `.agents/skills/`. Read `DESIGN.md`, `VISION.md`, and accepted ADRs under
 review. For non-trivial implementation work (any behavior, security, settings,
 or public-API change) that will be **committed, pushed, or opened as a PR**:
 
-1. Run focused checks via the `verify-change` Skill (or equivalent `cargo fmt`,
-   `cargo test`, `cargo clippy --all-targets -- -D warnings`).
+1. Run `make update`, `make validate`, `make test`, and
+   `make test-integration` via the `verify-change` Skill. Run `make embed` when
+   the host proof is affected.
 2. Run **`autoreview`** before the ship commit (or before push if the commit
    already exists). **Do not vendor** the autoreview skill into this repo;
    resolve the helper from the shared skill install (first match wins):

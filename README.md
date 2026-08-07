@@ -219,14 +219,16 @@ See [docs/embedding.md](docs/embedding.md).
 ## Development
 
 ```bash
-cargo fmt
-cargo test
-cargo build --all-targets
+make update
+make validate
+make test
+make test-integration
 ```
 
-CI on `main` and pull requests runs **Build & Test**, **Rustfmt**, and **Clippy**
-(see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Those checks are
-required for merges to `main`.
+The deterministic project gate is documented in
+[docs/project-verification.md](docs/project-verification.md). CI on `main` and
+pull requests calls the same Make targets (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+Those checks are required for merges to `main`.
 
 Offline tests must pass with **no** control plane. Live plane probe:
 

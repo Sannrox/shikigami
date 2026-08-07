@@ -20,6 +20,7 @@ Operator and contributor documentation for **shikigami**.
 | Run serve (queue or plane claim) + worker lifecycle | [serve.md](serve.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
+| Run deterministic project checks | [project-verification.md](project-verification.md) |
 | Run metrics export | [metrics.md](metrics.md) |
 | Network egress policy | [network.md](network.md) |
 | MCP client and server host | [mcp.md](mcp.md) |

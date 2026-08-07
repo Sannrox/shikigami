@@ -10,9 +10,10 @@
 
 ## Validation
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo test --locked`
-- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `make update`
+- [ ] `make validate`
+- [ ] `make test`
+- [ ] `make test-integration`
 - [ ] Additional focused or smoke tests are listed below
 
 <!-- List additional commands and results. Offline suite must pass without a plane. -->
