@@ -1,7 +1,9 @@
 # Run metrics export
 
-Process-local counters for fleet operators. **Default builds stay simple** —
-no Prometheus client crate; export is JSON and/or Prometheus *text format*.
+Durable counters for fleet operators. Each process writes its current snapshot
+under $SHIKIGAMI_STATE/metrics/process-<pid>-<instance>.json; CLI and HTTP exports
+aggregate those snapshots with `aggregate.json`. **Default builds stay simple** — no Prometheus
+client crate; export is JSON and/or Prometheus *text format*.
 
 ## Names
 
@@ -31,16 +33,25 @@ println!("{}", snap.to_prometheus());
 ```
 
 `Harness.metrics` is an `Arc<Metrics>` shared for the process lifetime of that
-harness instance (suitable for `serve` fleets).
+harness instance. The process snapshot is flushed after each counter update.
+Clean shutdown folds it into `aggregate.json`; Unix aggregation can also retire
+crashed snapshots after checking the process identity marker. An unclean process
+exit can still lose an update that was not flushed. On hosts without a portable
+process probe, unproven snapshots remain live rather than being counted twice.
 
 ## CLI
 
-No separate scrape port in v0.x. Operators can:
+CLI:
 
-- scrape JSON from a host wrapper that calls `metrics.snapshot()`, or
-- write Prometheus text via `to_prometheus()` on a timer.
+~~~
+shikigami metrics --json
+shikigami metrics --prometheus
+~~~
+
+Filesystem serve --listen exposes GET /metrics on its authenticated control
+surface.
 
 ## Non-goals
 
 - Full observability platform / tracing backend
-- Guaranteed exact counts across process crash (use plane harvest for governed truth)
+- Governed accounting truth; use plane harvest for that

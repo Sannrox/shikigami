@@ -21,9 +21,12 @@
 //! Ports are selected by [Config] settings. Production governance is
 //! `sekai-chisei`. Tenkai delivers the binary only — not a runtime port.
 
+pub mod artifacts;
+pub(crate) mod atomic;
 pub mod checkpoint;
 pub mod config;
 pub mod context;
+pub mod eval;
 pub mod events;
 pub mod governance;
 pub mod harness;
@@ -35,7 +38,9 @@ pub mod metrics;
 pub mod model;
 pub mod plane_intake;
 pub mod prompts;
+pub mod registry;
 pub mod run;
+pub mod sandbox;
 pub mod serve;
 pub mod state;
 pub mod tools;
@@ -45,13 +50,15 @@ pub mod workspace;
 
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpServerSettings, PermissionMode,
+    SandboxBackend, SandboxSettings,
 };
+pub use eval::{EVAL_SCHEMA_VERSION, EvalCaseResult, EvalError, EvalSuiteResult, run_fixture};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use governance::AvailableModel;
 pub use harness::{DoctorReport, Harness, HarnessError};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;
-pub use metrics::{Metrics, MetricsSnapshot};
+pub use metrics::{Metrics, MetricsError, MetricsSnapshot};
 pub use model::{CostEstimate, TokenUsage};
 pub use plane_intake::{
     CLAIMED_STATUS, ClaimedPlaneWork, ClaimedWorkMappingError, ClaimedWorkPolicy,
@@ -61,8 +68,12 @@ pub use plane_intake::{
     map_claimed_work, run_plane_serve,
 };
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
+pub use registry::{RunEventRecord, RunRecord, RunRegistry};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
-pub use serve::{QueueJob, QueueLayout, ServeOptions};
+pub use serve::{
+    ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,
+    run_serve_with_options,
+};
 pub use state::{StateError, StateRoot};
 pub use tools::{TodoItem, TodoStatus};
 pub use transcript::{

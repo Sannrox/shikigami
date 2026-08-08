@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "ti
 toml = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libc = "0.2"
 futures-util = { version = "0.3", optional = true }
 
 # Optional: sekai-chisei Rust SDK

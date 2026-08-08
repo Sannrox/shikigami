@@ -18,6 +18,8 @@ Operator and contributor documentation for **shikigami**.
 | Runtime skill packs | [skills.md](skills.md) |
 | Plane/model credential patterns | [credentials.md](credentials.md) |
 | Run serve (queue or plane claim) + worker lifecycle | [serve.md](serve.md) |
+| Inspect runs, cancel, artifacts, and HTTP control | [runs.md](runs.md) |
+| Run deterministic offline golden fixtures | [eval.md](eval.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
 | Run deterministic project checks | [project-verification.md](project-verification.md) |

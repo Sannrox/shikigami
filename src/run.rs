@@ -19,6 +19,7 @@ use crate::hooks::{self, HookEvent};
 use crate::model::{
     ChatMessage, CostEstimate, ModelError, ModelPort, ModelTurn, TokenUsage, ToolCall,
 };
+use crate::registry::RunRegistry;
 use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
 use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
 use serde_json::json;
@@ -227,6 +228,8 @@ pub struct RunResult {
     pub summary: String,
     pub turns: u32,
     pub workspace: PathBuf,
+    /// Durable local artifact directory, retained after workspace cleanup.
+    pub artifact_dir: Option<PathBuf>,
     pub termination: RunTermination,
     /// Set when `termination == Parked`.
     pub park: Option<ParkInfo>,
@@ -300,6 +303,7 @@ pub struct Engine {
     pub model: Arc<dyn ModelPort>,
     pub events: Arc<dyn EventSink>,
     pub state_runs: PathBuf,
+    pub registry: Arc<RunRegistry>,
 }
 
 impl Engine {
@@ -352,13 +356,20 @@ impl Engine {
 
     fn check_bounds(
         &self,
+        run_id: &str,
         request: &RunRequest,
         started: tokio::time::Instant,
         timeout: Option<Duration>,
     ) -> Result<(), RunError> {
+        self.registry.heartbeat(run_id).map_err(|error| {
+            RunError::Message(format!("run registry heartbeat failed: {error}"))
+        })?;
         if let Some(rx) = &request.cancel
             && *rx.borrow()
         {
+            return Err(RunError::Cancelled);
+        }
+        if self.registry.cancel_requested(run_id) {
             return Err(RunError::Cancelled);
         }
         if let Some(limit) = timeout
@@ -367,6 +378,30 @@ impl Engine {
             return Err(RunError::TimedOut(limit));
         }
         Ok(())
+    }
+
+    fn emit(&self, run_id: &str, event: HarnessEvent) {
+        self.registry.append_event(run_id, &event);
+        self.events.emit(event);
+    }
+
+    fn capture_artifacts(&self, run_id: &str, workspace: &Path) -> Option<PathBuf> {
+        match crate::artifacts::capture_run_artifacts(&self.state_runs, run_id, workspace) {
+            Ok(path) => {
+                let _ = self.registry.set_artifact_dir(run_id, &path);
+                Some(path)
+            }
+            Err(error) => {
+                self.emit(
+                    run_id,
+                    HarnessEvent::Message {
+                        level: "warn".into(),
+                        text: format!("artifact capture failed: {error}"),
+                    },
+                );
+                None
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -401,6 +436,76 @@ impl Engine {
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, RunError> {
+        if let Some(resume_id) = &request.resume_run_id {
+            let checkpoint = Checkpoint::load(&self.state_runs, resume_id)?;
+            checkpoint.validate_prompt(SYSTEM_PROMPT)?;
+            let _ =
+                validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &checkpoint)?;
+            let workspace_adapter = if checkpoint.workspace_adapter.is_empty() {
+                configured_workspace_adapter(&self.config)
+            } else {
+                checkpoint.workspace_adapter.as_str()
+            };
+            if request.restore_snapshot.is_some() && workspace_adapter == "inplace" {
+                return Err(RunError::Message(
+                    "restore_snapshot is not supported with workspace adapter `inplace`".into(),
+                ));
+            }
+            if checkpoint.park.is_some() && request.resume_answer.is_none() {
+                return Err(RunError::Message(format!(
+                    "run {resume_id} is parked; supply resume_answer / --answer to continue"
+                )));
+            }
+            if checkpoint.park.is_none() && request.resume_answer.is_some() {
+                return Err(RunError::Message(
+                    "resume_answer provided but run is not parked".into(),
+                ));
+            }
+        }
+        let run_id = request
+            .resume_run_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if let Err(error) = self.registry.start(
+            &run_id,
+            &request.task,
+            request.logical_operation_id.as_deref(),
+            None,
+        ) {
+            return Err(RunError::Message(format!(
+                "run registry start failed: {error}"
+            )));
+        }
+        let heartbeat_registry = Arc::clone(&self.registry);
+        let heartbeat_run_id = run_id.clone();
+        let heartbeat_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if heartbeat_registry.heartbeat(&heartbeat_run_id).is_err() {
+                    break;
+                }
+            }
+        });
+        let result = self.run_inner(request, run_id.clone()).await;
+        heartbeat_task.abort();
+        let _ = heartbeat_task.await;
+        match &result {
+            Ok(result) => {
+                let _ = self.registry.finish_result(result);
+            }
+            Err(error) => {
+                let _ = self.registry.finish_error(&run_id, error);
+            }
+        }
+        result
+    }
+
+    async fn run_inner(
+        &self,
+        request: RunRequest,
+        fresh_run_id: String,
+    ) -> Result<RunResult, RunError> {
         let started = tokio::time::Instant::now();
         let timeout = request
             .timeout
@@ -420,9 +525,12 @@ impl Engine {
             cp.validate_prompt(SYSTEM_PROMPT)?;
             let resumed_workspace =
                 validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &cp)?;
-            self.events.emit(HarnessEvent::Status {
-                status: "resuming".into(),
-            });
+            self.emit(
+                resume_id,
+                HarnessEvent::Status {
+                    status: "resuming".into(),
+                },
+            );
             let ws = MaterializedWorkspace {
                 path: resumed_workspace,
                 adapter: if cp.workspace_adapter.is_empty() {
@@ -471,10 +579,13 @@ impl Engine {
                 cp.governance,
             )
         } else {
-            let run_id = Uuid::new_v4().to_string();
-            self.events.emit(HarnessEvent::Status {
-                status: "starting".into(),
-            });
+            let run_id = fresh_run_id;
+            self.emit(
+                &run_id,
+                HarnessEvent::Status {
+                    status: "starting".into(),
+                },
+            );
             let ws = self.workspace.materialize(&run_id, &self.state_runs)?;
             let messages = vec![ChatMessage {
                 role: "user".into(),
@@ -494,6 +605,28 @@ impl Engine {
             )
         };
 
+        self.registry
+            .update_running(
+                &run_id,
+                &task,
+                request.logical_operation_id.as_deref(),
+                &ws.path,
+                turns,
+            )
+            .map_err(|error| RunError::Message(format!("run registry update failed: {error}")))?;
+
+        if let Err(error) =
+            crate::artifacts::capture_run_baseline(&self.state_runs, &run_id, &ws.path)
+        {
+            self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "warn".into(),
+                    text: format!("artifact baseline capture failed: {error}"),
+                },
+            );
+        }
+
         let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
         let project_rules = crate::context::load_project_rules(&ws.path, &self.config.context);
         let skills = crate::context::load_skills(&ws.path, &self.config.context);
@@ -504,50 +637,69 @@ impl Engine {
                 "restore_snapshot is not supported with workspace adapter `inplace`".into(),
             ));
         }
-        self.events.emit(HarnessEvent::Prompt {
-            prompt_id: prompt_id.clone(),
-        });
+        self.emit(
+            &run_id,
+            HarnessEvent::Prompt {
+                prompt_id: prompt_id.clone(),
+            },
+        );
         if let Some(ref rules) = project_rules {
-            self.events.emit(HarnessEvent::Message {
-                level: "info".into(),
-                text: format!("project_rules {} digest={}", rules.filename, rules.digest),
-            });
+            self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "info".into(),
+                    text: format!("project_rules {} digest={}", rules.filename, rules.digest),
+                },
+            );
         }
         for s in &skills {
-            self.events.emit(HarnessEvent::Message {
-                level: "info".into(),
-                text: format!("skill {} digest={}", s.id, s.digest),
-            });
+            self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "info".into(),
+                    text: format!("skill {} digest={}", s.id, s.digest),
+                },
+            );
         }
-        self.events.emit(HarnessEvent::Message {
-            level: "info".into(),
-            text: format!("workspace {}", ws.path.display()),
-        });
+        self.emit(
+            &run_id,
+            HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("workspace {}", ws.path.display()),
+            },
+        );
 
         if let Some(name) = &request.restore_snapshot {
             crate::workspace::restore_snapshot(&ws.path, &self.state_runs, &run_id, name)?;
-            self.events.emit(HarnessEvent::Message {
-                level: "info".into(),
-                text: format!("restored snapshot `{name}`"),
-            });
+            self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "info".into(),
+                    text: format!("restored snapshot `{name}`"),
+                },
+            );
         } else if self.config.workspace.snapshot {
             let dest =
                 crate::workspace::take_snapshot(&ws.path, &self.state_runs, &run_id, "initial")?;
-            self.events.emit(HarnessEvent::Message {
-                level: "info".into(),
-                text: format!("snapshot initial at {}", dest.display()),
-            });
+            self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "info".into(),
+                    text: format!("snapshot initial at {}", dest.display()),
+                },
+            );
         }
 
         let enabled = self.config.tools.effective_enabled();
         let protected_environment_names = self.config.protected_tool_environment_names();
-        let mut tools = ToolRegistry::with_builtins_protected_environment(
+        let mut tools = ToolRegistry::with_builtins_sandbox_protected_environment(
             &ws.path,
             enabled,
             self.config.tools.bash_timeout_secs,
             self.config.network.clone(),
             self.config.tools.respect_ignore,
             &protected_environment_names,
+            self.config.sandbox.clone(),
         )?;
         tools.set_todos(initial_todos);
         if !self.config.tools.mcp_servers.is_empty() {
@@ -670,7 +822,7 @@ impl Engine {
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
         let result: Result<Option<ParkInfo>, RunError> = async {
             loop {
-                self.check_bounds(&request, started, timeout)?;
+                self.check_bounds(&run_id, &request, started, timeout)?;
 
                 if staged_turn.is_none() && turns >= max_turns {
                     return Err(RunError::MaxTurns(max_turns));
@@ -682,13 +834,15 @@ impl Engine {
                     if let Some((before, after)) =
                         compact_messages(&mut messages, threshold as usize, keep)
                     {
-                        self.events
-                            .emit(HarnessEvent::ContextCompacted { before, after });
+                        self.emit(&run_id, HarnessEvent::ContextCompacted { before, after });
                     }
                 }
-                self.events.emit(HarnessEvent::Status {
-                    status: "planning".into(),
-                });
+                self.emit(
+                    &run_id,
+                    HarnessEvent::Status {
+                        status: "planning".into(),
+                    },
+                );
                 let turn = if let Some(turn) = staged_turn.take() {
                     // The assistant result is already in the checkpoint. A
                     // stable plane event id makes this retry idempotent if the
@@ -722,10 +876,13 @@ impl Engine {
                         usage.input_tokens = usage.input_tokens.saturating_add(u.input_tokens);
                         usage.output_tokens = usage.output_tokens.saturating_add(u.output_tokens);
                     }
-                    self.events.emit(HarnessEvent::ModelTurn {
-                        turn: turns,
-                        content_preview: turn.content.chars().take(200).collect(),
-                    });
+                    self.emit(
+                        &run_id,
+                        HarnessEvent::ModelTurn {
+                            turn: turns,
+                            content_preview: turn.content.chars().take(200).collect(),
+                        },
+                    );
 
                     messages.push(ChatMessage {
                         role: "assistant".into(),
@@ -765,7 +922,7 @@ impl Engine {
                 // Cancellation is checked after the returned model turn is
                 // durable and its receipt event is acknowledged. A stopped
                 // run can therefore resume without repeating that call.
-                self.check_bounds(&request, started, timeout)?;
+                self.check_bounds(&run_id, &request, started, timeout)?;
 
                 if turn.tool_calls.is_empty() {
                     final_summary = if turn.content.is_empty() {
@@ -826,15 +983,18 @@ impl Engine {
 
                 // Ordered ToolStart for stable live streams.
                 for call in &turn.tool_calls {
-                    self.events.emit(HarnessEvent::ToolStart {
-                        name: call.name.clone(),
-                        args_json: call.args_json.clone(),
-                    });
+                    self.emit(
+                        &run_id,
+                        HarnessEvent::ToolStart {
+                            name: call.name.clone(),
+                            args_json: call.args_json.clone(),
+                        },
+                    );
                 }
 
                 // Parallel path only for all-read batches (no report/park/write).
                 let batch_outcomes: Vec<(ToolCall, Result<ToolOutput, String>)> = if can_parallel {
-                    self.check_bounds(&request, started, timeout)?;
+                    self.check_bounds(&run_id, &request, started, timeout)?;
                     let sem = Arc::new(Semaphore::new(concurrency));
                     let mut set = JoinSet::new();
                     for (i, call) in turn.tool_calls.iter().cloned().enumerate() {
@@ -876,7 +1036,7 @@ impl Engine {
                 } else {
                     let mut out = Vec::with_capacity(turn.tool_calls.len());
                     for (index, call) in turn.tool_calls.iter().enumerate() {
-                        self.check_bounds(&request, started, timeout)?;
+                        self.check_bounds(&run_id, &request, started, timeout)?;
                         if let Err(e) = hooks::run_hooks(
                             &self.config.hooks,
                             HookEvent::PreTool,
@@ -1057,16 +1217,22 @@ impl Engine {
                             .await?;
                             if call.name == "todo_write" {
                                 let items = tools.todos();
-                                self.events.emit(HarnessEvent::TodosUpdated {
-                                    summary: text.chars().take(500).collect(),
-                                    item_count: items.len(),
-                                });
+                                self.emit(
+                                    &run_id,
+                                    HarnessEvent::TodosUpdated {
+                                        summary: text.chars().take(500).collect(),
+                                        item_count: items.len(),
+                                    },
+                                );
                             }
-                            self.events.emit(HarnessEvent::ToolEnd {
-                                name: call.name.clone(),
-                                ok: true,
-                                detail: text.chars().take(500).collect(),
-                            });
+                            self.emit(
+                                &run_id,
+                                HarnessEvent::ToolEnd {
+                                    name: call.name.clone(),
+                                    ok: true,
+                                    detail: text.chars().take(500).collect(),
+                                },
+                            );
                             let _ = hooks::run_hooks(
                                 &self.config.hooks,
                                 HookEvent::PostTool,
@@ -1087,11 +1253,14 @@ impl Engine {
                                 &report.summary,
                             )
                             .await?;
-                            self.events.emit(HarnessEvent::ToolEnd {
-                                name: "report".into(),
-                                ok: report.success,
-                                detail: report.summary.clone(),
-                            });
+                            self.emit(
+                                &run_id,
+                                HarnessEvent::ToolEnd {
+                                    name: "report".into(),
+                                    ok: report.success,
+                                    detail: report.summary.clone(),
+                                },
+                            );
                             final_summary = report.summary;
                             success = report.success;
                             termination = RunTermination::Completed;
@@ -1137,11 +1306,14 @@ impl Engine {
                                 &ws.adapter,
                             )?;
                             report_result?;
-                            self.events.emit(HarnessEvent::ToolEnd {
-                                name: "escalate".into(),
-                                ok: false,
-                                detail: detail.clone(),
-                            });
+                            self.emit(
+                                &run_id,
+                                HarnessEvent::ToolEnd {
+                                    name: "escalate".into(),
+                                    ok: false,
+                                    detail: detail.clone(),
+                                },
+                            );
                             let _ = hooks::run_hooks(
                                 &self.config.hooks,
                                 HookEvent::OnPark,
@@ -1163,11 +1335,14 @@ impl Engine {
                                 &detail,
                             )
                             .await?;
-                            self.events.emit(HarnessEvent::ToolEnd {
-                                name: call.name.clone(),
-                                ok: false,
-                                detail: detail.clone(),
-                            });
+                            self.emit(
+                                &run_id,
+                                HarnessEvent::ToolEnd {
+                                    name: call.name.clone(),
+                                    ok: false,
+                                    detail: detail.clone(),
+                                },
+                            );
                             let _ = hooks::run_hooks(
                                 &self.config.hooks,
                                 HookEvent::PostTool,
@@ -1278,11 +1453,19 @@ impl Engine {
                     }
                 }
                 // Do not delete workspace on cancel/timeout/max-turns so resume works.
-                self.events.emit(HarnessEvent::RunFinished {
-                    run_id: run_id.clone(),
-                    success: false,
-                    summary: summary.clone(),
-                });
+                self.emit(
+                    &run_id,
+                    HarnessEvent::RunFinished {
+                        run_id: run_id.clone(),
+                        success: false,
+                        summary: summary.clone(),
+                    },
+                );
+                // Reap after all error-path bookkeeping and immediately
+                // before inventory so descendants cannot keep mutating the
+                // workspace after the failed run has been recorded.
+                tools.kill_background_jobs().await;
+                self.capture_artifacts(&run_id, &ws.path);
                 return Err(e);
             }
         };
@@ -1313,12 +1496,14 @@ impl Engine {
                     tools.todos(),
                     &ws.adapter,
                 );
+                tools.kill_background_jobs().await;
+                self.capture_artifacts(&run_id, &ws.path);
                 return Err(error.into());
             }
             // Successful completion clears adapter-owned receipt correlation
             // from the durable checkpoint. Parked runs intentionally retain
             // it for their governed continuation.
-            self.save_checkpoint(
+            if let Err(error) = self.save_checkpoint(
                 &run_id,
                 &task,
                 &messages,
@@ -1328,28 +1513,36 @@ impl Engine {
                 None,
                 tools.todos(),
                 &ws.adapter,
-            )?;
+            ) {
+                tools.kill_background_jobs().await;
+                self.capture_artifacts(&run_id, &ws.path);
+                return Err(error);
+            }
         }
+
+        // Always reap background shells before taking the final inventory.
+        tools.kill_background_jobs().await;
+        let artifact_dir = self.capture_artifacts(&run_id, &ws.path);
 
         // Keep workspace on park; only delete on successful non-park completion.
         if !keep_workspace && success && termination != RunTermination::Parked {
             let _ = self.workspace.cleanup(&ws);
         }
 
-        self.events.emit(HarnessEvent::RunFinished {
-            run_id: run_id.clone(),
-            success,
-            summary: final_summary.clone(),
-        });
+        self.emit(
+            &run_id,
+            HarnessEvent::RunFinished {
+                run_id: run_id.clone(),
+                success,
+                summary: final_summary.clone(),
+            },
+        );
 
         let cost = CostEstimate::from_usage_and_rates(
             usage,
             self.config.model.input_usd_micros_per_mtok,
             self.config.model.output_usd_micros_per_mtok,
         );
-
-        // Always reap background shells so runs do not leak processes.
-        tools.kill_background_jobs().await;
 
         let _ = hooks::run_hooks(
             &self.config.hooks,
@@ -1369,6 +1562,7 @@ impl Engine {
             summary: final_summary,
             turns,
             workspace: ws.path,
+            artifact_dir,
             termination,
             park: park_info,
             prompt_id,
@@ -1511,6 +1705,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let (tx, rx) = watch::channel(true);
         let _keep = tx;
@@ -1543,6 +1738,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let err = eng
             .run(RunRequest {
@@ -1585,6 +1781,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config: config.clone(),
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let err = eng
             .run(RunRequest {
@@ -1631,6 +1828,7 @@ mod tests {
             events: Arc::from(events::from_config(&config2, &state.runs_dir()).unwrap()),
             config: config2,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let result = eng2
             .run(RunRequest {
@@ -1698,6 +1896,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let mut req = RunRequest::new("read both");
         req.keep_workspace = true;
@@ -1737,6 +1936,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config: config.clone(),
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let err = eng
             .run(RunRequest {
@@ -1798,6 +1998,7 @@ mod tests {
             events: Arc::from(events::from_config(&config2, &state.runs_dir()).unwrap()),
             config: config2,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let result = eng2
             .run(RunRequest {
@@ -1834,6 +2035,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let mut req = RunRequest::new("with parent op");
         req.keep_workspace = true;
@@ -1868,6 +2070,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config: config.clone(),
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let mut req = RunRequest::new("needs approval");
         req.keep_workspace = true;
@@ -1885,6 +2088,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config: config.clone(),
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let err = eng2
             .run(RunRequest {
@@ -1918,6 +2122,7 @@ mod tests {
             events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
             config,
             state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         };
         let mut resume = RunRequest::new("");
         resume.keep_workspace = true;

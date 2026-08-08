@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Durable local run registry and redacted event journals with runs, cancel,
+  logs, and cleanup CLI controls; retained artifact manifests and bounded git
+  patch export.
+- Bounded filesystem worker queue semantics: priority, concurrency,
+  backpressure, local retry limits, and authenticated HTTP run/control routes.
+- Opt-in Unix rlimit child process groups for CPU, memory, PID, file-size, and
+  descriptor limits.
+- Durable aggregate metrics with CLI/HTTP Prometheus export and an offline
+  scripted golden-fixture evaluator (shikigami eval).
 - Deterministic project verification through thin Make targets and sorted
   validation/update scripts, plus a pinned Rust toolchain for local agents and
   CI.
