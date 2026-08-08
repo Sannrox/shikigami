@@ -114,6 +114,22 @@ For `inplace`, place the harness **state** root (`--state` / `SHIKIGAMI_STATE`)
 **outside** `workspace.root`. Hosts must serialize concurrent runs against the
 same inplace root.
 
+### [sandbox]
+
+| Field | Default | Description |
+| --- | --- | --- |
+| backend | "none" | none or Unix-only rlimit; the latter creates a child process group |
+| cpu_time_secs | unset | CPU seconds for Bash children |
+| memory_mb | unset | Address-space limit for Bash children |
+| user_processes | unset | Per-real-user process ceiling (RLIMIT_NPROC); not isolated per run |
+| file_size_mb | unset | Maximum child-created file size |
+| open_files | unset | Maximum open descriptors |
+
+rlimit is opt-in and applies to Bash foreground/background children. It is
+not a complete container or network sandbox: path jail, egress policy, and
+governance remain separate controls. Non-Unix hosts reject the backend during
+configuration validation.
+
 ### `[run]` (tool concurrency)
 
 | Field | Default | Description |

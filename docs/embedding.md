@@ -177,7 +177,7 @@ optional config redaction applies the same secret scrubbing as doctor.
 | Checkpoint file format beyond v1 | Versioned; migrations may appear |
 | Event sink payload shapes | Additive preferred |
 | Feature flags and optional deps | May split further |
-| Serve queue protocol | Local FS queue first; HTTP later |
+| Serve queue protocol | Local FS queue plus optional authenticated local HTTP control/intake |
 | MCP server tool set / framing details | Optional host; tools may grow; stdio-only for now |
 | MCP client transports and settings | Integration surface; not embed freeze list |
 | Lifecycle hooks (`[[hooks]]`) | Settings-driven; schema may grow |

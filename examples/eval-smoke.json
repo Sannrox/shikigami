@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "coding-smoke",
+  "cases": [
+    {
+      "name": "writes marker",
+      "task": "write a marker",
+      "script": [
+        {
+          "tool_calls": [
+            {
+              "name": "write_file",
+              "args_json": "{\"path\":\"ok.txt\",\"content\":\"hello\"}"
+            }
+          ]
+        },
+        {
+          "tool_calls": [
+            {
+              "name": "report",
+              "args_json": "{\"summary\":\"done\",\"success\":true}"
+            }
+          ]
+        }
+      ],
+      "expect_success": true,
+      "summary_contains": ["done"],
+      "expect_files": [
+        {
+          "path": "ok.txt",
+          "contains": "hello"
+        }
+      ]
+    }
+  ]
+}

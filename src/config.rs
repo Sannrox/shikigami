@@ -32,6 +32,10 @@ pub struct Config {
     pub context: ContextSettings,
     #[serde(default)]
     pub network: NetworkSettings,
+    /// OS-level limits for child processes. The default keeps the historical
+    /// behavior; `rlimit` is an explicit Unix-only hardening choice.
+    #[serde(default)]
+    pub sandbox: SandboxSettings,
     /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
     #[serde(default)]
     pub hooks: Vec<HookSettings>,
@@ -347,6 +351,51 @@ pub struct RunSettings {
     pub compact_keep_tail: u32,
 }
 
+/// Child-process resource policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxSettings {
+    #[serde(default)]
+    pub backend: SandboxBackend,
+    /// CPU seconds for each child process (RLIMIT_CPU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_secs: Option<u64>,
+    /// Address-space limit in MiB (RLIMIT_AS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    /// Per-real-user process ceiling (RLIMIT_NPROC); not an isolated per-run limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_processes: Option<u64>,
+    /// Maximum file size in MiB (RLIMIT_FSIZE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size_mb: Option<u64>,
+    /// Maximum number of open file descriptors (RLIMIT_NOFILE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<u64>,
+}
+
+/// Supported local child-process limit backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackend {
+    #[default]
+    None,
+    Rlimit,
+}
+
+impl Default for SandboxSettings {
+    fn default() -> Self {
+        Self {
+            backend: SandboxBackend::None,
+            cpu_time_secs: None,
+            memory_mb: None,
+            user_processes: None,
+            file_size_mb: None,
+            open_files: None,
+        }
+    }
+}
+
 fn default_max_turns() -> u32 {
     50
 }
@@ -503,6 +552,7 @@ impl Default for Config {
             model: ModelSettings::default(),
             context: ContextSettings::default(),
             network: NetworkSettings::default(),
+            sandbox: SandboxSettings::default(),
             hooks: Vec::new(),
         }
     }
@@ -772,6 +822,24 @@ impl Config {
         match self.model.adapter.as_str() {
             "scripted" | "http" | "plane" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
+        }
+        for (name, value) in [
+            ("sandbox.cpu_time_secs", self.sandbox.cpu_time_secs),
+            ("sandbox.memory_mb", self.sandbox.memory_mb),
+            ("sandbox.user_processes", self.sandbox.user_processes),
+            ("sandbox.file_size_mb", self.sandbox.file_size_mb),
+            ("sandbox.open_files", self.sandbox.open_files),
+        ] {
+            if value == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} must be greater than zero"
+                )));
+            }
+        }
+        if matches!(self.sandbox.backend, SandboxBackend::Rlimit) && !cfg!(unix) {
+            return Err(ConfigError::Invalid(
+                "sandbox.backend=rlimit is supported only on Unix".into(),
+            ));
         }
         Ok(())
     }

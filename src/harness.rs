@@ -6,8 +6,9 @@ use std::sync::Arc;
 use crate::config::{Config, ConfigError, ConfigSource};
 use crate::events::{self, EventError, EventSink, FanoutSink};
 use crate::governance::{self, AvailableModel, GovernanceError, GovernancePort};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, MetricsError};
 use crate::model::{self, ModelError, ModelPort};
+use crate::registry::{RegistryError, RunRegistry};
 use crate::run::{Engine, RunError, RunRequest, RunResult, RunTermination};
 use crate::state::{StateError, StateRoot};
 use crate::tools::model_visible_builtin_definitions;
@@ -28,12 +29,17 @@ pub enum HarnessError {
     #[error(transparent)]
     Events(#[from] EventError),
     #[error(transparent)]
+    Registry(#[from] RegistryError),
+    #[error(transparent)]
+    Metrics(#[from] MetricsError),
+    #[error(transparent)]
     Run(#[from] RunError),
     #[error("doctor failed: {0}")]
     Doctor(String),
 }
 
 /// Wired harness ready to doctor or run.
+#[derive(Clone)]
 pub struct Harness {
     pub config: Config,
     pub config_source: ConfigSource,
@@ -44,6 +50,8 @@ pub struct Harness {
     events: Arc<dyn EventSink>,
     /// Process-local counters (JSON / Prometheus text export).
     pub metrics: Arc<Metrics>,
+    /// Durable host-local run records and redacted event journals.
+    pub registry: Arc<RunRegistry>,
 }
 
 /// Stable doctor JSON contract (`schema_version` = 1).
@@ -86,6 +94,8 @@ impl Harness {
         state.ensure_ready_for_runs()?;
         let events: Arc<dyn EventSink> =
             Arc::from(events::from_config(&config, &state.runs_dir())?);
+        let registry = Arc::new(RunRegistry::new(state.path())?);
+        let metrics = Metrics::new_at(state.path())?;
         Ok(Self {
             config,
             config_source,
@@ -94,7 +104,8 @@ impl Harness {
             workspace,
             model,
             events,
-            metrics: Metrics::new(),
+            metrics,
+            registry,
         })
     }
 
@@ -250,6 +261,13 @@ impl Harness {
                 self.config.network.allow_hosts.join(",")
             }
         ));
+        lines.push(format!(
+            "sandbox:   backend={:?} cpu={:?} memory_mb={:?} user_processes={:?}",
+            self.config.sandbox.backend,
+            self.config.sandbox.cpu_time_secs,
+            self.config.sandbox.memory_mb,
+            self.config.sandbox.user_processes,
+        ));
         lines.push(format!("max_turns: {}", self.config.run.max_turns));
         if self.config.hooks.is_empty() {
             lines.push("hooks:     (none)".into());
@@ -354,6 +372,7 @@ impl Harness {
             model: Arc::clone(&self.model),
             events,
             state_runs: self.state.runs_dir(),
+            registry: Arc::clone(&self.registry),
         };
         match engine.run(request).await {
             Ok(result) => {

@@ -395,7 +395,7 @@ impl ModelPort for HttpModel {
                 });
             }
         }
-        let usage = body.get("usage").and_then(|u| {
+        let usage = resp.get("usage").and_then(|u| {
             let input = u
                 .get("prompt_tokens")
                 .or_else(|| u.get("input_tokens"))

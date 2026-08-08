@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::config::NetworkSettings;
+use crate::config::{NetworkSettings, SandboxSettings};
 
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
 use super::catalog::model_visible_builtin_definitions;
@@ -74,14 +74,35 @@ impl ToolRegistry {
         respect_ignore: bool,
         protected_environment_names: &[String],
     ) -> Result<Self, ToolError> {
+        Self::with_builtins_sandbox_protected_environment(
+            workspace,
+            enabled,
+            bash_timeout_secs,
+            network,
+            respect_ignore,
+            protected_environment_names,
+            SandboxSettings::default(),
+        )
+    }
+
+    pub(crate) fn with_builtins_sandbox_protected_environment(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+        network: NetworkSettings,
+        respect_ignore: bool,
+        protected_environment_names: &[String],
+        sandbox_settings: SandboxSettings,
+    ) -> Result<Self, ToolError> {
         let web_fetcher = default_web_fetcher()?;
         Ok(Self {
-            executor: ToolExecutor::new_with_protected_environment(
+            executor: ToolExecutor::new_with_sandbox_protected_environment(
                 workspace,
                 enabled,
                 bash_timeout_secs,
                 respect_ignore,
                 protected_environment_names,
+                sandbox_settings,
             )?,
             external: Vec::new(),
             todos: Arc::new(Mutex::new(Vec::new())),
@@ -101,6 +122,7 @@ impl ToolRegistry {
             guard.jobs.drain().map(|(_id, job)| job.child).collect()
         };
         for mut child in children {
+            self.executor.sandbox.kill_process_group(child.id());
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
@@ -220,6 +242,10 @@ impl ToolRegistry {
             .stderr(stderr)
             .kill_on_drop(true);
         self.executor.environment.apply(&mut command);
+        self.executor
+            .sandbox
+            .apply(&mut command)
+            .map_err(|error| ToolError::Message(error.to_string()))?;
         let child = command.spawn()?;
         guard.jobs.insert(
             job_id.clone(),

@@ -19,6 +19,8 @@ shikigami --config examples/local-run.toml serve
 #   --intake filesystem   # default
 #   --poll-ms 200
 #   --max-jobs 1   # process N jobs then exit (useful in tests)
+#   --concurrency 4 --queue-capacity 256 --retry-limit 1
+#   --listen 127.0.0.1:8080 --auth-token-env SHIKIGAMI_SERVE_TOKEN
 ```
 
 Graceful stop: **Ctrl-C** / SIGINT sets shutdown and exits after the current
@@ -145,6 +147,18 @@ pod-network peers cannot scrape claim identifiers.
 Filesystem intake is **not** covered by this managed contract (see Tenkai ADR
 0011). Example manifest: [examples/k8s-worker-lifecycle.yaml](../examples/k8s-worker-lifecycle.yaml).
 
+Filesystem workers support bounded priority ordering, concurrency, local
+backpressure, and an explicit retry limit. These are host-local queue
+semantics; governed plane claims, leases, retry/dead-letter policy, and
+admission remain plane-owned. See [runs.md](runs.md) for the authenticated
+HTTP control/intake routes.
+
+Queue capacity counts both inbox and processing jobs, and the control-plane
+capacity must match the runtime capacity. The `inplace` workspace adapter uses
+the configured root directly, so filesystem serve rejects concurrency above
+one for that adapter; use isolated `directory` or `git-worktree` workspaces for
+parallel jobs.
+
 ### Health and recovery
 
 - Run `shikigami doctor` with the same config before starting the process.
@@ -205,7 +219,8 @@ for resolution, retry, dead-letter, and authorization semantics.
 ## Health
 
 **Filesystem intake:** `queue/health.json` fields: `ok`, `product`, `version`,
-`queue_inbox`, `running`, `last_run_id`.
+`queue_inbox`, `running`, `running_jobs`, `queue_capacity`,
+`queue_over_capacity`, `last_run_id`.
 
 **Plane intake:** `$SHIKIGAMI_STATE/worker/lifecycle.json` (and optional
 `--lifecycle-listen` probes). See *Worker lifecycle contract* above.

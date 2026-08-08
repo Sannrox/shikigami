@@ -17,6 +17,8 @@ use super::fs::{
 };
 use super::path::load_ignore_patterns;
 use super::{ParkRequest, Report, ToolDef, ToolError, ToolOutput, parse};
+use crate::config::SandboxSettings;
+use crate::sandbox::Sandbox;
 
 /// Workspace-jailed executor used by [`super::ToolRegistry`] (and tests).
 #[derive(Debug, Clone)]
@@ -27,6 +29,7 @@ pub struct ToolExecutor {
     pub(crate) environment: ToolEnvironment,
     /// Patterns for glob/grep filtering (empty when respect_ignore is false).
     pub(crate) ignore_patterns: Vec<String>,
+    pub(crate) sandbox: Sandbox,
 }
 
 #[derive(Deserialize)]
@@ -66,18 +69,39 @@ impl ToolExecutor {
         respect_ignore: bool,
         protected_environment_names: &[String],
     ) -> Result<Self, ToolError> {
+        Self::new_with_sandbox_protected_environment(
+            workspace,
+            enabled,
+            bash_timeout_secs,
+            respect_ignore,
+            protected_environment_names,
+            SandboxSettings::default(),
+        )
+    }
+
+    pub(crate) fn new_with_sandbox_protected_environment(
+        workspace: impl Into<PathBuf>,
+        enabled: Vec<String>,
+        bash_timeout_secs: u64,
+        respect_ignore: bool,
+        protected_environment_names: &[String],
+        sandbox_settings: SandboxSettings,
+    ) -> Result<Self, ToolError> {
         let workspace = std::fs::canonicalize(workspace.into())?;
         let ignore_patterns = if respect_ignore {
             load_ignore_patterns(&workspace)
         } else {
             Vec::new()
         };
+        let sandbox = Sandbox::new(sandbox_settings)
+            .map_err(|error| ToolError::Message(error.to_string()))?;
         Ok(Self {
             workspace,
             enabled,
             bash_timeout: Duration::from_secs(bash_timeout_secs.max(1)),
             environment: ToolEnvironment::resolve(protected_environment_names),
             ignore_patterns,
+            sandbox,
         })
     }
 
@@ -184,12 +208,17 @@ impl ToolExecutor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         self.environment.apply(&mut command);
+        self.sandbox
+            .apply(&mut command)
+            .map_err(|error| ToolError::Message(error.to_string()))?;
         let child = command.spawn()?;
+        let pid = child.id();
 
         let output = match timeout(limit, child.wait_with_output()).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => return Err(ToolError::Io(e)),
             Err(_) => {
+                self.sandbox.kill_process_group(pid);
                 return Err(ToolError::BashTimeout(limit));
             }
         };

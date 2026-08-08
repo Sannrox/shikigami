@@ -6,8 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
-    AvailableModel, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions,
-    StateRoot, VERSION, WorkerLifecycle, WorkerLifecycleIdentity, serve_lifecycle_http,
+    AvailableModel, ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest,
+    ServeOptions, ServeRuntimeOptions, StateRoot, VERSION, WorkerLifecycle,
+    WorkerLifecycleIdentity, serve_lifecycle_http,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -76,6 +77,48 @@ enum Command {
         #[arg(long)]
         answer_file: Option<PathBuf>,
     },
+    /// List or inspect durable local run records.
+    Runs {
+        /// Inspect one run; omit to list recent runs.
+        run_id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Request cancellation through the durable local run marker.
+    Cancel { run_id: String },
+    /// Print a redacted durable event journal.
+    Logs {
+        run_id: String,
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+    /// Remove a terminal run record and its retained artifacts.
+    Cleanup {
+        run_id: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Export the artifact manifest or captured git patch.
+    Artifacts {
+        run_id: String,
+        #[arg(long)]
+        patch: bool,
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+    /// Export aggregate durable metrics.
+    Metrics {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, conflicts_with = "json")]
+        prometheus: bool,
+    },
+    /// Run an offline scripted golden-fixture suite.
+    Eval {
+        fixture: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Long-running filesystem-queue or plane-claim host (see docs/serve.md).
     Serve {
         /// Work intake source. Filesystem remains the offline default.
@@ -87,6 +130,21 @@ enum Command {
         /// Exit after processing this many jobs (tests / oneshot drain).
         #[arg(long)]
         max_jobs: Option<u64>,
+        /// Maximum number of filesystem jobs executed concurrently.
+        #[arg(long, default_value_t = 1)]
+        concurrency: usize,
+        /// Maximum queued + processing jobs admitted by the local HTTP surface.
+        #[arg(long, default_value_t = 256)]
+        queue_capacity: usize,
+        /// Retry harness failures this many times for filesystem jobs.
+        #[arg(long, default_value_t = 0)]
+        retry_limit: u32,
+        /// Optional authenticated HTTP intake/control bind (filesystem only).
+        #[arg(long, env = "SHIKIGAMI_SERVE_LISTEN")]
+        listen: Option<String>,
+        /// Name of the environment variable containing the HTTP bearer token.
+        #[arg(long, env = "SHIKIGAMI_SERVE_AUTH_TOKEN_ENV")]
+        auth_token_env: Option<String>,
         /// Stable runtime id used to filter and hold plane claims.
         #[arg(long, default_value = "shikigami")]
         runtime_id: String,
@@ -259,6 +317,9 @@ async fn run() -> anyhow::Result<()> {
                 result.summary
             );
             println!("workspace {}", result.workspace.display());
+            if let Some(artifacts) = &result.artifact_dir {
+                println!("artifacts {}", artifacts.display());
+            }
             if let Some(park) = &result.park {
                 println!("parked reason={}", park.reason);
                 println!("parked question={}", park.question);
@@ -275,10 +336,121 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("run reported failure");
             }
         }
+        Command::Runs { run_id, json } => {
+            let registry = shikigami::RunRegistry::new(state.path())?;
+            if let Some(run_id) = run_id {
+                let record = registry.load(&run_id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!(
+                        "run {} status={} success={:?} turns={} termination={} artifacts={}",
+                        record.run_id,
+                        record.status,
+                        record.success,
+                        record.turns,
+                        record.termination.as_deref().unwrap_or("-"),
+                        record.artifact_dir.as_deref().unwrap_or("-"),
+                    );
+                }
+            } else {
+                let records = registry.list()?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&records)?);
+                } else {
+                    for record in records {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            record.run_id,
+                            record.status,
+                            record.turns,
+                            record.summary.replace(['\n', '\t'], " ")
+                        );
+                    }
+                }
+            }
+        }
+        Command::Cancel { run_id } => {
+            let registry = shikigami::RunRegistry::new(state.path())?;
+            registry.cancel(&run_id)?;
+            println!("cancellation requested for {run_id}");
+        }
+        Command::Logs { run_id, output } => {
+            let registry = shikigami::RunRegistry::new(state.path())?;
+            let log = registry.event_log(&run_id)?;
+            if let Some(path) = output {
+                std::fs::write(&path, log)?;
+                eprintln!("wrote event journal to {}", path.display());
+            } else {
+                print!("{log}");
+            }
+        }
+        Command::Cleanup { run_id, force } => {
+            let registry = shikigami::RunRegistry::new(state.path())?;
+            registry.clean(&run_id, force)?;
+            println!("cleaned run {run_id}");
+        }
+        Command::Artifacts {
+            run_id,
+            patch,
+            output,
+        } => {
+            let text =
+                shikigami::artifacts::export_run_artifacts(&state.runs_dir(), &run_id, patch)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+            if let Some(path) = output {
+                std::fs::write(&path, text)?;
+                eprintln!("wrote artifacts to {}", path.display());
+            } else {
+                print!("{text}");
+            }
+        }
+        Command::Metrics { json, prometheus } => {
+            let snapshot = shikigami::Metrics::aggregate(state.path())?;
+            if prometheus {
+                print!("{}", snapshot.to_prometheus());
+            } else {
+                let _ = json;
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            }
+        }
+        Command::Eval { fixture, json } => {
+            let result = shikigami::run_fixture(&fixture).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "eval {} passed={} cases={}/{}",
+                    result.suite,
+                    result.passed,
+                    result.passed_cases,
+                    result.passed_cases + result.failed_cases
+                );
+                for case in &result.cases {
+                    println!(
+                        "  {}: {}{}",
+                        case.name,
+                        if case.passed { "ok" } else { "fail" },
+                        case.failure
+                            .as_deref()
+                            .map(|failure| format!(" — {failure}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            if !result.passed {
+                anyhow::bail!("eval suite failed");
+            }
+        }
         Command::Serve {
             intake,
             poll_ms,
             max_jobs,
+            concurrency,
+            queue_capacity,
+            retry_limit,
+            listen,
+            auth_token_env,
             runtime_id,
             claim_ttl_secs,
             checkpoint_store_id,
@@ -327,11 +499,74 @@ async fn run() -> anyhow::Result<()> {
                         poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
                         max_jobs,
                     };
-                    shikigami::serve::run_serve(&harness, &layout, options, rx)
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))?
+                    if concurrency == 0 {
+                        anyhow::bail!("--concurrency must be greater than zero");
+                    }
+                    if queue_capacity == 0 {
+                        anyhow::bail!("--queue-capacity must be greater than zero");
+                    }
+                    if listen.is_none() && auth_token_env.is_some() {
+                        anyhow::bail!("--auth-token-env requires --listen");
+                    }
+                    let control = if let Some(bind) = listen {
+                        let addr: std::net::SocketAddr = bind
+                            .parse()
+                            .map_err(|error| anyhow::anyhow!("invalid --listen: {error}"))?;
+                        let token = auth_token_env
+                            .as_deref()
+                            .map(std::env::var)
+                            .transpose()
+                            .map_err(|error| {
+                                anyhow::anyhow!("cannot read HTTP auth token: {error}")
+                            })?;
+                        if token
+                            .as_deref()
+                            .is_some_and(|value| value.trim().is_empty())
+                        {
+                            anyhow::bail!("--auth-token-env resolved to an empty token");
+                        }
+                        if token.is_none() {
+                            anyhow::bail!("--listen requires --auth-token-env");
+                        }
+                        println!(
+                            "serve control http={} authenticated={}",
+                            addr,
+                            token.is_some()
+                        );
+                        Some(ControlOptions {
+                            bind: addr,
+                            auth_token: token,
+                            queue_capacity,
+                            ..ControlOptions::default()
+                        })
+                    } else {
+                        None
+                    };
+                    shikigami::serve::run_serve_with_options(
+                        &harness,
+                        &layout,
+                        options,
+                        ServeRuntimeOptions {
+                            concurrency,
+                            queue_capacity,
+                            retry_limit,
+                        },
+                        control,
+                        rx,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?
                 }
                 ServeIntake::Plane => {
+                    if listen.is_some()
+                        || auth_token_env.is_some()
+                        || concurrency != 1
+                        || retry_limit != 0
+                    {
+                        anyhow::bail!(
+                            "--listen/--auth-token-env/--concurrency/--retry-limit apply only to filesystem intake"
+                        );
+                    }
                     // Drop any prior process snapshot immediately so a failed
                     // restart cannot leave fleet-ready state on disk.
                     let _ = std::fs::remove_file(shikigami::lifecycle_path(state.path()));
