@@ -22,6 +22,7 @@ use crate::registry::RunRegistry;
 use crate::tools::{TodoItem, ToolError};
 use crate::workspace::{WorkspaceError, WorkspacePort};
 
+mod model_turn;
 mod resume;
 mod session;
 mod tool_batch;
