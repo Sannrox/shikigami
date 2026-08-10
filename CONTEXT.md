@@ -3,6 +3,14 @@
 This glossary complements the architecture and product definitions in
 [`DESIGN.md`](DESIGN.md).
 
+## Effective settings resolution
+
+The host-side protocol that selects the settings source and applies defaults,
+file values, profile presets, environment values, and the final host model
+selection before validation and source attribution. `Config`, `StateRoot`, and
+`Harness` delegate this ordering to a private deep module; the public settings
+schema and ports remain unchanged.
+
 ## Durable tool batch
 
 One model turn's ordered set of tool calls, including authorization, execution,
