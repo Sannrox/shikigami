@@ -33,6 +33,14 @@ redemption, execution identity, and fail-closed security checks. The
 sekai-chisei adapter delegates this protocol to a private deep module behind
 the existing governance port seam.
 
+## Governed harvest transaction
+
+One governed run's durable plane-reporting protocol, including local checkpoint
+projection and restoration, causal event staging and retry, model and tool
+report recovery, and in-doubt tool-execution detection. The sekai-chisei
+adapter delegates this protocol to a private deep module; plane receipts remain
+authoritative and the existing governance port seam is unchanged.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,
