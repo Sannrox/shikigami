@@ -9,6 +9,10 @@
 
 ### Changed
 
+- Deepen the authenticated local Run Control protocol behind one private module
+  so transport, framing, authentication, routing, queue admission, registry
+  operations, metrics projection, and response behavior no longer leak through
+  the serve host.
 - Deepen the local filesystem queue so the serve host and control adapter share
   one tested implementation of admission, priority claim, retry, archival, and
   health invariants without changing the public serve interface.
