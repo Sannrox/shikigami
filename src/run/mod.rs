@@ -24,6 +24,7 @@ use crate::workspace::{WorkspaceError, WorkspacePort};
 
 mod resume;
 mod session;
+mod tool_batch;
 mod transaction;
 
 use resume::{configured_workspace_adapter, validate_resumed_workspace};
