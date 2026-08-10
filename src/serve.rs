@@ -8,16 +8,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::harness::{Harness, HarnessError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
-use uuid::Uuid;
 
-use crate::harness::{Harness, HarnessError};
-use crate::run::{RunRequest, RunResult, RunTermination};
+mod queue;
+
+use queue::{Admission, FilesystemQueue};
 
 /// Job file dropped into the inbox for the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,7 +214,8 @@ pub async fn run_serve_with_options(
     control: Option<ControlOptions>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<u64, ServeError> {
-    layout.ensure()?;
+    let queue = FilesystemQueue::new(layout);
+    queue.ensure()?;
     let runtime = ServeRuntimeOptions {
         concurrency: runtime.concurrency.max(1),
         queue_capacity: runtime.queue_capacity.max(1),
@@ -253,18 +255,18 @@ pub async fn run_serve_with_options(
         }
     }
     let running = Arc::new(AtomicBool::new(true));
-    write_health(layout, harness, &running, 0, 0, None, &runtime)?;
+    queue.write_health(&running, 0, None, &runtime)?;
 
     let control_task = if let Some(control) = control {
         let listener = TcpListener::bind(control.bind).await?;
         let control_harness = harness.clone();
-        let control_layout = layout.clone();
+        let control_queue = queue.clone();
         let control_shutdown = shutdown.clone();
         Some(tokio::spawn(async move {
             run_control_listener(
                 listener,
                 control_harness,
-                control_layout,
+                control_queue,
                 control,
                 control_shutdown,
             )
@@ -297,27 +299,21 @@ pub async fn run_serve_with_options(
                 .map(|max| completed + (active as u64) < max)
                 .unwrap_or(true)
         {
-            let Some(job_path) = take_next_job(layout)? else {
+            let Some(job_path) = queue.claim_next()? else {
                 break;
             };
             let worker = harness.clone();
-            let worker_layout = layout.clone();
+            let worker_queue = queue.clone();
             let retry_limit = runtime.retry_limit;
             jobs.spawn(async move {
-                process_job(&worker, &worker_layout, &job_path, retry_limit).await
+                worker_queue
+                    .run_claimed(&worker, &job_path, retry_limit)
+                    .await
             });
             active += 1;
         }
 
-        write_health(
-            layout,
-            harness,
-            &running,
-            completed,
-            active,
-            last_run_id.clone(),
-            &runtime,
-        )?;
+        queue.write_health(&running, active, last_run_id.clone(), &runtime)?;
         if let Some(max) = options.max_jobs
             && completed >= max
             && active == 0
@@ -338,28 +334,12 @@ pub async fn run_serve_with_options(
                             Ok(Ok(Some(result))) => {
                                 completed += 1;
                                 last_run_id = Some(result.run_id);
-                                write_health(
-                                    layout,
-                                    harness,
-                                    &running,
-                                    completed,
-                                    active,
-                                    last_run_id.clone(),
-                                    &runtime,
-                                )?;
+                                queue.write_health(&running, active, last_run_id.clone(), &runtime)?;
                             }
                             Ok(Ok(None)) => {}
                             Ok(Err(_)) | Err(_) => {
                                 completed += 1;
-                                write_health(
-                                    layout,
-                                    harness,
-                                    &running,
-                                    completed,
-                                    active,
-                                    last_run_id.clone(),
-                                    &runtime,
-                                )?;
+                                queue.write_health(&running, active, last_run_id.clone(), &runtime)?;
                             }
                         }
                     }
@@ -388,15 +368,7 @@ pub async fn run_serve_with_options(
     }
 
     running.store(false, Ordering::SeqCst);
-    write_health(
-        layout,
-        harness,
-        &running,
-        completed,
-        0,
-        last_run_id,
-        &runtime,
-    )?;
+    queue.write_health(&running, 0, last_run_id, &runtime)?;
     if let Some(task) = control_task {
         task.abort();
         let _ = task.await;
@@ -415,217 +387,10 @@ async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
     }
 }
 
-fn take_next_job(layout: &QueueLayout) -> Result<Option<PathBuf>, ServeError> {
-    let entries: Vec<_> = std::fs::read_dir(&layout.inbox)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .is_some_and(|x| x == "json")
-        })
-        .collect();
-    let mut prioritized = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let priority = std::fs::read_to_string(entry.path())
-            .ok()
-            .and_then(|raw| serde_json::from_str::<QueueJob>(&raw).ok())
-            .map(|job| job.priority)
-            .unwrap_or(0);
-        prioritized.push((priority, entry.file_name(), entry.path()));
-    }
-    prioritized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    let Some((_, _, src)) = prioritized.into_iter().next() else {
-        return Ok(None);
-    };
-    let original_name = src
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("job.json");
-    // Claim under a unique processing name. A producer is allowed to reuse an
-    // inbox basename while an earlier job is still running; replacing a
-    // destination here would otherwise discard the claimed job on Unix.
-    let dest = layout.processing.join(format!(
-        "{original_name}.processing-{}.json",
-        Uuid::new_v4()
-    ));
-    std::fs::rename(&src, &dest)?;
-    Ok(Some(dest))
-}
-
-async fn process_job(
-    harness: &Harness,
-    layout: &QueueLayout,
-    job_path: &Path,
-    retry_limit: u32,
-) -> Result<Option<RunResult>, ServeError> {
-    let raw = std::fs::read_to_string(job_path)?;
-    let job: QueueJob = match serde_json::from_str(&raw) {
-        Ok(job) => job,
-        Err(source) => {
-            let dest = archive_job(layout, job_path, &layout.failed)?;
-            let _ = std::fs::write(dest.with_extension("error.txt"), source.to_string());
-            return Err(ServeError::Job {
-                path: job_path.to_path_buf(),
-                source,
-            });
-        }
-    };
-
-    let mut request = RunRequest::new(job.task.clone());
-    request.keep_workspace = job.keep_workspace;
-    request.logical_operation_id = job.logical_operation_id.clone();
-    request.timeout = job.timeout_secs.map(Duration::from_secs);
-
-    let result = match harness.run(request).await {
-        Ok(r) => r,
-        Err(e) => {
-            if job.attempt < retry_limit {
-                let mut retry = job.clone();
-                retry.attempt = retry.attempt.saturating_add(1);
-                // A producer may enqueue a new job with the original
-                // processing filename while this attempt is running. Retry
-                // under a fresh name so it cannot overwrite that job.
-                let dest = layout.inbox.join(format!("retry-{}.json", Uuid::new_v4()));
-                let temp = dest.with_extension("json.tmp");
-                std::fs::write(&temp, serde_json::to_vec_pretty(&retry)?)?;
-                std::fs::rename(&temp, &dest)?;
-                std::fs::remove_file(job_path)?;
-                return Ok(None);
-            }
-            let dest = archive_job(layout, job_path, &layout.failed)?;
-            let err_path = dest.with_extension("error.txt");
-            let _ = std::fs::write(err_path, e.to_string());
-            return Err(e.into());
-        }
-    };
-
-    let qr = QueueResult {
-        job_path: job_path.display().to_string(),
-        job_id: job.job_id.clone(),
-        attempt: job.attempt,
-        run_id: result.run_id.clone(),
-        success: result.success,
-        termination: result.termination.as_str().into(),
-        summary: result.summary.clone(),
-        turns: result.turns,
-        artifact_dir: result
-            .artifact_dir
-            .as_ref()
-            .map(|path| path.display().to_string()),
-    };
-    let dest_dir = if result.success && result.termination != RunTermination::Parked {
-        &layout.done
-    } else {
-        &layout.failed
-    };
-    let stem = original_job_stem(job_path);
-    let serialized = serde_json::to_string_pretty(&qr)?;
-    let _archive_lock = layout
-        .admission_lock
-        .lock()
-        .map_err(|_| ServeError::Message("queue archive lock poisoned".into()))?;
-    let suffix = Uuid::new_v4().to_string();
-    let preferred_result = dest_dir.join(format!("{stem}.result.json"));
-    let result_path = if preferred_result.exists() {
-        dest_dir.join(format!("{stem}-{suffix}.result.json"))
-    } else {
-        preferred_result
-    };
-    std::fs::write(&result_path, serialized)?;
-    archive_job_unlocked(layout, job_path, dest_dir, &suffix)?;
-
-    Ok(Some(result))
-}
-
-fn original_job_stem(job_path: &Path) -> String {
-    Path::new(&original_job_filename(job_path))
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("job")
-        .to_string()
-}
-
-fn original_job_filename(job_path: &Path) -> String {
-    let name = job_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("job.json");
-    name.rsplit_once(".processing-")
-        .map(|(original, _)| original)
-        .unwrap_or(name)
-        .to_string()
-}
-
-fn archive_job(
-    layout: &QueueLayout,
-    job_path: &Path,
-    destination_dir: &Path,
-) -> Result<PathBuf, ServeError> {
-    let _archive_lock = layout
-        .admission_lock
-        .lock()
-        .map_err(|_| ServeError::Message("queue archive lock poisoned".into()))?;
-    archive_job_unlocked(
-        layout,
-        job_path,
-        destination_dir,
-        &Uuid::new_v4().to_string(),
-    )
-}
-
-fn archive_job_unlocked(
-    _layout: &QueueLayout,
-    job_path: &Path,
-    destination_dir: &Path,
-    suffix: &str,
-) -> Result<PathBuf, ServeError> {
-    let preferred = destination_dir.join(original_job_filename(job_path));
-    let destination = if preferred.exists() {
-        destination_dir.join(format!("{}-{suffix}.json", original_job_stem(job_path)))
-    } else {
-        preferred
-    };
-    std::fs::rename(job_path, &destination)?;
-    Ok(destination)
-}
-
-fn write_health(
-    layout: &QueueLayout,
-    harness: &Harness,
-    running: &AtomicBool,
-    _completed: u64,
-    running_jobs: usize,
-    last_run_id: Option<String>,
-    runtime: &ServeRuntimeOptions,
-) -> Result<(), ServeError> {
-    let inbox = std::fs::read_dir(&layout.inbox)
-        .map(|rd| rd.filter_map(|e| e.ok()).count())
-        .unwrap_or(0);
-    let queue_depth = queue_depth(layout)?;
-    let status = HealthStatus {
-        ok: true,
-        product: crate::PRODUCT.into(),
-        version: crate::VERSION.into(),
-        queue_inbox: inbox,
-        running: running.load(Ordering::SeqCst),
-        last_run_id,
-        running_jobs,
-        queue_capacity: runtime.queue_capacity,
-        queue_over_capacity: queue_depth > runtime.queue_capacity,
-    };
-    let _ = harness; // reserved for future doctor embedding
-    std::fs::write(
-        &layout.health,
-        serde_json::to_string_pretty(&status).unwrap(),
-    )?;
-    Ok(())
-}
-
 async fn run_control_listener(
     listener: TcpListener,
     harness: Harness,
-    layout: QueueLayout,
+    queue: FilesystemQueue,
     control: ControlOptions,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ServeError> {
@@ -641,14 +406,14 @@ async fn run_control_listener(
                     continue;
                 };
                 let connection_harness = harness.clone();
-                let connection_layout = layout.clone();
+                let connection_queue = queue.clone();
                 let connection_control = control.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     let _ = handle_control_connection(
                         stream,
                         connection_harness,
-                        connection_layout,
+                        connection_queue,
                         connection_control,
                     ).await;
                 });
@@ -666,7 +431,7 @@ async fn run_control_listener(
 async fn handle_control_connection(
     mut stream: TcpStream,
     harness: Harness,
-    layout: QueueLayout,
+    queue: FilesystemQueue,
     control: ControlOptions,
 ) -> Result<(), ServeError> {
     let request = tokio::time::timeout(
@@ -684,7 +449,7 @@ async fn handle_control_connection(
                 .to_string()
                 .into_bytes(),
         ),
-        Ok(request) => match handle_control_request(&request, &harness, &layout, &control) {
+        Ok(request) => match handle_control_request(&request, &harness, &queue, &control) {
             Ok(response) => response,
             Err(error) => control_error_response(error),
         },
@@ -815,7 +580,7 @@ fn authorized(request: &HttpRequest, token: Option<&str>) -> bool {
 fn handle_control_request(
     request: &HttpRequest,
     harness: &Harness,
-    layout: &QueueLayout,
+    queue: &FilesystemQueue,
     control: &ControlOptions,
 ) -> Result<(&'static str, &'static str, Vec<u8>), ServeError> {
     let (path, query) = request
@@ -823,9 +588,7 @@ fn handle_control_request(
         .split_once('?')
         .map_or((request.path.as_str(), ""), |(path, query)| (path, query));
     if request.method == "GET" && path == "/healthz" {
-        let body = std::fs::read(&layout.health).unwrap_or_else(|_| {
-            serde_json::to_vec(&serde_json::json!({"ok":true,"product":crate::PRODUCT})).unwrap()
-        });
+        let body = queue.health();
         return Ok(("200 OK", "application/json", body));
     }
     if request.method == "GET" && path == "/metrics" {
@@ -838,10 +601,6 @@ fn handle_control_request(
         return json_response("200 OK", &harness.registry.list()?);
     }
     if request.method == "POST" && path == "/runs" {
-        let _admission = layout
-            .admission_lock
-            .lock()
-            .map_err(|_| ServeError::Message("queue admission lock poisoned".into()))?;
         if request.body.len() > control.max_body_bytes {
             return Ok((
                 "413 Payload Too Large",
@@ -849,7 +608,7 @@ fn handle_control_request(
                 b"{\"error\":\"body too large\"}".to_vec(),
             ));
         }
-        let mut job: QueueJob = match serde_json::from_slice(&request.body) {
+        let job: QueueJob = match serde_json::from_slice(&request.body) {
             Ok(job) => job,
             Err(error) => {
                 return Ok((
@@ -861,33 +620,23 @@ fn handle_control_request(
                 ));
             }
         };
-        if job.task.trim().is_empty() {
-            return Ok((
+        return match queue.admit(job, control.queue_capacity)? {
+            Admission::Accepted(job) => Ok((
+                "202 Accepted",
+                "application/json",
+                serde_json::to_vec(&job)?,
+            )),
+            Admission::MissingTask => Ok((
                 "400 Bad Request",
                 "application/json",
                 b"{\"error\":\"task is required\"}".to_vec(),
-            ));
-        }
-        if queue_depth(layout)? >= control.queue_capacity.max(1) {
-            return Ok((
+            )),
+            Admission::Full => Ok((
                 "429 Too Many Requests",
                 "application/json",
                 b"{\"error\":\"queue capacity reached\"}".to_vec(),
-            ));
-        }
-        if job.job_id.is_none() {
-            job.job_id = Some(Uuid::new_v4().to_string());
-        }
-        let filename = format!("job-{}.json", Uuid::new_v4());
-        let path = layout.inbox.join(filename);
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, serde_json::to_vec_pretty(&job)?)?;
-        std::fs::rename(temp, &path)?;
-        return Ok((
-            "202 Accepted",
-            "application/json",
-            serde_json::to_vec(&job)?,
-        ));
+            )),
+        };
     }
 
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -978,17 +727,6 @@ fn json_response<T: Serialize>(
         "application/json",
         serde_json::to_vec_pretty(value)?,
     ))
-}
-
-fn queue_depth(layout: &QueueLayout) -> Result<usize, ServeError> {
-    Ok(count_json(&layout.inbox)? + count_json(&layout.processing)?)
-}
-
-fn count_json(path: &Path) -> Result<usize, ServeError> {
-    Ok(std::fs::read_dir(path)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
-        .count())
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1087,12 +825,13 @@ mod tests {
         let harness = Harness::from_config(config, state.clone()).unwrap();
         let layout = QueueLayout::under_state(state.path());
         layout.ensure().unwrap();
+        let queue = FilesystemQueue::new(&layout);
         let runtime = ServeRuntimeOptions {
             queue_capacity: 1,
             ..ServeRuntimeOptions::default()
         };
         let running = AtomicBool::new(true);
-        write_health(&layout, &harness, &running, 0, 0, None, &runtime).unwrap();
+        queue.write_health(&running, 0, None, &runtime).unwrap();
         let control = ControlOptions {
             auth_token: Some("secret".into()),
             queue_capacity: 1,
@@ -1115,9 +854,9 @@ mod tests {
             body,
         };
         assert!(authorized(&request, control.auth_token.as_deref()));
-        let (status, _, _) = handle_control_request(&request, &harness, &layout, &control).unwrap();
+        let (status, _, _) = handle_control_request(&request, &harness, &queue, &control).unwrap();
         assert_eq!(status, "202 Accepted");
-        assert_eq!(queue_depth(&layout).unwrap(), 1);
+        assert_eq!(queue.depth().unwrap(), 1);
 
         let unauthorized = HttpRequest {
             authorization: Some("Bearer wrong".into()),
@@ -1139,11 +878,11 @@ mod tests {
             })
             .unwrap(),
         };
-        let (status, _, _) = handle_control_request(&second, &harness, &layout, &control).unwrap();
+        let (status, _, _) = handle_control_request(&second, &harness, &queue, &control).unwrap();
         assert_eq!(status, "429 Too Many Requests");
 
         std::fs::write(layout.processing.join("active.json"), b"{}").unwrap();
-        write_health(&layout, &harness, &running, 0, 0, None, &runtime).unwrap();
+        queue.write_health(&running, 0, None, &runtime).unwrap();
         let health: HealthStatus =
             serde_json::from_str(&std::fs::read_to_string(&layout.health).unwrap()).unwrap();
         assert!(health.queue_over_capacity);

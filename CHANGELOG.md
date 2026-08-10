@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen the local filesystem queue so the serve host and control adapter share
+  one tested implementation of admission, priority claim, retry, archival, and
+  health invariants without changing the public serve interface.
 - Deepen each plane-claimed run transaction behind one private interface so
   continuation, fencing, heartbeat, execution, acknowledgement, and lifecycle
   ordering no longer leak through the plane polling host.
