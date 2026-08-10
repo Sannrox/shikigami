@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen the governed harvest transaction behind one private module so
+  checkpoint projection, causal event state, report replay, and in-doubt tool
+  execution recovery no longer leak through the sekai-chisei adapter.
 - Deepen the authenticated local Run Control protocol behind one private module
   so transport, framing, authentication, routing, queue admission, registry
   operations, metrics projection, and response behavior no longer leak through

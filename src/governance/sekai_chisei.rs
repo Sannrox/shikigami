@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -13,7 +12,7 @@ use sekai_client::{
 
 use crate::checkpoint::{
     GovernanceCheckpoint, GovernanceEvidenceReference, PendingGovernanceEvent, StagedToolExecution,
-    StagedToolReport, ToolExecutionStatus,
+    StagedToolReport,
 };
 use crate::config::Config;
 use crate::model::{ChatMessage, ModelTurn, ToolCall};
@@ -40,7 +39,10 @@ const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
 
 type PlaneClient = CoreLoopClient<GrpcTransport>;
 
+mod harvest_transaction;
 mod tool_authorization;
+
+use harvest_transaction::HarvestTransaction;
 
 fn available_model(model: proto::chisei::AvailableModelRecord) -> AvailableModel {
     AvailableModel {
@@ -60,18 +62,6 @@ fn available_models_from_summary(
     response.models.into_iter().map(available_model).collect()
 }
 
-#[derive(Default)]
-struct HarvestState {
-    host_operation_id: Option<String>,
-    logical_operation_id: Option<String>,
-    model_operation_id: Option<String>,
-    model_reported: bool,
-    last_event_id: Option<String>,
-    pending_event: Option<PendingGovernanceEvent>,
-    pending_tool_reports: Vec<StagedToolReport>,
-    pending_tool_executions: Vec<StagedToolExecution>,
-}
-
 pub struct SekaiChiseiGovernance {
     endpoint: String,
     principal: String,
@@ -80,7 +70,7 @@ pub struct SekaiChiseiGovernance {
     token_env: Option<String>,
     max_tokens: i32,
     preferred_model: String,
-    harvest: Arc<Mutex<HashMap<String, HarvestState>>>,
+    harvest: HarvestTransaction,
 }
 
 /// Runtime-claim client used by the explicit plane intake mode of `serve`.
@@ -113,19 +103,12 @@ impl SekaiChiseiGovernance {
             token_env: config.governance.token_env.clone(),
             max_tokens: 4096,
             preferred_model: config.model.model.clone(),
-            harvest: Arc::new(Mutex::new(HashMap::new())),
+            harvest: HarvestTransaction::default(),
         })
     }
 
     fn update_host_plan(&self, run_id: &str, operation_id: String) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.entry(run_id.into()).or_default();
-        state.host_operation_id = Some(operation_id);
-        state.last_event_id = None;
-        Ok(())
+        self.harvest.set_host_operation(run_id, operation_id)
     }
 
     fn update_harvest_plan(
@@ -133,68 +116,11 @@ impl SekaiChiseiGovernance {
         run_id: &str,
         operation_id: String,
     ) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.entry(run_id.into()).or_default();
-        state.model_operation_id = Some(operation_id);
-        state.model_reported = false;
-        Ok(())
-    }
-
-    fn restore_harvest_state(
-        &self,
-        run_id: &str,
-        checkpoint: &GovernanceCheckpoint,
-    ) -> Result<(), GovernanceError> {
-        self.harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .insert(
-                run_id.into(),
-                HarvestState {
-                    host_operation_id: (!checkpoint.operation_id.is_empty())
-                        .then(|| checkpoint.operation_id.clone()),
-                    logical_operation_id: (!checkpoint.logical_operation_id.is_empty())
-                        .then(|| checkpoint.logical_operation_id.clone()),
-                    model_operation_id: (!checkpoint.model_operation_id.is_empty())
-                        .then(|| checkpoint.model_operation_id.clone()),
-                    model_reported: checkpoint.model_reported,
-                    last_event_id: (!checkpoint.last_event_id.is_empty())
-                        .then(|| checkpoint.last_event_id.clone()),
-                    pending_event: checkpoint.pending_event.clone(),
-                    pending_tool_reports: checkpoint.pending_tool_reports.clone(),
-                    pending_tool_executions: checkpoint.pending_tool_executions.clone(),
-                },
-            );
-        Ok(())
+        self.harvest.set_model_operation(run_id, operation_id)
     }
 
     fn harvest_checkpoint_state(&self, run_id: &str) -> Option<GovernanceCheckpoint> {
-        let harvest = self.harvest.lock().ok()?;
-        let state = harvest.get(run_id)?;
-        let has_state = state.host_operation_id.is_some()
-            || state.logical_operation_id.is_some()
-            || state.model_operation_id.is_some()
-            || state.model_reported
-            || state.last_event_id.is_some()
-            || state.pending_event.is_some()
-            || !state.pending_tool_reports.is_empty()
-            || !state.pending_tool_executions.is_empty();
-        if !has_state {
-            return None;
-        }
-        Some(GovernanceCheckpoint {
-            operation_id: state.host_operation_id.clone().unwrap_or_default(),
-            logical_operation_id: state.logical_operation_id.clone().unwrap_or_default(),
-            model_operation_id: state.model_operation_id.clone().unwrap_or_default(),
-            model_reported: state.model_reported,
-            last_event_id: state.last_event_id.clone().unwrap_or_default(),
-            pending_event: state.pending_event.clone(),
-            pending_tool_reports: state.pending_tool_reports.clone(),
-            pending_tool_executions: state.pending_tool_executions.clone(),
-        })
+        self.harvest.checkpoint(run_id)
     }
 
     #[cfg(test)]
@@ -210,72 +136,11 @@ impl SekaiChiseiGovernance {
         handle: &RunHandle,
         requested_event_id: Option<String>,
     ) -> Result<(String, String, String), GovernanceError> {
-        let harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.get(&handle.run_id).ok_or_else(|| {
-            GovernanceError::Message(
-                "operation-event reporting unavailable: run has no harvest state".into(),
-            )
-        })?;
-        let operation_id = state.host_operation_id.clone().ok_or_else(|| {
-            GovernanceError::Message(
-                "operation-event reporting unavailable: host PlanExecution did not establish a receipt".into(),
-            )
-        })?;
-        let parent_event_id = state
-            .last_event_id
-            .clone()
-            .unwrap_or_else(|| format!("{operation_id}:budget"));
-        let event_id = requested_event_id
-            .unwrap_or_else(|| format!("report:{operation_id}:{}", uuid::Uuid::new_v4()));
-        Ok((operation_id, parent_event_id, event_id))
-    }
-
-    fn remember_harvest_event(&self, run_id: &str, event_id: String) {
-        if let Ok(mut harvest) = self.harvest.lock()
-            && let Some(state) = harvest.get_mut(run_id)
-        {
-            state.last_event_id = Some(event_id);
-        }
-    }
-
-    fn set_pending_harvest_event(
-        &self,
-        run_id: &str,
-        pending: PendingGovernanceEvent,
-    ) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.get_mut(run_id).ok_or_else(|| {
-            GovernanceError::Message(
-                "operation-event reporting unavailable: run has no harvest state".into(),
-            )
-        })?;
-        if state.pending_event.is_some() {
-            return Err(GovernanceError::Message(
-                "operation-event reporting has an unacknowledged event pending retry".into(),
-            ));
-        }
-        state.pending_event = Some(pending);
-        Ok(())
-    }
-
-    fn clear_pending_harvest_event(&self, run_id: &str) {
-        if let Ok(mut harvest) = self.harvest.lock()
-            && let Some(state) = harvest.get_mut(run_id)
-        {
-            state.pending_event = None;
-        }
+        self.harvest.event_context(handle, requested_event_id)
     }
 
     fn forget_harvest(&self, run_id: &str) {
-        if let Ok(mut harvest) = self.harvest.lock() {
-            harvest.remove(run_id);
-        }
+        self.harvest.forget(run_id);
     }
 
     fn stage_tool_reports_for_run(
@@ -283,29 +148,7 @@ impl SekaiChiseiGovernance {
         run_id: &str,
         reports: Vec<StagedToolReport>,
     ) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.get_mut(run_id).ok_or_else(|| {
-            GovernanceError::Message(
-                "operation-event reporting unavailable: run has no harvest state".into(),
-            )
-        })?;
-        state.pending_tool_reports.extend(reports);
-        Ok(())
-    }
-
-    fn remove_staged_tool_report(&self, run_id: &str, call_id: &str) {
-        if let Ok(mut harvest) = self.harvest.lock()
-            && let Some(state) = harvest.get_mut(run_id)
-            && let Some(index) = state
-                .pending_tool_reports
-                .iter()
-                .position(|report| report.call_id == call_id)
-        {
-            state.pending_tool_reports.remove(index);
-        }
+        self.harvest.stage_tool_reports(run_id, reports)
     }
 
     fn stage_tool_execution_for_run(
@@ -313,17 +156,7 @@ impl SekaiChiseiGovernance {
         run_id: &str,
         execution: StagedToolExecution,
     ) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.get_mut(run_id).ok_or_else(|| {
-            GovernanceError::Message(
-                "tool execution staging unavailable: run has no harvest state".into(),
-            )
-        })?;
-        state.pending_tool_executions.push(execution);
-        Ok(())
+        self.harvest.stage_tool_execution(run_id, execution)
     }
 
     fn mark_tool_execution_complete_for_run(
@@ -331,24 +164,7 @@ impl SekaiChiseiGovernance {
         run_id: &str,
         call_id: &str,
     ) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.get_mut(run_id).ok_or_else(|| {
-            GovernanceError::Message(
-                "tool execution staging unavailable: run has no harvest state".into(),
-            )
-        })?;
-        if let Some(execution) = state
-            .pending_tool_executions
-            .iter_mut()
-            .find(|execution| execution.call_id == call_id)
-            .filter(|execution| matches!(execution.status, ToolExecutionStatus::Started))
-        {
-            execution.status = ToolExecutionStatus::Completed;
-        }
-        Ok(())
+        self.harvest.mark_tool_execution_complete(run_id, call_id)
     }
 
     fn mark_tool_execution_started_for_run(
@@ -356,74 +172,19 @@ impl SekaiChiseiGovernance {
         run_id: &str,
         call_id: &str,
     ) -> Result<(), GovernanceError> {
-        let mut harvest = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?;
-        let state = harvest.get_mut(run_id).ok_or_else(|| {
-            GovernanceError::Message(
-                "tool execution staging unavailable: run has no harvest state".into(),
-            )
-        })?;
-        if let Some(execution) = state
-            .pending_tool_executions
-            .iter_mut()
-            .find(|execution| execution.call_id == call_id)
-            .filter(|execution| matches!(execution.status, ToolExecutionStatus::Authorizing))
-        {
-            execution.status = ToolExecutionStatus::Started;
-        }
-        Ok(())
+        self.harvest.mark_tool_execution_started(run_id, call_id)
     }
 
     fn clear_staged_tool_executions_for_run(&self, run_id: &str) {
-        if let Ok(mut harvest) = self.harvest.lock()
-            && let Some(state) = harvest.get_mut(run_id)
-        {
-            state.pending_tool_executions.clear();
-        }
+        self.harvest.clear_tool_executions(run_id);
     }
 
     fn recover_staged_tool_executions_for_run(&self, run_id: &str) -> Result<(), GovernanceError> {
-        let pending = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(run_id)
-            .map(|state| state.pending_tool_executions.clone())
-            .unwrap_or_default();
-        if pending.is_empty() {
-            return Ok(());
-        }
-        if pending
-            .iter()
-            .all(|execution| matches!(execution.status, ToolExecutionStatus::Authorizing))
-        {
-            self.clear_staged_tool_executions_for_run(run_id);
-            return Ok(());
-        }
-        let details = pending
-            .iter()
-            .map(|execution| format!("{} ({:?})", execution.name, execution.status))
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(GovernanceError::Message(format!(
-            "tool execution state is in-doubt; inspect host effects before resuming: {details}"
-        )))
+        self.harvest.recover_tool_executions(run_id)
     }
 
     fn host_harvest_operation_id(&self, handle: &RunHandle) -> Result<String, GovernanceError> {
-        self.harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(&handle.run_id)
-            .and_then(|state| state.host_operation_id.clone())
-            .ok_or_else(|| {
-                GovernanceError::Message(
-                    "operation receipt unavailable: host PlanExecution did not establish a receipt"
-                        .into(),
-                )
-            })
+        self.harvest.host_operation_id(handle)
     }
 
     fn pending_event_references(
@@ -543,12 +304,7 @@ impl SekaiChiseiGovernance {
     }
 
     async fn retry_pending_harvest_event(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
-        let pending = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(&handle.run_id)
-            .and_then(|state| state.pending_event.clone());
+        let pending = self.harvest.pending_event(&handle.run_id)?;
         let Some(pending) = pending else {
             return Ok(());
         };
@@ -559,14 +315,9 @@ impl SekaiChiseiGovernance {
                 pending.event_id
             )));
         }
-        self.remember_harvest_event(&handle.run_id, pending.event_id);
-        if pending.kind == harvest::KIND_MODEL
-            && let Ok(mut harvest) = self.harvest.lock()
-            && let Some(state) = harvest.get_mut(&handle.run_id)
-        {
-            state.model_reported = true;
-        }
-        self.clear_pending_harvest_event(&handle.run_id);
+        let model = pending.kind == harvest::KIND_MODEL;
+        self.harvest
+            .commit_event(&handle.run_id, pending.event_id, model);
         Ok(())
     }
 
@@ -589,7 +340,7 @@ impl SekaiChiseiGovernance {
             attributes: attributes.into_iter().collect::<BTreeMap<_, _>>(),
             references: Self::pending_event_references(&references),
         };
-        self.set_pending_harvest_event(&handle.run_id, pending.clone())?;
+        self.harvest.stage_event(&handle.run_id, pending.clone())?;
         let response = self.send_pending_harvest_event(&pending).await?;
         if !response.recorded && response.event_id != pending.event_id {
             return Err(GovernanceError::Message(format!(
@@ -597,8 +348,8 @@ impl SekaiChiseiGovernance {
                 pending.event_id
             )));
         }
-        self.remember_harvest_event(&handle.run_id, pending.event_id);
-        self.clear_pending_harvest_event(&handle.run_id);
+        self.harvest
+            .commit_event(&handle.run_id, pending.event_id, false);
         Ok(response)
     }
 
@@ -618,22 +369,7 @@ impl SekaiChiseiGovernance {
         handle: &RunHandle,
         ok: bool,
     ) -> Result<(), GovernanceError> {
-        let (model_operation_id, model_reported) = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(&handle.run_id)
-            .map(|state| {
-                (
-                    state.model_operation_id.clone(),
-                    state.model_reported,
-                )
-            })
-            .ok_or_else(|| {
-                GovernanceError::Message(
-                    "model event reporting unavailable: model PlanExecution did not establish a receipt".into(),
-                )
-            })?;
+        let (model_operation_id, model_reported) = self.harvest.model_operation(&handle.run_id)?;
         if model_reported {
             return Ok(());
         }
@@ -655,11 +391,7 @@ impl SekaiChiseiGovernance {
             Some(event_id),
         )
         .await?;
-        if let Ok(mut harvest) = self.harvest.lock()
-            && let Some(state) = harvest.get_mut(&handle.run_id)
-        {
-            state.model_reported = true;
-        }
+        self.harvest.mark_model_reported(&handle.run_id);
         Ok(())
     }
 
@@ -698,7 +430,7 @@ impl SekaiChiseiGovernance {
         )
         .await?;
         if let Some(call_id) = call_id {
-            self.remove_staged_tool_report(&handle.run_id, call_id);
+            self.harvest.commit_tool_report(&handle.run_id, call_id);
         }
         Ok(())
     }
@@ -845,14 +577,7 @@ impl SekaiChiseiGovernance {
         handle: &RunHandle,
         reason: &str,
     ) -> Result<(), GovernanceError> {
-        if self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(&handle.run_id)
-            .and_then(|state| state.host_operation_id.as_ref())
-            .is_none()
-        {
+        if !self.harvest.has_host_operation(&handle.run_id)? {
             return Ok(());
         }
 
@@ -937,12 +662,8 @@ impl SekaiChiseiGovernance {
         };
 
         if let Some(checkpoint) = checkpoint {
-            self.restore_harvest_state(run_id, checkpoint)?;
-            if let Ok(mut harvest) = self.harvest.lock()
-                && let Some(state) = harvest.get_mut(run_id)
-            {
-                state.logical_operation_id = Some(handle.operation_id.clone());
-            }
+            self.harvest
+                .restore(run_id, checkpoint, handle.operation_id.clone())?;
             if !checkpoint.operation_id.is_empty() {
                 match self.harvest_receipt(&handle).await {
                     Ok(receipt) if receipt.complete => {
@@ -975,24 +696,10 @@ impl SekaiChiseiGovernance {
                 }
             }
         } else {
-            self.harvest
-                .lock()
-                .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-                .insert(
-                    run_id.into(),
-                    HarvestState {
-                        logical_operation_id: Some(handle.operation_id.clone()),
-                        ..HarvestState::default()
-                    },
-                );
+            self.harvest.start(run_id, handle.operation_id.clone())?;
         }
 
-        let has_host_receipt = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(run_id)
-            .is_some_and(|state| state.host_operation_id.is_some());
+        let has_host_receipt = self.harvest.has_host_operation(run_id)?;
         if !has_host_receipt {
             match self
                 .create_host_receipt(run_id, task, &handle.operation_id)
@@ -1004,14 +711,7 @@ impl SekaiChiseiGovernance {
             }
         }
 
-        let needs_attempt = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(run_id)
-            .is_some_and(|state| {
-                state.last_event_id.is_none() && state.host_operation_id.is_some()
-            });
+        let needs_attempt = self.harvest.needs_attempt(run_id)?;
         if needs_attempt {
             let attributes = harvest::attempt_attributes(run_id, &handle.operation_id);
             if let Err(error) = self
@@ -1615,13 +1315,7 @@ impl GovernancePort for SekaiChiseiGovernance {
     }
 
     async fn replay_staged_tool_reports(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
-        let reports = self
-            .harvest
-            .lock()
-            .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-            .get(&handle.run_id)
-            .map(|state| state.pending_tool_reports.clone())
-            .unwrap_or_default();
+        let reports = self.harvest.pending_tool_reports(&handle.run_id)?;
         for report in reports {
             self.report_tool_event(
                 handle,
@@ -1754,10 +1448,8 @@ impl GovernancePort for SekaiChiseiGovernance {
         {
             let model_operation_id = self
                 .harvest
-                .lock()
-                .map_err(|_| GovernanceError::Message("harvest state lock poisoned".into()))?
-                .get(&handle.run_id)
-                .and_then(|state| state.model_operation_id.clone())
+                .model_operation(&handle.run_id)?
+                .0
                 .filter(|operation_id| !operation_id.is_empty());
             let Some(model_operation_id) = model_operation_id else {
                 match self
@@ -2021,9 +1713,8 @@ mod tests {
         let governance = SekaiChiseiGovernance::from_config(&Config::default()).unwrap();
         governance
             .harvest
-            .lock()
-            .unwrap()
-            .insert("run-1".into(), HarvestState::default());
+            .start("run-1", "logical-op-1".into())
+            .unwrap();
         governance
             .update_host_plan("run-1", "host-plan-1".into())
             .unwrap();
@@ -2036,7 +1727,9 @@ mod tests {
         assert_eq!(operation_id, "host-plan-1");
         assert_eq!(parent, "host-plan-1:budget");
         assert!(event_id.starts_with("report:host-plan-1:"), "{event_id}");
-        governance.remember_harvest_event("run-1", event_id.clone());
+        governance
+            .harvest
+            .commit_event("run-1", event_id.clone(), false);
         let (_, next_parent, _) = governance.harvest_event_context(&handle).unwrap();
         assert_eq!(next_parent, event_id);
     }
@@ -2046,16 +1739,8 @@ mod tests {
         let governance = SekaiChiseiGovernance::from_config(&Config::default()).unwrap();
         governance
             .harvest
-            .lock()
-            .unwrap()
-            .insert("run-1".into(), HarvestState::default());
-        governance
-            .harvest
-            .lock()
-            .unwrap()
-            .get_mut("run-1")
-            .unwrap()
-            .logical_operation_id = Some("logical-op-1".into());
+            .start("run-1", "logical-op-1".into())
+            .unwrap();
         governance
             .update_host_plan("run-1", "host-plan-1".into())
             .unwrap();
@@ -2130,9 +1815,8 @@ mod tests {
         let governance = SekaiChiseiGovernance::from_config(&Config::default()).unwrap();
         governance
             .harvest
-            .lock()
-            .unwrap()
-            .insert("run-1".into(), HarvestState::default());
+            .start("run-1", "logical-op-1".into())
+            .unwrap();
         governance
             .update_host_plan("run-1", "host-plan-1".into())
             .unwrap();
