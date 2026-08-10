@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen the complete durable run transaction behind one internal interface so
+  workspace preparation, model/tool ordering, checkpoint recovery, completion,
+  and artifact finalization no longer live in the public `Engine` module.
 - Split the run engine into `src/run/` and deepen checkpoint durability behind
   an owned `RunSession` (messages, turns, retention, and todos no longer restated
   at every save). Resume workspace validation lives in `run/resume.rs`. Public
