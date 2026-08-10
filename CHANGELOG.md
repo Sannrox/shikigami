@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Deepen sekai-chisei governed tool authorization behind one private module
+  without changing the governance port or external-action behavior.
+
 ### Added
 
 - Durable local run registry and redacted event journals with runs, cancel,

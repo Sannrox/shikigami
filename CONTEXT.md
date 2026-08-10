@@ -24,3 +24,11 @@ preparation, claim events, heartbeat and shutdown races, harness execution,
 acknowledgement retry, and worker lifecycle publication. Plane intake delegates
 this protocol to a private deep module; it does not add a public port or adapter
 seam.
+
+## Governed tool authorization
+
+One stable tool call's sekai-chisei external-action protocol, including risk
+classification, request construction, decision interpretation, signed permit
+redemption, execution identity, and fail-closed security checks. The
+sekai-chisei adapter delegates this protocol to a private deep module behind
+the existing governance port seam.
