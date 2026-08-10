@@ -115,8 +115,28 @@ mod tests {
 
     use super::path::glob_match;
     use super::*;
-    use crate::config::NetworkSettings;
+    use crate::config::{Config, NetworkSettings, PermissionMode};
     use tempfile::tempdir;
+
+    #[test]
+    fn run_registry_applies_resolved_tool_authority() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::default();
+        config.tools.mode = PermissionMode::Read;
+        config.tools.enabled = vec!["read_file".into(), "write_file".into()];
+
+        let registry = ToolRegistry::for_run(dir.path(), &config).unwrap();
+
+        assert_eq!(registry.enabled(), &["read_file"]);
+        assert_eq!(
+            registry
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>(),
+            vec!["read_file"]
+        );
+    }
 
     #[tokio::test]
     async fn background_bash_job_poll_and_logs() {

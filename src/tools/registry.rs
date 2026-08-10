@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::config::{NetworkSettings, SandboxSettings};
+use crate::config::{Config, NetworkSettings, SandboxSettings};
 
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
 use super::catalog::model_visible_builtin_definitions;
@@ -39,6 +39,27 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Build the run-scoped registry from resolved harness settings.
+    ///
+    /// This is the turn loop's construction interface. Tool authority,
+    /// network policy, ignore behavior, protected child environments, and
+    /// sandbox policy stay local to the registry instead of being assembled
+    /// by every caller.
+    pub(crate) fn for_run(
+        workspace: impl Into<PathBuf>,
+        config: &Config,
+    ) -> Result<Self, ToolError> {
+        Self::with_builtins_sandbox_protected_environment(
+            workspace,
+            config.tools.effective_enabled(),
+            config.tools.bash_timeout_secs,
+            config.network.clone(),
+            config.tools.respect_ignore,
+            &config.protected_tool_environment_names(),
+            config.sandbox.clone(),
+        )
+    }
+
     /// Bootstrap builtins filtered by the settings allow-list.
     pub fn with_builtins(
         workspace: impl Into<PathBuf>,
