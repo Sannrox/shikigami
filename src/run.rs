@@ -436,8 +436,22 @@ impl Engine {
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, RunError> {
+        self.run_with_checkpoint_digest(request, None).await
+    }
+
+    pub(crate) async fn run_with_checkpoint_digest(
+        &self,
+        request: RunRequest,
+        expected_checkpoint_digest: Option<&str>,
+    ) -> Result<RunResult, RunError> {
+        let mut resume_checkpoint = None;
         if let Some(resume_id) = &request.resume_run_id {
-            let checkpoint = Checkpoint::load(&self.state_runs, resume_id)?;
+            let (checkpoint, digest) = Checkpoint::load_with_digest(&self.state_runs, resume_id)?;
+            if expected_checkpoint_digest.is_some_and(|expected| expected != digest) {
+                return Err(RunError::Message(format!(
+                    "checkpoint digest mismatch for run {resume_id}"
+                )));
+            }
             checkpoint.validate_prompt(SYSTEM_PROMPT)?;
             let _ =
                 validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &checkpoint)?;
@@ -461,6 +475,11 @@ impl Engine {
                     "resume_answer provided but run is not parked".into(),
                 ));
             }
+            resume_checkpoint = Some(checkpoint);
+        } else if expected_checkpoint_digest.is_some() {
+            return Err(RunError::Message(
+                "checkpoint digest requires a resumed run".into(),
+            ));
         }
         let run_id = request
             .resume_run_id
@@ -487,7 +506,9 @@ impl Engine {
                 }
             }
         });
-        let result = self.run_inner(request, run_id.clone()).await;
+        let result = self
+            .run_inner(request, run_id.clone(), resume_checkpoint)
+            .await;
         heartbeat_task.abort();
         let _ = heartbeat_task.await;
         match &result {
@@ -505,6 +526,7 @@ impl Engine {
         &self,
         request: RunRequest,
         fresh_run_id: String,
+        resume_checkpoint: Option<Checkpoint>,
     ) -> Result<RunResult, RunError> {
         let started = tokio::time::Instant::now();
         let timeout = request
@@ -521,8 +543,9 @@ impl Engine {
             initial_todos,
             governance_checkpoint,
         ) = if let Some(resume_id) = &request.resume_run_id {
-            let cp = Checkpoint::load(&self.state_runs, resume_id)?;
-            cp.validate_prompt(SYSTEM_PROMPT)?;
+            let cp = resume_checkpoint.ok_or_else(|| {
+                RunError::Message(format!("checkpoint snapshot missing for run {resume_id}"))
+            })?;
             let resumed_workspace =
                 validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &cp)?;
             self.emit(

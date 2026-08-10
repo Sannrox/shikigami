@@ -346,7 +346,8 @@ impl Harness {
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, HarnessError> {
-        self.run_with_events(request, None).await
+        self.run_with_events_and_checkpoint_digest(request, None, None)
+            .await
     }
 
     /// Run with an optional additional event sink (fan-out with the configured sink).
@@ -355,6 +356,25 @@ impl Harness {
         &self,
         request: RunRequest,
         extra: Option<Arc<dyn EventSink>>,
+    ) -> Result<RunResult, HarnessError> {
+        self.run_with_events_and_checkpoint_digest(request, extra, None)
+            .await
+    }
+
+    pub(crate) async fn run_with_checkpoint_digest(
+        &self,
+        request: RunRequest,
+        expected_checkpoint_digest: &str,
+    ) -> Result<RunResult, HarnessError> {
+        self.run_with_events_and_checkpoint_digest(request, None, Some(expected_checkpoint_digest))
+            .await
+    }
+
+    async fn run_with_events_and_checkpoint_digest(
+        &self,
+        request: RunRequest,
+        extra: Option<Arc<dyn EventSink>>,
+        expected_checkpoint_digest: Option<&str>,
     ) -> Result<RunResult, HarnessError> {
         let report = self.doctor_async().await;
         if !report.ok {
@@ -374,7 +394,10 @@ impl Harness {
             state_runs: self.state.runs_dir(),
             registry: Arc::clone(&self.registry),
         };
-        match engine.run(request).await {
+        match engine
+            .run_with_checkpoint_digest(request, expected_checkpoint_digest)
+            .await
+        {
             Ok(result) => {
                 self.metrics.record_run(
                     result.success,
