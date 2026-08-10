@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::config::{NetworkSettings, SandboxSettings};
+use crate::config::{Config, NetworkSettings, SandboxSettings};
 
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
 use super::catalog::model_visible_builtin_definitions;
@@ -39,6 +39,23 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Build the run-scoped tool module from resolved harness settings.
+    ///
+    /// This is the preferred harness-facing constructor: tool authority,
+    /// network policy, ignore behavior, protected environment names, and
+    /// sandbox policy stay coordinated behind the registry interface.
+    pub fn from_config(workspace: impl Into<PathBuf>, config: &Config) -> Result<Self, ToolError> {
+        Self::with_builtins_sandbox_protected_environment(
+            workspace,
+            config.tools.effective_enabled(),
+            config.tools.bash_timeout_secs,
+            config.network.clone(),
+            config.tools.respect_ignore,
+            &config.protected_tool_environment_names(),
+            config.sandbox.clone(),
+        )
+    }
+
     /// Bootstrap builtins filtered by the settings allow-list.
     pub fn with_builtins(
         workspace: impl Into<PathBuf>,

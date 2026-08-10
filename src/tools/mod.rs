@@ -379,6 +379,31 @@ mod tests {
         assert!(!must_be_exclusive_batch("bash"));
     }
 
+    #[test]
+    fn registry_from_config_owns_effective_tool_bootstrap() {
+        let dir = tempdir().unwrap();
+        let mut config = crate::Config::default();
+        config.tools.enabled = vec!["bash".into(), "read_file".into()];
+
+        let registry = ToolRegistry::from_config(dir.path(), &config).unwrap();
+        let names = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "read_file",
+                "bash",
+                "bash_background",
+                "bash_job_status",
+                "bash_job_logs",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn registry_unknown_enabled_name_fails_closed() {
         let dir = tempdir().unwrap();
