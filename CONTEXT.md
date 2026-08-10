@@ -39,3 +39,11 @@ The local serve intake's durable job lifecycle, including bounded admission,
 priority claim, retry, collision-safe terminal archival and result writing, and
 health observations. The serve host and local control adapter delegate this
 protocol to a private deep module; it is not a new public port or adapter seam.
+
+## Run Control API
+
+The optional authenticated local HTTP operator protocol for health, metrics,
+filesystem queue admission, and run inspection, cancellation, events, and
+cleanup. The serve host delegates transport, framing, authentication, routing,
+and response behavior to a private deep module; the public serve interface and
+existing registry, metrics, and filesystem queue seams remain unchanged.
