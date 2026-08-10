@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Reject path-like workspace snapshot identifiers before mutation, and restore
+  the workspace before artifact-baseline capture or project-context loading.
 - Centralize parked-checkpoint validation and digest calculation so plane
   continuation intake binds its digest to the exact bytes it validates.
 - Return the `auto` routing choice from `Harness::available_models` itself so

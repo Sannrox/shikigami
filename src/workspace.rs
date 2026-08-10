@@ -36,6 +36,109 @@ pub enum WorkspaceError {
     Git(String),
     #[error("snapshot not found: {0}")]
     SnapshotMissing(PathBuf),
+    #[error("invalid snapshot {field}: `{value}` must be one safe path segment")]
+    InvalidSnapshotId { field: &'static str, value: String },
+    #[error("snapshot storage contains a symbolic link")]
+    UnsafeSnapshotPath,
+    #[error("workspace adapter `{0}` does not support snapshots")]
+    SnapshotUnsupported(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotPlan<'a> {
+    None,
+    CaptureInitial,
+    Restore(&'a str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotOutcome {
+    Unchanged,
+    Captured { name: String, path: PathBuf },
+    Restored { name: String },
+}
+
+/// Run-scoped snapshot module.
+///
+/// This is the only interface the turn loop uses for snapshot policy. Storage
+/// layout, identifier validation, and destructive restore ordering stay behind
+/// this seam.
+pub(crate) struct WorkspaceSnapshots<'a> {
+    state_runs: &'a Path,
+}
+
+impl<'a> WorkspaceSnapshots<'a> {
+    pub(crate) fn new(state_runs: &'a Path) -> Self {
+        Self { state_runs }
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        workspace: &MaterializedWorkspace,
+        run_id: &str,
+        plan: SnapshotPlan<'_>,
+    ) -> Result<SnapshotOutcome, WorkspaceError> {
+        if matches!(plan, SnapshotPlan::None) {
+            return Ok(SnapshotOutcome::Unchanged);
+        }
+        if workspace.adapter == "inplace" {
+            return Err(WorkspaceError::SnapshotUnsupported(
+                workspace.adapter.clone(),
+            ));
+        }
+        match plan {
+            SnapshotPlan::None => Ok(SnapshotOutcome::Unchanged),
+            SnapshotPlan::CaptureInitial => {
+                let name = "initial";
+                let path = take_snapshot(&workspace.path, self.state_runs, run_id, name)?;
+                Ok(SnapshotOutcome::Captured {
+                    name: name.into(),
+                    path,
+                })
+            }
+            SnapshotPlan::Restore(name) => {
+                restore_snapshot(&workspace.path, self.state_runs, run_id, name)?;
+                Ok(SnapshotOutcome::Restored { name: name.into() })
+            }
+        }
+    }
+}
+
+fn validate_snapshot_id(field: &'static str, value: &str) -> Result<(), WorkspaceError> {
+    let mut components = Path::new(value).components();
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+        && !value.contains('\\');
+    if valid {
+        Ok(())
+    } else {
+        Err(WorkspaceError::InvalidSnapshotId {
+            field,
+            value: value.into(),
+        })
+    }
+}
+
+fn snapshot_path(state_runs: &Path, run_id: &str, name: &str) -> Result<PathBuf, WorkspaceError> {
+    if !crate::checkpoint::is_safe_run_id(run_id) {
+        return Err(WorkspaceError::InvalidSnapshotId {
+            field: "run id",
+            value: run_id.into(),
+        });
+    }
+    validate_snapshot_id("name", name)?;
+    let run_root = state_runs.join(run_id);
+    let snapshots = run_root.join("snapshots");
+    for ancestor in [&run_root, &snapshots] {
+        if std::fs::symlink_metadata(ancestor)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(WorkspaceError::UnsafeSnapshotPath);
+        }
+    }
+    Ok(snapshots.join(name))
 }
 
 /// Copy directory tree without following symlinks (workspace → snapshot).
@@ -73,7 +176,7 @@ pub fn take_snapshot(
     run_id: &str,
     name: &str,
 ) -> Result<PathBuf, WorkspaceError> {
-    let dest = state_runs.join(run_id).join("snapshots").join(name);
+    let dest = snapshot_path(state_runs, run_id, name)?;
     if dest.exists() {
         std::fs::remove_dir_all(&dest)?;
     }
@@ -88,7 +191,10 @@ pub fn restore_snapshot(
     run_id: &str,
     name: &str,
 ) -> Result<(), WorkspaceError> {
-    let src = state_runs.join(run_id).join("snapshots").join(name);
+    let src = snapshot_path(state_runs, run_id, name)?;
+    if std::fs::symlink_metadata(&src).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(WorkspaceError::UnsafeSnapshotPath);
+    }
     if !src.is_dir() {
         return Err(WorkspaceError::SnapshotMissing(src));
     }
@@ -378,5 +484,93 @@ mod snapshot_tests {
         assert!(!snapshot.join("linked-file").exists());
         assert!(!snapshot.join("linked-directory").exists());
         assert!(!snapshot.join("linked-directory/secret.txt").exists());
+    }
+
+    #[test]
+    fn restore_rejects_unsafe_names_before_mutating_workspace() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("keep.txt"), "keep").unwrap();
+
+        for name in ["", ".", "..", "../outside", "/tmp/outside", "a/b", "a\\b"] {
+            let error = restore_snapshot(&ws, &runs, "r1", name).unwrap_err();
+            assert!(matches!(error, WorkspaceError::InvalidSnapshotId { .. }));
+            assert_eq!(
+                std::fs::read_to_string(ws.join("keep.txt")).unwrap(),
+                "keep"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_accepts_canonical_maximum_length_run_id() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        let run_id = "a".repeat(128);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("file.txt"), "content").unwrap();
+
+        let path = take_snapshot(&ws, &runs, &run_id, "initial").unwrap();
+
+        assert!(path.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlinked_snapshot_before_mutating_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(ws.join("keep.txt"), "keep").unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::fs::create_dir_all(runs.join("r1/snapshots")).unwrap();
+        symlink(&outside, runs.join("r1/snapshots/initial")).unwrap();
+
+        let error = restore_snapshot(&ws, &runs, "r1", "initial").unwrap_err();
+
+        assert!(matches!(error, WorkspaceError::UnsafeSnapshotPath));
+        assert_eq!(
+            std::fs::read_to_string(ws.join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn snapshot_module_restores_before_callers_observe_workspace() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "restored rules").unwrap();
+        take_snapshot(&ws, &runs, "r1", "initial").unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "current rules").unwrap();
+        let materialized = MaterializedWorkspace {
+            path: ws.clone(),
+            adapter: "directory".into(),
+            cleanup: WorkspaceCleanup::None,
+        };
+
+        let outcome = WorkspaceSnapshots::new(&runs)
+            .prepare(&materialized, "r1", SnapshotPlan::Restore("initial"))
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            SnapshotOutcome::Restored {
+                name: "initial".into()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("AGENTS.md")).unwrap(),
+            "restored rules"
+        );
     }
 }
