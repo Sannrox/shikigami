@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen each plane-claimed run transaction behind one private interface so
+  continuation, fencing, heartbeat, execution, acknowledgement, and lifecycle
+  ordering no longer leak through the plane polling host.
 - Deepen durable tool-batch execution behind one private interface so
   authorization, crash-consistent checkpoints, execution, report replay,
   hooks, events, and park handling no longer leak through the run transaction.
