@@ -25,10 +25,9 @@ pub use sekai_client::protocol as proto;
 use sha2::{Digest, Sha256};
 
 use proto::chisei::{
-    AuthorizeExternalActionRequest, ChatMessage as ProtoChatMessage, ExecutionInput,
-    ExternalActionDecision, ExternalActionRequest, GetEffectivePolicySummaryRequest,
-    GetOperationReceiptRequest, RedeemExternalActionPermitRequest, ReportOperationEventRequest,
-    ToolCall as ProtoToolCall, ToolDef as ProtoToolDef,
+    ChatMessage as ProtoChatMessage, ExecutionInput, GetEffectivePolicySummaryRequest,
+    GetOperationReceiptRequest, ReportOperationEventRequest, ToolCall as ProtoToolCall,
+    ToolDef as ProtoToolDef,
 };
 use proto::sekai::{
     AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
@@ -40,6 +39,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
 
 type PlaneClient = CoreLoopClient<GrpcTransport>;
+
+mod tool_authorization;
 
 fn available_model(model: proto::chisei::AvailableModelRecord) -> AvailableModel {
     AvailableModel {
@@ -756,22 +757,6 @@ impl SekaiChiseiGovernance {
         Ok(())
     }
 
-    /// Whether a tool must request plane external-action authorization before
-    /// host execution. `report` / `escalate` / `todo_write` are harness-internal.
-    pub(crate) fn tool_requires_external_action(name: &str) -> bool {
-        !matches!(name, "report" | "escalate" | "todo_write")
-    }
-
-    /// Map a shikigami tool to the external-action risk class contract.
-    pub(crate) fn tool_risk_class(name: &str) -> &'static str {
-        match name {
-            "bash" | "bash_background" | "bash_job_status" | "bash_job_logs" => "destructive",
-            "write_file" | "edit" | "multi_edit" | "apply_patch" => "write",
-            "read_file" | "glob" | "grep" | "web_fetch" => "read",
-            _ => "write",
-        }
-    }
-
     fn arguments_digest(args_json: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(args_json.as_bytes());
@@ -780,94 +765,6 @@ impl SekaiChiseiGovernance {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
-    }
-
-    /// Interpret an ExternalActionDecision for headless execution.
-    /// Only `permit` allows the tool to proceed; the caller must still redeem
-    /// the signed permit before executing the tool.
-    pub(crate) fn interpret_external_action_decision(
-        decision: &ExternalActionDecision,
-    ) -> Result<(), GovernanceError> {
-        match decision.decision.as_str() {
-            "permit" => Ok(()),
-            "deny" => Err(GovernanceError::Denied(format!(
-                "external-action denied: {}",
-                if decision.reason.is_empty() {
-                    "policy denied"
-                } else {
-                    &decision.reason
-                }
-            ))),
-            "require_approval" => Err(GovernanceError::Denied(format!(
-                "external-action requires approval (unsupported headless): {}",
-                if decision.reason.is_empty() {
-                    "approval required"
-                } else {
-                    &decision.reason
-                }
-            ))),
-            other => Err(GovernanceError::Message(format!(
-                "external-action unexpected decision `{other}`{}",
-                if decision.reason.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", decision.reason)
-                }
-            ))),
-        }
-    }
-
-    fn permit_for_decision(
-        decision: &ExternalActionDecision,
-        permit: Option<proto::chisei::ExternalActionPermit>,
-    ) -> Result<proto::chisei::ExternalActionPermit, GovernanceError> {
-        Self::interpret_external_action_decision(decision)?;
-        permit.ok_or_else(|| GovernanceError::Message("external-action permit missing".into()))
-    }
-
-    fn build_external_action_request(
-        &self,
-        handle: &RunHandle,
-        call_id: &str,
-        name: &str,
-        args_json: &str,
-    ) -> Result<ExternalActionRequest, GovernanceError> {
-        let action_identity = Self::arguments_digest(&format!("{}:{call_id}", handle.run_id));
-        let request_id = format!("shikigami-action:{action_identity}");
-        let risk_class = Self::tool_risk_class(name);
-        Ok(ExternalActionRequest {
-            version: "external-action.request/v1".into(),
-            operation_id: self.host_harvest_operation_id(handle)?,
-            parent_operation_id: String::new(),
-            attempt_id: handle.run_id.clone(),
-            request_id: request_id.clone(),
-            actor: self.principal.clone(),
-            namespace: handle.namespace.clone(),
-            requesting_harness: "shikigami".into(),
-            // RedeemExternalActionPermit authenticates the bound executor
-            // through x-principal. This adapter has one configured
-            // authenticated identity, so it must bind actor and executor to
-            // the same principal; `requesting_harness` remains the stable
-            // shikigami host identity.
-            intended_executor: self.principal.clone(),
-            action_type: format!("shikigami.tool.{name}.{risk_class}/v1"),
-            parameter_schema: "application/json".into(),
-            canonical_arguments_digest: Self::arguments_digest(args_json),
-            policy_summary: std::collections::HashMap::from([("tool".into(), name.to_string())]),
-            target_selectors: vec![format!("project:{}/tool:{name}", handle.namespace)],
-            immutable_preconditions: std::collections::HashMap::new(),
-            risk_class: Self::tool_risk_class(name).into(),
-            expected_effects: vec![format!("execute_tool:{name}")],
-            requested_invocation_count: 1,
-            deadline_ms: chrono::Utc::now().timestamp_millis() + 120_000,
-            estimated_cost_micros: 0,
-            estimated_volume: 0,
-            affected_resource_count: 1,
-            rollback_capability: String::new(),
-            required_host_capabilities: vec!["shikigami.tools".into()],
-            idempotency_key: request_id,
-            policy_project: handle.namespace.clone(),
-        })
     }
 
     fn host_receipt_input(
@@ -1521,7 +1418,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         // Read actions still consume an external-action permit. Persist the
         // stable call identity before authorization so a crash cannot redeem
         // that permit twice on resume, even when the host effect is read-only.
-        Self::tool_requires_external_action(name)
+        tool_authorization::requires_external_action(name)
     }
 
     async fn plan_turn(
@@ -1692,118 +1589,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         name: &str,
         args_json: &str,
     ) -> Result<(), GovernanceError> {
-        if !Self::tool_requires_external_action(name) {
-            return Ok(());
-        }
-
-        let client = match self.connect().await {
-            Ok(c) => c,
-            Err(e) => {
-                if self.fail_closed {
-                    return Err(e);
-                }
-                return Ok(());
-            }
-        };
-
-        let request = match self.build_external_action_request(handle, call_id, name, args_json) {
-            Ok(request) => request,
-            Err(error) => {
-                if self.fail_closed {
-                    return Err(error);
-                }
-                return Ok(());
-            }
-        };
-        let response: proto::chisei::AuthorizeExternalActionResponse = match client
-            .raw()
-            .unary(
-                "/chisei.ChiseiService/AuthorizeExternalAction",
-                AuthorizeExternalActionRequest {
-                    request: Some(request.clone()),
-                    offline: false,
-                },
-                self.sdk_call_options(
-                    Some(&handle.namespace),
-                    Some(&request.operation_id),
-                    Some(&request.request_id),
-                ),
-            )
-            .await
-        {
-            Ok(r) => r,
-            Err(error) => {
-                if self.fail_closed {
-                    return Err(Self::sdk_error("AuthorizeExternalAction", error));
-                }
-                return Ok(());
-            }
-        };
-
-        let decision = response
-            .decision
-            .ok_or_else(|| GovernanceError::Message("external-action missing decision".into()))?;
-        let permit = Self::permit_for_decision(&decision, response.permit)?;
-        let redemption_response: proto::chisei::RedeemExternalActionPermitResponse = match client
-            .raw()
-            .unary(
-                "/chisei.ChiseiService/RedeemExternalActionPermit",
-                RedeemExternalActionPermitRequest {
-                    permit: Some(permit.clone()),
-                    executor: request.intended_executor.clone(),
-                    requesting_harness: request.requesting_harness.clone(),
-                    canonical_arguments_digest: request.canonical_arguments_digest.clone(),
-                    target_selectors: request.target_selectors.clone(),
-                    observed_preconditions: request.immutable_preconditions.clone(),
-                    host_capabilities: request.required_host_capabilities.clone(),
-                    idempotency_key: request.idempotency_key.clone(),
-                    execution_id: format!(
-                        "shikigami-execution:{}",
-                        Self::arguments_digest(&format!("{}:{call_id}", handle.run_id))
-                    ),
-                    invoked_at_ms: 0,
-                },
-                self.sdk_call_options(
-                    Some(&handle.namespace),
-                    Some(&request.operation_id),
-                    Some(&request.request_id),
-                ),
-            )
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let security_sensitive_failure = matches!(
-                    error.code,
-                    SdkErrorCode::PermissionDenied
-                        | SdkErrorCode::Unauthenticated
-                        | SdkErrorCode::FailedPrecondition
-                        | SdkErrorCode::InvalidArgument
-                );
-                let governance_error = if error.code == SdkErrorCode::Unauthenticated {
-                    GovernanceError::Unavailable(format!("RedeemExternalActionPermit: {error}"))
-                } else if security_sensitive_failure {
-                    GovernanceError::Message(format!("RedeemExternalActionPermit: {error}"))
-                } else {
-                    Self::sdk_error("RedeemExternalActionPermit", error)
-                };
-                if self.fail_closed || security_sensitive_failure {
-                    return Err(governance_error);
-                }
-                return Ok(());
-            }
-        };
-        let redemption = redemption_response
-            .redemption
-            .ok_or_else(|| GovernanceError::Message("external-action redemption missing".into()))?;
-        if redemption.permit_id != permit.permit_id
-            || redemption.executor != request.intended_executor
-        {
-            return Err(GovernanceError::Message(
-                "external-action redemption does not match the requested permit".into(),
-            ));
-        }
-        Ok(())
+        tool_authorization::authorize(self, handle, call_id, name, args_json).await
     }
 
     async fn report_tool(
@@ -2170,8 +1956,8 @@ pub async fn live_probe(config: &Config) -> Result<String, GovernanceError> {
 mod tests {
     use super::*;
 
-    fn decision(kind: &str, reason: &str) -> ExternalActionDecision {
-        ExternalActionDecision {
+    fn decision(kind: &str, reason: &str) -> proto::chisei::ExternalActionDecision {
+        proto::chisei::ExternalActionDecision {
             version: "external-action.decision/v1".into(),
             authorization_id: "auth-1".into(),
             request_digest: "digest".into(),
@@ -2310,51 +2096,32 @@ mod tests {
 
     #[test]
     fn report_skips_external_action() {
-        assert!(!SekaiChiseiGovernance::tool_requires_external_action(
-            "report"
-        ));
-        assert!(!SekaiChiseiGovernance::tool_requires_external_action(
-            "escalate"
-        ));
-        assert!(!SekaiChiseiGovernance::tool_requires_external_action(
-            "todo_write"
-        ));
-        assert!(SekaiChiseiGovernance::tool_requires_external_action("bash"));
-        assert!(SekaiChiseiGovernance::tool_requires_external_action(
-            "write_file"
-        ));
-        assert!(SekaiChiseiGovernance::tool_requires_external_action("edit"));
-        assert!(SekaiChiseiGovernance::tool_requires_external_action(
-            "read_file"
-        ));
+        assert!(!tool_authorization::requires_external_action("report"));
+        assert!(!tool_authorization::requires_external_action("escalate"));
+        assert!(!tool_authorization::requires_external_action("todo_write"));
+        assert!(tool_authorization::requires_external_action("bash"));
+        assert!(tool_authorization::requires_external_action("write_file"));
+        assert!(tool_authorization::requires_external_action("edit"));
+        assert!(tool_authorization::requires_external_action("read_file"));
     }
 
     #[test]
     fn risk_classes_match_tool_consequences() {
-        assert_eq!(
-            SekaiChiseiGovernance::tool_risk_class("bash"),
-            "destructive"
-        );
-        assert_eq!(
-            SekaiChiseiGovernance::tool_risk_class("write_file"),
-            "write"
-        );
-        assert_eq!(SekaiChiseiGovernance::tool_risk_class("edit"), "write");
-        assert_eq!(SekaiChiseiGovernance::tool_risk_class("read_file"), "read");
+        assert_eq!(tool_authorization::risk_class("bash"), "destructive");
+        assert_eq!(tool_authorization::risk_class("write_file"), "write");
+        assert_eq!(tool_authorization::risk_class("edit"), "write");
+        assert_eq!(tool_authorization::risk_class("read_file"), "read");
     }
 
     #[test]
     fn permit_allows_execution() {
-        assert!(
-            SekaiChiseiGovernance::interpret_external_action_decision(&decision("permit", ""))
-                .is_ok()
-        );
+        assert!(tool_authorization::interpret_decision(&decision("permit", "")).is_ok());
     }
 
     #[test]
     fn permit_decision_requires_signed_permit() {
         let err =
-            SekaiChiseiGovernance::permit_for_decision(&decision("permit", ""), None).unwrap_err();
+            tool_authorization::permit_for_decision(&decision("permit", ""), None).unwrap_err();
         assert!(matches!(err, GovernanceError::Message(message) if message.contains("permit")));
     }
 
@@ -2377,9 +2144,14 @@ mod tests {
             operation_id: "logical-op-1".into(),
             namespace: "default".into(),
         };
-        let request = governance
-            .build_external_action_request(&handle, "tool-1-0-provider-call", "write_file", "{}")
-            .unwrap();
+        let request = tool_authorization::build_request(
+            &governance,
+            &handle,
+            "tool-1-0-provider-call",
+            "write_file",
+            "{}",
+        )
+        .unwrap();
         assert_eq!(request.intended_executor, "shikigami");
         assert_eq!(request.action_type, "shikigami.tool.write_file.write/v1");
         assert_eq!(
@@ -2389,25 +2161,22 @@ mod tests {
         assert_eq!(request.operation_id, "host-plan-1");
         assert_eq!(
             request.request_id,
-            governance
-                .build_external_action_request(
-                    &handle,
-                    "tool-1-0-provider-call",
-                    "write_file",
-                    "{}"
-                )
-                .unwrap()
-                .request_id
+            tool_authorization::build_request(
+                &governance,
+                &handle,
+                "tool-1-0-provider-call",
+                "write_file",
+                "{}"
+            )
+            .unwrap()
+            .request_id
         );
     }
 
     #[test]
     fn deny_blocks_execution() {
-        let err = SekaiChiseiGovernance::interpret_external_action_decision(&decision(
-            "deny",
-            "budget exhausted",
-        ))
-        .unwrap_err();
+        let err = tool_authorization::interpret_decision(&decision("deny", "budget exhausted"))
+            .unwrap_err();
         match err {
             GovernanceError::Denied(msg) => {
                 assert!(msg.contains("budget exhausted"), "{msg}");
@@ -2418,11 +2187,9 @@ mod tests {
 
     #[test]
     fn require_approval_blocks_headless() {
-        let err = SekaiChiseiGovernance::interpret_external_action_decision(&decision(
-            "require_approval",
-            "needs human",
-        ))
-        .unwrap_err();
+        let err =
+            tool_authorization::interpret_decision(&decision("require_approval", "needs human"))
+                .unwrap_err();
         match err {
             GovernanceError::Denied(msg) => {
                 assert!(msg.contains("approval"), "{msg}");
@@ -2434,8 +2201,7 @@ mod tests {
 
     #[test]
     fn unknown_decision_fails_closed() {
-        let err = SekaiChiseiGovernance::interpret_external_action_decision(&decision("maybe", ""))
-            .unwrap_err();
+        let err = tool_authorization::interpret_decision(&decision("maybe", "")).unwrap_err();
         assert!(matches!(err, GovernanceError::Message(_)));
     }
 
