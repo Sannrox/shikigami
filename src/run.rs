@@ -311,6 +311,68 @@ pub struct Engine {
     pub registry: Arc<RunRegistry>,
 }
 
+/// Run-invariant context for durable checkpoint snapshots.
+///
+/// This private module keeps checkpoint metadata and retention policy out of
+/// turn-loop call sites while sampling progress and governance state at each
+/// durability point.
+struct CheckpointSession<'a> {
+    state_runs: &'a Path,
+    governance: &'a dyn GovernancePort,
+    run_id: &'a str,
+    task: &'a str,
+    workspace: &'a Path,
+    workspace_adapter: &'a str,
+    keep_workspace: bool,
+}
+
+impl CheckpointSession<'_> {
+    fn save(
+        &self,
+        messages: &[ChatMessage],
+        completed_turns: u32,
+        todos: Vec<TodoItem>,
+    ) -> Result<(), RunError> {
+        self.save_with_retention(messages, completed_turns, self.keep_workspace, None, todos)
+    }
+
+    fn save_recoverable(
+        &self,
+        messages: &[ChatMessage],
+        completed_turns: u32,
+        park: Option<ParkedState>,
+        todos: Vec<TodoItem>,
+    ) -> Result<(), RunError> {
+        self.save_with_retention(messages, completed_turns, true, park, todos)
+    }
+
+    fn save_with_retention(
+        &self,
+        messages: &[ChatMessage],
+        completed_turns: u32,
+        keep_workspace: bool,
+        park: Option<ParkedState>,
+        todos: Vec<TodoItem>,
+    ) -> Result<(), RunError> {
+        Checkpoint {
+            version: checkpoint::CHECKPOINT_VERSION,
+            run_id: self.run_id.into(),
+            task: self.task.into(),
+            prompt_id: checkpoint::prompt_id(SYSTEM_PROMPT),
+            messages: messages.to_vec(),
+            completed_turns,
+            workspace: self.workspace.to_path_buf(),
+            keep_workspace,
+            workspace_adapter: self.workspace_adapter.into(),
+            park,
+            todos,
+            governance: self.governance.checkpoint_state(self.run_id),
+        }
+        .save(self.state_runs)?;
+        Ok(())
+    }
+}
+
 impl Engine {
     /// Construct a low-level engine from resolved settings and adapters.
     pub fn new(
@@ -428,37 +490,6 @@ impl Engine {
                 None
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn save_checkpoint(
-        &self,
-        run_id: &str,
-        task: &str,
-        messages: &[ChatMessage],
-        turns: u32,
-        workspace: &Path,
-        keep_workspace: bool,
-        park: Option<ParkedState>,
-        todos: Vec<TodoItem>,
-        workspace_adapter: &str,
-    ) -> Result<(), RunError> {
-        let cp = Checkpoint {
-            version: checkpoint::CHECKPOINT_VERSION,
-            run_id: run_id.into(),
-            task: task.into(),
-            prompt_id: checkpoint::prompt_id(SYSTEM_PROMPT),
-            messages: messages.to_vec(),
-            completed_turns: turns,
-            workspace: workspace.to_path_buf(),
-            keep_workspace,
-            workspace_adapter: workspace_adapter.into(),
-            park,
-            todos,
-            governance: self.governance.checkpoint_state(run_id),
-        };
-        cp.save(&self.state_runs)?;
-        Ok(())
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, RunError> {
@@ -746,6 +777,15 @@ impl Engine {
         }
         let tool_defs = tools.definitions();
         let tools = Arc::new(tools);
+        let checkpoints = CheckpointSession {
+            state_runs: &self.state_runs,
+            governance: self.governance.as_ref(),
+            run_id: &run_id,
+            task: &task,
+            workspace: &ws.path,
+            workspace_adapter: &ws.adapter,
+            keep_workspace,
+        };
 
         let max_turns = self.config.run.max_turns;
         let mut final_summary = String::from("completed without report");
@@ -789,17 +829,7 @@ impl Engine {
         let host_receipt_was_durable = governance_checkpoint
             .as_ref()
             .is_some_and(|checkpoint| !checkpoint.operation_id.is_empty());
-        if let Err(error) = self.save_checkpoint(
-            &run_id,
-            &task,
-            &messages,
-            turns,
-            &ws.path,
-            keep_workspace,
-            None,
-            tools.todos(),
-            &ws.adapter,
-        ) {
+        if let Err(error) = checkpoints.save(&messages, turns, tools.todos()) {
             if !host_receipt_was_durable
                 && let Err(compensation) = self
                     .governance
@@ -826,17 +856,7 @@ impl Engine {
         }
 
         // Persist any replay cursor changes before the first turn begins.
-        self.save_checkpoint(
-            &run_id,
-            &task,
-            &messages,
-            turns,
-            &ws.path,
-            keep_workspace,
-            None,
-            tools.todos(),
-            &ws.adapter,
-        )?;
+        checkpoints.save(&messages, turns, tools.todos())?;
 
         if let Err(error) = hooks::run_hooks(
             &self.config.hooks,
@@ -887,17 +907,7 @@ impl Engine {
                     // stable plane event id makes this retry idempotent if the
                     // prior process reported it before failing to advance.
                     self.report_governance_model(&handle).await?;
-                    self.save_checkpoint(
-                        &run_id,
-                        &task,
-                        &messages,
-                        turns,
-                        &ws.path,
-                        keep_workspace,
-                        None,
-                        tools.todos(),
-                        &ws.adapter,
-                    )?;
+                    checkpoints.save(&messages, turns, tools.todos())?;
                     turn
                 } else {
                     let turn = self
@@ -932,29 +942,9 @@ impl Engine {
 
                     // The model result is durable before any remote harvest
                     // report can fail or before host tools can run.
-                    self.save_checkpoint(
-                        &run_id,
-                        &task,
-                        &messages,
-                        turns,
-                        &ws.path,
-                        keep_workspace,
-                        None,
-                        tools.todos(),
-                        &ws.adapter,
-                    )?;
+                    checkpoints.save(&messages, turns, tools.todos())?;
                     self.report_governance_model(&handle).await?;
-                    self.save_checkpoint(
-                        &run_id,
-                        &task,
-                        &messages,
-                        turns,
-                        &ws.path,
-                        keep_workspace,
-                        None,
-                        tools.todos(),
-                        &ws.adapter,
-                    )?;
+                    checkpoints.save(&messages, turns, tools.todos())?;
                     turn
                 };
 
@@ -988,17 +978,7 @@ impl Engine {
                             tool_calls: vec![],
                         });
                     }
-                    self.save_checkpoint(
-                        &run_id,
-                        &task,
-                        &messages,
-                        turns,
-                        &ws.path,
-                        keep_workspace,
-                        None,
-                        tools.todos(),
-                        &ws.adapter,
-                    )?;
+                    checkpoints.save(&messages, turns, tools.todos())?;
                     continue;
                 }
 
@@ -1106,17 +1086,7 @@ impl Engine {
                                     },
                                 )
                                 .await?;
-                            self.save_checkpoint(
-                                &run_id,
-                                &task,
-                                &messages,
-                                turns,
-                                &ws.path,
-                                keep_workspace,
-                                None,
-                                tools.todos(),
-                                &ws.adapter,
-                            )?;
+                            checkpoints.save(&messages, turns, tools.todos())?;
                         }
                         if let Err(e) = self
                             .governance
@@ -1138,17 +1108,7 @@ impl Engine {
                             self.governance
                                 .mark_tool_execution_started(&handle, &stable_call_id)
                                 .await?;
-                            self.save_checkpoint(
-                                &run_id,
-                                &task,
-                                &messages,
-                                turns,
-                                &ws.path,
-                                keep_workspace,
-                                None,
-                                tools.todos(),
-                                &ws.adapter,
-                            )?;
+                            checkpoints.save(&messages, turns, tools.todos())?;
                         }
                         match tools.execute(&call.name, &call.args_json).await {
                             Ok(o) => out.push((call.clone(), Ok(o))),
@@ -1229,17 +1189,7 @@ impl Engine {
                 self.governance
                     .clear_staged_tool_executions(&handle)
                     .await?;
-                self.save_checkpoint(
-                    &run_id,
-                    &task,
-                    &messages,
-                    turns,
-                    &ws.path,
-                    keep_workspace,
-                    None,
-                    tools.todos(),
-                    &ws.adapter,
-                )?;
+                checkpoints.save(&messages, turns, tools.todos())?;
 
                 let mut terminal_report = false;
                 for (index, (call, outcome)) in batch_outcomes.into_iter().enumerate() {
@@ -1333,16 +1283,11 @@ impl Engine {
                             // Save before reporting so a resume checkpoint
                             // carries the park state and the exact pending
                             // event for retry if the report fails.
-                            self.save_checkpoint(
-                                &run_id,
-                                &task,
+                            checkpoints.save_recoverable(
                                 &messages,
                                 turns,
-                                &ws.path,
-                                true,
                                 Some(parked),
                                 tools.todos(),
-                                &ws.adapter,
                             )?;
                             report_result?;
                             self.emit(
@@ -1394,29 +1339,9 @@ impl Engine {
                             .await;
                         }
                     }
-                    self.save_checkpoint(
-                        &run_id,
-                        &task,
-                        &messages,
-                        turns,
-                        &ws.path,
-                        keep_workspace,
-                        None,
-                        tools.todos(),
-                        &ws.adapter,
-                    )?;
+                    checkpoints.save(&messages, turns, tools.todos())?;
                 }
-                self.save_checkpoint(
-                    &run_id,
-                    &task,
-                    &messages,
-                    turns,
-                    &ws.path,
-                    keep_workspace,
-                    None,
-                    tools.todos(),
-                    &ws.adapter,
-                )?;
+                checkpoints.save(&messages, turns, tools.todos())?;
                 if terminal_report {
                     return Ok(None);
                 }
@@ -1437,16 +1362,12 @@ impl Engine {
                 tools.kill_background_jobs().await;
                 // The complete batch was staged before reporting, so this
                 // checkpoint cannot replay an already executed host tool.
-                let _ = self.save_checkpoint(
-                    &run_id,
-                    &task,
+                // Keep the workspace on failure for resume/inspection.
+                let _ = checkpoints.save_recoverable(
                     &messages,
                     turns,
-                    &ws.path,
-                    true, // keep workspace on failure for resume/inspection
                     pending_park.clone(),
                     tools.todos(),
-                    &ws.adapter,
                 );
                 if !e.leaves_governance_open() {
                     let completion = self
@@ -1463,31 +1384,21 @@ impl Engine {
                         )
                         .await;
                     if completion.is_err() {
-                        let _ = self.save_checkpoint(
-                            &run_id,
-                            &task,
+                        let _ = checkpoints.save_recoverable(
                             &messages,
                             turns,
-                            &ws.path,
-                            true,
                             pending_park.clone(),
                             tools.todos(),
-                            &ws.adapter,
                         );
                     } else {
                         // `complete_run` has forgotten the in-memory receipt
                         // state; persist that finalized boundary so a later
                         // resume cannot reuse a terminal plane receipt.
-                        let _ = self.save_checkpoint(
-                            &run_id,
-                            &task,
+                        let _ = checkpoints.save_recoverable(
                             &messages,
                             turns,
-                            &ws.path,
-                            true,
                             pending_park.clone(),
                             tools.todos(),
-                            &ws.adapter,
                         );
                     }
                 }
@@ -1524,17 +1435,7 @@ impl Engine {
                 )
                 .await;
             if let Err(error) = completion {
-                let _ = self.save_checkpoint(
-                    &run_id,
-                    &task,
-                    &messages,
-                    turns,
-                    &ws.path,
-                    true,
-                    None,
-                    tools.todos(),
-                    &ws.adapter,
-                );
+                let _ = checkpoints.save_recoverable(&messages, turns, None, tools.todos());
                 tools.kill_background_jobs().await;
                 self.capture_artifacts(&run_id, &ws.path);
                 return Err(error.into());
@@ -1542,17 +1443,7 @@ impl Engine {
             // Successful completion clears adapter-owned receipt correlation
             // from the durable checkpoint. Parked runs intentionally retain
             // it for their governed continuation.
-            if let Err(error) = self.save_checkpoint(
-                &run_id,
-                &task,
-                &messages,
-                turns,
-                &ws.path,
-                keep_workspace,
-                None,
-                tools.todos(),
-                &ws.adapter,
-            ) {
+            if let Err(error) = checkpoints.save(&messages, turns, tools.todos()) {
                 tools.kill_background_jobs().await;
                 self.capture_artifacts(&run_id, &ws.path);
                 return Err(error);
