@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard now permits plaintext gRPC only for loopback development endpoints;
   non-loopback planes must use HTTPS.
 
+### Fixed
+
+- Workspace snapshots now skip symbolic links instead of following them outside
+  the workspace.
+
 ## [1.0.5] — 2026-08-01
 
 ### Security

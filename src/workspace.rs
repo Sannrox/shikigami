@@ -45,17 +45,17 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            let meta = entry.metadata()?;
-            if meta.is_symlink() {
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
                 continue;
             }
             let from = entry.path();
             let rel = from.strip_prefix(src).unwrap_or(from.as_path());
             let to = dst.join(rel);
-            if meta.is_dir() {
+            if file_type.is_dir() {
                 std::fs::create_dir_all(&to)?;
                 stack.push(from);
-            } else if meta.is_file() {
+            } else if file_type.is_file() {
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -356,5 +356,27 @@ mod snapshot_tests {
         std::fs::write(ws.join("a.txt"), "v2").unwrap();
         restore_snapshot(&ws, &runs, "r1", "initial").unwrap();
         assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "v1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_does_not_follow_symlinks_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let outside = dir.path().join("outside");
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside").unwrap();
+        symlink(outside.join("secret.txt"), ws.join("linked-file")).unwrap();
+        symlink(&outside, ws.join("linked-directory")).unwrap();
+
+        let snapshot = take_snapshot(&ws, &runs, "r1", "initial").unwrap();
+
+        assert!(!snapshot.join("linked-file").exists());
+        assert!(!snapshot.join("linked-directory").exists());
+        assert!(!snapshot.join("linked-directory/secret.txt").exists());
     }
 }
