@@ -9,6 +9,10 @@
 
 ### Changed
 
+- Deepen effective settings resolution behind one private module so source
+  discovery, profile and environment precedence, final host model selection,
+  validation, and source attribution no longer leak across Config, StateRoot,
+  and Harness.
 - Deepen the governed harvest transaction behind one private module so
   checkpoint projection, causal event state, report replay, and in-doubt tool
   execution recovery no longer leak through the sekai-chisei adapter.

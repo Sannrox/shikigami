@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::{Config, ConfigError, ConfigSource};
+use crate::config::{Config, ConfigError, ConfigResolutionError, ConfigSource};
 use crate::events::{self, EventError, EventSink, FanoutSink};
 use crate::governance::{self, AvailableModel, GovernanceError, GovernancePort};
 use crate::metrics::{Metrics, MetricsError};
@@ -129,17 +129,15 @@ impl Harness {
         cwd: &Path,
         model: Option<&str>,
     ) -> Result<Self, HarnessError> {
-        let (config, source) = state.config_search(explicit_config, cwd)?;
-        let mut config = config;
-        if let Some(model) = model.map(str::trim) {
-            if model.is_empty() {
-                return Err(HarnessError::Config(ConfigError::Invalid(
-                    "model override must not be empty".into(),
-                )));
-            }
-            config.model.model = model.into();
-            config.validate()?;
-        }
+        let (config, source) =
+            Config::resolve_search_with_model(explicit_config, state.path(), cwd, model).map_err(
+                |error| match error {
+                    ConfigResolutionError::Search(error) => {
+                        HarnessError::State(StateError::Config(error))
+                    }
+                    ConfigResolutionError::Override(error) => HarnessError::Config(error),
+                },
+            )?;
         Self::new(config, source, state)
     }
 
@@ -603,6 +601,40 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "missing key {key}");
         }
+    }
+
+    #[test]
+    fn invalid_model_override_remains_a_config_error() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+
+        let error = match Harness::resolve_with_model(None, state, dir.path(), Some("  ")) {
+            Ok(_) => panic!("empty model override must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            HarnessError::Config(ConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn config_search_failure_remains_a_state_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(Config::FILENAME);
+        std::fs::write(&path, "not valid toml = [").unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+
+        let error = match Harness::resolve_with_model(Some(&path), state, dir.path(), None) {
+            Ok(_) => panic!("invalid config must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            HarnessError::State(StateError::Config(ConfigError::Parse { .. }))
+        ));
     }
 
     #[tokio::test]

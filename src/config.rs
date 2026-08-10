@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod resolution;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -655,6 +657,11 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+pub(crate) enum ConfigResolutionError {
+    Search(ConfigError),
+    Override(ConfigError),
+}
+
 impl Config {
     pub const FILENAME: &'static str = "shikigami.toml";
     pub const CURRENT_VERSION: u32 = 1;
@@ -670,16 +677,7 @@ impl Config {
     }
 
     pub fn resolve(path: impl AsRef<Path>) -> Result<(Self, ConfigSource), ConfigError> {
-        let path = path.as_ref();
-        let (mut config, source) = if path.is_file() {
-            (Self::load(path)?, ConfigSource::File(path.to_path_buf()))
-        } else {
-            (Self::default(), ConfigSource::Defaults)
-        };
-        config.apply_profile_presets();
-        config.apply_env();
-        config.validate()?;
-        Ok((config, source))
+        resolution::resolve(path.as_ref(), None)
     }
 
     pub fn resolve_search(
@@ -687,43 +685,20 @@ impl Config {
         state_root: &Path,
         cwd: &Path,
     ) -> Result<(Self, ConfigSource), ConfigError> {
-        if let Some(path) = explicit {
-            return Self::resolve(path);
-        }
-        if let Ok(path) = env::var(Self::CONFIG_PATH_ENV)
-            && !path.is_empty()
-        {
-            return Self::resolve(PathBuf::from(path));
-        }
-        let under_state = Self::path_in(state_root);
-        if under_state.is_file() {
-            return Self::resolve(under_state);
-        }
-        let under_cwd = cwd.join(Self::FILENAME);
-        if under_cwd.is_file() {
-            return Self::resolve(under_cwd);
-        }
-        Self::resolve(under_state)
+        resolution::resolve_search(explicit, state_root, cwd)
+    }
+
+    pub(crate) fn resolve_search_with_model(
+        explicit: Option<&Path>,
+        state_root: &Path,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<(Self, ConfigSource), ConfigResolutionError> {
+        resolution::resolve_search_with_model(explicit, state_root, cwd, model)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let path = path.as_ref();
-        let raw = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let mut config: Self = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if config.version != Self::CURRENT_VERSION {
-            return Err(ConfigError::UnsupportedVersion {
-                found: config.version,
-                expected: Self::CURRENT_VERSION,
-            });
-        }
-        config.apply_profile_presets();
-        Ok(config)
+        resolution::load(path.as_ref())
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
