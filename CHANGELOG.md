@@ -9,6 +9,10 @@
 
 ### Changed
 
+- Split the run engine into `src/run/` and deepen checkpoint durability behind
+  an owned `RunSession` (messages, turns, retention, and todos no longer restated
+  at every save). Resume workspace validation lives in `run/resume.rs`. Public
+  `Engine` / `RunRequest` / `RunResult` surfaces are unchanged.
 - Deepen managed plane-host startup behind a prepare/run interface so lifecycle
   ordering, client construction, health gating, and intake policy remain local
   to the library instead of being reconstructed by CLI hosts.

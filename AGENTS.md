@@ -5,9 +5,10 @@
 `shikigami` is a Rust 2024 crate for a local-first headless agent harness.
 Source code lives in `src/`: `src/lib.rs` exports the public API,
 `src/bin/shikigami.rs` is a thin CLI host, `src/harness.rs` wires settings to
-ports, `src/run.rs` owns the turn loop, `src/governance/` holds governance
-adapters (`none`, `local`, `sekai-chisei`), `src/tools.rs` implements
-workspace-jailed tools, `src/workspace.rs` materializes sandboxes,
+ports, `src/run/` owns the turn loop (resume validation + deep `RunSession`
+checkpoints), `src/governance/` holds governance adapters (`none`, `local`,
+`sekai-chisei`), `src/tools/` implements workspace-jailed tools,
+`src/workspace.rs` materializes sandboxes,
 `src/model.rs` supplies ungoverned model turns, and `src/events.rs` sinks
 harness-local progress. The sekai-chisei adapter consumes the versioned
 upstream `sekai-client` Rust facade and its canonical `sekai-proto` dependency;
