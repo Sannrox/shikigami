@@ -7,8 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
     ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions,
-    ServeRuntimeOptions, StateRoot, VERSION, WorkerLifecycle, WorkerLifecycleIdentity,
-    serve_lifecycle_http,
+    ServeRuntimeOptions, StateRoot, VERSION,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -187,14 +186,6 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn default_worker_id() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("HOST"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "shikigami-worker".into())
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -589,114 +580,35 @@ async fn run() -> anyhow::Result<()> {
                     }
                     #[cfg(feature = "governance-sekai-chisei")]
                     {
-                        let ttl = std::time::Duration::from_secs(claim_ttl_secs);
-                        let worker_id = worker_id.unwrap_or_else(default_worker_id);
-                        // Open lifecycle before any other fallible plane startup so
-                        // supervisors never keep a prior process's ready snapshot.
-                        let lifecycle = WorkerLifecycle::open(
-                            state.path(),
-                            WorkerLifecycleIdentity {
-                                worker_id: worker_id.clone(),
-                                namespace: harness.config.governance.namespace.clone(),
+                        let prepared = shikigami::prepare_plane_host(
+                            &harness,
+                            shikigami::PlaneHostOptions {
                                 runtime_id: runtime_id.clone(),
+                                worker_id,
+                                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
+                                max_jobs,
+                                claim_ttl: std::time::Duration::from_secs(claim_ttl_secs),
+                                checkpoint_store_id,
+                                lifecycle_listen,
                             },
+                            rx,
                         )
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                        let startup_fail =
-                            |lc: &WorkerLifecycle, kind: &str, err: anyhow::Error| {
-                                let _ = lc.set_unhealthy(kind);
-                                let _ = std::fs::remove_file(lc.path());
-                                err
-                            };
-                        let client =
-                            shikigami::governance::sekai_chisei::SekaiClaimClient::from_config(
-                                &harness.config,
-                            )
-                            .map_err(|error| {
-                                startup_fail(
-                                    &lifecycle,
-                                    "plane_client_failed",
-                                    anyhow::anyhow!(error),
-                                )
-                            })?;
-                        let report = harness.doctor();
-                        if !report.ok {
-                            return Err(startup_fail(
-                                &lifecycle,
-                                "doctor_failed",
-                                anyhow::anyhow!(
-                                    "doctor failed before plane serve; fix configuration first: {}",
-                                    report.lines.join("; ")
-                                ),
-                            ));
-                        }
-                        if let Some(bind) = &lifecycle_listen {
-                            let addr: std::net::SocketAddr = bind.parse().map_err(|e| {
-                                startup_fail(
-                                    &lifecycle,
-                                    "lifecycle_listen_invalid",
-                                    anyhow::anyhow!("invalid --lifecycle-listen: {e}"),
-                                )
-                            })?;
-                            // Loopback for local probes; unspecified (0.0.0.0 / ::) for
-                            // in-pod K8s probes. Never bind a concrete public interface —
-                            // the surface is unauthenticated operational JSON only.
-                            if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
-                                return Err(startup_fail(
-                                    &lifecycle,
-                                    "lifecycle_listen_invalid",
-                                    anyhow::anyhow!(
-                                        "--lifecycle-listen must be loopback or unspecified (0.0.0.0/[::]), got {addr}"
-                                    ),
-                                ));
-                            }
-                            let listen_rx = rx.clone();
-                            let bound = serve_lifecycle_http(addr, lifecycle.clone(), listen_rx)
-                                .await
-                                .map_err(|e| {
-                                    startup_fail(
-                                        &lifecycle,
-                                        "lifecycle_listen_failed",
-                                        anyhow::anyhow!(e),
-                                    )
-                                })?;
+                        .await?;
+                        let info = prepared.info();
+                        if let Some(addr) = info.lifecycle_addr {
                             println!(
                                 "serve lifecycle http={} file={}",
-                                bound,
-                                lifecycle.path().display()
+                                addr,
+                                info.lifecycle_path.display()
                             );
                         } else {
-                            println!("serve lifecycle file={}", lifecycle.path().display());
+                            println!("serve lifecycle file={}", info.lifecycle_path.display());
                         }
-                        lifecycle.mark_serving().map_err(|e| anyhow::anyhow!(e))?;
-                        let options = shikigami::PlaneServeOptions {
-                            poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
-                            max_jobs,
-                            claim_ttl: ttl,
-                            heartbeat_interval: ttl / 3,
-                            ack_retry_limit: 5,
-                            checkpoint_store_id,
-                            policy: shikigami::ClaimedWorkPolicy {
-                                expected_runtime: runtime_id.clone(),
-                                host_timeout: harness
-                                    .config
-                                    .run
-                                    .timeout_secs
-                                    .map(std::time::Duration::from_secs),
-                                ..Default::default()
-                            },
-                            lifecycle: Some(lifecycle),
-                        };
                         println!(
                             "serve intake=plane runtime={} namespace={} ttl_secs={} worker={}",
-                            runtime_id,
-                            harness.config.governance.namespace,
-                            claim_ttl_secs,
-                            worker_id
+                            info.runtime_id, info.namespace, claim_ttl_secs, info.worker_id
                         );
-                        shikigami::run_plane_serve(&harness, &client, options, rx)
-                            .await
-                            .map_err(|error| anyhow::anyhow!(error))?
+                        prepared.run().await?
                     }
                     #[cfg(not(feature = "governance-sekai-chisei"))]
                     {

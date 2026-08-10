@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen managed plane-host startup behind a prepare/run interface so lifecycle
+  ordering, client construction, health gating, and intake policy remain local
+  to the library instead of being reconstructed by CLI hosts.
 - Centralize run-scoped tool bootstrap behind `ToolRegistry::from_config` so
   the registry owns coordinated authority, network, environment, ignore, and
   sandbox settings instead of the turn loop.
