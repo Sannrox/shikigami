@@ -125,7 +125,10 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 | `bash` | Opt-in shell in workspace (timeout-bounded) |
 | `report` / `escalate` | Finish or park; exclusive batch |
 
-API: `ToolRegistry::with_builtins` → `definitions()` + `execute()`.
+API: `ToolRegistry::from_config` → `definitions()` + `execute()`.
+The registry owns resolved tool authority, network policy, ignore behavior,
+protected child-process environment names, and sandbox policy. Lower-level
+`with_builtins*` constructors remain available for focused adapters and tests.
 Dynamic native plugins remain out of scope; future MCP/skill tools register
 into the same registry without changing the turn loop.
 

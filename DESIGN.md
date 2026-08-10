@@ -120,7 +120,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/harness.rs` | Public wiring: config → ports → doctor/run |
 | `src/run.rs` | Turn loop |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei` |
-| `src/tools.rs` | Workspace-jailed tools |
+| `src/tools/` | Run-scoped tool registry, catalog, and workspace-jailed execution |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
 | `src/model.rs` | Scripted / HTTP (ungoverned) |
 | `src/events.rs` | stderr / jsonl / none |

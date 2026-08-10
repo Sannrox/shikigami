@@ -7,6 +7,12 @@
 - Provide `Engine::new` as the preferred low-level construction interface while
   preserving 1.x-compatible public fields for existing embedders.
 
+### Changed
+
+- Centralize run-scoped tool bootstrap behind `ToolRegistry::from_config` so
+  the registry owns coordinated authority, network, environment, ignore, and
+  sandbox settings instead of the turn loop.
+
 ### Fixed
 
 - Centralize parked-checkpoint validation and digest calculation so plane
