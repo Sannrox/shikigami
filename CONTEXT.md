@@ -9,3 +9,11 @@ One model turn's ordered set of tool calls, including authorization, execution,
 checkpoint markers, report replay, hooks, events, and park handling. The Run
 transaction delegates this protocol to a private deep module; it is not a new
 public port or adapter seam.
+
+## Claimed run transaction
+
+One plane-acquired claim's fenced execution protocol, including continuation
+preparation, claim events, heartbeat and shutdown races, harness execution,
+acknowledgement retry, and worker lifecycle publication. Plane intake delegates
+this protocol to a private deep module; it does not add a public port or adapter
+seam.
