@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
-    AvailableModel, ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest,
-    ServeOptions, ServeRuntimeOptions, StateRoot, VERSION, WorkerLifecycle,
-    WorkerLifecycleIdentity, serve_lifecycle_http,
+    ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions,
+    ServeRuntimeOptions, StateRoot, VERSION, WorkerLifecycle, WorkerLifecycleIdentity,
+    serve_lifecycle_http,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -226,7 +226,7 @@ async fn run() -> anyhow::Result<()> {
             let report = harness.doctor_async().await;
             let (available_models, model_catalog_error) = if models {
                 match harness.available_models().await {
-                    Ok(models) => (Some(with_auto_route(&harness, models)), None),
+                    Ok(models) => (Some(models), None),
                     Err(error) => (Some(Vec::new()), Some(error.to_string())),
                 }
             } else {
@@ -740,21 +740,4 @@ async fn run() -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn with_auto_route(harness: &Harness, mut models: Vec<AvailableModel>) -> Vec<AvailableModel> {
-    if harness.config.governance.adapter == "sekai-chisei"
-        && !models.iter().any(|model| model.canonical_model == "auto")
-    {
-        models.insert(
-            0,
-            AvailableModel {
-                provider: "sekai-chisei".into(),
-                upstream_model: "auto".into(),
-                canonical_model: "auto".into(),
-                lifecycle: "routing".into(),
-            },
-        );
-    }
-    models
 }
