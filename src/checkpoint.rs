@@ -146,6 +146,10 @@ pub enum CheckpointError {
     InvalidRunId,
     #[error("checkpoint run id does not match requested run")]
     RunIdMismatch,
+    #[error("checkpoint is not parked")]
+    NotParked,
+    #[error("checkpoint workspace is unavailable")]
+    WorkspaceUnavailable,
 }
 
 /// Versioned prompt id for a body (defaults to the `harness-v1` name prefix
@@ -188,6 +192,38 @@ impl Checkpoint {
     }
 
     pub fn load(state_runs: &Path, run_id: &str) -> Result<Self, CheckpointError> {
+        Ok(Self::load_with_digest(state_runs, run_id)?.0)
+    }
+
+    /// Load a resumable parked checkpoint and bind its digest to the exact
+    /// bytes that passed validation.
+    pub fn load_parked_digest(
+        state_runs: &Path,
+        run_id: &str,
+        prompt: &str,
+    ) -> Result<String, CheckpointError> {
+        let (checkpoint, digest) = Self::load_with_digest(state_runs, run_id)?;
+        if checkpoint.park.is_none() {
+            return Err(CheckpointError::NotParked);
+        }
+        if !checkpoint.workspace.is_dir() {
+            return Err(CheckpointError::WorkspaceUnavailable);
+        }
+        checkpoint.validate_prompt(prompt)?;
+        Ok(digest)
+    }
+
+    pub(crate) fn load_with_digest(
+        state_runs: &Path,
+        run_id: &str,
+    ) -> Result<(Self, String), CheckpointError> {
+        let raw = Self::read(state_runs, run_id)?;
+        let checkpoint = Self::parse(&raw, run_id)?;
+        let digest = format!("sha256:{}", hex_lower(Sha256::digest(&raw).as_slice()));
+        Ok((checkpoint, digest))
+    }
+
+    fn read(state_runs: &Path, run_id: &str) -> Result<Vec<u8>, CheckpointError> {
         if !is_safe_run_id(run_id) {
             return Err(CheckpointError::InvalidRunId);
         }
@@ -195,8 +231,11 @@ impl Checkpoint {
         if !path.is_file() {
             return Err(CheckpointError::Missing(run_id.into()));
         }
-        let raw = fs::read_to_string(path)?;
-        let cp: Self = serde_json::from_str(&raw)?;
+        Ok(fs::read(path)?)
+    }
+
+    fn parse(raw: &[u8], run_id: &str) -> Result<Self, CheckpointError> {
+        let cp: Self = serde_json::from_slice(raw)?;
         if cp.version != CHECKPOINT_VERSION {
             return Err(CheckpointError::UnsupportedVersion {
                 found: cp.version,
@@ -298,6 +337,47 @@ mod tests {
         assert!(matches!(
             Checkpoint::load(&runs, requested),
             Err(CheckpointError::RunIdMismatch)
+        ));
+    }
+
+    #[test]
+    fn load_parked_validates_state_and_digests_validated_bytes() {
+        let dir = tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        let workspace = runs.join("parked/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut cp = Checkpoint {
+            version: CHECKPOINT_VERSION,
+            run_id: "parked".into(),
+            task: "t".into(),
+            prompt_id: prompt_id("p"),
+            messages: vec![],
+            completed_turns: 1,
+            workspace,
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: Some(ParkedState {
+                reason: "approval required".into(),
+                question: "continue?".into(),
+                tool_call_id: "tool-1".into(),
+            }),
+            todos: vec![],
+            governance: None,
+        };
+        let path = cp.save(&runs).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+
+        let digest = Checkpoint::load_parked_digest(&runs, "parked", "p").unwrap();
+        assert_eq!(
+            digest,
+            format!("sha256:{}", hex_lower(Sha256::digest(raw).as_slice()))
+        );
+
+        cp.park = None;
+        cp.save(&runs).unwrap();
+        assert!(matches!(
+            Checkpoint::load_parked_digest(&runs, "parked", "p"),
+            Err(CheckpointError::NotParked)
         ));
     }
 }

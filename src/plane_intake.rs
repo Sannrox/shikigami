@@ -448,7 +448,18 @@ pub async fn run_plane_serve(
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         prepared.request.cancel = Some(cancel_rx);
-        let mut run = Box::pin(harness.run(prepared.request));
+        let resumed = prepared.resumed;
+        let expected_checkpoint_digest = prepared.checkpoint_digest.clone();
+        let request = prepared.request;
+        let mut run = Box::pin(async move {
+            if resumed {
+                harness
+                    .run_with_checkpoint_digest(request, &expected_checkpoint_digest)
+                    .await
+            } else {
+                harness.run(request).await
+            }
+        });
         let run_result = loop {
             tokio::select! {
                 result = &mut run => break result,
@@ -810,16 +821,12 @@ fn prepare_claimed_run(
 
     if let Some(checkpoint) = &continuation.checkpoint {
         let can_resolve = options.checkpoint_store_id.as_deref() == Some(&checkpoint.store_id)
-            && safe_checkpoint_ref(&checkpoint.reference)
-            && checkpoint_digest(&harness.state.runs_dir(), &checkpoint.reference)
-                .is_ok_and(|digest| digest == checkpoint.digest)
-            && checkpoint::Checkpoint::load(&harness.state.runs_dir(), &checkpoint.reference)
-                .is_ok_and(|stored| {
-                    stored.run_id == checkpoint.reference
-                        && stored.park.is_some()
-                        && stored.workspace.is_dir()
-                        && stored.validate_prompt(crate::run::SYSTEM_PROMPT).is_ok()
-                });
+            && checkpoint::Checkpoint::load_parked_digest(
+                &harness.state.runs_dir(),
+                &checkpoint.reference,
+                crate::run::SYSTEM_PROMPT,
+            )
+            .is_ok_and(|digest| digest == checkpoint.digest);
         if can_resolve {
             request.resume_run_id = Some(checkpoint.reference.clone());
             request.resume_answer = Some(answer);
@@ -926,31 +933,15 @@ fn checkpoint_for_park(
     Ok(PlaneCheckpoint {
         store_id: store_id.into(),
         reference: run_id.into(),
-        digest: checkpoint_digest(&harness.state.runs_dir(), run_id)?,
+        digest: checkpoint::Checkpoint::load_parked_digest(
+            &harness.state.runs_dir(),
+            run_id,
+            crate::run::SYSTEM_PROMPT,
+        )
+        .map_err(|error| {
+            PlaneIntakeError::Source(format!("load parked checkpoint for {run_id}: {error}"))
+        })?,
     })
-}
-
-fn checkpoint_digest(
-    state_runs: &std::path::Path,
-    run_id: &str,
-) -> Result<String, PlaneIntakeError> {
-    if !safe_checkpoint_ref(run_id) {
-        return Err(PlaneIntakeError::Source(
-            "checkpoint reference must be an opaque run id".into(),
-        ));
-    }
-    let bytes = std::fs::read(checkpoint::path_for(state_runs, run_id)).map_err(|error| {
-        PlaneIntakeError::Source(format!("read parked checkpoint for {run_id}: {error}"))
-    })?;
-    Ok(format!("sha256:{}", sha256_hex(&bytes)))
-}
-
-fn safe_checkpoint_ref(reference: &str) -> bool {
-    !reference.trim().is_empty()
-        && reference.len() <= 128
-        && reference
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
 async fn cancel_and_drain<F>(
@@ -1331,9 +1322,11 @@ mod tests {
 
     #[test]
     fn checkpoint_reference_rejects_paths_and_urls() {
-        assert!(safe_checkpoint_ref("123e4567-e89b-12d3-a456-426614174000"));
-        assert!(!safe_checkpoint_ref("../checkpoint"));
-        assert!(!safe_checkpoint_ref("/tmp/run"));
-        assert!(!safe_checkpoint_ref("https://example.test/run"));
+        assert!(checkpoint::is_safe_run_id(
+            "123e4567-e89b-12d3-a456-426614174000"
+        ));
+        assert!(!checkpoint::is_safe_run_id("../checkpoint"));
+        assert!(!checkpoint::is_safe_run_id("/tmp/run"));
+        assert!(!checkpoint::is_safe_run_id("https://example.test/run"));
     }
 }
