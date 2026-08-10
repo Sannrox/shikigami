@@ -36,6 +36,7 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod metrics;
 pub mod model;
+pub mod plane_host;
 pub mod plane_intake;
 pub mod prompts;
 pub mod registry;
@@ -60,6 +61,9 @@ pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;
 pub use metrics::{Metrics, MetricsError, MetricsSnapshot};
 pub use model::{CostEstimate, TokenUsage};
+pub use plane_host::{PlaneHostError, PlaneHostInfo, PlaneHostOptions};
+#[cfg(feature = "governance-sekai-chisei")]
+pub use plane_host::{PreparedPlaneHost, prepare_plane_host};
 pub use plane_intake::{
     CLAIMED_STATUS, ClaimedPlaneWork, ClaimedWorkMappingError, ClaimedWorkPolicy,
     DEFAULT_MAX_CLAIMED_TASK_BYTES, DEFAULT_MAX_CONTINUATION_BYTES, PlaneAck, PlaneAckOutcome,
