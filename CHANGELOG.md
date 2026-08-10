@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen durable tool-batch execution behind one private interface so
+  authorization, crash-consistent checkpoints, execution, report replay,
+  hooks, events, and park handling no longer leak through the run transaction.
 - Deepen the complete durable run transaction behind one internal interface so
   workspace preparation, model/tool ordering, checkpoint recovery, completion,
   and artifact finalization no longer live in the public `Engine` module.
