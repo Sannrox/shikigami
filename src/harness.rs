@@ -163,7 +163,7 @@ impl Harness {
     /// adapters expose their configured model as a compact local catalog.
     pub async fn available_models(&self) -> Result<Vec<AvailableModel>, HarnessError> {
         if self.config.governance.adapter == "sekai-chisei" {
-            return Ok(self.governance.available_models().await?);
+            return Ok(with_auto_route(self.governance.available_models().await?));
         }
         let model = self.effective_model_name();
         Ok(vec![AvailableModel {
@@ -423,6 +423,21 @@ impl Harness {
     }
 }
 
+fn with_auto_route(mut models: Vec<AvailableModel>) -> Vec<AvailableModel> {
+    if !models.iter().any(|model| model.canonical_model == "auto") {
+        models.insert(
+            0,
+            AvailableModel {
+                provider: "sekai-chisei".into(),
+                upstream_model: "auto".into(),
+                canonical_model: "auto".into(),
+                lifecycle: "routing".into(),
+            },
+        );
+    }
+    models
+}
+
 fn display_tools(tools: &[String]) -> String {
     if tools.is_empty() {
         "(none)".into()
@@ -485,7 +500,83 @@ pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::governance::{RunHandle, RunOutcome};
+    use crate::model::{ChatMessage, ModelPort, ModelTurn};
+    use crate::tools::ToolDef;
     use tempfile::tempdir;
+
+    struct CatalogGovernance;
+
+    #[async_trait::async_trait]
+    impl GovernancePort for CatalogGovernance {
+        fn id(&self) -> &'static str {
+            "catalog-test"
+        }
+
+        fn health_detail(&self) -> String {
+            "ok".into()
+        }
+
+        fn health_ok(&self) -> bool {
+            true
+        }
+
+        async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
+            Ok(vec![AvailableModel {
+                provider: "openai".into(),
+                upstream_model: "gpt-5.5".into(),
+                canonical_model: "openai/gpt-5.5".into(),
+                lifecycle: "active".into(),
+            }])
+        }
+
+        async fn begin_run(
+            &self,
+            _run_id: &str,
+            _task: &str,
+            _logical_operation_id: Option<&str>,
+        ) -> Result<RunHandle, GovernanceError> {
+            unreachable!()
+        }
+
+        async fn plan_turn(
+            &self,
+            _handle: &RunHandle,
+            _system: &str,
+            _messages: &[ChatMessage],
+            _tools: &[ToolDef],
+            _local_model: &dyn ModelPort,
+        ) -> Result<ModelTurn, GovernanceError> {
+            unreachable!()
+        }
+
+        async fn authorize_tool(
+            &self,
+            _handle: &RunHandle,
+            _name: &str,
+            _args_json: &str,
+        ) -> Result<(), GovernanceError> {
+            unreachable!()
+        }
+
+        async fn report_tool(
+            &self,
+            _handle: &RunHandle,
+            _name: &str,
+            _ok: bool,
+            _detail: &str,
+        ) -> Result<(), GovernanceError> {
+            unreachable!()
+        }
+
+        async fn complete_run(
+            &self,
+            _handle: &RunHandle,
+            _outcome: RunOutcome,
+        ) -> Result<(), GovernanceError> {
+            unreachable!()
+        }
+    }
 
     #[test]
     fn doctor_json_schema_keys_stable() {
@@ -531,6 +622,27 @@ mod tests {
                 lifecycle: "configured".into(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn governed_available_models_include_auto_route() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut harness = Harness::from_config(Config::default(), state).unwrap();
+        harness.config.governance.adapter = "sekai-chisei".into();
+        harness.governance = Arc::new(CatalogGovernance);
+
+        let catalog = harness.available_models().await.unwrap();
+        assert_eq!(catalog[0].canonical_model, "auto");
+        assert_eq!(catalog[0].lifecycle, "routing");
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|model| model.canonical_model == "auto")
+                .count(),
+            1
+        );
+        assert_eq!(catalog[1].canonical_model, "openai/gpt-5.5");
     }
 
     #[test]

@@ -6,6 +6,8 @@
 
 - Centralize parked-checkpoint validation and digest calculation so plane
   continuation intake binds its digest to the exact bytes it validates.
+- Return the `auto` routing choice from `Harness::available_models` itself so
+  every governed host receives the same effective model catalog.
 
 All notable changes to this project are documented in this file.
 
