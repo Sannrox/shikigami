@@ -385,15 +385,15 @@ impl Harness {
                 as Arc<dyn EventSink>,
             None => Arc::clone(&self.events),
         };
-        let engine = Engine {
-            config: self.config.clone(),
-            governance: Arc::clone(&self.governance),
-            workspace: Arc::clone(&self.workspace),
-            model: Arc::clone(&self.model),
+        let engine = Engine::new(
+            self.config.clone(),
+            Arc::clone(&self.governance),
+            Arc::clone(&self.workspace),
+            Arc::clone(&self.model),
             events,
-            state_runs: self.state.runs_dir(),
-            registry: Arc::clone(&self.registry),
-        };
+            self.state.runs_dir(),
+            Arc::clone(&self.registry),
+        );
         match engine
             .run_with_checkpoint_digest(request, expected_checkpoint_digest)
             .await

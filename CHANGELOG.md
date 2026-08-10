@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Provide `Engine::new` as the preferred low-level construction interface while
+  preserving 1.x-compatible public fields for existing embedders.
+
 ### Fixed
 
 - Centralize parked-checkpoint validation and digest calculation so plane

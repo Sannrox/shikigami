@@ -296,6 +296,11 @@ impl RunError {
     }
 }
 
+/// Low-level run engine.
+///
+/// Most hosts should use [`crate::Harness`]. The fields remain public for
+/// compatibility with existing 1.x embedders; new construction should use
+/// [`Engine::new`] so first-party wiring stays at one interface.
 pub struct Engine {
     pub config: Config,
     pub governance: Arc<dyn GovernancePort>,
@@ -307,6 +312,27 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Construct a low-level engine from resolved settings and adapters.
+    pub fn new(
+        config: Config,
+        governance: Arc<dyn GovernancePort>,
+        workspace: Arc<dyn WorkspacePort>,
+        model: Arc<dyn ModelPort>,
+        events: Arc<dyn EventSink>,
+        state_runs: PathBuf,
+        registry: Arc<RunRegistry>,
+    ) -> Self {
+        Self {
+            config,
+            governance,
+            workspace,
+            model,
+            events,
+            state_runs,
+            registry,
+        }
+    }
+
     async fn report_governance_tool_with_id(
         &self,
         handle: &crate::governance::RunHandle,
