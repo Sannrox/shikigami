@@ -32,3 +32,10 @@ classification, request construction, decision interpretation, signed permit
 redemption, execution identity, and fail-closed security checks. The
 sekai-chisei adapter delegates this protocol to a private deep module behind
 the existing governance port seam.
+
+## Filesystem queue
+
+The local serve intake's durable job lifecycle, including bounded admission,
+priority claim, retry, collision-safe terminal archival and result writing, and
+health observations. The serve host and local control adapter delegate this
+protocol to a private deep module; it is not a new public port or adapter seam.
