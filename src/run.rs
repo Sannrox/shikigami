@@ -21,7 +21,10 @@ use crate::model::{
 };
 use crate::registry::RunRegistry;
 use crate::tools::{self, TodoItem, ToolError, ToolOutput, ToolRegistry};
-use crate::workspace::{MaterializedWorkspace, WorkspaceCleanup, WorkspaceError, WorkspacePort};
+use crate::workspace::{
+    MaterializedWorkspace, SnapshotOutcome, SnapshotPlan, WorkspaceCleanup, WorkspaceError,
+    WorkspacePort, WorkspaceSnapshots,
+};
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -695,6 +698,29 @@ impl Engine {
             )
             .map_err(|error| RunError::Message(format!("run registry update failed: {error}")))?;
 
+        let snapshot_plan = match request.restore_snapshot.as_deref() {
+            Some(name) => SnapshotPlan::Restore(name),
+            None if self.config.workspace.snapshot => SnapshotPlan::CaptureInitial,
+            None => SnapshotPlan::None,
+        };
+        match WorkspaceSnapshots::new(&self.state_runs).prepare(&ws, &run_id, snapshot_plan)? {
+            SnapshotOutcome::Unchanged => {}
+            SnapshotOutcome::Captured { name, path } => self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "info".into(),
+                    text: format!("snapshot {name} at {}", path.display()),
+                },
+            ),
+            SnapshotOutcome::Restored { name } => self.emit(
+                &run_id,
+                HarnessEvent::Message {
+                    level: "info".into(),
+                    text: format!("restored snapshot `{name}`"),
+                },
+            ),
+        }
+
         if let Err(error) =
             crate::artifacts::capture_run_baseline(&self.state_runs, &run_id, &ws.path)
         {
@@ -712,11 +738,6 @@ impl Engine {
         let skills = crate::context::load_skills(&ws.path, &self.config.context);
         let system_prompt =
             crate::context::compose_system_prompt(SYSTEM_PROMPT, project_rules.as_ref(), &skills);
-        if request.restore_snapshot.is_some() && ws.adapter == "inplace" {
-            return Err(RunError::Message(
-                "restore_snapshot is not supported with workspace adapter `inplace`".into(),
-            ));
-        }
         self.emit(
             &run_id,
             HarnessEvent::Prompt {
@@ -748,27 +769,6 @@ impl Engine {
                 text: format!("workspace {}", ws.path.display()),
             },
         );
-
-        if let Some(name) = &request.restore_snapshot {
-            crate::workspace::restore_snapshot(&ws.path, &self.state_runs, &run_id, name)?;
-            self.emit(
-                &run_id,
-                HarnessEvent::Message {
-                    level: "info".into(),
-                    text: format!("restored snapshot `{name}`"),
-                },
-            );
-        } else if self.config.workspace.snapshot {
-            let dest =
-                crate::workspace::take_snapshot(&ws.path, &self.state_runs, &run_id, "initial")?;
-            self.emit(
-                &run_id,
-                HarnessEvent::Message {
-                    level: "info".into(),
-                    text: format!("snapshot initial at {}", dest.display()),
-                },
-            );
-        }
 
         let mut tools = ToolRegistry::from_config(&ws.path, &self.config)?;
         tools.set_todos(initial_todos);
