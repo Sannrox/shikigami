@@ -13,19 +13,17 @@ use crate::checkpoint::{Checkpoint, ParkedState};
 use crate::events::HarnessEvent;
 use crate::governance::{GovernanceError, RunOutcome};
 use crate::hooks::{self, HookEvent};
-use crate::model::{ChatMessage, CostEstimate, ModelTurn, TokenUsage};
+use crate::model::{ChatMessage, CostEstimate};
 use crate::tools::ToolRegistry;
 use crate::workspace::{
     MaterializedWorkspace, SnapshotOutcome, SnapshotPlan, WorkspaceCleanup, WorkspaceSnapshots,
 };
 
+use super::model_turn::DurableModelTurn;
 use super::resume::{configured_workspace_adapter, validate_resumed_workspace};
 use super::session::RunSession;
 use super::tool_batch::{DurableToolBatch, ToolBatchOutcome};
-use super::{
-    Engine, ParkInfo, RunError, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT,
-    compact_messages,
-};
+use super::{Engine, ParkInfo, RunError, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 
 pub(super) struct RunTransaction<'a> {
     engine: &'a Engine,
@@ -256,32 +254,9 @@ impl<'a> RunTransaction<'a> {
             turns,
         );
 
-        let max_turns = self.engine.config.run.max_turns;
         let mut final_summary = String::from("completed without report");
         let mut success = false;
         let mut termination = RunTermination::Completed;
-        let mut usage = TokenUsage::default();
-        // A checkpoint taken after model execution but before governance
-        // reporting ends with the assistant message. Reuse that durable
-        // result on resume instead of charging the plane for a new model call.
-        let governed_model_checkpoint = request.resume_run_id.is_some()
-            && governance_checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| !checkpoint.model_operation_id.is_empty());
-        let mut staged_turn = governed_model_checkpoint
-            .then(|| {
-                session
-                    .messages
-                    .last()
-                    .filter(|message| message.role == "assistant")
-                    .map(|message| ModelTurn {
-                        content: message.content.clone(),
-                        tool_calls: message.tool_calls.clone(),
-                        usage: None,
-                    })
-            })
-            .flatten();
-
         let handle = self
             .engine
             .governance
@@ -354,87 +329,23 @@ impl<'a> RunTransaction<'a> {
         // Preserve an escalation park if reporting that park fails after the
         // park has already been durably written.
         let mut pending_park: Option<ParkedState> = None;
+        let mut model_turns = DurableModelTurn::new(
+            self.engine,
+            &request,
+            started,
+            timeout,
+            &handle,
+            &system_prompt,
+            &tool_defs,
+            Arc::clone(&tools),
+            governance_checkpoint.as_ref(),
+            &session,
+        );
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
         let result: Result<Option<ParkInfo>, RunError> = async {
             loop {
-                self.engine
-                    .check_bounds(&session.run_id, &request, started, timeout)?;
-
-                if staged_turn.is_none() && session.turns >= max_turns {
-                    return Err(RunError::MaxTurns(max_turns));
-                }
-                if staged_turn.is_none()
-                    && let Some(threshold) = self.engine.config.run.compact_after_messages
-                {
-                    let keep = self.engine.config.run.compact_keep_tail.max(2) as usize;
-                    if let Some((before, after)) =
-                        compact_messages(&mut session.messages, threshold as usize, keep)
-                    {
-                        self.engine.emit(
-                            &session.run_id,
-                            HarnessEvent::ContextCompacted { before, after },
-                        );
-                    }
-                }
-                self.engine.emit(
-                    &session.run_id,
-                    HarnessEvent::Status {
-                        status: "planning".into(),
-                    },
-                );
-                let turn = if let Some(turn) = staged_turn.take() {
-                    // The assistant result is already in the checkpoint. A
-                    // stable plane event id makes this retry idempotent if the
-                    // prior process reported it before failing to advance.
-                    self.engine.report_governance_model(&handle).await?;
-                    session.save(tools.as_ref())?;
-                    turn
-                } else {
-                    let turn = self
-                        .engine
-                        .governance
-                        .plan_turn(
-                            &handle,
-                            &system_prompt,
-                            &session.messages,
-                            &tool_defs,
-                            self.engine.model.as_ref(),
-                        )
-                        .await?;
-                    session.turns += 1;
-                    if let Some(u) = turn.usage {
-                        usage.input_tokens = usage.input_tokens.saturating_add(u.input_tokens);
-                        usage.output_tokens = usage.output_tokens.saturating_add(u.output_tokens);
-                    }
-                    self.engine.emit(
-                        &session.run_id,
-                        HarnessEvent::ModelTurn {
-                            turn: session.turns,
-                            content_preview: turn.content.chars().take(200).collect(),
-                        },
-                    );
-
-                    session.messages.push(ChatMessage {
-                        role: "assistant".into(),
-                        content: turn.content.clone(),
-                        tool_call_id: String::new(),
-                        tool_calls: turn.tool_calls.clone(),
-                    });
-
-                    // The model result is durable before any remote harvest
-                    // report can fail or before host tools can run.
-                    session.save(tools.as_ref())?;
-                    self.engine.report_governance_model(&handle).await?;
-                    session.save(tools.as_ref())?;
-                    turn
-                };
-
-                // Cancellation is checked after the returned model turn is
-                // durable and its receipt event is acknowledged. A stopped
-                // run can therefore resume without repeating that call.
-                self.engine
-                    .check_bounds(&session.run_id, &request, started, timeout)?;
+                let turn = model_turns.next(&mut session).await?;
 
                 if turn.tool_calls.is_empty() {
                     final_summary = if turn.content.is_empty() {
@@ -484,6 +395,7 @@ impl<'a> RunTransaction<'a> {
             Ok(park) => park.clone(),
             Err(_) => None,
         };
+        let usage = model_turns.usage();
 
         let (success, final_summary, termination) = match result {
             Ok(_) => (success, final_summary, termination),
