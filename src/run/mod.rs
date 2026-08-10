@@ -1,4 +1,9 @@
 //! Run lifecycle engine.
+//!
+//! Public surface: [`Engine`], [`RunRequest`], [`RunResult`], and related types.
+//! Internals:
+//! - [`session::RunSession`] — owned attempt state + deep checkpoint interface
+//! - [`resume`] — checkpoint workspace boundary checks
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,7 +14,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::checkpoint::{
-    self, Checkpoint, CheckpointError, ParkedState, StagedToolExecution, StagedToolReport,
+    Checkpoint, CheckpointError, ParkedState, StagedToolExecution, StagedToolReport,
     ToolExecutionStatus,
 };
 use crate::config::Config;
@@ -28,6 +33,12 @@ use crate::workspace::{
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+
+mod resume;
+mod session;
+
+use resume::{configured_workspace_adapter, validate_resumed_workspace};
+use session::RunSession;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
@@ -121,109 +132,6 @@ impl RunRequest {
     }
 }
 
-fn configured_workspace_adapter(config: &Config) -> &str {
-    match config.workspace.adapter.as_str() {
-        "directory-inplace" => "inplace",
-        other => other,
-    }
-}
-
-fn canonical_workspace_below(root: &Path, suffix: &[&str]) -> Result<PathBuf, RunError> {
-    let trusted_root = root.canonicalize().map_err(|error| {
-        RunError::Message(format!(
-            "configured workspace root cannot be resolved: {}: {error}",
-            root.display()
-        ))
-    })?;
-    let mut candidate = root.to_path_buf();
-    for component in suffix {
-        candidate.push(component);
-        let metadata = std::fs::symlink_metadata(&candidate).map_err(|error| {
-            RunError::Message(format!(
-                "expected checkpoint workspace cannot be inspected: {}: {error}",
-                candidate.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(RunError::Message(format!(
-                "checkpoint workspace path must not contain symlinks: {}",
-                candidate.display()
-            )));
-        }
-    }
-    let expected = candidate.canonicalize().map_err(|error| {
-        RunError::Message(format!(
-            "expected checkpoint workspace cannot be resolved: {}: {error}",
-            candidate.display()
-        ))
-    })?;
-    if !expected.starts_with(&trusted_root) {
-        return Err(RunError::Message(format!(
-            "checkpoint workspace {} escapes configured root {}",
-            expected.display(),
-            trusted_root.display()
-        )));
-    }
-    Ok(expected)
-}
-
-fn validate_resumed_workspace(
-    config: &Config,
-    state_runs: &Path,
-    resume_id: &str,
-    checkpoint: &Checkpoint,
-) -> Result<PathBuf, RunError> {
-    let actual = checkpoint.workspace.canonicalize().map_err(|error| {
-        RunError::Message(format!(
-            "checkpoint workspace cannot be resolved: {}: {error}",
-            checkpoint.workspace.display()
-        ))
-    })?;
-    let configured_adapter = configured_workspace_adapter(config);
-    let checkpoint_adapter = if checkpoint.workspace_adapter.is_empty() {
-        configured_adapter
-    } else {
-        checkpoint.workspace_adapter.as_str()
-    };
-    if checkpoint_adapter != configured_adapter {
-        return Err(RunError::Message(format!(
-            "checkpoint workspace adapter `{checkpoint_adapter}` does not match configured adapter `{configured_adapter}`"
-        )));
-    }
-    let expected = match configured_adapter {
-        "directory" => {
-            let root = PathBuf::from(&config.workspace.root);
-            if root.as_os_str() == "." {
-                canonical_workspace_below(state_runs, &[resume_id, "workspace"])?
-            } else {
-                canonical_workspace_below(&root, &["shikigami-runs", resume_id])?
-            }
-        }
-        "git-worktree" => canonical_workspace_below(state_runs, &[resume_id, "worktree"])?,
-        "inplace" => PathBuf::from(&config.workspace.root)
-            .canonicalize()
-            .map_err(|error| {
-                RunError::Message(format!(
-                    "configured workspace root cannot be resolved: {}: {error}",
-                    config.workspace.root
-                ))
-            })?,
-        other => {
-            return Err(RunError::Message(format!(
-                "cannot validate checkpoint workspace for adapter `{other}`"
-            )));
-        }
-    };
-    if actual != expected {
-        return Err(RunError::Message(format!(
-            "checkpoint workspace {} does not match configured workspace {}",
-            actual.display(),
-            expected.display()
-        )));
-    }
-    Ok(actual)
-}
-
 #[derive(Debug, Clone)]
 pub struct RunResult {
     pub run_id: String,
@@ -312,68 +220,6 @@ pub struct Engine {
     pub events: Arc<dyn EventSink>,
     pub state_runs: PathBuf,
     pub registry: Arc<RunRegistry>,
-}
-
-/// Run-invariant context for durable checkpoint snapshots.
-///
-/// This private module keeps checkpoint metadata and retention policy out of
-/// turn-loop call sites while sampling progress and governance state at each
-/// durability point.
-struct CheckpointSession<'a> {
-    state_runs: &'a Path,
-    governance: &'a dyn GovernancePort,
-    run_id: &'a str,
-    task: &'a str,
-    workspace: &'a Path,
-    workspace_adapter: &'a str,
-    keep_workspace: bool,
-}
-
-impl CheckpointSession<'_> {
-    fn save(
-        &self,
-        messages: &[ChatMessage],
-        completed_turns: u32,
-        todos: Vec<TodoItem>,
-    ) -> Result<(), RunError> {
-        self.save_with_retention(messages, completed_turns, self.keep_workspace, None, todos)
-    }
-
-    fn save_recoverable(
-        &self,
-        messages: &[ChatMessage],
-        completed_turns: u32,
-        park: Option<ParkedState>,
-        todos: Vec<TodoItem>,
-    ) -> Result<(), RunError> {
-        self.save_with_retention(messages, completed_turns, true, park, todos)
-    }
-
-    fn save_with_retention(
-        &self,
-        messages: &[ChatMessage],
-        completed_turns: u32,
-        keep_workspace: bool,
-        park: Option<ParkedState>,
-        todos: Vec<TodoItem>,
-    ) -> Result<(), RunError> {
-        Checkpoint {
-            version: checkpoint::CHECKPOINT_VERSION,
-            run_id: self.run_id.into(),
-            task: self.task.into(),
-            prompt_id: checkpoint::prompt_id(SYSTEM_PROMPT),
-            messages: messages.to_vec(),
-            completed_turns,
-            workspace: self.workspace.to_path_buf(),
-            keep_workspace,
-            workspace_adapter: self.workspace_adapter.into(),
-            park,
-            todos,
-            governance: self.governance.checkpoint_state(self.run_id),
-        }
-        .save(self.state_runs)?;
-        Ok(())
-    }
 }
 
 impl Engine {
@@ -595,8 +441,8 @@ impl Engine {
 
         let (
             run_id,
-            mut messages,
-            mut turns,
+            messages,
+            turns,
             ws,
             task,
             keep_workspace,
@@ -777,15 +623,17 @@ impl Engine {
         }
         let tool_defs = tools.definitions();
         let tools = Arc::new(tools);
-        let checkpoints = CheckpointSession {
-            state_runs: &self.state_runs,
-            governance: self.governance.as_ref(),
-            run_id: &run_id,
-            task: &task,
-            workspace: &ws.path,
-            workspace_adapter: &ws.adapter,
+        let mut session = RunSession::new(
+            self.state_runs.clone(),
+            Arc::clone(&self.governance),
+            run_id,
+            task,
+            ws.path.clone(),
+            ws.adapter.clone(),
             keep_workspace,
-        };
+            messages,
+            turns,
+        );
 
         let max_turns = self.config.run.max_turns;
         let mut final_summary = String::from("completed without report");
@@ -801,7 +649,8 @@ impl Engine {
                 .is_some_and(|checkpoint| !checkpoint.model_operation_id.is_empty());
         let mut staged_turn = governed_model_checkpoint
             .then(|| {
-                messages
+                session
+                    .messages
                     .last()
                     .filter(|message| message.role == "assistant")
                     .map(|message| ModelTurn {
@@ -815,8 +664,8 @@ impl Engine {
         let handle = self
             .governance
             .begin_run_with_checkpoint(
-                &run_id,
-                &task,
+                &session.run_id,
+                &session.task,
                 request.logical_operation_id.as_deref(),
                 governance_checkpoint.as_ref(),
             )
@@ -829,7 +678,7 @@ impl Engine {
         let host_receipt_was_durable = governance_checkpoint
             .as_ref()
             .is_some_and(|checkpoint| !checkpoint.operation_id.is_empty());
-        if let Err(error) = checkpoints.save(&messages, turns, tools.todos()) {
+        if let Err(error) = session.save(tools.as_ref()) {
             if !host_receipt_was_durable
                 && let Err(compensation) = self
                     .governance
@@ -856,14 +705,14 @@ impl Engine {
         }
 
         // Persist any replay cursor changes before the first turn begins.
-        checkpoints.save(&messages, turns, tools.todos())?;
+        session.save(tools.as_ref())?;
 
         if let Err(error) = hooks::run_hooks(
             &self.config.hooks,
             HookEvent::PreRun,
             json!({
-                "run_id": run_id,
-                "task": task,
+                "run_id": session.run_id,
+                "task": session.task,
                 "resume": request.resume_run_id.is_some(),
             }),
         )
@@ -881,9 +730,9 @@ impl Engine {
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
         let result: Result<Option<ParkInfo>, RunError> = async {
             loop {
-                self.check_bounds(&run_id, &request, started, timeout)?;
+                self.check_bounds(&session.run_id, &request, started, timeout)?;
 
-                if staged_turn.is_none() && turns >= max_turns {
+                if staged_turn.is_none() && session.turns >= max_turns {
                     return Err(RunError::MaxTurns(max_turns));
                 }
                 if staged_turn.is_none()
@@ -891,13 +740,16 @@ impl Engine {
                 {
                     let keep = self.config.run.compact_keep_tail.max(2) as usize;
                     if let Some((before, after)) =
-                        compact_messages(&mut messages, threshold as usize, keep)
+                        compact_messages(&mut session.messages, threshold as usize, keep)
                     {
-                        self.emit(&run_id, HarnessEvent::ContextCompacted { before, after });
+                        self.emit(
+                            &session.run_id,
+                            HarnessEvent::ContextCompacted { before, after },
+                        );
                     }
                 }
                 self.emit(
-                    &run_id,
+                    &session.run_id,
                     HarnessEvent::Status {
                         status: "planning".into(),
                     },
@@ -907,7 +759,7 @@ impl Engine {
                     // stable plane event id makes this retry idempotent if the
                     // prior process reported it before failing to advance.
                     self.report_governance_model(&handle).await?;
-                    checkpoints.save(&messages, turns, tools.todos())?;
+                    session.save(tools.as_ref())?;
                     turn
                 } else {
                     let turn = self
@@ -915,25 +767,25 @@ impl Engine {
                         .plan_turn(
                             &handle,
                             &system_prompt,
-                            &messages,
+                            &session.messages,
                             &tool_defs,
                             self.model.as_ref(),
                         )
                         .await?;
-                    turns += 1;
+                    session.turns += 1;
                     if let Some(u) = turn.usage {
                         usage.input_tokens = usage.input_tokens.saturating_add(u.input_tokens);
                         usage.output_tokens = usage.output_tokens.saturating_add(u.output_tokens);
                     }
                     self.emit(
-                        &run_id,
+                        &session.run_id,
                         HarnessEvent::ModelTurn {
-                            turn: turns,
+                            turn: session.turns,
                             content_preview: turn.content.chars().take(200).collect(),
                         },
                     );
 
-                    messages.push(ChatMessage {
+                    session.messages.push(ChatMessage {
                         role: "assistant".into(),
                         content: turn.content.clone(),
                         tool_call_id: String::new(),
@@ -942,16 +794,16 @@ impl Engine {
 
                     // The model result is durable before any remote harvest
                     // report can fail or before host tools can run.
-                    checkpoints.save(&messages, turns, tools.todos())?;
+                    session.save(tools.as_ref())?;
                     self.report_governance_model(&handle).await?;
-                    checkpoints.save(&messages, turns, tools.todos())?;
+                    session.save(tools.as_ref())?;
                     turn
                 };
 
                 // Cancellation is checked after the returned model turn is
                 // durable and its receipt event is acknowledged. A stopped
                 // run can therefore resume without repeating that call.
-                self.check_bounds(&run_id, &request, started, timeout)?;
+                self.check_bounds(&session.run_id, &request, started, timeout)?;
 
                 if turn.tool_calls.is_empty() {
                     final_summary = if turn.content.is_empty() {
@@ -970,7 +822,7 @@ impl Engine {
                     .any(|c| tools::must_be_exclusive_batch(&c.name));
                 if exclusive && turn.tool_calls.len() != 1 {
                     for c in &turn.tool_calls {
-                        messages.push(ChatMessage {
+                        session.messages.push(ChatMessage {
                             role: "tool".into(),
                             content: "tool batch rejected: report/escalate must be the only call"
                                 .into(),
@@ -978,7 +830,7 @@ impl Engine {
                             tool_calls: vec![],
                         });
                     }
-                    checkpoints.save(&messages, turns, tools.todos())?;
+                    session.save(tools.as_ref())?;
                     continue;
                 }
 
@@ -1003,7 +855,7 @@ impl Engine {
                 // Ordered ToolStart for stable live streams.
                 for call in &turn.tool_calls {
                     self.emit(
-                        &run_id,
+                        &session.run_id,
                         HarnessEvent::ToolStart {
                             name: call.name.clone(),
                             args_json: call.args_json.clone(),
@@ -1013,7 +865,7 @@ impl Engine {
 
                 // Parallel path only for all-read batches (no report/park/write).
                 let batch_outcomes: Vec<(ToolCall, Result<ToolOutput, String>)> = if can_parallel {
-                    self.check_bounds(&run_id, &request, started, timeout)?;
+                    self.check_bounds(&session.run_id, &request, started, timeout)?;
                     let sem = Arc::new(Semaphore::new(concurrency));
                     let mut set = JoinSet::new();
                     for (i, call) in turn.tool_calls.iter().cloned().enumerate() {
@@ -1023,7 +875,8 @@ impl Engine {
                         let sem = Arc::clone(&sem);
                         set.spawn(async move {
                             let _permit = sem.acquire().await.expect("semaphore");
-                            let stable_call_id = Engine::stable_tool_call_id(&call, turns, i);
+                            let stable_call_id =
+                                Engine::stable_tool_call_id(&call, session.turns, i);
                             if let Err(e) = gov
                                 .authorize_tool_with_id(
                                     &handle,
@@ -1055,12 +908,12 @@ impl Engine {
                 } else {
                     let mut out = Vec::with_capacity(turn.tool_calls.len());
                     for (index, call) in turn.tool_calls.iter().enumerate() {
-                        self.check_bounds(&run_id, &request, started, timeout)?;
+                        self.check_bounds(&session.run_id, &request, started, timeout)?;
                         if let Err(e) = hooks::run_hooks(
                             &self.config.hooks,
                             HookEvent::PreTool,
                             json!({
-                                "run_id": run_id,
+                                "run_id": session.run_id,
                                 "tool": call.name,
                                 "args_json": call.args_json,
                             }),
@@ -1070,7 +923,7 @@ impl Engine {
                             out.push((call.clone(), Err(e)));
                             continue;
                         }
-                        let stable_call_id = Self::stable_tool_call_id(call, turns, index);
+                        let stable_call_id = Self::stable_tool_call_id(call, session.turns, index);
                         if self
                             .governance
                             .tool_requires_execution_checkpoint(&call.name)
@@ -1086,7 +939,7 @@ impl Engine {
                                     },
                                 )
                                 .await?;
-                            checkpoints.save(&messages, turns, tools.todos())?;
+                            session.save(tools.as_ref())?;
                         }
                         if let Err(e) = self
                             .governance
@@ -1108,7 +961,7 @@ impl Engine {
                             self.governance
                                 .mark_tool_execution_started(&handle, &stable_call_id)
                                 .await?;
-                            checkpoints.save(&messages, turns, tools.todos())?;
+                            session.save(tools.as_ref())?;
                         }
                         match tools.execute(&call.name, &call.args_json).await {
                             Ok(o) => out.push((call.clone(), Ok(o))),
@@ -1124,20 +977,20 @@ impl Engine {
                 // later host-side effects absent from the resume checkpoint.
                 for (call, outcome) in &batch_outcomes {
                     match outcome {
-                        Ok(ToolOutput::Text(text)) => messages.push(ChatMessage {
+                        Ok(ToolOutput::Text(text)) => session.messages.push(ChatMessage {
                             role: "tool".into(),
                             content: text.clone(),
                             tool_call_id: call.id.clone(),
                             tool_calls: vec![],
                         }),
-                        Ok(ToolOutput::Report(report)) => messages.push(ChatMessage {
+                        Ok(ToolOutput::Report(report)) => session.messages.push(ChatMessage {
                             role: "tool".into(),
                             content: format!("report: {}", report.summary),
                             tool_call_id: call.id.clone(),
                             tool_calls: vec![],
                         }),
                         Ok(ToolOutput::Park(_)) => {}
-                        Err(detail) => messages.push(ChatMessage {
+                        Err(detail) => session.messages.push(ChatMessage {
                             role: "tool".into(),
                             content: detail.clone(),
                             tool_call_id: call.id.clone(),
@@ -1154,7 +1007,7 @@ impl Engine {
                         self.governance
                             .mark_tool_execution_complete(
                                 &handle,
-                                &Self::stable_tool_call_id(call, turns, index),
+                                &Self::stable_tool_call_id(call, session.turns, index),
                             )
                             .await?;
                     }
@@ -1163,7 +1016,7 @@ impl Engine {
                     .iter()
                     .enumerate()
                     .map(|(index, (call, outcome))| StagedToolReport {
-                        call_id: Self::stable_tool_call_id(call, turns, index),
+                        call_id: Self::stable_tool_call_id(call, session.turns, index),
                         name: call.name.clone(),
                         ok: match outcome {
                             Ok(ToolOutput::Text(_)) => true,
@@ -1189,11 +1042,11 @@ impl Engine {
                 self.governance
                     .clear_staged_tool_executions(&handle)
                     .await?;
-                checkpoints.save(&messages, turns, tools.todos())?;
+                session.save(tools.as_ref())?;
 
                 let mut terminal_report = false;
                 for (index, (call, outcome)) in batch_outcomes.into_iter().enumerate() {
-                    let report_call_id = Self::stable_tool_call_id(&call, turns, index);
+                    let report_call_id = Self::stable_tool_call_id(&call, session.turns, index);
                     match outcome {
                         Ok(ToolOutput::Text(text)) => {
                             self.report_governance_tool_with_id(
@@ -1207,7 +1060,7 @@ impl Engine {
                             if call.name == "todo_write" {
                                 let items = tools.todos();
                                 self.emit(
-                                    &run_id,
+                                    &session.run_id,
                                     HarnessEvent::TodosUpdated {
                                         summary: text.chars().take(500).collect(),
                                         item_count: items.len(),
@@ -1215,7 +1068,7 @@ impl Engine {
                                 );
                             }
                             self.emit(
-                                &run_id,
+                                &session.run_id,
                                 HarnessEvent::ToolEnd {
                                     name: call.name.clone(),
                                     ok: true,
@@ -1226,7 +1079,7 @@ impl Engine {
                                 &self.config.hooks,
                                 HookEvent::PostTool,
                                 json!({
-                                    "run_id": run_id,
+                                    "run_id": session.run_id,
                                     "tool": call.name,
                                     "ok": true,
                                 }),
@@ -1243,7 +1096,7 @@ impl Engine {
                             )
                             .await?;
                             self.emit(
-                                &run_id,
+                                &session.run_id,
                                 HarnessEvent::ToolEnd {
                                     name: "report".into(),
                                     ok: report.success,
@@ -1260,12 +1113,20 @@ impl Engine {
                             let parked = ParkedState {
                                 reason: park.reason.clone(),
                                 question: park.question.clone(),
-                                tool_call_id: Self::conversation_tool_call_id(&call, turns, index),
+                                tool_call_id: Self::conversation_tool_call_id(
+                                    &call,
+                                    session.turns,
+                                    index,
+                                ),
                             };
                             let info = ParkInfo {
                                 reason: park.reason.clone(),
                                 question: park.question.clone(),
-                                tool_call_id: Self::conversation_tool_call_id(&call, turns, index),
+                                tool_call_id: Self::conversation_tool_call_id(
+                                    &call,
+                                    session.turns,
+                                    index,
+                                ),
                             };
                             final_summary = park.reason.clone();
                             success = false;
@@ -1283,15 +1144,10 @@ impl Engine {
                             // Save before reporting so a resume checkpoint
                             // carries the park state and the exact pending
                             // event for retry if the report fails.
-                            checkpoints.save_recoverable(
-                                &messages,
-                                turns,
-                                Some(parked),
-                                tools.todos(),
-                            )?;
+                            session.save_recoverable(Some(parked), tools.as_ref())?;
                             report_result?;
                             self.emit(
-                                &run_id,
+                                &session.run_id,
                                 HarnessEvent::ToolEnd {
                                     name: "escalate".into(),
                                     ok: false,
@@ -1302,7 +1158,7 @@ impl Engine {
                                 &self.config.hooks,
                                 HookEvent::OnPark,
                                 json!({
-                                    "run_id": run_id,
+                                    "run_id": session.run_id,
                                     "reason": park.reason,
                                     "question": park.question,
                                 }),
@@ -1320,7 +1176,7 @@ impl Engine {
                             )
                             .await?;
                             self.emit(
-                                &run_id,
+                                &session.run_id,
                                 HarnessEvent::ToolEnd {
                                     name: call.name.clone(),
                                     ok: false,
@@ -1331,7 +1187,7 @@ impl Engine {
                                 &self.config.hooks,
                                 HookEvent::PostTool,
                                 json!({
-                                    "run_id": run_id,
+                                    "run_id": session.run_id,
                                     "tool": call.name,
                                     "ok": false,
                                 }),
@@ -1339,9 +1195,9 @@ impl Engine {
                             .await;
                         }
                     }
-                    checkpoints.save(&messages, turns, tools.todos())?;
+                    session.save(tools.as_ref())?;
                 }
-                checkpoints.save(&messages, turns, tools.todos())?;
+                session.save(tools.as_ref())?;
                 if terminal_report {
                     return Ok(None);
                 }
@@ -1363,12 +1219,7 @@ impl Engine {
                 // The complete batch was staged before reporting, so this
                 // checkpoint cannot replay an already executed host tool.
                 // Keep the workspace on failure for resume/inspection.
-                let _ = checkpoints.save_recoverable(
-                    &messages,
-                    turns,
-                    pending_park.clone(),
-                    tools.todos(),
-                );
+                let _ = session.save_recoverable(pending_park.clone(), tools.as_ref());
                 if !e.leaves_governance_open() {
                     let completion = self
                         .governance
@@ -1377,36 +1228,26 @@ impl Engine {
                             RunOutcome {
                                 success: false,
                                 summary: summary.clone(),
-                                turns,
+                                turns: session.turns,
                                 termination: e.termination().as_str().into(),
                                 workspace: ws.path.display().to_string(),
                             },
                         )
                         .await;
                     if completion.is_err() {
-                        let _ = checkpoints.save_recoverable(
-                            &messages,
-                            turns,
-                            pending_park.clone(),
-                            tools.todos(),
-                        );
+                        let _ = session.save_recoverable(pending_park.clone(), tools.as_ref());
                     } else {
                         // `complete_run` has forgotten the in-memory receipt
                         // state; persist that finalized boundary so a later
                         // resume cannot reuse a terminal plane receipt.
-                        let _ = checkpoints.save_recoverable(
-                            &messages,
-                            turns,
-                            pending_park.clone(),
-                            tools.todos(),
-                        );
+                        let _ = session.save_recoverable(pending_park.clone(), tools.as_ref());
                     }
                 }
                 // Do not delete workspace on cancel/timeout/max-turns so resume works.
                 self.emit(
-                    &run_id,
+                    &session.run_id,
                     HarnessEvent::RunFinished {
-                        run_id: run_id.clone(),
+                        run_id: session.run_id.clone(),
                         success: false,
                         summary: summary.clone(),
                     },
@@ -1415,7 +1256,7 @@ impl Engine {
                 // before inventory so descendants cannot keep mutating the
                 // workspace after the failed run has been recorded.
                 tools.kill_background_jobs().await;
-                self.capture_artifacts(&run_id, &ws.path);
+                self.capture_artifacts(&session.run_id, &ws.path);
                 return Err(e);
             }
         };
@@ -1428,41 +1269,41 @@ impl Engine {
                     RunOutcome {
                         success,
                         summary: final_summary.clone(),
-                        turns,
+                        turns: session.turns,
                         termination: termination.as_str().into(),
                         workspace: ws.path.display().to_string(),
                     },
                 )
                 .await;
             if let Err(error) = completion {
-                let _ = checkpoints.save_recoverable(&messages, turns, None, tools.todos());
+                let _ = session.save_recoverable(None, tools.as_ref());
                 tools.kill_background_jobs().await;
-                self.capture_artifacts(&run_id, &ws.path);
+                self.capture_artifacts(&session.run_id, &ws.path);
                 return Err(error.into());
             }
             // Successful completion clears adapter-owned receipt correlation
             // from the durable checkpoint. Parked runs intentionally retain
             // it for their governed continuation.
-            if let Err(error) = checkpoints.save(&messages, turns, tools.todos()) {
+            if let Err(error) = session.save(tools.as_ref()) {
                 tools.kill_background_jobs().await;
-                self.capture_artifacts(&run_id, &ws.path);
+                self.capture_artifacts(&session.run_id, &ws.path);
                 return Err(error);
             }
         }
 
         // Always reap background shells before taking the final inventory.
         tools.kill_background_jobs().await;
-        let artifact_dir = self.capture_artifacts(&run_id, &ws.path);
+        let artifact_dir = self.capture_artifacts(&session.run_id, &ws.path);
 
         // Keep workspace on park; only delete on successful non-park completion.
-        if !keep_workspace && success && termination != RunTermination::Parked {
+        if !session.keep_workspace && success && termination != RunTermination::Parked {
             let _ = self.workspace.cleanup(&ws);
         }
 
         self.emit(
-            &run_id,
+            &session.run_id,
             HarnessEvent::RunFinished {
-                run_id: run_id.clone(),
+                run_id: session.run_id.clone(),
                 success,
                 summary: final_summary.clone(),
             },
@@ -1478,7 +1319,7 @@ impl Engine {
             &self.config.hooks,
             HookEvent::PostRun,
             json!({
-                "run_id": run_id,
+                "run_id": session.run_id,
                 "success": success,
                 "termination": termination.as_str(),
                 "summary": final_summary,
@@ -1487,10 +1328,10 @@ impl Engine {
         .await;
 
         Ok(RunResult {
-            run_id,
+            run_id: session.run_id,
             success,
             summary: final_summary,
-            turns,
+            turns: session.turns,
             workspace: ws.path,
             artifact_dir,
             termination,
@@ -1506,6 +1347,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint;
     use crate::config::Config;
     use crate::events;
     use crate::governance;

@@ -118,7 +118,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | Path | Responsibility |
 | --- | --- |
 | `src/harness.rs` | Public wiring: config → ports → doctor/run |
-| `src/run.rs` | Turn loop |
+| `src/run/` | Turn loop (`Engine`), resume validation, deep `RunSession` checkpoints |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei` |
 | `src/tools/` | Run-scoped tool registry, catalog, and workspace-jailed execution |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
