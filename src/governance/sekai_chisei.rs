@@ -23,8 +23,7 @@ pub use sekai_client::protocol as proto;
 use sha2::{Digest, Sha256};
 
 use proto::chisei::{
-    ExecutionInput, GetEffectivePolicySummaryRequest, GetOperationReceiptRequest,
-    ReportOperationEventRequest,
+    GetEffectivePolicySummaryRequest, GetOperationReceiptRequest, ReportOperationEventRequest,
 };
 use proto::sekai::{
     AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
@@ -38,6 +37,7 @@ const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
 type PlaneClient = CoreLoopClient<GrpcTransport>;
 
 mod governed_model_turn;
+mod governed_run_admission;
 mod governed_run_completion;
 mod harvest_transaction;
 mod tool_authorization;
@@ -499,77 +499,14 @@ impl SekaiChiseiGovernance {
             .collect()
     }
 
+    #[cfg(test)]
     fn host_receipt_input(
         &self,
         run_id: &str,
         task: &str,
         logical_operation_id: &str,
-    ) -> ExecutionInput {
-        // Sekai/Chisei 1.0 exposes PlanExecution as the receipt-creation
-        // surface. Keep this host-only plan non-model: the empty prompt/tool
-        // payload and zero output bound make its budget admission zero, while
-        // each actual model turn receives its own normal execution plan.
-        ExecutionInput {
-            request_id: format!("shikigami-host:{run_id}"),
-            namespace: self.namespace.clone(),
-            spec: task.into(),
-            preferred_model: self.preferred_model.clone(),
-            preferred_runtime: String::new(),
-            task_type: "agent".into(),
-            priority: 0,
-            user_id: self.principal.clone(),
-            estimated_tokens: 0,
-            messages: vec![],
-            tools: vec![],
-            system: String::new(),
-            max_tokens: 0,
-            task_class: "shikigami-run".into(),
-            logical_operation_id: logical_operation_id.into(),
-            attempt_id: run_id.into(),
-            route_override: String::new(),
-        }
-    }
-
-    async fn create_host_receipt(
-        &self,
-        run_id: &str,
-        task: &str,
-        logical_operation_id: &str,
-    ) -> Result<String, GovernanceError> {
-        // This plan allocates the host receipt's planning spine only. The
-        // host plan is intentionally never sent to ExecutePlanStream; the
-        // host lifecycle is filled by authenticated ReportOperationEvent
-        // events below, while each model turn owns its own executed plan.
-        let client = self.connect().await?;
-        let plan = client
-            .plan_execution(
-                self.host_receipt_input(run_id, task, logical_operation_id),
-                self.sdk_call_options(
-                    Some(&self.namespace),
-                    Some(logical_operation_id),
-                    Some(&format!("shikigami-host:{run_id}")),
-                ),
-            )
-            .await
-            .map_err(|error| Self::sdk_error("PlanExecution host receipt", error))?;
-        if plan.budget.as_ref().is_some_and(|budget| !budget.allowed) {
-            return Err(GovernanceError::Denied(
-                plan.budget
-                    .as_ref()
-                    .map(|budget| budget.reason.clone())
-                    .filter(|reason| !reason.is_empty())
-                    .unwrap_or_else(|| "host receipt budget denied".into()),
-            ));
-        }
-        if !plan.executable {
-            return Err(GovernanceError::Denied(
-                plan.warnings
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "host receipt plan not executable".into()),
-            ));
-        }
-        Ok(plan.plan_id)
+    ) -> proto::chisei::ExecutionInput {
+        governed_run_admission::host_receipt_input(self, run_id, task, logical_operation_id)
     }
 
     async fn abort_uncheckpointed_receipt(
@@ -620,110 +557,6 @@ impl SekaiChiseiGovernance {
         }
         self.forget_harvest(&handle.run_id);
         Ok(())
-    }
-
-    async fn begin_governed_run(
-        &self,
-        run_id: &str,
-        task: &str,
-        logical_operation_id: Option<&str>,
-        checkpoint: Option<&GovernanceCheckpoint>,
-    ) -> Result<RunHandle, GovernanceError> {
-        if self.endpoint.trim().is_empty() {
-            return Err(GovernanceError::Unavailable(
-                "sekai-chisei endpoint not set".into(),
-            ));
-        }
-        if let Err(error) = self.probe().await
-            && self.fail_closed
-        {
-            return Err(error);
-        }
-        let checkpoint_logical_operation_id = checkpoint
-            .filter(|state| !state.logical_operation_id.is_empty())
-            .map(|state| state.logical_operation_id.as_str())
-            .filter(|operation_id| !operation_id.is_empty());
-        if let (Some(requested), Some(checkpoint_logical)) =
-            (logical_operation_id, checkpoint_logical_operation_id)
-            && requested != checkpoint_logical
-        {
-            return Err(GovernanceError::Message(format!(
-                "resume logical operation id `{requested}` does not match checkpoint lineage `{checkpoint_logical}`"
-            )));
-        }
-        let operation_id = logical_operation_id
-            .or(checkpoint_logical_operation_id)
-            .unwrap_or(run_id)
-            .to_string();
-        let handle = RunHandle {
-            run_id: run_id.into(),
-            operation_id,
-            namespace: self.namespace.clone(),
-        };
-
-        if let Some(checkpoint) = checkpoint {
-            self.harvest
-                .restore(run_id, checkpoint, handle.operation_id.clone())?;
-            if !checkpoint.operation_id.is_empty() {
-                match self.harvest_receipt(&handle).await {
-                    Ok(receipt) if receipt.complete => {
-                        self.forget_harvest(run_id);
-                        return Err(GovernanceError::Message(format!(
-                            "resume checkpoint references completed host receipt {}; refusing to resume terminal run",
-                            checkpoint.operation_id
-                        )));
-                    }
-                    Ok(_) => {}
-                    Err(error) if self.fail_closed => return Err(error),
-                    Err(_) => {}
-                }
-                if let Err(error) = self.retry_pending_harvest_event(&handle).await
-                    && self.fail_closed
-                {
-                    return Err(error);
-                }
-                match self.harvest_receipt(&handle).await {
-                    Ok(receipt) if receipt.complete => {
-                        self.forget_harvest(run_id);
-                        return Err(GovernanceError::Message(format!(
-                            "resume checkpoint became complete while replaying host receipt {}; refusing to resume terminal run",
-                            checkpoint.operation_id
-                        )));
-                    }
-                    Ok(_) => {}
-                    Err(error) if self.fail_closed => return Err(error),
-                    Err(_) => {}
-                }
-            }
-        } else {
-            self.harvest.start(run_id, handle.operation_id.clone())?;
-        }
-
-        let has_host_receipt = self.harvest.has_host_operation(run_id)?;
-        if !has_host_receipt {
-            match self
-                .create_host_receipt(run_id, task, &handle.operation_id)
-                .await
-            {
-                Ok(operation_id) => self.update_host_plan(run_id, operation_id)?,
-                Err(error) if self.fail_closed => return Err(error),
-                Err(_) => {}
-            }
-        }
-
-        let needs_attempt = self.harvest.needs_attempt(run_id)?;
-        if needs_attempt {
-            let attributes = harvest::attempt_attributes(run_id, &handle.operation_id);
-            if let Err(error) = self
-                .report_harvest_event(&handle, harvest::KIND_ATTEMPT, attributes, vec![])
-                .await
-                && self.fail_closed
-            {
-                return Err(error);
-            }
-        }
-
-        Ok(handle)
     }
 }
 
@@ -1095,8 +928,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         task: &str,
         logical_operation_id: Option<&str>,
     ) -> Result<RunHandle, GovernanceError> {
-        self.begin_governed_run(run_id, task, logical_operation_id, None)
-            .await
+        governed_run_admission::admit(self, run_id, task, logical_operation_id, None).await
     }
 
     async fn begin_run_with_checkpoint(
@@ -1106,8 +938,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         logical_operation_id: Option<&str>,
         checkpoint: Option<&GovernanceCheckpoint>,
     ) -> Result<RunHandle, GovernanceError> {
-        self.begin_governed_run(run_id, task, logical_operation_id, checkpoint)
-            .await
+        governed_run_admission::admit(self, run_id, task, logical_operation_id, checkpoint).await
     }
 
     fn checkpoint_state(&self, run_id: &str) -> Option<GovernanceCheckpoint> {

@@ -73,6 +73,14 @@ abortion, outcome reporting, completeness enforcement, and local harvest-state
 release. The sekai-chisei adapter delegates this protocol to a private deep
 module behind the existing governance port seam.
 
+## Governed Run admission
+
+One governed Run's pre-turn plane protocol, including lineage validation,
+checkpoint restoration, authoritative receipt reconciliation, pending-event
+replay, host-receipt creation, attempt establishment, and fail-closed error
+policy. The sekai-chisei adapter delegates this protocol to a private deep
+module behind the existing governance port seam.
+
 ## MCP tool attachment protocol
 
 The run-start protocol that initializes configured MCP servers, discovers and
