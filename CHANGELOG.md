@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen host-local Run preparation behind one private interface so fresh and
+  resumed state, snapshots, context, tools, governed admission, initial
+  durability, recovery replay, and pre-run hooks no longer leak through the
+  Run transaction.
 - Deepen governed Run admission behind one private module so lineage,
   receipt reconciliation, pending-event replay, attempt establishment, and
   fail-closed policy no longer leak through the sekai-chisei adapter.
