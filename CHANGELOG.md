@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen governed run completion behind one private module so authoritative
+  receipt reconciliation and fail-closed cleanup no longer leak through the
+  sekai-chisei adapter.
 - Deepen effective settings resolution behind one private module so source
   discovery, profile and environment precedence, final host model selection,
   validation, and source attribution no longer leak across Config, StateRoot,

@@ -38,6 +38,7 @@ const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
 type PlaneClient = CoreLoopClient<GrpcTransport>;
 
 mod governed_model_turn;
+mod governed_run_completion;
 mod harvest_transaction;
 mod tool_authorization;
 
@@ -1253,119 +1254,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         handle: &RunHandle,
         outcome: RunOutcome,
     ) -> Result<(), GovernanceError> {
-        if let Err(error) = self.retry_pending_harvest_event(handle).await {
-            if self.fail_closed {
-                return Err(error);
-            }
-            self.forget_harvest(&handle.run_id);
-            return Ok(());
-        }
-        let receipt = match self.harvest_receipt(handle).await {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                if self.fail_closed {
-                    return Err(error);
-                }
-                self.forget_harvest(&handle.run_id);
-                return Ok(());
-            }
-        };
-        if receipt.complete {
-            self.forget_harvest(&handle.run_id);
-            return Ok(());
-        }
-        if receipt
-            .missing_surfaces
-            .iter()
-            .any(|surface| surface == "attempt")
-        {
-            let attributes = harvest::attempt_attributes(&handle.run_id, &handle.operation_id);
-            if let Err(error) = self
-                .report_harvest_event(handle, harvest::KIND_ATTEMPT, attributes, vec![])
-                .await
-            {
-                if self.fail_closed {
-                    return Err(error);
-                }
-                self.forget_harvest(&handle.run_id);
-                return Ok(());
-            }
-        }
-        let receipt = match self.harvest_receipt(handle).await {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                if self.fail_closed {
-                    return Err(error);
-                }
-                self.forget_harvest(&handle.run_id);
-                return Ok(());
-            }
-        };
-        if receipt
-            .missing_surfaces
-            .iter()
-            .any(|surface| surface == "model_call")
-        {
-            let model_operation_id = self
-                .harvest
-                .model_operation(&handle.run_id)?
-                .0
-                .filter(|operation_id| !operation_id.is_empty());
-            let Some(model_operation_id) = model_operation_id else {
-                match self
-                    .abort_uncheckpointed_receipt(handle, &outcome.summary)
-                    .await
-                {
-                    Ok(()) => return Ok(()),
-                    Err(error) if self.fail_closed => return Err(error),
-                    Err(_) => {
-                        self.forget_harvest(&handle.run_id);
-                        return Ok(());
-                    }
-                }
-            };
-            if let Err(error) = self
-                .report_harvest_event(
-                    handle,
-                    harvest::KIND_MODEL,
-                    harvest::model_attributes(&model_operation_id, false),
-                    vec![],
-                )
-                .await
-            {
-                if self.fail_closed {
-                    return Err(error);
-                }
-                self.forget_harvest(&handle.run_id);
-                return Ok(());
-            }
-        }
-        let attributes = harvest::complete_attributes(&outcome);
-        let references = harvest::complete_references(handle, &outcome);
-        let response = match self
-            .report_harvest_event(handle, harvest::KIND_COMPLETE, attributes, references)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                if self.fail_closed {
-                    return Err(error);
-                }
-                self.forget_harvest(&handle.run_id);
-                return Ok(());
-            }
-        };
-        if !response.complete {
-            let error = GovernanceError::Message(format!(
-                "operation receipt remains incomplete; missing surfaces: {}",
-                response.missing_surfaces.join(", ")
-            ));
-            if self.fail_closed {
-                return Err(error);
-            }
-        }
-        self.forget_harvest(&handle.run_id);
-        Ok(())
+        governed_run_completion::complete(self, handle, outcome).await
     }
 }
 
