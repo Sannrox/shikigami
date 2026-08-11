@@ -11,6 +11,14 @@ selection before validation and source attribution. `Config`, `StateRoot`, and
 `Harness` delegate this ordering to a private deep module; the public settings
 schema and ports remain unchanged.
 
+## Harness diagnosis
+
+The host-side health and configuration projection exposed through the stable
+`Harness::doctor` and `Harness::doctor_async` interface and `DoctorReport`
+schema. One private deep module owns adapter health, effective tool authority,
+credential-source reporting, secret redaction, fail-closed classification, and
+live plane probing; it does not add a port or adapter seam.
+
 ## Durable tool batch
 
 One model turn's ordered set of tool calls, including authorization, execution,
