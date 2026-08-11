@@ -46,6 +46,10 @@ The image contract is:
   `/var/lib/shikigami` and `/workspace` when retaining state or workspaces;
 - no provider keys, plane tokens, repository checkout, host path, or runtime
   service credentials are copied into the image.
+- the OCI label
+  `io.sannrox.shikigami.worker-lifecycle=shikigami.worker_lifecycle/v1`
+  advertises the versioned plane-worker lifecycle contract used by Tenkai and
+  other fleet hosts.
 
 Governed operation still requires the configured plane and token. Missing or
 unhealthy governance remains fail-closed; the image does not add credentials or
@@ -56,7 +60,8 @@ weaken that policy.
 The builder and runtime base images are pinned to linux/amd64 manifest digests.
 The build context is allow-listed in `.dockerignore`; the final stage copies
 only the release executable and empty state/workspace directories. OCI labels
-record the source repository, release version, and source revision. The release
+record the source repository, release version, source revision, and the
+supported plane-worker lifecycle contract. The release
 workflow also enables BuildKit max-mode provenance and SBOM attestations and
 uploads the resulting immutable image reference and digest as release metadata.
 

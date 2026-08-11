@@ -28,7 +28,8 @@ LABEL org.opencontainers.image.title="shikigami" \
       org.opencontainers.image.description="Open-source local-first headless agent harness" \
       org.opencontainers.image.source="https://github.com/Sannrox/shikigami" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.revision="${VCS_REF}"
+      org.opencontainers.image.revision="${VCS_REF}" \
+      io.sannrox.shikigami.worker-lifecycle="shikigami.worker_lifecycle/v1"
 
 COPY --from=builder --chown=65532:65532 /src/target/release/shikigami /usr/local/bin/shikigami
 COPY --from=builder --chown=65532:65532 /image-root/var/lib/shikigami /var/lib/shikigami

@@ -1,11 +1,43 @@
 # Changelog
 
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## Unreleased
+
+<!-- Add changes for the next release here. -->
+
+## [1.0.6] — 2026-08-11
 
 ### Added
 
+- Publish the immutable OCI `shikigami.worker_lifecycle/v1` capability label
+  used by Tenkai-managed worker hosts before replacement and rollback.
 - Provide `Engine::new` as the preferred low-level construction interface while
   preserving 1.x-compatible public fields for existing embedders.
+- Published the versioned `shikigami.worker_lifecycle` plane-host contract
+  (`schema_version` 1): `$SHIKIGAMI_STATE/worker/lifecycle.json`, optional
+  `--lifecycle-listen` probes (`/readyz`, `/livez`; full `/lifecycle` only on
+  loopback), SIGTERM drain that stops new claims without force-acking, and a
+  minimal Kubernetes host example for Tenkai-managed rollout and recovery.
+- Durable local run registry and redacted event journals with runs, cancel,
+  logs, and cleanup CLI controls; retained artifact manifests and bounded git
+  patch export.
+- Bounded filesystem worker queue semantics: priority, concurrency,
+  backpressure, local retry limits, and authenticated HTTP run/control routes.
+- Opt-in Unix rlimit child process groups for CPU, memory, PID, file-size, and
+  descriptor limits.
+- Durable aggregate metrics with CLI/HTTP Prometheus export and an offline
+  scripted golden-fixture evaluator (shikigami eval).
+- Deterministic project verification through thin Make targets and sorted
+  validation/update scripts, plus a pinned Rust toolchain for local agents and
+  CI.
+- `shikigami doctor --models` to print the effective model catalog, including
+  the `auto` sekai-chisei routing option; new settings default the preferred
+  model to `auto` while preserving `gpt-4.1-mini` for direct HTTP fallback.
+- Global `--model` / `SHIKIGAMI_MODEL` selection for direct CLI model overrides.
 
 ### Changed
 
@@ -56,52 +88,8 @@
 - Centralize run-scoped tool bootstrap behind `ToolRegistry::from_config` so
   the registry owns coordinated authority, network, environment, ignore, and
   sandbox settings instead of the turn loop.
-
-### Fixed
-
-- Reject path-like workspace snapshot identifiers before mutation, and restore
-  the workspace before artifact-baseline capture or project-context loading.
-- Centralize parked-checkpoint validation and digest calculation so plane
-  continuation intake binds its digest to the exact bytes it validates.
-- Return the `auto` routing choice from `Harness::available_models` itself so
-  every governed host receives the same effective model catalog.
-
-All notable changes to this project are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
 - Deepen sekai-chisei governed tool authorization behind one private module
   without changing the governance port or external-action behavior.
-
-### Added
-
-- Durable local run registry and redacted event journals with runs, cancel,
-  logs, and cleanup CLI controls; retained artifact manifests and bounded git
-  patch export.
-- Bounded filesystem worker queue semantics: priority, concurrency,
-  backpressure, local retry limits, and authenticated HTTP run/control routes.
-- Opt-in Unix rlimit child process groups for CPU, memory, PID, file-size, and
-  descriptor limits.
-- Durable aggregate metrics with CLI/HTTP Prometheus export and an offline
-  scripted golden-fixture evaluator (shikigami eval).
-- Deterministic project verification through thin Make targets and sorted
-  validation/update scripts, plus a pinned Rust toolchain for local agents and
-  CI.
-- `shikigami doctor --models` to print the effective model catalog, including
-  the `auto` sekai-chisei routing option; new settings default the preferred
-  model to `auto` while preserving `gpt-4.1-mini` for direct HTTP fallback.
-- Global `--model` / `SHIKIGAMI_MODEL` selection for direct CLI model overrides.
-- Versioned plane-worker lifecycle contract (`shikigami.worker_lifecycle`
-  schema_version 1): `$SHIKIGAMI_STATE/worker/lifecycle.json`, optional
-  `--lifecycle-listen` probes (`/readyz`, `/livez`; full `/lifecycle` only on
-  loopback), SIGTERM drain that stops new claims without force-acking, and a
-  minimal Kubernetes host example.
-
-### Changed
-
 - Migrated the governed adapter and vendored Sekai/Chisei schemas to the 1.0
   control-plane contract. Model discovery now uses
   `GetEffectivePolicySummary`; governed harvest uses canonical receipt events
@@ -120,6 +108,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject path-like workspace snapshot identifiers before mutation, and restore
+  the workspace before artifact-baseline capture or project-context loading.
+- Centralize parked-checkpoint validation and digest calculation so plane
+  continuation intake binds its digest to the exact bytes it validates.
+- Return the `auto` routing choice from `Harness::available_models` itself so
+  every governed host receives the same effective model catalog.
 - Workspace snapshots now skip symbolic links instead of following them outside
   the workspace.
 

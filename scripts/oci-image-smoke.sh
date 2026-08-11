@@ -32,9 +32,11 @@ assert_nonempty() {
 source_label=$(label org.opencontainers.image.source)
 version_label=$(label org.opencontainers.image.version)
 revision_label=$(label org.opencontainers.image.revision)
+worker_lifecycle_label=$(label io.sannrox.shikigami.worker-lifecycle)
 assert_equal "source label" "https://github.com/Sannrox/shikigami" "$source_label"
 assert_nonempty "version label" "$version_label"
 assert_nonempty "revision label" "$revision_label"
+assert_equal "worker lifecycle label" "shikigami.worker_lifecycle/v1" "$worker_lifecycle_label"
 
 if [[ -n "$expected_version" ]]; then
   assert_equal "version label" "$expected_version" "$version_label"
