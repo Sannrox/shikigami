@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Add changes for the next release here. -->
 
+### Changed
+
+- Deepen governed Run admission behind one private module so lineage,
+  receipt reconciliation, pending-event replay, attempt establishment, and
+  fail-closed policy no longer leak through the sekai-chisei adapter.
+
 ## [1.0.6] — 2026-08-11
 
 ### Added
