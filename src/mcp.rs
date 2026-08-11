@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
+
+mod protocol;
+
+use protocol::{Client as McpClient, Transport, attach_tools};
 
 use crate::config::{Config, McpServerSettings};
 use crate::tools::{ExternalTool, ToolDef, ToolError, ToolRegistry};
@@ -46,22 +49,8 @@ pub async fn attach_mcp_servers(
                 .network
                 .check_http_url(url)
                 .map_err(ToolError::Message)?;
-            match McpHttpClient::connect(server, config).await {
-                Ok(mut client) => {
-                    let tools = client.list_tools().await?;
-                    let client = Arc::new(Mutex::new(client));
-                    for t in tools {
-                        let full = format!("mcp.{}.{}", server.name, t.name);
-                        registry.register_external(Arc::new(McpHttpRemoteTool {
-                            full_name: full,
-                            remote_name: t.name,
-                            description: t.description,
-                            schema: t.input_schema,
-                            client: Arc::clone(&client),
-                        }));
-                        n += 1;
-                    }
-                }
+            match McpHttpTransport::connect(server, config).await {
+                Ok(client) => n += attach_tools(registry, &server.name, client).await?,
                 Err(e) => {
                     return Err(ToolError::Message(format!(
                         "mcp server `{}`: {e}",
@@ -74,21 +63,9 @@ pub async fn attach_mcp_servers(
         if server.command.is_empty() {
             continue;
         }
-        match McpStdioClient::spawn(server).await {
-            Ok(mut client) => {
-                let tools = client.list_tools().await?;
-                let client = Arc::new(Mutex::new(client));
-                for t in tools {
-                    let full = format!("mcp.{}.{}", server.name, t.name);
-                    registry.register_external(Arc::new(McpRemoteTool {
-                        full_name: full,
-                        remote_name: t.name,
-                        description: t.description,
-                        schema: t.input_schema,
-                        client: Arc::clone(&client),
-                    }));
-                    n += 1;
-                }
+        match McpStdioTransport::spawn(server).await {
+            Ok(transport) => {
+                n += attach_tools(registry, &server.name, McpClient::new(transport)).await?;
             }
             Err(e) => {
                 return Err(ToolError::Message(format!(
@@ -125,22 +102,15 @@ impl ExternalTool for MockEchoTool {
     }
 }
 
-struct McpToolInfo {
-    name: String,
-    description: String,
-    input_schema: String,
-}
-
-struct McpStdioClient {
+struct McpStdioTransport {
     /// Kept alive for process lifetime (kill_on_drop).
     #[allow(dead_code)]
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    next_id: u64,
 }
 
-impl McpStdioClient {
+impl McpStdioTransport {
     async fn spawn(server: &McpServerSettings) -> Result<Self, ToolError> {
         let mut child = Command::new(&server.command)
             .args(&server.args)
@@ -158,116 +128,11 @@ impl McpStdioClient {
             .stdout
             .take()
             .ok_or_else(|| ToolError::Message("mcp stdout missing".into()))?;
-        let mut client = Self {
+        Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
-            next_id: 1,
-        };
-        // initialize (best-effort)
-        let _ = client
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "shikigami", "version": env!("CARGO_PKG_VERSION")}
-                }),
-            )
-            .await;
-        let _ = client.notify("notifications/initialized", json!({})).await;
-        Ok(client)
-    }
-
-    async fn list_tools(&mut self) -> Result<Vec<McpToolInfo>, ToolError> {
-        let result = self.request("tools/list", json!({})).await?;
-        let tools = result
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let mut out = Vec::new();
-        for t in tools {
-            let name = t
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let description = t
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let schema = t
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or_else(|| json!({"type":"object"}));
-            out.push(McpToolInfo {
-                name,
-                description,
-                input_schema: schema.to_string(),
-            });
-        }
-        Ok(out)
-    }
-
-    async fn call_tool(&mut self, name: &str, args_json: &str) -> Result<String, ToolError> {
-        let args: Value = serde_json::from_str(args_json).unwrap_or(json!({}));
-        let result = self
-            .request(
-                "tools/call",
-                json!({
-                    "name": name,
-                    "arguments": args,
-                }),
-            )
-            .await?;
-        // Prefer content[0].text
-        if let Some(arr) = result.get("content").and_then(|c| c.as_array()) {
-            let mut texts = Vec::new();
-            for c in arr {
-                if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
-                    texts.push(t.to_string());
-                }
-            }
-            if !texts.is_empty() {
-                return Ok(texts.join("\n"));
-            }
-        }
-        Ok(result.to_string())
-    }
-
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, ToolError> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        self.write_message(&msg).await?;
-        loop {
-            let resp = self.read_message().await?;
-            if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
-                if let Some(err) = resp.get("error") {
-                    return Err(ToolError::Message(format!("mcp error: {err}")));
-                }
-                return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
-            }
-        }
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), ToolError> {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        self.write_message(&msg).await
+        })
     }
 
     async fn write_message(&mut self, msg: &Value) -> Result<(), ToolError> {
@@ -339,41 +204,37 @@ impl McpStdioClient {
     }
 }
 
-struct McpRemoteTool {
-    full_name: String,
-    remote_name: String,
-    description: String,
-    schema: String,
-    client: Arc<Mutex<McpStdioClient>>,
-}
-
 #[async_trait]
-impl ExternalTool for McpRemoteTool {
-    fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: self.full_name.clone(),
-            description: self.description.clone(),
-            schema: self.schema.clone(),
+impl Transport for McpStdioTransport {
+    async fn exchange(&mut self, request: &Value) -> Result<Value, ToolError> {
+        self.write_message(request).await?;
+        let id = request.get("id").and_then(Value::as_u64);
+        loop {
+            let response = self.read_message().await?;
+            if response.get("id").and_then(Value::as_u64) == id {
+                return Ok(response);
+            }
         }
     }
 
-    async fn call(&self, args_json: &str) -> Result<String, ToolError> {
-        let mut guard = self.client.lock().await;
-        guard.call_tool(&self.remote_name, args_json).await
+    async fn send(&mut self, notification: &Value) -> Result<(), ToolError> {
+        self.write_message(notification).await
     }
 }
 
 /// Minimal HTTP JSON-RPC MCP client (POST body; not full SSE streaming).
-struct McpHttpClient {
+struct McpHttpTransport {
     url: String,
     token: Option<String>,
-    next_id: u64,
     #[cfg(feature = "model-http")]
     client: reqwest::Client,
 }
 
-impl McpHttpClient {
-    async fn connect(server: &McpServerSettings, config: &Config) -> Result<Self, ToolError> {
+impl McpHttpTransport {
+    async fn connect(
+        server: &McpServerSettings,
+        config: &Config,
+    ) -> Result<McpClient<Self>, ToolError> {
         let url = server
             .url
             .clone()
@@ -393,24 +254,7 @@ impl McpHttpClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|e| ToolError::Message(format!("http mcp client: {e}")))?;
-            let mut c = Self {
-                url,
-                token,
-                next_id: 1,
-                client,
-            };
-            let _ = c
-                .request(
-                    "initialize",
-                    json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "shikigami", "version": env!("CARGO_PKG_VERSION")}
-                    }),
-                )
-                .await;
-            let _ = c.notify("notifications/initialized", json!({})).await;
-            Ok(c)
+            Ok(McpClient::new(Self { url, token, client }))
         }
         #[cfg(not(feature = "model-http"))]
         {
@@ -420,157 +264,56 @@ impl McpHttpClient {
             ))
         }
     }
+}
 
-    async fn list_tools(&mut self) -> Result<Vec<McpToolInfo>, ToolError> {
+#[async_trait]
+impl Transport for McpHttpTransport {
+    async fn exchange(&mut self, request: &Value) -> Result<Value, ToolError> {
         #[cfg(not(feature = "model-http"))]
         {
+            let _ = request;
             return Err(ToolError::Message(
                 "http mcp requires the model-http feature".into(),
             ));
         }
         #[cfg(feature = "model-http")]
         {
-            let result = self.request("tools/list", json!({})).await?;
-            let tools = result
-                .get("tools")
-                .and_then(|t| t.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let mut out = Vec::new();
-            for t in tools {
-                let name = t
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if name.is_empty() {
-                    continue;
-                }
-                let description = t
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let schema = t
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({"type":"object"}));
-                out.push(McpToolInfo {
-                    name,
-                    description,
-                    input_schema: schema.to_string(),
-                });
+            let mut req = self.client.post(&self.url).json(request);
+            if let Some(tok) = &self.token {
+                req = req.bearer_auth(tok);
             }
-            Ok(out)
-        }
-    }
-
-    #[cfg(feature = "model-http")]
-    async fn call_tool(&mut self, name: &str, args_json: &str) -> Result<String, ToolError> {
-        let args: Value = serde_json::from_str(args_json).unwrap_or(json!({}));
-        let result = self
-            .request(
-                "tools/call",
-                json!({
-                    "name": name,
-                    "arguments": args,
-                }),
-            )
-            .await?;
-        if let Some(arr) = result.get("content").and_then(|c| c.as_array()) {
-            let mut texts = Vec::new();
-            for c in arr {
-                if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
-                    texts.push(t.to_string());
-                }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| ToolError::Message(format!("http mcp: {e}")))?;
+            if !resp.status().is_success() {
+                return Err(ToolError::Message(format!(
+                    "http mcp status {}",
+                    resp.status()
+                )));
             }
-            if !texts.is_empty() {
-                return Ok(texts.join("\n"));
-            }
-        }
-        Ok(result.to_string())
-    }
-
-    #[cfg(feature = "model-http")]
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, ToolError> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        let mut req = self.client.post(&self.url).json(&msg);
-        if let Some(tok) = &self.token {
-            req = req.bearer_auth(tok);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ToolError::Message(format!("http mcp: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(ToolError::Message(format!(
-                "http mcp status {}",
-                resp.status()
-            )));
-        }
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| ToolError::Message(format!("http mcp body: {e}")))?;
-        if let Some(err) = body.get("error") {
-            return Err(ToolError::Message(format!("mcp error: {err}")));
-        }
-        Ok(body.get("result").cloned().unwrap_or(Value::Null))
-    }
-
-    #[cfg(feature = "model-http")]
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), ToolError> {
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        let mut req = self.client.post(&self.url).json(&msg);
-        if let Some(tok) = &self.token {
-            req = req.bearer_auth(tok);
-        }
-        let _ = req.send().await;
-        Ok(())
-    }
-}
-
-struct McpHttpRemoteTool {
-    full_name: String,
-    remote_name: String,
-    description: String,
-    schema: String,
-    client: Arc<Mutex<McpHttpClient>>,
-}
-
-#[async_trait]
-impl ExternalTool for McpHttpRemoteTool {
-    fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: self.full_name.clone(),
-            description: self.description.clone(),
-            schema: self.schema.clone(),
+            resp.json()
+                .await
+                .map_err(|e| ToolError::Message(format!("http mcp body: {e}")))
         }
     }
 
-    async fn call(&self, args_json: &str) -> Result<String, ToolError> {
-        let mut guard = self.client.lock().await;
-        #[cfg(feature = "model-http")]
-        {
-            return guard.call_tool(&self.remote_name, args_json).await;
-        }
+    async fn send(&mut self, notification: &Value) -> Result<(), ToolError> {
         #[cfg(not(feature = "model-http"))]
         {
-            let _ = args_json;
-            Err(ToolError::Message(
+            let _ = notification;
+            return Err(ToolError::Message(
                 "http mcp requires the model-http feature".into(),
-            ))
+            ));
+        }
+        #[cfg(feature = "model-http")]
+        {
+            let mut req = self.client.post(&self.url).json(notification);
+            if let Some(tok) = &self.token {
+                req = req.bearer_auth(tok);
+            }
+            let _ = req.send().await;
+            Ok(())
         }
     }
 }

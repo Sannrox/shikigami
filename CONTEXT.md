@@ -65,6 +65,14 @@ abortion, outcome reporting, completeness enforcement, and local harvest-state
 release. The sekai-chisei adapter delegates this protocol to a private deep
 module behind the existing governance port seam.
 
+## MCP tool attachment protocol
+
+The run-start protocol that initializes configured MCP servers, discovers and
+namespaces their tools, projects tool calls and results, and registers one
+remote-tool implementation with the run-scoped Tool Registry. The stdio and
+HTTP transport adapters retain framing and network behavior behind a private
+transport seam; this is not a new public port or adapter seam.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,
