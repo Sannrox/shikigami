@@ -8,18 +8,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+pub(crate) mod framing;
 mod protocol;
 
 use protocol::{Client as McpClient, Transport, attach_tools};
 
 use crate::config::{Config, McpServerSettings};
 use crate::tools::{ExternalTool, ToolDef, ToolError, ToolRegistry};
-
-pub(crate) const MAX_MCP_FRAME_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_MCP_HEADER_BYTES: usize = 8 * 1024;
 
 /// Attach MCP tools named `mcp.<server>.<tool>` to a registry.
 pub async fn attach_mcp_servers(
@@ -136,71 +134,19 @@ impl McpStdioTransport {
     }
 
     async fn write_message(&mut self, msg: &Value) -> Result<(), ToolError> {
-        let body = serde_json::to_vec(msg).map_err(|e| ToolError::Message(e.to_string()))?;
-        let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        self.stdin
-            .write_all(header.as_bytes())
+        framing::write(&mut self.stdin, msg)
             .await
-            .map_err(|e| ToolError::Message(e.to_string()))?;
-        self.stdin
-            .write_all(&body)
-            .await
-            .map_err(|e| ToolError::Message(e.to_string()))?;
-        self.stdin
-            .flush()
-            .await
-            .map_err(|e| ToolError::Message(e.to_string()))?;
-        Ok(())
+            .map_err(ToolError::Message)
     }
 
     async fn read_message(&mut self) -> Result<Value, ToolError> {
-        let mut content_length = None;
-        let mut header_bytes = 0usize;
-        loop {
-            let mut line = String::new();
-            let n = (&mut self.stdout)
-                .take((MAX_MCP_HEADER_BYTES + 1) as u64)
-                .read_line(&mut line)
-                .await
-                .map_err(|e| ToolError::Message(e.to_string()))?;
-            if n == 0 {
-                return Err(ToolError::Message("mcp stdout closed".into()));
-            }
-            header_bytes = header_bytes.saturating_add(n);
-            if header_bytes > MAX_MCP_HEADER_BYTES {
-                return Err(ToolError::Message(format!(
-                    "mcp headers exceed {MAX_MCP_HEADER_BYTES} bytes"
-                )));
-            }
-            let line = line.trim_end();
-            if line.is_empty() {
-                break;
-            }
-            if let Some(rest) = line.strip_prefix("Content-Length:") {
-                if content_length.is_some() {
-                    return Err(ToolError::Message("mcp duplicate Content-Length".into()));
-                }
-                let length = rest
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| ToolError::Message("mcp invalid Content-Length".into()))?;
-                if length > MAX_MCP_FRAME_BYTES {
-                    return Err(ToolError::Message(format!(
-                        "mcp Content-Length {length} exceeds {MAX_MCP_FRAME_BYTES} bytes"
-                    )));
-                }
-                content_length = Some(length);
-            }
-        }
-        let len = content_length
-            .ok_or_else(|| ToolError::Message("mcp missing Content-Length".into()))?;
-        let mut buf = vec![0u8; len];
-        use tokio::io::AsyncReadExt;
-        self.stdout
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| ToolError::Message(e.to_string()))?;
-        serde_json::from_slice(&buf).map_err(|e| ToolError::Message(e.to_string()))
+        framing::read(&mut self.stdout).await.map_err(|error| {
+            ToolError::Message(if error == "eof" {
+                "mcp stdout closed".into()
+            } else {
+                error
+            })
+        })
     }
 }
 

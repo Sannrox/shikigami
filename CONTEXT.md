@@ -73,6 +73,13 @@ remote-tool implementation with the run-scoped Tool Registry. The stdio and
 HTTP transport adapters retain framing and network behavior behind a private
 transport seam; this is not a new public port or adapter seam.
 
+## MCP stdio framing
+
+The shared bounded `Content-Length` protocol used by both MCP stdio adapters.
+One private deep module owns message encoding, header validation, duplicate or
+invalid length rejection, and body-size enforcement before allocation; the
+client and host adapters retain process and request behavior at their seams.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,

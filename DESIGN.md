@@ -121,7 +121,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/run/` | Thin `Engine` interface over the deep run transaction, durable model turns and tool batches, resume validation, and `RunSession` checkpoints |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs` | Thin local-queue host over the private deep filesystem queue lifecycle and Run Control protocol |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates governed model turns, run completion, tool authorization, and harvest durability to private deep modules |
-| `src/tools/`, `src/mcp/` | Run-scoped tool registry, catalog, workspace-jailed execution, and a private deep MCP tool attachment protocol over stdio/HTTP transport adapters |
+| `src/tools/`, `src/mcp/` | Run-scoped tool registry, catalog, workspace-jailed execution, a private deep MCP tool attachment protocol, and shared bounded framing behind the stdio adapter seams |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
 | `src/model.rs` | Scripted / HTTP (ungoverned) |
 | `src/events.rs` | stderr / jsonl / none |

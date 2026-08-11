@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, stdin, stdout};
+use tokio::io::{BufReader, stdin, stdout};
 use tokio::sync::{Mutex, Notify};
 
 use crate::events::{ChannelSink, HarnessEvent};
 use crate::harness::Harness;
 use crate::identity::{PRODUCT, VERSION};
-use crate::mcp::{MAX_MCP_FRAME_BYTES, MAX_MCP_HEADER_BYTES};
+use crate::mcp::framing;
 use crate::model::TokenUsage;
 use crate::run::{ParkInfo, RunRequest, RunResult};
 
@@ -86,13 +86,13 @@ pub async fn run_stdio(harness: Harness) -> Result<(), String> {
     let mut reader = BufReader::new(stdin());
     let mut writer = stdout();
     loop {
-        let msg = match read_message(&mut reader).await {
+        let msg = match framing::read(&mut reader).await {
             Ok(m) => m,
             Err(e) if e == "eof" => break,
             Err(e) => return Err(e),
         };
         if let Some(resp) = handle_message(&state, msg).await {
-            write_message(&mut writer, &resp).await?;
+            framing::write(&mut writer, &resp).await?;
         }
     }
     Ok(())
@@ -432,74 +432,9 @@ fn tool_error_result(message: &str) -> Value {
     tool_text_result(message, true)
 }
 
-async fn write_message<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    msg: &Value,
-) -> Result<(), String> {
-    let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    writer.write_all(&body).await.map_err(|e| e.to_string())?;
-    writer.flush().await.map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Value, String> {
-    let mut content_length = None;
-    let mut header_bytes = 0usize;
-    loop {
-        let mut line = String::new();
-        let n = (&mut *reader)
-            .take((MAX_MCP_HEADER_BYTES + 1) as u64)
-            .read_line(&mut line)
-            .await
-            .map_err(|e| e.to_string())?;
-        if n == 0 {
-            return Err("eof".into());
-        }
-        header_bytes = header_bytes.saturating_add(n);
-        if header_bytes > MAX_MCP_HEADER_BYTES {
-            return Err(format!("mcp headers exceed {MAX_MCP_HEADER_BYTES} bytes"));
-        }
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if let Some(rest) = line.strip_prefix("Content-Length:") {
-            if content_length.is_some() {
-                return Err("mcp duplicate Content-Length".into());
-            }
-            let length = rest
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| "mcp invalid Content-Length".to_string())?;
-            if length > MAX_MCP_FRAME_BYTES {
-                return Err(format!(
-                    "mcp Content-Length {length} exceeds {MAX_MCP_FRAME_BYTES} bytes"
-                ));
-            }
-            content_length = Some(length);
-        }
-    }
-    let len = content_length.ok_or_else(|| "mcp missing Content-Length".to_string())?;
-    let mut buf = vec![0u8; len];
-    reader
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| e.to_string())?;
-    serde_json::from_slice(&buf).map_err(|e| e.to_string())
-}
-
 /// Encode a JSON-RPC message with Content-Length framing (for tests/clients).
 pub fn frame_message(msg: &Value) -> Result<Vec<u8>, String> {
-    let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut out = header.into_bytes();
-    out.extend_from_slice(&body);
-    Ok(out)
+    framing::encode(msg)
 }
 
 #[cfg(test)]
@@ -517,24 +452,6 @@ mod tests {
         config.events.adapter = "none".into();
         config.workspace.root = dir.join("ws-root").to_string_lossy().into();
         Harness::from_config(config, state).unwrap()
-    }
-
-    #[tokio::test]
-    async fn framing_rejects_oversized_and_duplicate_lengths_before_body_read() {
-        let oversized = format!("Content-Length: {}\r\n\r\n", MAX_MCP_FRAME_BYTES + 1);
-        let mut reader = BufReader::new(oversized.as_bytes());
-        let err = read_message(&mut reader).await.unwrap_err();
-        assert!(err.contains("exceeds"), "{err}");
-
-        let duplicate = b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}";
-        let mut reader = BufReader::new(&duplicate[..]);
-        let err = read_message(&mut reader).await.unwrap_err();
-        assert!(err.contains("duplicate"), "{err}");
-
-        let oversized_header = format!("X-Fill: {}\r\n\r\n", "x".repeat(MAX_MCP_HEADER_BYTES));
-        let mut reader = BufReader::new(oversized_header.as_bytes());
-        let err = read_message(&mut reader).await.unwrap_err();
-        assert!(err.contains("headers exceed"), "{err}");
     }
 
     #[test]
