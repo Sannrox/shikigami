@@ -18,6 +18,14 @@ checkpoint markers, report replay, hooks, events, and park handling. The Run
 transaction delegates this protocol to a private deep module; it is not a new
 public port or adapter seam.
 
+## Run admission and supervision
+
+One Run's host-local protocol around the durable Run transaction, including
+checkpoint preflight, registry ownership, independent heartbeat publication,
+transaction invocation, and durable result or error finalization. `Engine`
+delegates this protocol to a private deep module behind its existing public
+interface; it is not a new public port or adapter seam.
+
 ## Durable model turn
 
 One run-loop iteration's model-side protocol, including staged resume replay,
