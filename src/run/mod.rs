@@ -2,6 +2,7 @@
 //!
 //! Public surface: [`Engine`], [`RunRequest`], [`RunResult`], and related types.
 //! Internals:
+//! - [`supervision`] — run admission, ownership, heartbeat, and finalization
 //! - [`session::RunSession`] — owned attempt state + deep checkpoint interface
 //! - [`resume`] — checkpoint workspace boundary checks
 
@@ -11,9 +12,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::watch;
-use uuid::Uuid;
 
-use crate::checkpoint::{Checkpoint, CheckpointError};
+#[cfg(test)]
+use crate::checkpoint::Checkpoint;
+use crate::checkpoint::CheckpointError;
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort};
@@ -25,11 +27,14 @@ use crate::workspace::{WorkspaceError, WorkspacePort};
 mod model_turn;
 mod resume;
 mod session;
+mod supervision;
 mod tool_batch;
 mod transaction;
 
-use resume::{configured_workspace_adapter, validate_resumed_workspace};
-use transaction::RunTransaction;
+use supervision::RunSupervision;
+
+#[cfg(test)]
+use resume::validate_resumed_workspace;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
@@ -341,93 +346,9 @@ impl Engine {
         request: RunRequest,
         expected_checkpoint_digest: Option<&str>,
     ) -> Result<RunResult, RunError> {
-        let mut resume_checkpoint = None;
-        if let Some(resume_id) = &request.resume_run_id {
-            let (checkpoint, digest) = Checkpoint::load_with_digest(&self.state_runs, resume_id)?;
-            if expected_checkpoint_digest.is_some_and(|expected| expected != digest) {
-                return Err(RunError::Message(format!(
-                    "checkpoint digest mismatch for run {resume_id}"
-                )));
-            }
-            checkpoint.validate_prompt(SYSTEM_PROMPT)?;
-            let _ =
-                validate_resumed_workspace(&self.config, &self.state_runs, resume_id, &checkpoint)?;
-            let workspace_adapter = if checkpoint.workspace_adapter.is_empty() {
-                configured_workspace_adapter(&self.config)
-            } else {
-                checkpoint.workspace_adapter.as_str()
-            };
-            if request.restore_snapshot.is_some() && workspace_adapter == "inplace" {
-                return Err(RunError::Message(
-                    "restore_snapshot is not supported with workspace adapter `inplace`".into(),
-                ));
-            }
-            if checkpoint.park.is_some() && request.resume_answer.is_none() {
-                return Err(RunError::Message(format!(
-                    "run {resume_id} is parked; supply resume_answer / --answer to continue"
-                )));
-            }
-            if checkpoint.park.is_none() && request.resume_answer.is_some() {
-                return Err(RunError::Message(
-                    "resume_answer provided but run is not parked".into(),
-                ));
-            }
-            resume_checkpoint = Some(checkpoint);
-        } else if expected_checkpoint_digest.is_some() {
-            return Err(RunError::Message(
-                "checkpoint digest requires a resumed run".into(),
-            ));
-        }
-        let run_id = request
-            .resume_run_id
-            .clone()
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        if let Err(error) = self.registry.start(
-            &run_id,
-            &request.task,
-            request.logical_operation_id.as_deref(),
-            None,
-        ) {
-            return Err(RunError::Message(format!(
-                "run registry start failed: {error}"
-            )));
-        }
-        let heartbeat_registry = Arc::clone(&self.registry);
-        let heartbeat_run_id = run_id.clone();
-        let heartbeat_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                if heartbeat_registry.heartbeat(&heartbeat_run_id).is_err() {
-                    break;
-                }
-            }
-        });
-        let result = self
-            .run_inner(request, run_id.clone(), resume_checkpoint)
-            .await;
-        heartbeat_task.abort();
-        let _ = heartbeat_task.await;
-        match &result {
-            Ok(result) => {
-                let _ = self.registry.finish_result(result);
-            }
-            Err(error) => {
-                let _ = self.registry.finish_error(&run_id, error);
-            }
-        }
-        result
-    }
-
-    async fn run_inner(
-        &self,
-        request: RunRequest,
-        fresh_run_id: String,
-        resume_checkpoint: Option<Checkpoint>,
-    ) -> Result<RunResult, RunError> {
-        return RunTransaction::new(self)
-            .execute(request, fresh_run_id, resume_checkpoint)
-            .await;
+        RunSupervision::new(self)
+            .execute(request, expected_checkpoint_digest)
+            .await
     }
 }
 

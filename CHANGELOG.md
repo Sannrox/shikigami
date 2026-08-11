@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen Run admission and supervision behind one private module so checkpoint
+  preflight, registry ownership, heartbeats, transaction invocation, and
+  durable finalization no longer live in the public `Engine` module.
 - Refactor MCP stdio adapters around one private bounded framing module, keeping
   `Content-Length` validation and allocation limits consistent across client
   and host paths.
