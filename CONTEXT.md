@@ -121,6 +121,14 @@ One private deep module owns message encoding, header validation, duplicate or
 invalid length rejection, and body-size enforcement before allocation; the
 client and host adapters retain process and request behavior at their seams.
 
+## MCP background Run lifecycle
+
+The MCP host's single-flight asynchronous Run protocol, including start
+admission, event collection, terminal result publication, status snapshots,
+timeout behavior, and retained state-change signaling for waits. The MCP host
+delegates this protocol to a private deep module; JSON-RPC routing and result
+projection remain at the existing host interface.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,

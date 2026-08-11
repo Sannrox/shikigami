@@ -12,14 +12,16 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{BufReader, stdin, stdout};
-use tokio::sync::{Mutex, Notify};
 
-use crate::events::{ChannelSink, HarnessEvent};
 use crate::harness::Harness;
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
 use crate::model::TokenUsage;
 use crate::run::{ParkInfo, RunRequest, RunResult};
+
+mod background_run;
+
+use background_run::BackgroundRunLifecycle;
 
 /// Stable summary returned by the MCP `run` / async run tools.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -55,27 +57,15 @@ impl From<&RunResult> for McpRunSummary {
 /// Session state for stdio MCP server (single-flight async run).
 pub struct McpServerState {
     harness: Arc<Harness>,
-    job: Mutex<JobSlot>,
-}
-
-#[derive(Default)]
-struct JobSlot {
-    phase: String, // idle | running | finished
-    events: Vec<String>,
-    result: Option<Result<McpRunSummary, String>>,
-    done: Option<Arc<Notify>>,
+    background: Arc<BackgroundRunLifecycle>,
 }
 
 impl McpServerState {
     pub fn new(harness: Harness) -> Arc<Self> {
+        let harness = Arc::new(harness);
         Arc::new(Self {
-            harness: Arc::new(harness),
-            job: Mutex::new(JobSlot {
-                phase: "idle".into(),
-                events: Vec::new(),
-                result: None,
-                done: None,
-            }),
+            background: BackgroundRunLifecycle::new(Arc::clone(&harness)),
+            harness,
         })
     }
 }
@@ -229,19 +219,19 @@ async fn call_tool(state: &Arc<McpServerState>, params: &Value) -> Result<Value,
             Ok(tool_text_result(&text, !summary.success))
         }
         "run_start" => {
-            start_background_run(state, &args).await?;
+            state.background.start(build_request(&args)?).await?;
             Ok(tool_text_result(
                 r#"{"phase":"running","message":"run started; poll with run_status or run_wait"}"#,
                 false,
             ))
         }
         "run_status" => {
-            let text = status_json(state).await?;
+            let text = state.background.status_json().await?;
             Ok(tool_text_result(&text, false))
         }
         "run_wait" => {
             let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
-            let text = wait_for_run(state, timeout_secs).await?;
+            let text = state.background.wait(timeout_secs).await?;
             let is_err = text.contains("\"success\":false") || text.contains("error");
             Ok(tool_text_result(
                 &text,
@@ -250,126 +240,6 @@ async fn call_tool(state: &Arc<McpServerState>, params: &Value) -> Result<Value,
         }
         other => Err(format!("unknown tool: {other}")),
     }
-}
-
-async fn start_background_run(state: &Arc<McpServerState>, args: &Value) -> Result<(), String> {
-    let mut slot = state.job.lock().await;
-    if slot.phase == "running" {
-        return Err("a background run is already in progress (single-flight)".into());
-    }
-    let request = build_request(args)?;
-    let done = Arc::new(Notify::new());
-    *slot = JobSlot {
-        phase: "running".into(),
-        events: vec!["status=starting".into()],
-        result: None,
-        done: Some(Arc::clone(&done)),
-    };
-    drop(slot);
-
-    let harness = Arc::clone(&state.harness);
-    let state_job = Arc::clone(state);
-    tokio::spawn(async move {
-        let (sink, rx) = ChannelSink::pair();
-        let run_fut = harness.run_with_events(request, Some(Arc::new(sink)));
-        let drain = tokio::task::spawn_blocking(move || {
-            let mut lines = Vec::new();
-            while let Ok(ev) = rx.recv() {
-                lines.push(format_event(&ev));
-            }
-            lines
-        });
-
-        let result = run_fut.await;
-        let event_lines = drain.await.unwrap_or_default();
-
-        let mut slot = state_job.job.lock().await;
-        slot.events.extend(event_lines);
-        slot.phase = "finished".into();
-        slot.result = Some(match result {
-            Ok(r) => Ok(McpRunSummary::from(&r)),
-            Err(e) => Err(e.to_string()),
-        });
-        if let Some(d) = slot.done.take() {
-            d.notify_waiters();
-        }
-        // Restore done notify for waiters that race
-        slot.done = Some(Arc::new(Notify::new()));
-        slot.done.as_ref().unwrap().notify_waiters();
-    });
-    Ok(())
-}
-
-fn format_event(ev: &HarnessEvent) -> String {
-    match ev {
-        HarnessEvent::Status { status } => format!("status={status}"),
-        HarnessEvent::ToolStart { name, .. } => format!("tool_start={name}"),
-        HarnessEvent::ToolEnd { name, ok, .. } => format!("tool_end={name} ok={ok}"),
-        HarnessEvent::ModelTurn { turn, .. } => format!("model_turn={turn}"),
-        HarnessEvent::RunFinished {
-            run_id,
-            success,
-            summary,
-        } => format!("run_finished id={run_id} success={success} summary={summary}"),
-        HarnessEvent::Prompt { prompt_id } => format!("prompt={prompt_id}"),
-        HarnessEvent::ContextCompacted { before, after } => {
-            format!("compacted before={before} after={after}")
-        }
-        HarnessEvent::TodosUpdated { item_count, .. } => {
-            format!("todos item_count={item_count}")
-        }
-        HarnessEvent::Message { level, text } => format!("message[{level}]={text}"),
-    }
-}
-
-async fn status_json(state: &Arc<McpServerState>) -> Result<String, String> {
-    let slot = state.job.lock().await;
-    let recent: Vec<&String> = slot.events.iter().rev().take(30).collect();
-    let recent: Vec<&String> = recent.into_iter().rev().collect();
-    let body = json!({
-        "phase": slot.phase,
-        "events": recent,
-        "result": match &slot.result {
-            Some(Ok(s)) => json!(s),
-            Some(Err(e)) => json!({"error": e}),
-            None => Value::Null,
-        }
-    });
-    serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
-}
-
-async fn wait_for_run(
-    state: &Arc<McpServerState>,
-    timeout_secs: Option<u64>,
-) -> Result<String, String> {
-    let notify = {
-        let slot = state.job.lock().await;
-        if slot.phase == "idle" {
-            return Err("no background run (call run_start first)".into());
-        }
-        if slot.phase == "finished" {
-            drop(slot);
-            return status_json(state).await;
-        }
-        slot.done
-            .clone()
-            .ok_or_else(|| "run missing completion notify".to_string())?
-    };
-    if let Some(secs) = timeout_secs {
-        match tokio::time::timeout(Duration::from_secs(secs), notify.notified()).await {
-            Ok(()) => {}
-            Err(_) => {
-                return Ok(json!({
-                    "phase": "running",
-                    "error": format!("timed out waiting after {secs}s")
-                })
-                .to_string());
-            }
-        }
-    } else {
-        notify.notified().await;
-    }
-    status_json(state).await
 }
 
 async fn run_tool(harness: &Harness, args: &Value) -> Result<McpRunSummary, String> {
@@ -571,6 +441,31 @@ mod tests {
         // Events should have been recorded for multi-turn scripted run
         let events = status["events"].as_array().unwrap();
         assert!(!events.is_empty(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn wait_observes_completion_published_before_registration() {
+        let directory = tempdir().unwrap();
+        let state = McpServerState::new(local_scripted_harness(directory.path()));
+        state
+            .background
+            .start(build_request(&json!({"task": "fast run"})).unwrap())
+            .await
+            .unwrap();
+
+        loop {
+            let status: Value =
+                serde_json::from_str(&state.background.status_json().await.unwrap()).unwrap();
+            if status["phase"] == "finished" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let status: Value =
+            serde_json::from_str(&state.background.wait(Some(1)).await.unwrap()).unwrap();
+        assert_eq!(status["phase"], "finished");
+        assert_eq!(status["result"]["success"], true);
     }
 
     #[tokio::test]
