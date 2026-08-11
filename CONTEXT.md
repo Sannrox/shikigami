@@ -57,6 +57,14 @@ ExecutePlanStream consumption, durable failure reporting, and response
 projection. The sekai-chisei adapter delegates this protocol to a private deep
 module behind the existing governance port seam.
 
+## Governed run completion
+
+One governed run's authoritative receipt-finalization protocol, including
+pending-event retry, required-surface reconciliation, incomplete model-call
+abortion, outcome reporting, completeness enforcement, and local harvest-state
+release. The sekai-chisei adapter delegates this protocol to a private deep
+module behind the existing governance port seam.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,
