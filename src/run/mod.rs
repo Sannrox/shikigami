@@ -6,7 +6,7 @@
 //! - [`session::RunSession`] — owned attempt state + deep checkpoint interface
 //! - [`resume`] — checkpoint workspace boundary checks
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +24,7 @@ use crate::registry::RunRegistry;
 use crate::tools::{TodoItem, ToolError};
 use crate::workspace::{WorkspaceError, WorkspacePort};
 
+mod artifact_lifecycle;
 mod model_turn;
 mod preparation;
 mod resume;
@@ -317,25 +318,6 @@ impl Engine {
     pub(super) fn emit(&self, run_id: &str, event: HarnessEvent) {
         self.registry.append_event(run_id, &event);
         self.events.emit(event);
-    }
-
-    fn capture_artifacts(&self, run_id: &str, workspace: &Path) -> Option<PathBuf> {
-        match crate::artifacts::capture_run_artifacts(&self.state_runs, run_id, workspace) {
-            Ok(path) => {
-                let _ = self.registry.set_artifact_dir(run_id, &path);
-                Some(path)
-            }
-            Err(error) => {
-                self.emit(
-                    run_id,
-                    HarnessEvent::Message {
-                        level: "warn".into(),
-                        text: format!("artifact capture failed: {error}"),
-                    },
-                );
-                None
-            }
-        }
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, RunError> {

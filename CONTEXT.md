@@ -35,6 +35,14 @@ checkpoint durability and compensation, recovery replay, and pre-run hooks.
 The Run transaction delegates this protocol to a private deep module behind
 one preparation interface; it is not a new public port or adapter seam.
 
+## Run artifact lifecycle
+
+One Run's artifact retention protocol, including best-effort initial baseline,
+terminal background-job reaping, bounded manifest and patch capture, warning
+publication, and Run Registry linkage. Run preparation and the Run transaction
+delegate this protocol to a private deep module; stable manifest and export
+compatibility remain in the public artifacts module.
+
 ## Durable model turn
 
 One run-loop iteration's model-side protocol, including staged resume replay,

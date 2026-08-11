@@ -244,17 +244,7 @@ fn prepare_workspace(
 }
 
 fn capture_baseline(engine: &Engine, run_id: &str, workspace: &MaterializedWorkspace) {
-    if let Err(error) =
-        crate::artifacts::capture_run_baseline(&engine.state_runs, run_id, &workspace.path)
-    {
-        engine.emit(
-            run_id,
-            HarnessEvent::Message {
-                level: "warn".into(),
-                text: format!("artifact baseline capture failed: {error}"),
-            },
-        );
-    }
+    super::artifact_lifecycle::RunArtifactLifecycle::new(engine).begin(run_id, &workspace.path);
 }
 
 fn compose_context(
