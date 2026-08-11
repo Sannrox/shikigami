@@ -9,6 +9,8 @@
 
 ### Changed
 
+- Deepen the sekai-chisei governed model-turn protocol behind one private
+  module without changing the governance port seam.
 - Deepen the governed harvest transaction behind one private module so
   checkpoint projection, causal event state, report replay, and in-doubt tool
   execution recovery no longer leak through the sekai-chisei adapter.
