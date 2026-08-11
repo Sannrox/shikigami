@@ -9,6 +9,10 @@
 
 ### Changed
 
+- Deepen effective settings resolution behind one private module so source
+  discovery, profile and environment precedence, final host model selection,
+  validation, and source attribution no longer leak across Config, StateRoot,
+  and Harness.
 - Deepen the sekai-chisei governed model-turn protocol behind one private
   module without changing the governance port seam.
 - Deepen the governed harvest transaction behind one private module so
