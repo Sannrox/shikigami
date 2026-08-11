@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen the MCP background Run lifecycle behind one private interface and use
+  retained state-change signaling so completion cannot be lost between state
+  inspection and wait registration.
 - Deepen Harness diagnosis behind the stable doctor interface so health,
   effective tool authority, credential-source projection, secret redaction,
   fail-closed classification, and live plane probing no longer crowd public
