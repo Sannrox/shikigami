@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Deepen MCP tool attachment behind one private protocol module so initialize,
+  discovery, namespacing, tool calls, result projection, and remote-tool
+  registration are shared by the stdio and HTTP transport adapters.
 - Deepen governed run completion behind one private module so authoritative
   receipt reconciliation and fail-closed cleanup no longer leak through the
   sekai-chisei adapter.
