@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen Harness diagnosis behind the stable doctor interface so health,
+  effective tool authority, credential-source projection, secret redaction,
+  fail-closed classification, and live plane probing no longer crowd public
+  wiring.
 - Deepen the Run artifact lifecycle behind one private interface so baseline
   capture, terminal background-job reaping, bounded final capture, warnings,
   and Run Registry linkage no longer leak across Run modules.

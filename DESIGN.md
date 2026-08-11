@@ -117,7 +117,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 
 | Path | Responsibility |
 | --- | --- |
-| `src/harness.rs` | Public wiring: config → ports → doctor/run |
+| `src/harness.rs`, `src/harness/diagnosis.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep module |
 | `src/run/` | Thin `Engine` interface over deep run admission and supervision, host-local Run preparation, the Run artifact lifecycle, the durable run transaction, durable model turns and tool batches, resume validation, and `RunSession` checkpoints |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs` | Thin local-queue host over the private deep filesystem queue lifecycle and Run Control protocol |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates governed Run admission, governed model turns, run completion, tool authorization, and harvest durability to private deep modules |

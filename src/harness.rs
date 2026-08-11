@@ -11,8 +11,9 @@ use crate::model::{self, ModelError, ModelPort};
 use crate::registry::{RegistryError, RunRegistry};
 use crate::run::{Engine, RunError, RunRequest, RunResult, RunTermination};
 use crate::state::{StateError, StateRoot};
-use crate::tools::model_visible_builtin_definitions;
 use crate::workspace::{self, WorkspaceError, WorkspacePort};
+
+mod diagnosis;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
@@ -173,174 +174,12 @@ impl Harness {
     }
 
     pub fn doctor(&self) -> DoctorReport {
-        let mut lines = Vec::new();
-        let gov_ok = self.governance.health_ok();
-        let gov_detail = self.governance.health_detail();
-        let ws_detail = self.workspace.health_detail();
-        let ev_detail = self.events.health_detail();
-
-        lines.push(format!("profile:   {}", self.config.profile.name));
-        lines.push(format!("config:    {}", self.config_source.description()));
-        lines.push(format!("state:     {}", self.state.path().display()));
-        lines.push(format!(
-            "gov:       {} — {}",
-            self.governance.id(),
-            gov_detail
-        ));
-        lines.push(format!(
-            "workspace: {} — {}",
-            self.workspace.id(),
-            ws_detail
-        ));
-        lines.push(format!("events:    {} — {}", self.events.id(), ev_detail));
-        lines.push(format!("model:     {}", self.model.id()));
-        let tool_authority = self.config.tools.authority_summary();
-        lines.push(format!(
-            "tools.mode:       {}",
-            self.config.tools.mode.as_str()
-        ));
-        lines.push(format!(
-            "tools.configured: {}",
-            display_tools(&tool_authority.configured_enabled)
-        ));
-        lines.push(format!(
-            "tools.preset:     {}",
-            display_tools(&tool_authority.preset_enabled)
-        ));
-        lines.push(format!(
-            "tools.excluded:   {}",
-            display_tools(&tool_authority.excluded_by_intersection)
-        ));
-        let model_visible_builtins =
-            model_visible_builtin_definitions(&tool_authority.effective_enabled)
-                .into_iter()
-                .map(|definition| definition.name)
-                .collect::<Vec<_>>();
-        let implicit_enabled = model_visible_builtins
-            .iter()
-            .filter(|tool| !tool_authority.effective_enabled.contains(tool))
-            .cloned()
-            .collect::<Vec<_>>();
-        lines.push(format!(
-            "tools.implicit:   {}",
-            display_tools(&implicit_enabled)
-        ));
-        lines.push(format!(
-            "tools.effective:  {}",
-            display_tools(&tool_authority.effective_enabled)
-        ));
-        lines.push(format!(
-            "tools.visible:    {}",
-            display_tools(&model_visible_builtins)
-        ));
-        lines.push(format!(
-            "tools.environment: parent minus protected/startup controls; protected={}",
-            display_tools(&self.config.protected_tool_environment_names()),
-        ));
-        if !self.config.tools.mcp_servers.is_empty() {
-            let servers: Vec<_> = self
-                .config
-                .tools
-                .mcp_servers
-                .iter()
-                .map(|server| server.name.as_str())
-                .collect();
-            lines.push(format!(
-                "tools.external:   MCP servers [{}] (resolved at run start)",
-                servers.join(", ")
-            ));
-        }
-        lines.push(format!(
-            "network:   egress={:?} allow_hosts={}",
-            self.config.network.egress,
-            if self.config.network.allow_hosts.is_empty() {
-                "(none)".into()
-            } else {
-                self.config.network.allow_hosts.join(",")
-            }
-        ));
-        lines.push(format!(
-            "sandbox:   backend={:?} cpu={:?} memory_mb={:?} user_processes={:?}",
-            self.config.sandbox.backend,
-            self.config.sandbox.cpu_time_secs,
-            self.config.sandbox.memory_mb,
-            self.config.sandbox.user_processes,
-        ));
-        lines.push(format!("max_turns: {}", self.config.run.max_turns));
-        if self.config.hooks.is_empty() {
-            lines.push("hooks:     (none)".into());
-        } else {
-            let names: Vec<_> = self
-                .config
-                .hooks
-                .iter()
-                .map(|h| format!("{}:{}", h.event, h.command))
-                .collect();
-            lines.push(format!(
-                "hooks:     {} [{}]",
-                self.config.hooks.len(),
-                names.join(", ")
-            ));
-        }
-        lines.push(format!("credentials: {}", credential_summary(&self.config)));
-
-        let mut ok = true;
-        if self.config.requires_governance() && !gov_ok {
-            ok = false;
-            lines.push("error: governance unhealthy under fail-closed profile".into());
-        }
-        if self.config.governance.adapter == "sekai-chisei"
-            && let Err(e) = self.config.governance_endpoint_required()
-        {
-            ok = false;
-            lines.push(format!("error: {e}"));
-        }
-
-        // Never surface secret values; only env var *names* and presence.
-        let lines = lines
-            .into_iter()
-            .map(|l| redact_secrets_in_line(&l, &self.config))
-            .collect();
-
-        DoctorReport {
-            schema_version: DoctorReport::SCHEMA_VERSION,
-            ok,
-            profile: self.config.profile.name.clone(),
-            governance: self.governance.id().into(),
-            governance_detail: redact_secrets_in_line(&gov_detail, &self.config),
-            workspace: self.workspace.id().into(),
-            workspace_detail: ws_detail,
-            events: self.events.id().into(),
-            events_detail: ev_detail,
-            model: self.model.id().into(),
-            lines,
-        }
+        diagnosis::doctor(self)
     }
 
     /// Async doctor that live-probes sekai-chisei when configured.
     pub async fn doctor_async(&self) -> DoctorReport {
-        let mut report = self.doctor();
-        #[cfg(feature = "governance-sekai-chisei")]
-        if self.config.governance.adapter == "sekai-chisei"
-            && self.config.governance.endpoint.is_some()
-        {
-            match crate::governance::sekai_chisei::live_probe(&self.config).await {
-                Ok(msg) => report.lines.push(redact_secrets_in_line(
-                    &format!("plane:     {msg}"),
-                    &self.config,
-                )),
-                Err(e) => {
-                    report.lines.push(redact_secrets_in_line(
-                        &format!("plane:     unreachable ({e})"),
-                        &self.config,
-                    ));
-                    if self.config.requires_governance() {
-                        report.ok = false;
-                    }
-                }
-            }
-        }
-        report
+        diagnosis::doctor_async(self).await
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, HarnessError> {
