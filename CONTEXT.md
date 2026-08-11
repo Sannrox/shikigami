@@ -26,6 +26,15 @@ transaction invocation, and durable result or error finalization. `Engine`
 delegates this protocol to a private deep module behind its existing public
 interface; it is not a new public port or adapter seam.
 
+## Run preparation
+
+One Run's host-local pre-turn protocol, including fresh or resumed state,
+workspace and snapshot preparation, artifact baseline capture, context
+composition, Tool Registry and MCP attachment, governed admission, initial
+checkpoint durability and compensation, recovery replay, and pre-run hooks.
+The Run transaction delegates this protocol to a private deep module behind
+one preparation interface; it is not a new public port or adapter seam.
+
 ## Durable model turn
 
 One run-loop iteration's model-side protocol, including staged resume replay,

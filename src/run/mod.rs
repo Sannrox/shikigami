@@ -25,6 +25,7 @@ use crate::tools::{TodoItem, ToolError};
 use crate::workspace::{WorkspaceError, WorkspacePort};
 
 mod model_turn;
+mod preparation;
 mod resume;
 mod session;
 mod supervision;
@@ -313,7 +314,7 @@ impl Engine {
         Ok(())
     }
 
-    fn emit(&self, run_id: &str, event: HarnessEvent) {
+    pub(super) fn emit(&self, run_id: &str, event: HarnessEvent) {
         self.registry.append_event(run_id, &event);
         self.events.emit(event);
     }
