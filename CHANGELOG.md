@@ -9,6 +9,9 @@
 
 ### Changed
 
+- Refactor MCP stdio adapters around one private bounded framing module, keeping
+  `Content-Length` validation and allocation limits consistent across client
+  and host paths.
 - Deepen MCP tool attachment behind one private protocol module so initialize,
   discovery, namespacing, tool calls, result projection, and remote-tool
   registration are shared by the stdio and HTTP transport adapters.
