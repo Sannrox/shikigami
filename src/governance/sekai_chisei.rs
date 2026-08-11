@@ -5,7 +5,6 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use sekai_client::{
     CallContext, CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, SdkError, SdkErrorCode,
 };
@@ -15,7 +14,7 @@ use crate::checkpoint::{
     StagedToolReport,
 };
 use crate::config::Config;
-use crate::model::{ChatMessage, ModelTurn, ToolCall};
+use crate::model::{ChatMessage, ModelTurn};
 use crate::tools::ToolDef;
 
 use super::{AvailableModel, GovernanceError, GovernancePort, RunHandle, RunOutcome};
@@ -24,9 +23,8 @@ pub use sekai_client::protocol as proto;
 use sha2::{Digest, Sha256};
 
 use proto::chisei::{
-    ChatMessage as ProtoChatMessage, ExecutionInput, GetEffectivePolicySummaryRequest,
-    GetOperationReceiptRequest, ReportOperationEventRequest, ToolCall as ProtoToolCall,
-    ToolDef as ProtoToolDef,
+    ExecutionInput, GetEffectivePolicySummaryRequest, GetOperationReceiptRequest,
+    ReportOperationEventRequest,
 };
 use proto::sekai::{
     AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
@@ -39,6 +37,7 @@ const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
 
 type PlaneClient = CoreLoopClient<GrpcTransport>;
 
+mod governed_model_turn;
 mod harvest_transaction;
 mod tool_authorization;
 
@@ -1129,146 +1128,7 @@ impl GovernancePort for SekaiChiseiGovernance {
         tools: &[ToolDef],
         _local_model: &dyn crate::model::ModelPort,
     ) -> Result<ModelTurn, GovernanceError> {
-        let client = self.connect().await?;
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let input = ExecutionInput {
-            request_id: request_id.clone(),
-            namespace: handle.namespace.clone(),
-            spec: messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.clone())
-                .unwrap_or_default(),
-            preferred_model: self.preferred_model.clone(),
-            preferred_runtime: String::new(),
-            task_type: "agent".into(),
-            priority: 0,
-            user_id: self.principal.clone(),
-            estimated_tokens: self.max_tokens,
-            messages: messages
-                .iter()
-                .map(|m| ProtoChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    tool_call_id: m.tool_call_id.clone(),
-                    tool_calls: m
-                        .tool_calls
-                        .iter()
-                        .map(|c| ProtoToolCall {
-                            id: c.id.clone(),
-                            name: c.name.clone(),
-                            args_json: c.args_json.clone(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            tools: tools
-                .iter()
-                .map(|t| ProtoToolDef {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    input_schema_json: t.schema.clone(),
-                })
-                .collect(),
-            system: system.into(),
-            max_tokens: self.max_tokens,
-            task_class: "shikigami-run".into(),
-            logical_operation_id: handle.operation_id.clone(),
-            attempt_id: handle.run_id.clone(),
-            route_override: String::new(),
-        };
-
-        let plan = client
-            .plan_execution(
-                input,
-                self.sdk_call_options(
-                    Some(&handle.namespace),
-                    Some(&handle.operation_id),
-                    Some(&request_id),
-                ),
-            )
-            .await
-            .map_err(|error| Self::sdk_error("PlanExecution", error))?;
-        let plan_id = plan.plan_id.clone();
-        self.update_harvest_plan(&handle.run_id, plan_id.clone())?;
-
-        if plan.budget.as_ref().is_some_and(|b| !b.allowed) {
-            let reason = plan
-                .budget
-                .as_ref()
-                .map(|b| b.reason.clone())
-                .unwrap_or_else(|| "budget denied".into());
-            self.report_failed_model_event(handle).await?;
-            return Err(GovernanceError::Denied(reason));
-        }
-        if !plan.executable {
-            let reason = if !plan.eval_regression_reason.is_empty() {
-                plan.eval_regression_reason
-            } else {
-                plan.warnings
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "plan not executable".into())
-            };
-            self.report_failed_model_event(handle).await?;
-            return Err(GovernanceError::Denied(reason));
-        }
-
-        let mut stream = match client
-            .execute_plan_stream(
-                plan,
-                self.sdk_call_options(
-                    Some(&handle.namespace),
-                    Some(&handle.operation_id),
-                    Some(&request_id),
-                ),
-            )
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.report_failed_model_event(handle).await?;
-                return Err(Self::sdk_error("ExecutePlanStream", error));
-            }
-        };
-
-        let mut final_response = None;
-        while let Some(event) = stream.next().await {
-            let event = match event {
-                Ok(event) => event,
-                Err(error) => {
-                    self.report_failed_model_event(handle).await?;
-                    return Err(Self::sdk_error("ExecutePlanStream", error));
-                }
-            };
-            if event.response.is_some() {
-                final_response = event.response;
-            }
-            if event.done {
-                break;
-            }
-        }
-        let response = match final_response {
-            Some(response) => response,
-            None => {
-                self.report_failed_model_event(handle).await?;
-                return Err(GovernanceError::Message("missing model response".into()));
-            }
-        };
-
-        Ok(ModelTurn {
-            content: response.content,
-            tool_calls: response
-                .tool_calls
-                .into_iter()
-                .map(|c| ToolCall {
-                    id: c.id,
-                    name: c.name,
-                    args_json: c.args_json,
-                })
-                .collect(),
-            usage: None, // plane usage surfaces via harvest when available
-        })
+        governed_model_turn::execute(self, handle, system, messages, tools).await
     }
 
     async fn authorize_tool(

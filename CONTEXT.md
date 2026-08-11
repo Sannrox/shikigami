@@ -49,6 +49,14 @@ report recovery, and in-doubt tool-execution detection. The sekai-chisei
 adapter delegates this protocol to a private deep module; plane receipts remain
 authoritative and the existing governance port seam is unchanged.
 
+## Governed model turn
+
+One sekai-chisei model-side protocol, including request projection,
+PlanExecution, budget and executability decisions, model-operation correlation,
+ExecutePlanStream consumption, durable failure reporting, and response
+projection. The sekai-chisei adapter delegates this protocol to a private deep
+module behind the existing governance port seam.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,
