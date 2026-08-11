@@ -171,8 +171,9 @@ impl<'a> RunTransaction<'a> {
                 // Reap after all error-path bookkeeping and immediately
                 // before inventory so descendants cannot keep mutating the
                 // workspace after the failed run has been recorded.
-                tools.kill_background_jobs().await;
-                self.engine.capture_artifacts(&session.run_id, &ws.path);
+                super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
+                    .finalize(&session.run_id, &ws.path, tools.as_ref())
+                    .await;
                 return Err(e);
             }
         };
@@ -194,23 +195,26 @@ impl<'a> RunTransaction<'a> {
                 .await;
             if let Err(error) = completion {
                 let _ = session.save_recoverable(None, tools.as_ref());
-                tools.kill_background_jobs().await;
-                self.engine.capture_artifacts(&session.run_id, &ws.path);
+                super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
+                    .finalize(&session.run_id, &ws.path, tools.as_ref())
+                    .await;
                 return Err(error.into());
             }
             // Successful completion clears adapter-owned receipt correlation
             // from the durable checkpoint. Parked runs intentionally retain
             // it for their governed continuation.
             if let Err(error) = session.save(tools.as_ref()) {
-                tools.kill_background_jobs().await;
-                self.engine.capture_artifacts(&session.run_id, &ws.path);
+                super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
+                    .finalize(&session.run_id, &ws.path, tools.as_ref())
+                    .await;
                 return Err(error);
             }
         }
 
         // Always reap background shells before taking the final inventory.
-        tools.kill_background_jobs().await;
-        let artifact_dir = self.engine.capture_artifacts(&session.run_id, &ws.path);
+        let artifact_dir = super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
+            .finalize(&session.run_id, &ws.path, tools.as_ref())
+            .await;
 
         // Keep workspace on park; only delete on successful non-park completion.
         if !session.keep_workspace && success && termination != RunTermination::Parked {
@@ -309,6 +313,14 @@ mod tests {
 
         assert_eq!(result.summary, "done");
         assert_eq!(result.turns, 1);
+        assert!(result.artifact_dir.is_some());
+        assert_eq!(
+            registry.load(run_id).unwrap().artifact_dir,
+            result
+                .artifact_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+        );
         let checkpoint = Checkpoint::load(&state.runs_dir(), run_id).unwrap();
         assert_eq!(checkpoint.completed_turns, 1);
         assert_eq!(checkpoint.messages.last().unwrap().content, "done");

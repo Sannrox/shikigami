@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen the Run artifact lifecycle behind one private interface so baseline
+  capture, terminal background-job reaping, bounded final capture, warnings,
+  and Run Registry linkage no longer leak across Run modules.
 - Deepen host-local Run preparation behind one private interface so fresh and
   resumed state, snapshots, context, tools, governed admission, initial
   durability, recovery replay, and pre-run hooks no longer leak through the
