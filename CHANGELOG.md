@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen governed harvest event reporting behind the existing governance port
+  seam so stage → ReportOperationEvent → commit/retry, model/tool digests, and
+  abort-before-model finalization no longer crowd the sekai-chisei adapter.
 - Deepen plane claim acquisition behind the existing `PlaneIntakePort` seam so
   list → claim → continuation validation → instance lookup → pre-run fence
   renew no longer crowd the sekai-chisei claim client.

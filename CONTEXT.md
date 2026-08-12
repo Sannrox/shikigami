@@ -90,6 +90,15 @@ report recovery, and in-doubt tool-execution detection. The sekai-chisei
 adapter delegates this protocol to a private deep module; plane receipts remain
 authoritative and the existing governance port seam is unchanged.
 
+## Governed harvest event reporting
+
+One governed run's plane RPC reporting protocol, including pending-event send
+and retry, stage → ReportOperationEvent → commit, model and tool event-id
+digests, receipt lookup, and abort-before-model finalization. The sekai-chisei
+adapter delegates this protocol to a private deep module that pairs with the
+local harvest transaction state module; the existing governance port seam is
+unchanged.
+
 ## Governed model turn
 
 One sekai-chisei model-side protocol, including request projection,
