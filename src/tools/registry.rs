@@ -5,12 +5,11 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
-use tokio::process::Command;
 
 use crate::config::{Config, NetworkSettings, SandboxSettings};
 
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
-use super::catalog::model_visible_builtin_definitions;
+use super::catalog::{BASH_HELPER_TOOLS, builtin_is_authorized, model_visible_builtin_definitions};
 use super::executor::{BashArgs, ToolExecutor};
 use super::todo::{TodoItem, apply_todo_write, format_todo_summary};
 use super::web_fetch::{
@@ -113,7 +112,7 @@ impl ToolRegistry {
     ) -> Result<Self, ToolError> {
         let web_fetcher = default_web_fetcher()?;
         Ok(Self {
-            executor: ToolExecutor::new_with_sandbox_protected_environment(
+            executor: ToolExecutor::new(
                 workspace,
                 enabled,
                 bash_timeout_secs,
@@ -180,15 +179,18 @@ impl ToolRegistry {
     }
 
     pub fn is_enabled(&self, name: &str) -> bool {
-        self.executor.enabled.iter().any(|e| e == name)
+        builtin_is_authorized(&self.executor.enabled, name)
             || self.external.iter().any(|t| t.definition().name == name)
     }
 
     pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
+        if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
+            return Ok(ToolOutput::Text(t.call(args_json).await?));
+        }
+        if !builtin_is_authorized(&self.executor.enabled, name) {
+            return Err(ToolError::Disabled(name.into()));
+        }
         if name == "todo_write" {
-            if !self.executor.enabled.iter().any(|e| e == name) {
-                return Err(ToolError::Disabled(name.into()));
-            }
             let items = apply_todo_write(args_json)?;
             {
                 let mut guard = self
@@ -201,30 +203,17 @@ impl ToolRegistry {
             return Ok(ToolOutput::Text(summary));
         }
         if name == "web_fetch" {
-            if !self.executor.enabled.iter().any(|e| e == name) {
-                return Err(ToolError::Disabled(name.into()));
-            }
             let text = self.web_fetch(args_json).await?;
             return Ok(ToolOutput::Text(text));
         }
-        if matches!(
-            name,
-            "bash_background" | "bash_job_status" | "bash_job_logs"
-        ) {
-            // Same authority as bash: require bash in the allow-list.
-            if !self.executor.enabled.iter().any(|e| e == "bash") {
-                return Err(ToolError::Disabled(name.into()));
-            }
+        if BASH_HELPER_TOOLS.contains(&name) {
             let text = match name {
                 "bash_background" => self.bash_background(args_json).await?,
                 "bash_job_status" => self.bash_job_status(args_json).await?,
                 "bash_job_logs" => self.bash_job_logs(args_json)?,
-                _ => unreachable!(),
+                _ => unreachable!("BASH_HELPER_TOOLS names are exhaustive"),
             };
             return Ok(ToolOutput::Text(text));
-        }
-        if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
-            return Ok(ToolOutput::Text(t.call(args_json).await?));
         }
         self.executor.execute(name, args_json).await
     }
@@ -248,21 +237,8 @@ impl ToolRegistry {
         let log_file = std::fs::File::create(&log_path)?;
         let stdout = Stdio::from(log_file.try_clone()?);
         let stderr = Stdio::from(log_file);
-        let mut command = Command::new("bash");
-        command
-            .arg("--noprofile")
-            .arg("--norc")
-            .arg("-c")
-            .arg(&args.command)
-            .current_dir(&self.executor.workspace)
-            .stdout(stdout)
-            .stderr(stderr)
-            .kill_on_drop(true);
-        self.executor.environment.apply(&mut command);
-        self.executor
-            .sandbox
-            .apply(&mut command)
-            .map_err(|error| ToolError::Message(error.to_string()))?;
+        let mut command = self.executor.bash_command(&args.command)?;
+        command.stdout(stdout).stderr(stderr);
         let child = command.spawn()?;
         guard.jobs.insert(
             job_id.clone(),

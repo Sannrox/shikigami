@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::model::{ChatMessage, ModelTurn};
-use crate::tools::ToolDef;
+use crate::tools::{ToolDef, builtin_is_authorized};
 
 use super::{GovernanceError, GovernancePort, RunHandle, RunOutcome};
 
@@ -167,19 +167,7 @@ impl HttpCallbackGovernance {
     /// Match ToolRegistry expansion: bash enables background helpers; MCP tools
     /// are external registrations authorized by the host callback.
     fn tool_is_authorized(&self, name: &str) -> bool {
-        if self.enabled_tools.iter().any(|t| t == name) {
-            return true;
-        }
-        if matches!(
-            name,
-            "bash_background" | "bash_job_status" | "bash_job_logs"
-        ) && self.enabled_tools.iter().any(|t| t == "bash")
-        {
-            return true;
-        }
-        // External MCP tools are registered only when configured; gate them
-        // via the host rather than a static allow-list snapshot.
-        name.starts_with("mcp.")
+        builtin_is_authorized(&self.enabled_tools, name) || name.starts_with("mcp.")
     }
 }
 

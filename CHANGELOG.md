@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen builtin tool execution behind the `ToolRegistry` interface so catalog
+  authority, jailed dispatch, and shared bash spawn no longer leak through a
+  second public executor (`ToolExecutor` is now crate-private).
 - Deepen the plane serve poll loop behind the thin `run_plane_serve` entry so
   lifecycle gates, shutdown races, idle polling, and claim-error observation no
   longer crowd plane intake.

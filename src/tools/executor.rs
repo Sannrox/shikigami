@@ -9,20 +9,20 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::bash::MAX_BASH_OUTPUT_BYTES;
-use super::catalog::{builtin_catalog, definitions_for_enabled};
+use super::catalog::builtin_catalog;
 use super::environment::ToolEnvironment;
 use super::fs::{
     ApplyPatchArgs, EditArgs, GlobArgs, GrepArgs, MAX_APPLY_PATCH_BYTES, MAX_SEARCH_MATCHES,
     MultiEditArgs, PathArgs, WriteArgs,
 };
 use super::path::load_ignore_patterns;
-use super::{ParkRequest, Report, ToolDef, ToolError, ToolOutput, parse};
+use super::{ParkRequest, Report, ToolError, ToolOutput, parse};
 use crate::config::SandboxSettings;
 use crate::sandbox::Sandbox;
 
-/// Workspace-jailed executor used by [`super::ToolRegistry`] (and tests).
+/// Private workspace-jailed builtin dispatch used by [`super::ToolRegistry`].
 #[derive(Debug, Clone)]
-pub struct ToolExecutor {
+pub(crate) struct ToolExecutor {
     pub(crate) workspace: PathBuf,
     pub(crate) enabled: Vec<String>,
     pub(crate) bash_timeout: Duration,
@@ -39,47 +39,7 @@ pub(crate) struct BashArgs {
 }
 
 impl ToolExecutor {
-    pub fn new(
-        workspace: impl Into<PathBuf>,
-        enabled: Vec<String>,
-        bash_timeout_secs: u64,
-    ) -> Result<Self, ToolError> {
-        Self::new_with_ignore(workspace, enabled, bash_timeout_secs, true)
-    }
-
-    pub fn new_with_ignore(
-        workspace: impl Into<PathBuf>,
-        enabled: Vec<String>,
-        bash_timeout_secs: u64,
-        respect_ignore: bool,
-    ) -> Result<Self, ToolError> {
-        Self::new_with_protected_environment(
-            workspace,
-            enabled,
-            bash_timeout_secs,
-            respect_ignore,
-            &[],
-        )
-    }
-
-    pub(crate) fn new_with_protected_environment(
-        workspace: impl Into<PathBuf>,
-        enabled: Vec<String>,
-        bash_timeout_secs: u64,
-        respect_ignore: bool,
-        protected_environment_names: &[String],
-    ) -> Result<Self, ToolError> {
-        Self::new_with_sandbox_protected_environment(
-            workspace,
-            enabled,
-            bash_timeout_secs,
-            respect_ignore,
-            protected_environment_names,
-            SandboxSettings::default(),
-        )
-    }
-
-    pub(crate) fn new_with_sandbox_protected_environment(
+    pub(crate) fn new(
         workspace: impl Into<PathBuf>,
         enabled: Vec<String>,
         bash_timeout_secs: u64,
@@ -105,12 +65,27 @@ impl ToolExecutor {
         })
     }
 
-    /// Backward-compatible alias for [`definitions_for_enabled`].
-    pub fn definitions_json(enabled: &[String]) -> Vec<ToolDef> {
-        definitions_for_enabled(enabled)
+    pub(crate) fn bash_command(&self, script: &str) -> Result<Command, ToolError> {
+        let mut command = Command::new("bash");
+        command
+            .arg("--noprofile")
+            .arg("--norc")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&self.workspace)
+            .kill_on_drop(true);
+        self.environment.apply(&mut command);
+        self.sandbox
+            .apply(&mut command)
+            .map_err(|error| ToolError::Message(error.to_string()))?;
+        Ok(command)
     }
 
-    pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
+    pub(crate) async fn execute(
+        &self,
+        name: &str,
+        args_json: &str,
+    ) -> Result<ToolOutput, ToolError> {
         if !self.enabled.iter().any(|e| e == name) {
             return Err(ToolError::Disabled(name.into()));
         }
@@ -197,20 +172,8 @@ impl ToolExecutor {
     }
 
     async fn bash(&self, script: &str, limit: Duration) -> Result<String, ToolError> {
-        let mut command = Command::new("bash");
-        command
-            .arg("--noprofile")
-            .arg("--norc")
-            .arg("-c")
-            .arg(script)
-            .current_dir(&self.workspace)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        self.environment.apply(&mut command);
-        self.sandbox
-            .apply(&mut command)
-            .map_err(|error| ToolError::Message(error.to_string()))?;
+        let mut command = self.bash_command(script)?;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = command.spawn()?;
         let pid = child.id();
 

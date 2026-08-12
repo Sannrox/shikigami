@@ -13,10 +13,9 @@ mod web_fetch;
 pub(crate) use environment::ToolEnvironment;
 
 pub use catalog::{
-    ToolDef, builtin_catalog, definitions_for_enabled, is_parallel_safe_tool,
-    model_visible_builtin_definitions, must_be_exclusive_batch,
+    ToolDef, builtin_catalog, builtin_is_authorized, definitions_for_enabled,
+    is_parallel_safe_tool, model_visible_builtin_definitions, must_be_exclusive_batch,
 };
-pub use executor::ToolExecutor;
 pub use path::{is_unsafe_relative_path, path_is_ignored};
 pub use registry::{ExternalTool, ToolRegistry};
 pub use todo::{MAX_TODO_CONTENT_CHARS, MAX_TODO_ID_CHARS, MAX_TODO_ITEMS, TodoItem, TodoStatus};
@@ -119,6 +118,31 @@ mod tests {
     use super::*;
     use crate::config::NetworkSettings;
     use tempfile::tempdir;
+
+    fn registry(dir: &tempfile::TempDir, enabled: &[&str]) -> ToolRegistry {
+        ToolRegistry::with_builtins(
+            dir.path(),
+            enabled.iter().map(|name| (*name).to_string()).collect(),
+            30,
+            NetworkSettings::default(),
+        )
+        .unwrap()
+    }
+
+    fn registry_ignore(
+        dir: &tempfile::TempDir,
+        enabled: &[&str],
+        respect_ignore: bool,
+    ) -> ToolRegistry {
+        ToolRegistry::with_builtins_ignore(
+            dir.path(),
+            enabled.iter().map(|name| (*name).to_string()).collect(),
+            30,
+            NetworkSettings::default(),
+            respect_ignore,
+        )
+        .unwrap()
+    }
 
     #[tokio::test]
     async fn background_bash_job_poll_and_logs() {
@@ -287,17 +311,7 @@ mod tests {
     #[tokio::test]
     async fn write_read_edit_report() {
         let dir = tempdir().unwrap();
-        let tools = ToolExecutor::new(
-            dir.path(),
-            vec![
-                "read_file".into(),
-                "write_file".into(),
-                "edit".into(),
-                "report".into(),
-            ],
-            30,
-        )
-        .unwrap();
+        let tools = registry(&dir, &["read_file", "write_file", "edit", "report"]);
         tools
             .execute("write_file", r#"{"path":"a.txt","content":"hello"}"#)
             .await
@@ -321,7 +335,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_absolute_path() {
         let dir = tempdir().unwrap();
-        let tools = ToolExecutor::new(dir.path(), vec!["read_file".into()], 30).unwrap();
+        let tools = registry(&dir, &["read_file"]);
         let err = tools
             .execute("read_file", r#"{"path":"/etc/passwd"}"#)
             .await
@@ -332,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_parent_path() {
         let dir = tempdir().unwrap();
-        let tools = ToolExecutor::new(dir.path(), vec!["read_file".into()], 30).unwrap();
+        let tools = registry(&dir, &["read_file"]);
         let err = tools
             .execute("read_file", r#"{"path":"../secret"}"#)
             .await
@@ -404,6 +418,22 @@ mod tests {
                 "bash_job_logs",
             ]
         );
+        assert!(registry.is_enabled("bash_background"));
+        assert!(registry.is_enabled("bash_job_status"));
+        assert!(registry.is_enabled("bash_job_logs"));
+        assert!(!registry.is_enabled("web_fetch"));
+    }
+
+    #[tokio::test]
+    async fn bash_helpers_require_bash_allow_list() {
+        let dir = tempdir().unwrap();
+        let reg = registry(&dir, &["read_file"]);
+        let err = reg
+            .execute("bash_background", r#"{"command":"true"}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Disabled(_)));
+        assert!(!reg.is_enabled("bash_background"));
     }
 
     #[tokio::test]
@@ -553,13 +583,7 @@ mod tests {
         std::fs::write(dir.path().join("secret.txt"), "nope").unwrap();
         std::fs::write(dir.path().join("visible.txt"), "ok").unwrap();
 
-        let tools = ToolExecutor::new_with_ignore(
-            dir.path(),
-            vec!["glob".into(), "grep".into(), "read_file".into()],
-            30,
-            true,
-        )
-        .unwrap();
+        let tools = registry_ignore(&dir, &["glob", "grep", "read_file"], true);
         let glob_out = tools
             .execute("glob", r#"{"pattern":"**/*"}"#)
             .await
@@ -579,8 +603,7 @@ mod tests {
             .unwrap();
         assert_eq!(read, ToolOutput::Text("nope".into()));
 
-        let tools_off =
-            ToolExecutor::new_with_ignore(dir.path(), vec!["glob".into()], 30, false).unwrap();
+        let tools_off = registry_ignore(&dir, &["glob"], false);
         let glob_all = tools_off
             .execute("glob", r#"{"pattern":"**/*"}"#)
             .await
@@ -597,7 +620,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/a.rs"), "fn hello() {}\n").unwrap();
         std::fs::write(dir.path().join("src/b.txt"), "hello world\n").unwrap();
-        let tools = ToolExecutor::new(dir.path(), vec!["glob".into(), "grep".into()], 30).unwrap();
+        let tools = registry(&dir, &["glob", "grep"]);
         let glob_out = tools
             .execute("glob", r#"{"pattern":"**/*.rs"}"#)
             .await
@@ -647,7 +670,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("b.txt"), "x\ny\nz\n").unwrap();
-        let tools = ToolExecutor::new(dir.path(), vec!["apply_patch".into()], 30).unwrap();
+        let tools = registry(&dir, &["apply_patch"]);
         let out = tools
             .execute(
                 "apply_patch",
@@ -701,7 +724,7 @@ mod tests {
     async fn multi_edit_atomic() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "one two three\n").unwrap();
-        let tools = ToolExecutor::new(dir.path(), vec!["multi_edit".into()], 30).unwrap();
+        let tools = registry(&dir, &["multi_edit"]);
         tools
             .execute(
                 "multi_edit",
