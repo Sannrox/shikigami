@@ -1,6 +1,6 @@
 //! First-party sekai-chisei governance adapter.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,7 @@ use sekai_client::{
 };
 
 use crate::checkpoint::{
-    GovernanceCheckpoint, GovernanceEvidenceReference, PendingGovernanceEvent, StagedToolExecution,
-    StagedToolReport,
+    GovernanceCheckpoint, GovernanceEvidenceReference, StagedToolExecution, StagedToolReport,
 };
 use crate::config::Config;
 use crate::model::{ChatMessage, ModelTurn};
@@ -22,9 +21,7 @@ use super::{AvailableModel, GovernanceError, GovernancePort, RunHandle, RunOutco
 pub use sekai_client::protocol as proto;
 use sha2::{Digest, Sha256};
 
-use proto::chisei::{
-    GetEffectivePolicySummaryRequest, GetOperationReceiptRequest, ReportOperationEventRequest,
-};
+use proto::chisei::GetEffectivePolicySummaryRequest;
 use proto::sekai::{
     AckActionWorkRequest, HeartbeatActionClaimRequest, ReportActionClaimEventRequest,
 };
@@ -39,6 +36,7 @@ mod claim_acquisition;
 mod governed_model_turn;
 mod governed_run_admission;
 mod governed_run_completion;
+mod harvest_event_reporting;
 mod harvest_transaction;
 mod tool_authorization;
 
@@ -131,7 +129,7 @@ impl SekaiChiseiGovernance {
         self.harvest_event_context_with_id(handle, None)
     }
 
-    fn harvest_event_context_with_id(
+    pub(super) fn harvest_event_context_with_id(
         &self,
         handle: &RunHandle,
         requested_event_id: Option<String>,
@@ -139,7 +137,7 @@ impl SekaiChiseiGovernance {
         self.harvest.event_context(handle, requested_event_id)
     }
 
-    fn forget_harvest(&self, run_id: &str) {
+    pub(super) fn forget_harvest(&self, run_id: &str) {
         self.harvest.forget(run_id);
     }
 
@@ -183,11 +181,14 @@ impl SekaiChiseiGovernance {
         self.harvest.recover_tool_executions(run_id)
     }
 
-    fn host_harvest_operation_id(&self, handle: &RunHandle) -> Result<String, GovernanceError> {
+    pub(super) fn host_harvest_operation_id(
+        &self,
+        handle: &RunHandle,
+    ) -> Result<String, GovernanceError> {
         self.harvest.host_operation_id(handle)
     }
 
-    fn pending_event_references(
+    pub(super) fn pending_event_references(
         references: &[proto::chisei::OperationEvidenceReference],
     ) -> Vec<GovernanceEvidenceReference> {
         references
@@ -203,7 +204,7 @@ impl SekaiChiseiGovernance {
             .collect()
     }
 
-    fn proto_event_references(
+    pub(super) fn proto_event_references(
         references: &[GovernanceEvidenceReference],
     ) -> Vec<proto::chisei::OperationEvidenceReference> {
         references
@@ -228,7 +229,7 @@ impl SekaiChiseiGovernance {
             .unwrap_or("local")
     }
 
-    fn sdk_call_options(
+    pub(super) fn sdk_call_options(
         &self,
         namespace: Option<&str>,
         operation_id: Option<&str>,
@@ -251,7 +252,7 @@ impl SekaiChiseiGovernance {
         options
     }
 
-    fn sdk_error(operation: &str, error: SdkError) -> GovernanceError {
+    pub(super) fn sdk_error(operation: &str, error: SdkError) -> GovernanceError {
         let detail = format!("{operation}: {error}");
         match error.code {
             SdkErrorCode::Unavailable | SdkErrorCode::DeadlineExceeded => {
@@ -277,133 +278,39 @@ impl SekaiChiseiGovernance {
         )
     }
 
-    async fn send_pending_harvest_event(
-        &self,
-        pending: &PendingGovernanceEvent,
-    ) -> Result<proto::chisei::ReportOperationEventResponse, GovernanceError> {
-        let client = self.connect().await?;
-        client
-            .report_operation_event(
-                ReportOperationEventRequest {
-                    operation_id: pending.operation_id.clone(),
-                    event_id: pending.event_id.clone(),
-                    parent_event_id: pending.parent_event_id.clone(),
-                    timestamp_ms: pending.timestamp_ms,
-                    kind: pending.kind.clone(),
-                    attributes: pending.attributes.clone().into_iter().collect(),
-                    references: Self::proto_event_references(&pending.references),
-                },
-                self.sdk_call_options(
-                    Some(&self.namespace),
-                    Some(&pending.operation_id),
-                    Some(&pending.event_id),
-                ),
-            )
-            .await
-            .map_err(|error| Self::sdk_error("ReportOperationEvent", error))
-    }
-
-    async fn retry_pending_harvest_event(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
-        let pending = self.harvest.pending_event(&handle.run_id)?;
-        let Some(pending) = pending else {
-            return Ok(());
-        };
-        let response = self.send_pending_harvest_event(&pending).await?;
-        if !response.recorded && response.event_id != pending.event_id {
-            return Err(GovernanceError::Message(format!(
-                "ReportOperationEvent did not record pending event {}",
-                pending.event_id
-            )));
-        }
-        let model = pending.kind == harvest::KIND_MODEL;
-        self.harvest
-            .commit_event(&handle.run_id, pending.event_id, model);
-        Ok(())
-    }
-
-    async fn report_harvest_event_with_id(
+    pub(super) async fn retry_pending_harvest_event(
         &self,
         handle: &RunHandle,
-        kind: &str,
-        attributes: HashMap<String, String>,
-        references: Vec<proto::chisei::OperationEvidenceReference>,
-        event_id: Option<String>,
-    ) -> Result<proto::chisei::ReportOperationEventResponse, GovernanceError> {
-        let (operation_id, parent_event_id, event_id) =
-            self.harvest_event_context_with_id(handle, event_id)?;
-        let pending = PendingGovernanceEvent {
-            operation_id,
-            event_id,
-            parent_event_id,
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-            kind: kind.into(),
-            attributes: attributes.into_iter().collect::<BTreeMap<_, _>>(),
-            references: Self::pending_event_references(&references),
-        };
-        self.harvest.stage_event(&handle.run_id, pending.clone())?;
-        let response = self.send_pending_harvest_event(&pending).await?;
-        if !response.recorded && response.event_id != pending.event_id {
-            return Err(GovernanceError::Message(format!(
-                "ReportOperationEvent did not record event {}",
-                pending.event_id
-            )));
-        }
-        self.harvest
-            .commit_event(&handle.run_id, pending.event_id, false);
-        Ok(response)
+    ) -> Result<(), GovernanceError> {
+        harvest_event_reporting::retry_pending(self, handle).await
     }
 
-    async fn report_harvest_event(
+    pub(super) async fn report_harvest_event(
         &self,
         handle: &RunHandle,
         kind: &str,
         attributes: HashMap<String, String>,
         references: Vec<proto::chisei::OperationEvidenceReference>,
     ) -> Result<proto::chisei::ReportOperationEventResponse, GovernanceError> {
-        self.report_harvest_event_with_id(handle, kind, attributes, references, None)
-            .await
+        harvest_event_reporting::report(self, handle, kind, attributes, references).await
     }
 
-    async fn report_model_event(
+    pub(super) async fn report_model_event(
         &self,
         handle: &RunHandle,
         ok: bool,
     ) -> Result<(), GovernanceError> {
-        let (model_operation_id, model_reported) = self.harvest.model_operation(&handle.run_id)?;
-        if model_reported {
-            return Ok(());
-        }
-        let model_operation_id = model_operation_id.ok_or_else(|| {
-            GovernanceError::Message(
-                "model event reporting unavailable: model PlanExecution did not establish a receipt".into(),
-            )
-        })?;
-        let host_operation_id = self.host_harvest_operation_id(handle)?;
-        let event_id = format!(
-            "report:{host_operation_id}:model:{}",
-            Self::arguments_digest(&format!("{}:{}", handle.run_id, model_operation_id))
-        );
-        self.report_harvest_event_with_id(
-            handle,
-            harvest::KIND_MODEL,
-            harvest::model_attributes(&model_operation_id, ok),
-            vec![],
-            Some(event_id),
-        )
-        .await?;
-        self.harvest.mark_model_reported(&handle.run_id);
-        Ok(())
+        harvest_event_reporting::report_model(self, handle, ok).await
     }
 
-    async fn report_failed_model_event(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
-        match self.report_model_event(handle, false).await {
-            Ok(()) => Ok(()),
-            Err(error) if self.fail_closed => Err(error),
-            Err(_) => Ok(()),
-        }
+    pub(super) async fn report_failed_model_event(
+        &self,
+        handle: &RunHandle,
+    ) -> Result<(), GovernanceError> {
+        harvest_event_reporting::report_failed_model(self, handle).await
     }
 
-    async fn report_tool_event(
+    pub(super) async fn report_tool_event(
         &self,
         handle: &RunHandle,
         call_id: Option<&str>,
@@ -411,51 +318,17 @@ impl SekaiChiseiGovernance {
         ok: bool,
         detail: &str,
     ) -> Result<(), GovernanceError> {
-        let event_id = match call_id.filter(|call_id| !call_id.is_empty()) {
-            Some(call_id) => {
-                let operation_id = self.host_harvest_operation_id(handle)?;
-                Some(format!(
-                    "report:{operation_id}:tool:{}",
-                    Self::arguments_digest(&format!("{}:{call_id}", handle.run_id))
-                ))
-            }
-            None => None,
-        };
-        self.report_harvest_event_with_id(
-            handle,
-            harvest::KIND_TOOL,
-            harvest::tool_attributes(name, ok, detail),
-            vec![],
-            event_id,
-        )
-        .await?;
-        if let Some(call_id) = call_id {
-            self.harvest.commit_tool_report(&handle.run_id, call_id);
-        }
-        Ok(())
+        harvest_event_reporting::report_tool(self, handle, call_id, name, ok, detail).await
     }
 
-    async fn harvest_receipt(
+    pub(super) async fn harvest_receipt(
         &self,
         handle: &RunHandle,
     ) -> Result<proto::chisei::GetOperationReceiptResponse, GovernanceError> {
-        let operation_id = self.host_harvest_operation_id(handle)?;
-        let client = self.connect().await?;
-        client
-            .get_operation_receipt(
-                GetOperationReceiptRequest {
-                    operation_id: operation_id.clone(),
-                    request_id: String::new(),
-                    caller_scope: String::new(),
-                    attempt: 0,
-                },
-                self.sdk_call_options(Some(&self.namespace), Some(&operation_id), None),
-            )
-            .await
-            .map_err(|error| Self::sdk_error("GetOperationReceipt", error))
+        harvest_event_reporting::harvest_receipt(self, handle).await
     }
 
-    async fn connect(&self) -> Result<PlaneClient, GovernanceError> {
+    pub(super) async fn connect(&self) -> Result<PlaneClient, GovernanceError> {
         if self.endpoint.trim().is_empty() {
             return Err(GovernanceError::Unavailable(
                 "sekai-chisei endpoint not set (governance.endpoint or SHIKIGAMI_CONTROL_PLANE)"
@@ -489,7 +362,7 @@ impl SekaiChiseiGovernance {
         Ok(())
     }
 
-    fn arguments_digest(args_json: &str) -> String {
+    pub(super) fn arguments_digest(args_json: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(args_json.as_bytes());
         hasher
@@ -509,54 +382,12 @@ impl SekaiChiseiGovernance {
         governed_run_admission::host_receipt_input(self, run_id, task, logical_operation_id)
     }
 
-    async fn abort_uncheckpointed_receipt(
+    pub(super) async fn abort_uncheckpointed_receipt(
         &self,
         handle: &RunHandle,
         reason: &str,
     ) -> Result<(), GovernanceError> {
-        if !self.harvest.has_host_operation(&handle.run_id)? {
-            return Ok(());
-        }
-
-        self.retry_pending_harvest_event(handle).await?;
-        let receipt = self.harvest_receipt(handle).await?;
-        if receipt.complete {
-            self.forget_harvest(&handle.run_id);
-            return Ok(());
-        }
-        if receipt
-            .missing_surfaces
-            .iter()
-            .any(|surface| surface == "attempt")
-        {
-            let attributes = harvest::attempt_attributes(&handle.run_id, &handle.operation_id);
-            self.report_harvest_event(handle, harvest::KIND_ATTEMPT, attributes, vec![])
-                .await?;
-        }
-
-        let outcome = RunOutcome {
-            success: false,
-            summary: reason.chars().take(4000).collect(),
-            turns: 0,
-            termination: "aborted_before_model".into(),
-            workspace: String::new(),
-        };
-        let response = self
-            .report_harvest_event(
-                handle,
-                harvest::KIND_COMPLETE,
-                harvest::complete_attributes(&outcome),
-                harvest::complete_references(handle, &outcome),
-            )
-            .await?;
-        if !response.complete {
-            return Err(GovernanceError::Message(format!(
-                "uncheckpointed host receipt remains incomplete; missing surfaces: {}",
-                response.missing_surfaces.join(", ")
-            )));
-        }
-        self.forget_harvest(&handle.run_id);
-        Ok(())
+        harvest_event_reporting::abort_uncheckpointed_receipt(self, handle, reason).await
     }
 }
 
