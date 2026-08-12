@@ -47,7 +47,8 @@ Expected response:
 ```
 
 or `{ "decision": "deny", "message": "…" }` (`behavior` is accepted as an alias
-for `decision`). Timeout or HTTP failure denies when `fail_closed` is true.
+for `decision`). Timeout, HTTP failure, or unexpected decisions always deny
+(http-callback never fail-opens mid-run tool authorization).
 Read/search/report/todo tools skip the host callback after the local allow-list
 check. Requires the `model-http` feature (default) for the HTTP client.
 

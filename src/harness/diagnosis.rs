@@ -82,6 +82,23 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
         ok = false;
         lines.push(format!("error: {error}"));
     }
+    if let Err(error) = harness.config.validate() {
+        // Defense in depth for in-memory configs that skipped resolve/validate
+        // (e.g. governed + bash + sandbox.backend=none).
+        ok = false;
+        lines.push(format!("error: {error}"));
+    }
+    if matches!(
+        harness.config.governance.adapter.as_str(),
+        "sekai-chisei" | "http-callback" | "host-authz"
+    ) && !harness.config.governance.fail_closed
+        && harness.config.profile.name != "governed"
+    {
+        lines.push(
+            "note: mid-run tool authz for sekai-chisei/http-callback is always fail-closed; set governance.fail_closed=true or profile=governed for doctor/run start gates"
+                .into(),
+        );
+    }
     let lines = lines
         .into_iter()
         .map(|line| redact_secrets_in_line(&line, &harness.config))

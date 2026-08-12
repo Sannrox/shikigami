@@ -816,6 +816,37 @@ impl Config {
                 "sandbox.backend=rlimit is supported only on Unix".into(),
             ));
         }
+        self.validate_governed_bash_controls()?;
+        Ok(())
+    }
+
+    /// Whether the effective tool allow-list includes Bash (and thus
+    /// background Bash job tools).
+    pub fn bash_enabled(&self) -> bool {
+        self.tools
+            .effective_enabled()
+            .iter()
+            .any(|tool| tool == "bash")
+    }
+
+    /// Governed / fail-closed profiles that enable Bash must not run with the
+    /// historical no-op sandbox or unrestricted harness egress. Bash is only
+    /// cwd-jailed; without rlimit + egress policy the host blast radius is
+    /// unbounded relative to the FS tool jail.
+    fn validate_governed_bash_controls(&self) -> Result<(), ConfigError> {
+        if !self.requires_governance() || !self.bash_enabled() {
+            return Ok(());
+        }
+        if matches!(self.sandbox.backend, SandboxBackend::None) {
+            return Err(ConfigError::Invalid(
+                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires sandbox.backend=rlimit; sandbox.backend=none refuses bash".into(),
+            ));
+        }
+        if matches!(self.network.egress, EgressMode::Unrestricted) {
+            return Err(ConfigError::Invalid(
+                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires network.egress=deny or allowlist; unrestricted refuses bash".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1040,6 +1071,59 @@ unknown_thing = true
         let mut c = Config::default();
         c.tools.mode = PermissionMode::WorkspaceExec;
         assert!(c.tools.effective_enabled().contains(&"bash".into()));
+    }
+
+    #[test]
+    fn governed_bash_refuses_sandbox_none_and_unrestricted_egress() {
+        let mut c = Config::default();
+        c.profile.name = "governed".into();
+        c.apply_profile_presets();
+        c.tools.enabled = vec!["bash".into(), "report".into()];
+        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+
+        let err = c.validate().unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid(message) if message.contains("sandbox.backend=rlimit")),
+            "{err}"
+        );
+
+        c.sandbox.backend = SandboxBackend::Rlimit;
+        let err = c.validate().unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid(message) if message.contains("network.egress")),
+            "{err}"
+        );
+
+        c.network.egress = EgressMode::Deny;
+        if cfg!(unix) {
+            c.validate().unwrap();
+        } else {
+            let err = c.validate().unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid(message) if message.contains("Unix")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_bash_still_allows_sandbox_none() {
+        let mut c = Config::default();
+        c.tools.enabled = vec!["bash".into()];
+        c.validate().unwrap();
+        assert!(c.bash_enabled());
+        assert!(!c.requires_governance());
+    }
+
+    #[test]
+    fn governed_without_bash_allows_sandbox_none() {
+        let mut c = Config::default();
+        c.profile.name = "governed".into();
+        c.apply_profile_presets();
+        c.tools.enabled = vec!["read_file".into(), "report".into()];
+        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        c.validate().unwrap();
+        assert!(!c.bash_enabled());
     }
 
     #[test]

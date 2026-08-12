@@ -107,7 +107,10 @@ Timeouts are 30s. Full SSE streaming is not required for v1 list/call.
 
 - Tools execute through the same `authorize_tool` path when governed.
 - Prefer `tools.mode` without bash when combining MCP and least privilege.
-- HTTP MCP transports may later consult `[network]` egress policy.
+- Stdio MCP children use the same reconstructed environment as Bash: harness
+  `governance.token_env`, HTTP `model.api_key_env`, and MCP `token_env` names
+  are removed before spawn (children do not inherit plane/model secrets).
+- HTTP MCP transports consult `[network]` egress policy.
 
 ### Offline tests
 

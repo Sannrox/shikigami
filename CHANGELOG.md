@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refuse Bash under `governed` / `fail_closed` when `sandbox.backend=none` or
+  `network.egress=unrestricted`; drop Bash from the governed sekai-chisei
+  example (cwd-only host `bash -c` is not an FS jail).
+- Scrub MCP stdio child environments with the same protected-credential
+  reconstruction as Bash (`env_clear` + allowlist minus plane/model/MCP tokens).
+- Never fail-open mid-run tool authorization for `sekai-chisei` /
+  `http-callback` on connect/transport/policy errors (destructive tools no
+  longer run when the plane/broker is unreachable).
 - Map pre-run claim heartbeat `FailedPrecondition` to `FenceLost` after
   `ClaimActionWork` already succeeded, so the plane serve loop demotes fencing
   instead of treating fence loss as idle `Ok(None)`.

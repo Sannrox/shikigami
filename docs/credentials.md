@@ -62,8 +62,9 @@ The supported 1.x API intentionally preserves other parent variables for local
 compatibility. Managed hosts must therefore launch Shikigami with an allowlist
 containing only the process variables tools require. Provider keys should stay
 in the external model/governance service rather than the Shikigami process.
-This protection covers Bash child environments; an OS sandbox or container is
-still required to isolate files, processes, and network access.
+This protection covers Bash child environments and MCP stdio server children
+(same protected-name reconstruction). An OS sandbox or container is still
+required to isolate files, processes, and network access.
 
 ## Optional: OS keyring (operators)
 
