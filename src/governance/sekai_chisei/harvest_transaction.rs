@@ -421,6 +421,25 @@ mod tests {
     }
 
     #[test]
+    fn committing_model_kind_marks_model_reported() {
+        let transaction = HarvestTransaction::default();
+        transaction.start("run-1", "logical-1".into()).unwrap();
+        transaction
+            .set_host_operation("run-1", "host-1".into())
+            .unwrap();
+        transaction
+            .set_model_operation("run-1", "model-1".into())
+            .unwrap();
+        let (_, model_reported) = transaction.model_operation("run-1").unwrap();
+        assert!(!model_reported);
+
+        // Fresh report_with_id used to pass model=false even for KIND_MODEL.
+        transaction.commit_event("run-1", "model-event".into(), true);
+        let (_, model_reported) = transaction.model_operation("run-1").unwrap();
+        assert!(model_reported);
+    }
+
+    #[test]
     fn recovery_clears_only_unredeemed_authorizations() {
         let transaction = HarvestTransaction::default();
         transaction.start("run-1", "logical-1".into()).unwrap();

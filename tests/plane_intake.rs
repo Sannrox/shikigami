@@ -503,6 +503,80 @@ impl PlaneIntakePort for ClaimErrorIntake {
     }
 }
 
+struct ClaimFenceLostIntake;
+
+#[async_trait]
+impl PlaneIntakePort for ClaimFenceLostIntake {
+    async fn claim_next(
+        &self,
+        _runtime_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError> {
+        // Mirrors pre-run HeartbeatActionClaim FailedPrecondition after an
+        // owned claim: must surface FenceLost, never idle Ok(None).
+        Err(PlaneIntakeError::FenceLost(
+            "pre-run renew lost the fence".into(),
+        ))
+    }
+
+    async fn heartbeat(
+        &self,
+        _claim: &PlaneClaim,
+        _ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        unreachable!("claim_next fails first")
+    }
+
+    async fn ack(&self, _claim: &PlaneClaim, _ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
+        unreachable!("claim_next fails first")
+    }
+
+    async fn report_claim_event(
+        &self,
+        _claim: &PlaneClaim,
+        _kind: PlaneClaimEventKind,
+        _checkpoint_digest: &str,
+        _reason_code: &str,
+        _request_id: &str,
+    ) -> Result<(), PlaneIntakeError> {
+        unreachable!("claim_next fails first")
+    }
+}
+
+#[tokio::test]
+async fn claim_next_fence_lost_demotes_lifecycle_not_idle() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let state = StateRoot::new(&state_path);
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+    let lifecycle = WorkerLifecycle::open(
+        &state_path,
+        WorkerLifecycleIdentity {
+            worker_id: "w1".into(),
+            namespace: "ns".into(),
+            runtime_id: "shikigami".into(),
+        },
+    )
+    .unwrap();
+    lifecycle.mark_serving().unwrap();
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+    let err = run_plane_serve(&harness, &ClaimFenceLostIntake, options, rx)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlaneIntakeError::FenceLost(_)), "{err}");
+    assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::FenceLost);
+    assert!(!lifecycle.accepting_claims());
+}
+
 #[tokio::test]
 async fn lifecycle_marks_governance_unavailable_on_claim_error() {
     let dir = tempdir().unwrap();

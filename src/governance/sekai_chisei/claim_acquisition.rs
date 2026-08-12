@@ -116,12 +116,10 @@ pub(super) async fn claim_next(
         .await
     {
         Ok(response) => response,
-        Err(error) if is_claim_contention(&error) => return Ok(None),
-        Err(error) => {
-            return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
-                "HeartbeatActionClaim before run: {error}"
-            )));
-        }
+        // ClaimActionWork already succeeded: FailedPrecondition is fence loss,
+        // not idle contention. Mapping to Ok(None) would hide FenceLost from the
+        // serve loop and keep the worker accepting claims.
+        Err(error) => return Err(map_owned_claim_heartbeat_error(&error)),
     };
     let effect = effect_response.effect.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source(
@@ -208,6 +206,17 @@ pub(super) fn is_claim_contention(error: &SdkError) -> bool {
     error.code == SdkErrorCode::FailedPrecondition
 }
 
+/// Map pre-run renew failures after the claim is already owned.
+fn map_owned_claim_heartbeat_error(error: &SdkError) -> crate::plane_intake::PlaneIntakeError {
+    if is_claim_contention(error) {
+        crate::plane_intake::PlaneIntakeError::FenceLost(error.to_string())
+    } else {
+        crate::plane_intake::PlaneIntakeError::Source(format!(
+            "HeartbeatActionClaim before run: {error}"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +232,31 @@ mod tests {
         assert!(!is_claim_contention(&SdkError::new(
             SdkErrorCode::Unavailable
         )));
+    }
+
+    #[test]
+    fn owned_claim_heartbeat_contention_is_fence_lost_not_idle() {
+        let error =
+            map_owned_claim_heartbeat_error(&SdkError::new(SdkErrorCode::FailedPrecondition));
+        assert!(
+            matches!(error, crate::plane_intake::PlaneIntakeError::FenceLost(_)),
+            "expected FenceLost, got {error}"
+        );
+    }
+
+    #[test]
+    fn owned_claim_heartbeat_transport_errors_stay_source() {
+        let error = map_owned_claim_heartbeat_error(&SdkError::new(SdkErrorCode::Unavailable));
+        assert!(
+            matches!(error, crate::plane_intake::PlaneIntakeError::Source(_)),
+            "expected Source, got {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("HeartbeatActionClaim before run"),
+            "{error}"
+        );
     }
 
     #[test]
