@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen the filesystem serve loop behind the thin `run_serve_with_options`
+  entry so concurrency, idle poll, `max_jobs`, graceful drain, and health
+  writes no longer crowd the local-queue host.
 - Deepen builtin tool execution behind the `ToolRegistry` interface so catalog
   authority, jailed dispatch, and shared bash spawn no longer leak through a
   second public executor (`ToolExecutor` is now crate-private).
