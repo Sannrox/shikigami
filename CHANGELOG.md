@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen plane claim acquisition behind the existing `PlaneIntakePort` seam so
+  list → claim → continuation validation → instance lookup → pre-run fence
+  renew no longer crowd the sekai-chisei claim client.
 - Deepen the MCP background Run lifecycle behind one private interface and use
   retained state-change signaling so completion cannot be lost between state
   inspection and wait registration.
