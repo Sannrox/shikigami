@@ -76,11 +76,12 @@ seam.
 
 ## Plane claim acquisition
 
-One fenced claim's admit protocol before host execution, including claimable
-listing, claim RPC, continuation and park snapshot validation, action-instance
-parameter lookup, and pre-run fence renew under contention. The sekai-chisei
-claim client delegates this protocol to a private deep module behind the
-existing `PlaneIntakePort` seam; it does not move admission into the harness.
+One fenced claim's plane protocol, including claimable listing, claim RPC,
+continuation and park snapshot validation, action-instance parameter lookup,
+pre-run fence renew, and post-admit heartbeat, ack, and claim-event RPCs with
+contention → `FenceLost` mapping. The sekai-chisei claim client delegates this
+protocol to a private deep module behind the existing `PlaneIntakePort` seam;
+it does not move admission into the harness.
 
 ## Plane serve loop
 
