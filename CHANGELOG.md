@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen the plane serve poll loop behind the thin `run_plane_serve` entry so
+  lifecycle gates, shutdown races, idle polling, and claim-error observation no
+  longer crowd plane intake.
 - Deepen governed harvest event reporting behind the existing governance port
   seam so stage → ReportOperationEvent → commit/retry, model/tool digests, and
   abort-before-model finalization no longer crowd the sekai-chisei adapter.
