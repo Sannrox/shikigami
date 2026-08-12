@@ -66,6 +66,14 @@ acknowledgement retry, and worker lifecycle publication. Plane intake delegates
 this protocol to a private deep module; it does not add a public port or adapter
 seam.
 
+## Plane claim acquisition
+
+One fenced claim's admit protocol before host execution, including claimable
+listing, claim RPC, continuation and park snapshot validation, action-instance
+parameter lookup, and pre-run fence renew under contention. The sekai-chisei
+claim client delegates this protocol to a private deep module behind the
+existing `PlaneIntakePort` seam; it does not move admission into the harness.
+
 ## Governed tool authorization
 
 One stable tool call's sekai-chisei external-action protocol, including risk
