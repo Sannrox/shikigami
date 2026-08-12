@@ -42,10 +42,13 @@ Operators and integrators should understand:
   not a full OS sandbox; treat host compromise assumptions accordingly.
 - **Bash is opt-in.** Default tool allow-lists exclude `bash`. Enabling it
   increases blast radius. Bash receives an explicitly constructed environment;
-  configured harness credential variables are always removed.
+  configured harness credential variables are always removed. Under
+  `governed` / `fail_closed`, Bash also requires `sandbox.backend=rlimit` and
+  non-unrestricted `network.egress` (still not a full OS/container jail).
 - **Governance fail-closed.** Profiles with `fail_closed` or `governed` must not
-  run when the plane is missing or unhealthy. If you need offline operation,
-  use the `local` profile deliberately.
+  run when the plane is missing or unhealthy. Mid-run tool authorization for
+  `sekai-chisei` / `http-callback` always denies on transport/policy errors.
+  If you need offline operation, use the `local` profile deliberately.
 - **Secrets.** Use environment variables for plane tokens and model API keys.
   Never commit `.shikigami-state/`, `.env` files with secrets, or tokens in TOML.
 - **Plane trust.** When using sekai-chisei, the plane is a trusted control

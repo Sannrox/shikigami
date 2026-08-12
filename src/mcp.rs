@@ -17,7 +17,7 @@ mod protocol;
 use protocol::{Client as McpClient, Transport, attach_tools};
 
 use crate::config::{Config, McpServerSettings};
-use crate::tools::{ExternalTool, ToolDef, ToolError, ToolRegistry};
+use crate::tools::{ExternalTool, ToolDef, ToolEnvironment, ToolError, ToolRegistry};
 
 /// Attach MCP tools named `mcp.<server>.<tool>` to a registry.
 pub async fn attach_mcp_servers(
@@ -61,7 +61,8 @@ pub async fn attach_mcp_servers(
         if server.command.is_empty() {
             continue;
         }
-        match McpStdioTransport::spawn(server).await {
+        let protected = config.protected_tool_environment_names();
+        match McpStdioTransport::spawn(server, &protected).await {
             Ok(transport) => {
                 n += attach_tools(registry, &server.name, McpClient::new(transport)).await?;
             }
@@ -109,13 +110,22 @@ struct McpStdioTransport {
 }
 
 impl McpStdioTransport {
-    async fn spawn(server: &McpServerSettings) -> Result<Self, ToolError> {
-        let mut child = Command::new(&server.command)
+    async fn spawn(
+        server: &McpServerSettings,
+        protected_environment_names: &[String],
+    ) -> Result<Self, ToolError> {
+        // Same credential reconstruction as Bash: clear then allowlist parent
+        // env minus plane/model/MCP token names and shell-startup controls.
+        let environment = ToolEnvironment::resolve(protected_environment_names);
+        let mut command = Command::new(&server.command);
+        command
             .args(&server.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        environment.apply(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|e| ToolError::Message(format!("spawn mcp: {e}")))?;
         let stdin = child
@@ -310,6 +320,62 @@ mod tests {
             crate::tools::ToolOutput::Text(t) => assert_eq!(t, "echo:hi"),
             _ => panic!("expected text"),
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_stdio_spawn_scrubs_protected_credentials() {
+        let dir = tempdir().unwrap();
+        let dump = dir.path().join("child-env.txt");
+        let dump_path = dump.to_string_lossy().into_owned();
+        let safe_name = "SHIKIGAMI_TEST_MCP_SAFE_FLAG_SEC";
+        let token_name = "SEKAI_TOKEN";
+        let plane_name = "SHIKIGAMI_TEST_PLANE_TOKEN_SEC";
+        // SAFETY: unique/synthetic test names removed immediately after spawn
+        // snapshots the parent environment.
+        unsafe {
+            std::env::set_var(safe_name, "visible");
+            std::env::set_var(token_name, "must-not-reach-mcp");
+            std::env::set_var(plane_name, "must-not-reach-mcp-either");
+        }
+        let protected = vec![token_name.into(), plane_name.into()];
+        let server = McpServerSettings {
+            name: "envprobe".into(),
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "printf '%s|%s|%s' \"${{{safe_name}-unset}}\" \"${{{token_name}-unset}}\" \"${{{plane_name}-unset}}\" > '{dump_path}'; sleep 30"
+                ),
+            ],
+            transport: "stdio".into(),
+            url: None,
+            token_env: None,
+        };
+        let transport = McpStdioTransport::spawn(&server, &protected)
+            .await
+            .expect("spawn env probe");
+        // SAFETY: cleanup of the synthetic names above.
+        unsafe {
+            std::env::remove_var(safe_name);
+            std::env::remove_var(token_name);
+            std::env::remove_var(plane_name);
+        }
+        let mut saw = None;
+        for _ in 0..50 {
+            if dump.is_file() {
+                saw = std::fs::read_to_string(&dump).ok();
+                if saw.as_ref().is_some_and(|s| !s.is_empty()) {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drop(transport);
+        let body = saw.expect("child wrote env probe");
+        assert_eq!(
+            body, "visible|unset|unset",
+            "mcp child env leaked secrets: {body}"
+        );
     }
 
     #[cfg(feature = "model-http")]

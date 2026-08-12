@@ -17,7 +17,10 @@ adapter = "directory"
 root = "."
 
 [tools]
-enabled = ["read_file", "write_file", "edit", "bash", "report"]
+# Bash omitted: under profile=governed, enabling bash requires sandbox.backend=rlimit
+# and network.egress=deny|allowlist (see docs/settings.md). Path jail alone does not
+# contain host bash -c. Add bash only with those controls configured.
+enabled = ["read_file", "write_file", "edit", "report"]
 bash_timeout_secs = 60
 
 [run]

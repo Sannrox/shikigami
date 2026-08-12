@@ -137,12 +137,10 @@ impl HttpCallbackGovernance {
     }
 
     fn unavailable(&self, message: String) -> Result<(), GovernanceError> {
-        if self.fail_closed {
-            Err(GovernanceError::Unavailable(message))
-        } else {
-            // Fail-open: host/broker unreachable → allow tool (operator accepted risk).
-            Ok(())
-        }
+        // http-callback / host-authz never fail-open on transport or policy
+        // errors: an unreachable broker must not permit tool execution.
+        // (`fail_closed` still surfaces in doctor/health text for operators.)
+        Err(GovernanceError::Unavailable(message))
     }
 
     fn validate_endpoint(endpoint: &str) -> Result<(), GovernanceError> {
@@ -439,6 +437,23 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, GovernanceError::Denied(_)));
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_errors_deny_even_when_not_fail_closed() {
+        let mut config = config_with_endpoint("http://127.0.0.1:1/authz");
+        config.governance.fail_closed = false;
+        let gov = HttpCallbackGovernance::from_config(&config).unwrap();
+        assert!(!gov.fail_closed);
+        let handle = gov.begin_run("run-fo", "task", None).await.unwrap();
+        let err = gov
+            .authorize_tool(&handle, "write_file", r#"{"path":"a.txt","content":"x"}"#)
+            .await
+            .expect_err("host unreachable must deny, not Ok(())");
+        assert!(
+            matches!(err, GovernanceError::Unavailable(_)),
+            "expected Unavailable, got {err}"
+        );
     }
 
     #[tokio::test]

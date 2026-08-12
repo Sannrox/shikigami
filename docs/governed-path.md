@@ -97,7 +97,11 @@ authorized through the plane’s host-executed external-action API
 | `deny` | Do **not** execute; surface denial on the tool result / events |
 | `require_approval` | Do **not** execute (headless path cannot wait for interactive approval) |
 | missing / unknown | Fail closed as denial |
-| plane unavailable + `fail_closed` | Fail closed (tool not executed) |
+| plane unavailable / transport / build / redeem error | Fail closed (tool not executed) |
+
+The sekai-chisei adapter never fail-opens mid-run tool authorization: plane
+connect/RPC/redeem failures deny the tool even when `governance.fail_closed`
+is false. `fail_closed` / profile `governed` still gate doctor and run start.
 
 Offline adapters (`none`, `local`) do **not** call external-action; they only
 enforce the local tool allow-list.

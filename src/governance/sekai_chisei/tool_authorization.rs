@@ -19,17 +19,12 @@ pub(super) async fn authorize(
     if !requires_external_action(name) {
         return Ok(());
     }
-    let client = match governance.connect().await {
-        Ok(client) => client,
-        Err(error) if governance.fail_closed => return Err(error),
-        Err(_) => return Ok(()),
-    };
-    let request = match build_request(governance, handle, call_id, name, args_json) {
-        Ok(request) => request,
-        Err(error) if governance.fail_closed => return Err(error),
-        Err(_) => return Ok(()),
-    };
-    let response: proto::chisei::AuthorizeExternalActionResponse = match client
+    // Mid-run external-action authz is always fail-closed for the sekai-chisei
+    // adapter: transport/build/RPC errors must never permit tool execution
+    // (including destructive bash), regardless of governance.fail_closed.
+    let client = governance.connect().await?;
+    let request = build_request(governance, handle, call_id, name, args_json)?;
+    let response: proto::chisei::AuthorizeExternalActionResponse = client
         .raw()
         .unary(
             "/chisei.ChiseiService/AuthorizeExternalAction",
@@ -44,16 +39,7 @@ pub(super) async fn authorize(
             ),
         )
         .await
-    {
-        Ok(response) => response,
-        Err(error) if governance.fail_closed => {
-            return Err(SekaiChiseiGovernance::sdk_error(
-                "AuthorizeExternalAction",
-                error,
-            ));
-        }
-        Err(_) => return Ok(()),
-    };
+        .map_err(|error| SekaiChiseiGovernance::sdk_error("AuthorizeExternalAction", error))?;
     let decision = response
         .decision
         .ok_or_else(|| GovernanceError::Message("external-action missing decision".into()))?;
@@ -97,17 +83,14 @@ pub(super) async fn authorize(
                     | SdkErrorCode::FailedPrecondition
                     | SdkErrorCode::InvalidArgument
             );
-            let governance_error = if error.code == SdkErrorCode::Unauthenticated {
+            // Always deny on redeem failure (no fail-open for plane adapters).
+            return Err(if error.code == SdkErrorCode::Unauthenticated {
                 GovernanceError::Unavailable(format!("RedeemExternalActionPermit: {error}"))
             } else if security_sensitive_failure {
                 GovernanceError::Message(format!("RedeemExternalActionPermit: {error}"))
             } else {
                 SekaiChiseiGovernance::sdk_error("RedeemExternalActionPermit", error)
-            };
-            if governance.fail_closed || security_sensitive_failure {
-                return Err(governance_error);
-            }
-            return Ok(());
+            });
         }
     };
     let redemption = redemption_response

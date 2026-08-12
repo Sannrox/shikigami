@@ -130,6 +130,12 @@ not a complete container or network sandbox: path jail, egress policy, and
 governance remain separate controls. Non-Unix hosts reject the backend during
 configuration validation.
 
+Under `profile = governed` or `governance.fail_closed = true`, enabling Bash
+(explicitly or via `tools.mode = workspace_exec`) **refuses** configuration when
+`sandbox.backend = none` or `network.egress = unrestricted`. Operators must set
+`sandbox.backend = rlimit` and `network.egress = deny` or `allowlist`. Full OS
+isolation (containers / seccomp) remains a host residual.
+
 ### `[run]` (tool concurrency)
 
 | Field | Default | Description |
@@ -160,7 +166,9 @@ Foreground and background Bash share one explicitly reconstructed child
 environment. For 1.x compatibility, ordinary parent variables remain
 available, while active `governance.token_env`, HTTP `model.api_key_env`, MCP
 bearer-token env names, and shell-startup controls are removed. Bash startup
-files are disabled so they cannot repopulate the child environment.
+files are disabled so they cannot repopulate the child environment. MCP stdio
+server children use the same reconstructed environment (credentials are not
+inherited from the harness process).
 
 Managed hosts must launch Shikigami with an allowlisted parent environment when
 additional ambient variables are untrusted or sensitive. A configurable child

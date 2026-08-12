@@ -1110,6 +1110,40 @@ mod tests {
         assert!(matches!(err, GovernanceError::Message(_)));
     }
 
+    #[tokio::test]
+    async fn authorize_transport_errors_deny_even_when_not_fail_closed() {
+        // Empty endpoint → connect Unavailable. Mid-run authz must deny tools
+        // even when the adapter was constructed with fail_closed=false.
+        let governance = SekaiChiseiGovernance {
+            endpoint: String::new(),
+            principal: "test".into(),
+            namespace: "default".into(),
+            fail_closed: false,
+            token_env: None,
+            max_tokens: 4096,
+            preferred_model: "auto".into(),
+            harvest: HarvestTransaction::default(),
+        };
+        let handle = RunHandle {
+            run_id: "run-authz-fail".into(),
+            operation_id: "op-authz-fail".into(),
+            namespace: "default".into(),
+        };
+        let err = tool_authorization::authorize(
+            &governance,
+            &handle,
+            "tool-1-0-provider-call",
+            "bash",
+            r#"{"command":"true"}"#,
+        )
+        .await
+        .expect_err("transport failure must deny, not Ok(())");
+        assert!(
+            matches!(err, GovernanceError::Unavailable(_)),
+            "expected Unavailable, got {err}"
+        );
+    }
+
     #[test]
     fn arguments_digest_is_stable() {
         let a = SekaiChiseiGovernance::arguments_digest(r#"{"path":"a.txt"}"#);
