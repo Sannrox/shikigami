@@ -19,6 +19,14 @@ schema. One private deep module owns adapter health, effective tool authority,
 credential-source reporting, secret redaction, fail-closed classification, and
 live plane probing; it does not add a port or adapter seam.
 
+## Builtin tool execution
+
+The run-scoped protocol that decides which builtins exist, which the allow-list
+authorizes (including bash helpers that share `bash` authority), and how one
+call executes inside the workspace jail. `ToolRegistry` is the only external
+interface; catalog expansion, jailed dispatch, and shared bash spawn stay in
+the private implementation. It is not a new public port or adapter seam.
+
 ## Durable tool batch
 
 One model turn's ordered set of tool calls, including authorization, execution,

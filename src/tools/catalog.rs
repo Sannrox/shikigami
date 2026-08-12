@@ -110,6 +110,10 @@ pub fn is_parallel_safe_tool(name: &str) -> bool {
     matches!(name, "read_file" | "glob" | "grep" | "web_fetch")
 }
 
+/// Background bash tools that share `bash` allow-list authority.
+pub(crate) const BASH_HELPER_TOOLS: &[&str] =
+    &["bash_background", "bash_job_status", "bash_job_logs"];
+
 /// Definitions for an allow-list against the builtin catalog.
 pub fn definitions_for_enabled(enabled: &[String]) -> Vec<ToolDef> {
     builtin_catalog()
@@ -118,16 +122,72 @@ pub fn definitions_for_enabled(enabled: &[String]) -> Vec<ToolDef> {
         .collect()
 }
 
+/// Whether a builtin name is authorized by the allow-list, including bash
+/// helpers that share `bash` authority. Helper names are not independently
+/// enableable; they piggyback on `bash`.
+pub fn builtin_is_authorized(enabled: &[String], name: &str) -> bool {
+    if BASH_HELPER_TOOLS.contains(&name) {
+        return enabled.iter().any(|tool| tool == "bash");
+    }
+    enabled.iter().any(|tool| tool == name)
+}
+
+fn with_bash_helpers(enabled: &[String]) -> Vec<String> {
+    let mut expanded: Vec<String> = enabled
+        .iter()
+        .filter(|tool| !BASH_HELPER_TOOLS.contains(&tool.as_str()))
+        .cloned()
+        .collect();
+    if enabled.iter().any(|tool| tool == "bash") {
+        for implicit in BASH_HELPER_TOOLS {
+            expanded.push((*implicit).into());
+        }
+    }
+    expanded
+}
+
 /// Model-visible builtin definitions, including helpers that share bash
 /// authority and excluding unknown configured names.
 pub fn model_visible_builtin_definitions(enabled: &[String]) -> Vec<ToolDef> {
-    let mut expanded = enabled.to_vec();
-    if enabled.iter().any(|tool| tool == "bash") {
-        for implicit in ["bash_background", "bash_job_status", "bash_job_logs"] {
-            if !expanded.iter().any(|tool| tool == implicit) {
-                expanded.push(implicit.into());
-            }
+    definitions_for_enabled(&with_bash_helpers(enabled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_enables_background_helpers() {
+        let enabled = vec!["bash".into()];
+        assert!(builtin_is_authorized(&enabled, "bash"));
+        for helper in BASH_HELPER_TOOLS {
+            assert!(builtin_is_authorized(&enabled, helper), "{helper}");
         }
+        assert!(!builtin_is_authorized(&enabled, "web_fetch"));
+        let names: Vec<_> = model_visible_builtin_definitions(&enabled)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "bash",
+                "bash_background",
+                "bash_job_status",
+                "bash_job_logs",
+            ]
+        );
     }
-    definitions_for_enabled(&expanded)
+
+    #[test]
+    fn helpers_are_not_authorized_without_bash() {
+        let enabled = vec!["read_file".into(), "bash_background".into()];
+        assert!(builtin_is_authorized(&enabled, "read_file"));
+        assert!(!builtin_is_authorized(&enabled, "bash_background"));
+        let names: Vec<_> = model_visible_builtin_definitions(&enabled)
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert_eq!(names, vec!["read_file"]);
+    }
 }

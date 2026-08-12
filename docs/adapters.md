@@ -127,16 +127,18 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 | `report` / `escalate` | Finish or park; exclusive batch |
 
 API: `ToolRegistry::from_config` → `definitions()` + `execute()`.
-The registry owns resolved tool authority, network policy, ignore behavior,
-protected child-process environment names, and sandbox policy. Lower-level
-`with_builtins*` constructors remain available for focused adapters and tests.
-Dynamic native plugins remain out of scope; future MCP/skill tools register
-into the same registry without changing the turn loop.
+The registry is the only execution interface: it owns resolved tool authority
+(including bash helpers that share `bash` authority), network policy, ignore
+behavior, protected child-process environment names, sandbox policy, and
+jailed builtin dispatch. Lower-level `with_builtins*` constructors remain
+available for focused adapters and tests. Dynamic native plugins remain out of
+scope; future MCP/skill tools register into the same registry without changing
+the turn loop.
 
 Governed runs still call `authorize_tool` before `execute` for consequential
+tools.
 
 MCP: optional `tools.mcp_servers` — see [mcp.md](mcp.md).
-tools.
 
 ## Not an adapter
 
