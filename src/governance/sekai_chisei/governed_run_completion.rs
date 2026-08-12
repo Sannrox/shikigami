@@ -33,12 +33,12 @@ pub(super) async fn complete(
         Err(error) => return governance.finish_best_effort(handle, error),
     };
     if missing_surface(&receipt.missing_surfaces, "model_call") {
-        let model_operation_id = governance
+        let has_model_operation = governance
             .harvest
             .model_operation(&handle.run_id)?
             .0
-            .filter(|operation_id| !operation_id.is_empty());
-        let Some(model_operation_id) = model_operation_id else {
+            .is_some_and(|operation_id| !operation_id.is_empty());
+        if !has_model_operation {
             return match governance
                 .abort_uncheckpointed_receipt(handle, &outcome.summary)
                 .await
@@ -46,16 +46,11 @@ pub(super) async fn complete(
                 Ok(()) => Ok(()),
                 Err(error) => governance.finish_best_effort(handle, error),
             };
-        };
-        if let Err(error) = governance
-            .report_harvest_event(
-                handle,
-                harvest::KIND_MODEL,
-                harvest::model_attributes(&model_operation_id, false),
-                vec![],
-            )
-            .await
-        {
+        }
+        // Use the dedicated model reporter: deterministic event id + local
+        // model_reported. The generic harvest path used random ids and left
+        // model_reported false, so retries could duplicate model_call events.
+        if let Err(error) = governance.report_model_event(handle, outcome.success).await {
             return governance.finish_best_effort(handle, error);
         }
     }

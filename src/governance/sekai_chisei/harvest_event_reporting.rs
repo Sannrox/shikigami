@@ -53,7 +53,7 @@ pub(super) async fn retry_pending(
             pending.event_id
         )));
     }
-    let model = pending.kind == harvest::KIND_MODEL;
+    let model = pending_marks_model_reported(&pending);
     governance
         .harvest
         .commit_event(&handle.run_id, pending.event_id, model);
@@ -89,9 +89,13 @@ pub(super) async fn report_with_id(
             pending.event_id
         )));
     }
+    // Match retry_pending: model events must flip model_reported on commit so
+    // completion/backfill paths that use KIND_MODEL stay consistent with the
+    // dedicated report_model helper.
+    let model = pending_marks_model_reported(&pending);
     governance
         .harvest
-        .commit_event(&handle.run_id, pending.event_id, false);
+        .commit_event(&handle.run_id, pending.event_id, model);
     Ok(response)
 }
 
@@ -262,4 +266,34 @@ pub(super) async fn abort_uncheckpointed_receipt(
     }
     governance.forget_harvest(&handle.run_id);
     Ok(())
+}
+
+/// Whether committing this pending event should flip local `model_reported`.
+pub(super) fn pending_marks_model_reported(pending: &PendingGovernanceEvent) -> bool {
+    pending.kind == harvest::KIND_MODEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::PendingGovernanceEvent;
+
+    #[test]
+    fn model_kind_pending_marks_model_reported_like_retry_path() {
+        let pending = PendingGovernanceEvent {
+            operation_id: "host-1".into(),
+            event_id: "event-1".into(),
+            parent_event_id: "host-1:budget".into(),
+            timestamp_ms: 0,
+            kind: harvest::KIND_MODEL.into(),
+            attributes: Default::default(),
+            references: vec![],
+        };
+        assert!(pending_marks_model_reported(&pending));
+        let pending = PendingGovernanceEvent {
+            kind: harvest::KIND_TOOL.into(),
+            ..pending
+        };
+        assert!(!pending_marks_model_reported(&pending));
+    }
 }

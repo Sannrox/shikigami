@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Add changes for the next release here. -->
 
+### Fixed
+
+- Map pre-run claim heartbeat `FailedPrecondition` to `FenceLost` after
+  `ClaimActionWork` already succeeded, so the plane serve loop demotes fencing
+  instead of treating fence loss as idle `Ok(None)`.
+- Commit harvest `model_called` events with `model_reported=true` on the fresh
+  report path (matching retry), and fill missing `model_call` receipt surfaces
+  through the deterministic `report_model` helper instead of a random-id
+  generic harvest event.
+
 ### Changed
 
 - Deepen the plane serve poll loop behind the thin `run_plane_serve` entry so
