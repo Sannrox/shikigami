@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen plane claim lease RPCs behind the existing `PlaneIntakePort` seam so
+  heartbeat, ack, and claim-event reporting no longer crowd the sekai-chisei
+  claim client.
 - Deepen the filesystem serve loop behind the thin `run_serve_with_options`
   entry so concurrency, idle poll, `max_jobs`, graceful drain, and health
   writes no longer crowd the local-queue host.
