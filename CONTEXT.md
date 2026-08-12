@@ -74,6 +74,14 @@ parameter lookup, and pre-run fence renew under contention. The sekai-chisei
 claim client delegates this protocol to a private deep module behind the
 existing `PlaneIntakePort` seam; it does not move admission into the harness.
 
+## Plane serve loop
+
+The plane intake host's poll-and-admit protocol, including option validation at
+the public entry, lifecycle accepting/draining gates, shutdown races around
+claim acquisition, idle poll sleep, max_jobs limits, claim-error observation,
+and delegation to the claimed run transaction. Plane intake keeps a thin
+`run_plane_serve` interface over this private deep module.
+
 ## Governed tool authorization
 
 One stable tool call's sekai-chisei external-action protocol, including risk

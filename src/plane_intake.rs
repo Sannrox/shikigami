@@ -17,6 +17,7 @@ use crate::harness::{Harness, HarnessError};
 use crate::run::RunRequest;
 
 mod claimed_run;
+mod serve_loop;
 
 pub const RUNTIME_DISPATCH_KIND: &str = "runtime_dispatch";
 pub const CLAIMED_STATUS: &str = "claimed";
@@ -282,119 +283,14 @@ pub async fn run_plane_serve(
             "ack_retry_limit must be greater than zero".into(),
         ));
     }
-
-    if let Some(lc) = &options.lifecycle {
-        // Demote only: never auto-clear a runtime governance failure from a
-        // static adapter health check alone.
-        if !harness.governance_ok() {
-            let _ = lc.set_governance_ok(false);
-        }
-        let _ = lc.publish();
-    }
-
-    let mut completed = 0u64;
-    loop {
-        if *shutdown.borrow() {
-            if let Some(lc) = &options.lifecycle {
-                lifecycle_set_draining(lc);
-            }
-            return Ok(completed);
-        }
-        if options.max_jobs.is_some_and(|max| completed >= max) {
-            if let Some(lc) = &options.lifecycle {
-                lifecycle_set_draining(lc);
-            }
-            return Ok(completed);
-        }
-
-        if let Some(lc) = &options.lifecycle {
-            if !harness.governance_ok() {
-                let _ = lc.set_governance_ok(false);
-            }
-            if !lc.accepting_claims() {
-                // Drain or governance/fence/unhealthy: do not start new claims.
-                if lc.snapshot().state == crate::worker_lifecycle::WorkerLifecycleState::Draining
-                    || *shutdown.borrow()
-                {
-                    return Ok(completed);
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(options.poll_interval) => {}
-                    _ = wait_for_shutdown(shutdown.clone()) => {
-                        lifecycle_set_draining(lc);
-                        return Ok(completed);
-                    }
-                }
-                continue;
-            }
-        }
-
-        let claim_result = tokio::select! {
-            result = intake.claim_next(&options.policy.expected_runtime, options.claim_ttl) => result,
-            _ = wait_for_shutdown(shutdown.clone()) => {
-                if let Some(lc) = &options.lifecycle {
-                    lifecycle_set_draining(lc);
-                }
-                return Ok(completed);
-            }
-        };
-        let Some(claim) = claim_result.inspect_err(|error| {
-            observe_claim_error(&options, error);
-        })?
-        else {
-            tokio::select! {
-                _ = tokio::time::sleep(options.poll_interval) => {}
-                _ = wait_for_shutdown(shutdown.clone()) => {
-                    if let Some(lc) = &options.lifecycle {
-                        lifecycle_set_draining(lc);
-                    }
-                    return Ok(completed);
-                }
-            }
-            continue;
-        };
-        // select! may pick claim_next even when shutdown is also ready; recheck
-        // so SIGTERM never starts side effects for a newly acquired claim.
-        if *shutdown.borrow() {
-            if let Some(lc) = &options.lifecycle {
-                lifecycle_set_draining(lc);
-            }
-            // Leave the plane claim unacked so lease expiry can reclaim it.
-            return Ok(completed);
-        }
-        completed += 1;
-        match claimed_run::execute(harness, intake, claim, &options, &shutdown).await? {
-            claimed_run::Execution::Continue => {}
-            claimed_run::Execution::Shutdown => return Ok(completed),
-            claimed_run::Execution::GovernanceUnavailable => {
-                return Err(PlaneIntakeError::Source(
-                    "governance unavailable during run; plane serve exiting for replacement".into(),
-                ));
-            }
-        }
-    }
+    serve_loop::run_until_shutdown(harness, intake, &options, shutdown).await
 }
 
-fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecycle) {
+pub(super) fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecycle) {
     if let Err(error) = lc.set_draining() {
         eprintln!(
             "warning: worker lifecycle drain publish failed: {error}; removed stale snapshot if present"
         );
-    }
-}
-
-fn observe_claim_error(options: &PlaneServeOptions, error: &PlaneIntakeError) {
-    let Some(lifecycle) = &options.lifecycle else {
-        return;
-    };
-    match error {
-        PlaneIntakeError::FenceLost(kind) => {
-            let _ = lifecycle.set_fence_lost(kind);
-        }
-        PlaneIntakeError::Source(_) | PlaneIntakeError::Harness(_) => {
-            let _ = lifecycle.set_governance_ok(false);
-        }
-        PlaneIntakeError::Mapping(_) => {}
     }
 }
 
@@ -559,7 +455,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+pub(super) async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     loop {
         if *shutdown.borrow() || shutdown.changed().await.is_err() {
             return;
