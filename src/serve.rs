@@ -5,18 +5,16 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::harness::{Harness, HarnessError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 
 mod control;
 mod queue;
+mod serve_loop;
 
 use queue::FilesystemQueue;
 
@@ -234,126 +232,7 @@ pub async fn run_serve_with_options(
     if let Some(control) = &control {
         control::validate_options(control, runtime.queue_capacity)?;
     }
-    let running = Arc::new(AtomicBool::new(true));
-    queue.write_health(&running, 0, None, &runtime)?;
-
-    let control_task = if let Some(control) = control {
-        let listener = TcpListener::bind(control.bind).await?;
-        let control_harness = harness.clone();
-        let control_queue = queue.clone();
-        let control_shutdown = shutdown.clone();
-        Some(tokio::spawn(async move {
-            control::listen(
-                listener,
-                control_harness,
-                control_queue,
-                control,
-                control_shutdown,
-            )
-            .await
-        }))
-    } else {
-        None
-    };
-
-    let mut completed = 0u64;
-    let mut active = 0usize;
-    let mut last_run_id = None;
-    let mut jobs = JoinSet::new();
-    let mut stopping = false;
-    loop {
-        if *shutdown.borrow() {
-            stopping = true;
-            break;
-        }
-        if let Some(max) = options.max_jobs
-            && completed + active as u64 >= max
-            && active == 0
-        {
-            break;
-        }
-
-        while active < runtime.concurrency
-            && options
-                .max_jobs
-                .map(|max| completed + (active as u64) < max)
-                .unwrap_or(true)
-        {
-            let Some(job_path) = queue.claim_next()? else {
-                break;
-            };
-            let worker = harness.clone();
-            let worker_queue = queue.clone();
-            let retry_limit = runtime.retry_limit;
-            jobs.spawn(async move {
-                worker_queue
-                    .run_claimed(&worker, &job_path, retry_limit)
-                    .await
-            });
-            active += 1;
-        }
-
-        queue.write_health(&running, active, last_run_id.clone(), &runtime)?;
-        if let Some(max) = options.max_jobs
-            && completed >= max
-            && active == 0
-        {
-            break;
-        }
-        if active == 0 {
-            tokio::select! {
-                _ = tokio::time::sleep(options.poll_interval) => {}
-                _ = wait_shutdown(shutdown.clone()) => { stopping = true; break; }
-            }
-        } else {
-            tokio::select! {
-                joined = jobs.join_next() => {
-                    active = active.saturating_sub(1);
-                    if let Some(joined) = joined {
-                        match joined {
-                            Ok(Ok(Some(result))) => {
-                                completed += 1;
-                                last_run_id = Some(result.run_id);
-                                queue.write_health(&running, active, last_run_id.clone(), &runtime)?;
-                            }
-                            Ok(Ok(None)) => {}
-                            Ok(Err(_)) | Err(_) => {
-                                completed += 1;
-                                queue.write_health(&running, active, last_run_id.clone(), &runtime)?;
-                            }
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(options.poll_interval) => {}
-                _ = wait_shutdown(shutdown.clone()) => { stopping = true; break; }
-            }
-        }
-    }
-
-    // Drain already claimed jobs on graceful shutdown; no new jobs are taken.
-    if stopping {
-        while let Some(joined) = jobs.join_next().await {
-            active = active.saturating_sub(1);
-            match joined {
-                Ok(Ok(Some(result))) => {
-                    completed += 1;
-                    last_run_id = Some(result.run_id);
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(_)) | Err(_) => {
-                    completed += 1;
-                }
-            }
-        }
-    }
-
-    running.store(false, Ordering::SeqCst);
-    queue.write_health(&running, 0, last_run_id, &runtime)?;
-    if let Some(task) = control_task {
-        task.abort();
-        let _ = task.await;
-    }
-    Ok(completed)
+    serve_loop::run_until_shutdown(harness, queue, options, runtime, control, shutdown).await
 }
 
 async fn wait_shutdown(mut rx: watch::Receiver<bool>) {
@@ -414,6 +293,58 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&layout.health).unwrap()).unwrap();
         assert!(health.ok);
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn serve_stops_at_max_jobs_without_claiming_the_rest() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.model.adapter = "scripted".into();
+        config.events.adapter = "none".into();
+        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+        let harness = Harness::from_config(config, state.clone()).unwrap();
+        let layout = QueueLayout::under_state(state.path());
+        layout.ensure().unwrap();
+
+        let job = QueueJob {
+            job_id: None,
+            task: "demo".into(),
+            priority: 0,
+            attempt: 0,
+            keep_workspace: true,
+            logical_operation_id: None,
+            timeout_secs: None,
+        };
+        let payload = serde_json::to_string_pretty(&job).unwrap();
+        std::fs::write(layout.inbox.join("001.json"), &payload).unwrap();
+        std::fs::write(layout.inbox.join("002.json"), &payload).unwrap();
+
+        let (tx, rx) = watch::channel(false);
+        let options = ServeOptions {
+            poll_interval: Duration::from_millis(50),
+            max_jobs: Some(1),
+        };
+        let n = run_serve(&harness, &layout, options, rx).await.unwrap();
+        drop(tx);
+        assert_eq!(n, 1);
+        let inbox = std::fs::read_dir(&layout.inbox)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .ok()
+                    .and_then(|e| e.path().extension().map(|ext| ext == "json"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(inbox, 1);
+        let results = ["001.result.json", "002.result.json"]
+            .iter()
+            .filter(|name| layout.done.join(name).is_file())
+            .count();
+        assert_eq!(results, 1);
     }
 
     #[tokio::test]

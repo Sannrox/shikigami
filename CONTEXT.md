@@ -162,6 +162,14 @@ timeout behavior, and retained state-change signaling for waits. The MCP host
 delegates this protocol to a private deep module; JSON-RPC routing and result
 projection remain at the existing host interface.
 
+## Filesystem serve loop
+
+The local serve host's poll-and-drain protocol, including concurrency,
+idle poll, `max_jobs`, graceful drain of claimed work, health writes, and
+control-task abort. The public `run_serve_with_options` entry keeps option
+validation and delegates this protocol to a private deep module; it is not a
+new public port or adapter seam.
+
 ## Filesystem queue
 
 The local serve intake's durable job lifecycle, including bounded admission,
