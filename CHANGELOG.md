@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Never fail-open mid-run tool authorization for `sekai-chisei` /
   `http-callback` on connect/transport/policy errors (destructive tools no
   longer run when the plane/broker is unreachable).
+- Bind claim/heartbeat grants to the held work and requested `runtime_id`
+  (`effect_id`, owner, fencing token, generation); mismatch or empty fence
+  identity is `FenceLost` instead of adopting another principal's lease.
+- Set claim `valid_until` from granted remaining TTL, never longer than
+  `min(requested, granted)`, and reject `ttl_ms == 0` so the plane cannot
+  default a zero TTL to 60s.
 - Map pre-run claim heartbeat `FailedPrecondition` to `FenceLost` after
   `ClaimActionWork` already succeeded, so the plane serve loop demotes fencing
   instead of treating fence loss as idle `Ok(None)`.
