@@ -168,12 +168,15 @@ parallel jobs.
   intake. The filesystem `queue/health.json` file describes filesystem intake
   only.
 - Heartbeats fail closed: loss or expiry cancels the active harness future
-  within a bounded grace period. The host never continues execution without a
-  live fence. Terminal acknowledgement retries with the same fence
-  up to five times while its lease remains live; a lost fence, exhausted retry
-  budget, or shutdown stops plane intake instead of continuing without claim
-  authority. Lease safety uses host-monotonic deadlines bounded from each
-  acquire/renew RPC, not cross-host wall-clock comparisons.
+  and drains it within a bounded grace period so bash process groups are
+  reaped. The host never continues execution without a live fence, and it
+  does not acknowledge under a lost fence. Terminal acknowledgement retries
+  with the same fence up to five times while its lease remains live,
+  renewing the fence between attempts (matching claim-event retries); a lost
+  fence, exhausted retry budget, or shutdown stops plane intake instead of
+  continuing without claim authority. Lease safety uses host-monotonic
+  deadlines bounded from each acquire/renew RPC, not cross-host wall-clock
+  comparisons.
 - Harness and mapping failures are acknowledged `failed` with a bounded
   reason. Parked runs are acknowledged `parked` with a durable idempotency key.
   If `--checkpoint-store-id` is configured, the acknowledgement also carries

@@ -118,9 +118,14 @@ pub(super) async fn execute(
                 let call_window = match claim_call_window(&claim, options.heartbeat_interval) {
                     Ok(window) => window,
                     Err(error) => {
-                        let _ = cancel_tx.send(true);
-                        lifecycle_observe_error(options, Some(&claim_id), &error);
-                        return Err(error);
+                        return fail_closed_after_fence_loss(
+                            &cancel_tx,
+                            &mut run,
+                            options,
+                            Some(&claim_id),
+                            error,
+                        )
+                        .await;
                     }
                 };
                 match tokio::time::timeout(
@@ -129,17 +134,27 @@ pub(super) async fn execute(
                 ).await {
                     Ok(Ok(lease)) => claim.lease = lease,
                     Ok(Err(error)) => {
-                        let _ = cancel_tx.send(true);
-                        lifecycle_observe_error(options, Some(&claim_id), &error);
-                        return Err(error);
+                        return fail_closed_after_fence_loss(
+                            &cancel_tx,
+                            &mut run,
+                            options,
+                            Some(&claim_id),
+                            error,
+                        )
+                        .await;
                     }
                     Err(_) => {
-                        let _ = cancel_tx.send(true);
-                        let error = PlaneIntakeError::FenceLost(
-                            "heartbeat did not complete before the lease safety deadline".into(),
-                        );
-                        lifecycle_observe_error(options, Some(&claim_id), &error);
-                        return Err(error);
+                        return fail_closed_after_fence_loss(
+                            &cancel_tx,
+                            &mut run,
+                            options,
+                            Some(&claim_id),
+                            PlaneIntakeError::FenceLost(
+                                "heartbeat did not complete before the lease safety deadline"
+                                    .into(),
+                            ),
+                        )
+                        .await;
                     }
                 }
             }
@@ -380,6 +395,18 @@ impl<T: PlaneIntakePort + ?Sized> PlaneIntakeAckExt for T {
                     "shutdown requested while acknowledgement was retrying".into(),
                 ));
             }
+            // Renew the same fence before retrying. Claim-event retries already
+            // do this; without it, hung acks consume the remaining lease and a
+            // completed run can expire, be reclaimed, and execute twice.
+            let call_window = claim_call_window(claim, options.heartbeat_interval)?;
+            claim.lease =
+                tokio::time::timeout(call_window, self.heartbeat(claim, options.claim_ttl))
+                    .await
+                    .map_err(|_| {
+                        PlaneIntakeError::FenceLost(
+                            "acknowledgement heartbeat exceeded the lease safety deadline".into(),
+                        )
+                    })??;
             let safe_sleep = claim
                 .lease
                 .valid_until
@@ -571,6 +598,30 @@ async fn cancel_and_drain<F>(
 {
     let _ = cancel.send(true);
     let _ = tokio::time::timeout(grace, run).await;
+}
+
+/// Stop local execution after fence loss the same way shutdown does: cancel,
+/// then drain so Run cleanup can reap bash process groups. Dropping the harness
+/// future immediately only SIGKILLs the bash parent (`kill_on_drop`); rlimit
+/// descendants can keep mutating the workspace after another claimant starts.
+async fn fail_closed_after_fence_loss<F>(
+    cancel: &watch::Sender<bool>,
+    run: &mut std::pin::Pin<Box<F>>,
+    options: &PlaneServeOptions,
+    claim_id: Option<&str>,
+    error: PlaneIntakeError,
+) -> Result<Execution, PlaneIntakeError>
+where
+    F: std::future::Future,
+{
+    // Remaining plane lease may already be zero; cleanup is local and must not
+    // wait on claim_call_window.
+    let grace = options
+        .heartbeat_interval
+        .clamp(Duration::from_millis(50), Duration::from_secs(5));
+    cancel_and_drain(cancel, run, grace).await;
+    lifecycle_observe_error(options, claim_id, &error);
+    Err(error)
 }
 
 fn bounded_reason(reason: &str) -> String {
