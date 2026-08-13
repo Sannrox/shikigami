@@ -97,7 +97,10 @@ protocol to a private deep module; it is not a new public port or adapter seam.
 One fenced claim's plane protocol, including claimable listing, claim RPC,
 continuation and park snapshot validation, action-instance parameter lookup,
 pre-run fence renew, and post-admit heartbeat, ack, and claim-event RPCs with
-contention → `FenceLost` mapping. The sekai-chisei claim client delegates this
+contention → `FenceLost` mapping. After Claim/Heartbeat success the adapter
+binds `effect_id`, `claim_owner == requested runtime_id`, fencing token, and
+generation (same or +1), and sets `valid_until` from granted remaining TTL
+capped by the requested TTL. The sekai-chisei claim client delegates this
 protocol to a private deep module behind the existing `PlaneIntakePort` seam;
 it does not move admission into the harness.
 
