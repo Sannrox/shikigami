@@ -26,9 +26,6 @@ struct QueueCache {
     inbox_mtime: Option<SystemTime>,
     inbox_idle: bool,
     last_health: Option<String>,
-    counts: Option<QueueCounts>,
-    counts_inbox_mtime: Option<SystemTime>,
-    counts_processing_mtime: Option<SystemTime>,
     #[cfg(test)]
     inbox_file_reads: u64,
     #[cfg(test)]
@@ -275,29 +272,12 @@ impl FilesystemQueue {
     }
 
     fn queue_counts(&self) -> Result<QueueCounts, ServeError> {
-        let inbox_mtime = dir_mtime(&self.layout.inbox);
-        let processing_mtime = dir_mtime(&self.layout.processing);
-        {
-            let cache = self.cache.lock().expect("queue cache lock");
-            if let Some(counts) = cache.counts
-                && cache.counts_inbox_mtime == inbox_mtime
-                && cache.counts_processing_mtime == processing_mtime
-            {
-                return Ok(counts);
-            }
-        }
         let (inbox_entries, inbox_json) = count_inbox(&self.layout.inbox)?;
-        let processing_json = count_json(&self.layout.processing)?;
-        let counts = QueueCounts {
+        Ok(QueueCounts {
             inbox_entries,
             inbox_json,
-            processing_json,
-        };
-        let mut cache = self.cache.lock().expect("queue cache lock");
-        cache.counts = Some(counts);
-        cache.counts_inbox_mtime = inbox_mtime;
-        cache.counts_processing_mtime = processing_mtime;
-        Ok(counts)
+            processing_json: count_json(&self.layout.processing)?,
+        })
     }
 
     fn inbox_is_idle(&self) -> Result<bool, ServeError> {
@@ -318,7 +298,6 @@ impl FilesystemQueue {
         let mut cache = self.cache.lock().expect("queue cache lock");
         cache.inbox_idle = false;
         cache.inbox_mtime = None;
-        cache.counts = None;
         cache.last_health = None;
     }
 
