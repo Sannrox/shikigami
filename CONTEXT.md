@@ -80,10 +80,11 @@ interface over this private deep module; snapshot publishing remains on
 
 One plane-acquired claim's fenced execution protocol, including continuation
 preparation, claim events, heartbeat and shutdown races, harness execution,
-acknowledgement retry (renewing the live fence between attempts), fail-closed
-drain after in-run fence loss, and worker lifecycle publication. Plane intake
-delegates this protocol to a private deep module; it does not add a public port
-or adapter seam.
+one lease-safe fenced RPC retry protocol for both acknowledgement and claim
+events (renewing the live fence between attempts and never sleeping past half
+the remaining lease), fail-closed drain after in-run fence loss, and worker
+lifecycle publication. Plane intake delegates this protocol to a private deep
+module; it does not add a public port or adapter seam.
 
 ## Plane session
 
