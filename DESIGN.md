@@ -126,6 +126,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
 | `src/model.rs` | Scripted / HTTP (ungoverned) |
 | `src/events.rs` | stderr / jsonl / none |
+| `src/worker_lifecycle.rs` | Canonical worker snapshot publisher plus thin `serve_lifecycle_http` over the private fleet HTTP probe protocol |
 | `src/config.rs`, `src/config/resolution.rs` | Versioned settings over the private deep effective settings resolution protocol |
 | `src/bin/shikigami.rs` | CLI host |
 | `sekai-client` dependency | Versioned Rust facade over canonical sekai-chisei gRPC contracts |

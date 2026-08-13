@@ -68,6 +68,14 @@ checkpointing, model-report acknowledgement, and post-turn cancellation. The
 Run transaction delegates this protocol to a private deep module; it is not a
 new public port or adapter seam.
 
+## Worker lifecycle HTTP probe
+
+The fleet probe protocol over the worker lifecycle snapshot, including
+connection caps, bounded header reads, `/readyz` and `/livez` mapping, and
+loopback-only `/lifecycle` detail. `serve_lifecycle_http` stays the public
+interface over this private deep module; snapshot publishing remains on
+`WorkerLifecycle`. It is not a new public port or adapter seam.
+
 ## Claimed run transaction
 
 One plane-acquired claim's fenced execution protocol, including continuation

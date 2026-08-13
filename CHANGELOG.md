@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen the worker lifecycle HTTP probe behind the thin `serve_lifecycle_http`
+  interface so connection caps, bounded header reads, `/readyz` `/livez`
+  mapping, and loopback-only `/lifecycle` detail no longer crowd the snapshot
+  publisher.
 - Deepen Engine leftover run helpers behind existing private modules so cancel
   and timeout bounds live with supervision, tool-call identity with the tool
   batch, and context compaction with the durable model turn.
