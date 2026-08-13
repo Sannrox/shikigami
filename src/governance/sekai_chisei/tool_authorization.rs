@@ -2,7 +2,7 @@
 
 use sekai_client::SdkErrorCode;
 
-use super::{GovernanceError, RunHandle, SekaiChiseiGovernance, proto};
+use super::{GovernanceError, RunHandle, SekaiChiseiGovernance, plane_session, proto};
 use proto::chisei::{
     AuthorizeExternalActionRequest, ExternalActionDecision, ExternalActionRequest,
     RedeemExternalActionPermitRequest,
@@ -22,7 +22,7 @@ pub(super) async fn authorize(
     // Mid-run external-action authz is always fail-closed for the sekai-chisei
     // adapter: transport/build/RPC errors must never permit tool execution
     // (including destructive bash), regardless of governance.fail_closed.
-    let client = governance.connect().await?;
+    let client = plane_session::connect(governance).await?;
     let request = build_request(governance, handle, call_id, name, args_json)?;
     let response: proto::chisei::AuthorizeExternalActionResponse = client
         .raw()
@@ -32,14 +32,15 @@ pub(super) async fn authorize(
                 request: Some(request.clone()),
                 offline: false,
             },
-            governance.sdk_call_options(
+            plane_session::call_options(
+                governance,
                 Some(&handle.namespace),
                 Some(&request.operation_id),
                 Some(&request.request_id),
             ),
         )
         .await
-        .map_err(|error| SekaiChiseiGovernance::sdk_error("AuthorizeExternalAction", error))?;
+        .map_err(|error| plane_session::map_error("AuthorizeExternalAction", error))?;
     let decision = response
         .decision
         .ok_or_else(|| GovernanceError::Message("external-action missing decision".into()))?;
@@ -66,7 +67,8 @@ pub(super) async fn authorize(
                 ),
                 invoked_at_ms: 0,
             },
-            governance.sdk_call_options(
+            plane_session::call_options(
+                governance,
                 Some(&handle.namespace),
                 Some(&request.operation_id),
                 Some(&request.request_id),
@@ -89,7 +91,7 @@ pub(super) async fn authorize(
             } else if security_sensitive_failure {
                 GovernanceError::Message(format!("RedeemExternalActionPermit: {error}"))
             } else {
-                SekaiChiseiGovernance::sdk_error("RedeemExternalActionPermit", error)
+                plane_session::map_error("RedeemExternalActionPermit", error)
             });
         }
     };

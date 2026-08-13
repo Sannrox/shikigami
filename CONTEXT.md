@@ -74,6 +74,13 @@ acknowledgement retry, and worker lifecycle publication. Plane intake delegates
 this protocol to a private deep module; it does not add a public port or adapter
 seam.
 
+## Plane session
+
+Shared sekai-chisei plane-connection protocol, including endpoint connect,
+token and auth-source metadata, CallOptions correlation, SdkError mapping, and
+the live probe. Governed RPC modules and the claim client delegate this
+protocol to a private deep module; it is not a new public port or adapter seam.
+
 ## Plane claim acquisition
 
 One fenced claim's plane protocol, including claimable listing, claim RPC,

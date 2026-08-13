@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen sekai-chisei plane session behind the existing governance and
+  `PlaneIntakePort` seams so connect, token, auth-source metadata, CallOptions,
+  SdkError mapping, and the live probe no longer crowd the adapter.
 - Deepen plane claim lease RPCs behind the existing `PlaneIntakePort` seam so
   heartbeat, ack, and claim-event reporting no longer crowd the sekai-chisei
   claim client.
