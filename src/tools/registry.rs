@@ -337,3 +337,17 @@ impl ToolRegistry {
         unreachable!("bounded redirect loop always returns")
     }
 }
+
+impl Drop for ToolRegistry {
+    fn drop(&mut self) {
+        // Fence-loss / cancel can drop the harness future before the async
+        // reaper runs. Reap process groups here so bash descendants cannot
+        // outlive the claim.
+        let Ok(mut guard) = self.bg_jobs.lock() else {
+            return;
+        };
+        for (_, job) in guard.jobs.drain() {
+            self.executor.sandbox.kill_process_group(job.child.id());
+        }
+    }
+}

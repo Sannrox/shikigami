@@ -72,9 +72,10 @@ new public port or adapter seam.
 
 One plane-acquired claim's fenced execution protocol, including continuation
 preparation, claim events, heartbeat and shutdown races, harness execution,
-acknowledgement retry, and worker lifecycle publication. Plane intake delegates
-this protocol to a private deep module; it does not add a public port or adapter
-seam.
+acknowledgement retry (renewing the live fence between attempts), fail-closed
+drain after in-run fence loss, and worker lifecycle publication. Plane intake
+delegates this protocol to a private deep module; it does not add a public port
+or adapter seam.
 
 ## Plane session
 

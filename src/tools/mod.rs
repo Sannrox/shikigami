@@ -195,6 +195,41 @@ mod tests {
         reg.kill_background_jobs().await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_registry_reaps_background_bash_process_group() {
+        use crate::config::{SandboxBackend, SandboxSettings};
+
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("leaked");
+        let sandbox = SandboxSettings {
+            backend: SandboxBackend::Rlimit,
+            ..Default::default()
+        };
+        let reg = ToolRegistry::with_builtins_sandbox_protected_environment(
+            dir.path(),
+            vec!["bash".into()],
+            30,
+            NetworkSettings::default(),
+            true,
+            &[],
+            sandbox,
+        )
+        .unwrap();
+        let command = format!(
+            "(sleep 0.4; printf leaked > {}) & sleep 20",
+            marker.display()
+        );
+        let args = serde_json::json!({"command": command}).to_string();
+        reg.execute("bash_background", &args).await.unwrap();
+        drop(reg);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !marker.exists(),
+            "bash descendants must not outlive ToolRegistry drop"
+        );
+    }
+
     #[tokio::test]
     async fn bash_environment_protects_credentials_foreground_and_background() {
         let dir = tempdir().unwrap();

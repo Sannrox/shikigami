@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Drain the harness future on in-run claim fence loss (instead of dropping it)
+  and reap bash process groups on tool/registry drop so descendants cannot keep
+  mutating the workspace after another claimant takes the lease.
+- Renew the live claim fence between terminal acknowledgement retries so a hung
+  ack cannot starve the remaining TTL and let the plane reclaim already-finished
+  work.
 - Refuse Bash under `governed` / `fail_closed` when `sandbox.backend=none` or
   `network.egress=unrestricted`; drop Bash from the governed sekai-chisei
   example (cwd-only host `bash -c` is not an FS jail).
