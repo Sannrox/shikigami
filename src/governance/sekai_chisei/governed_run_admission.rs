@@ -3,7 +3,7 @@
 use crate::checkpoint::GovernanceCheckpoint;
 use crate::governance::{GovernanceError, RunHandle};
 
-use super::{SekaiChiseiGovernance, harvest, proto};
+use super::{SekaiChiseiGovernance, harvest, plane_session, proto};
 
 pub(super) fn host_receipt_input(
     governance: &SekaiChiseiGovernance,
@@ -38,18 +38,19 @@ async fn create_host_receipt(
     task: &str,
     logical_operation_id: &str,
 ) -> Result<String, GovernanceError> {
-    let client = governance.connect().await?;
+    let client = plane_session::connect(governance).await?;
     let plan = client
         .plan_execution(
             host_receipt_input(governance, run_id, task, logical_operation_id),
-            governance.sdk_call_options(
+            plane_session::call_options(
+                governance,
                 Some(&governance.namespace),
                 Some(logical_operation_id),
                 Some(&format!("shikigami-host:{run_id}")),
             ),
         )
         .await
-        .map_err(|error| SekaiChiseiGovernance::sdk_error("PlanExecution host receipt", error))?;
+        .map_err(|error| plane_session::map_error("PlanExecution host receipt", error))?;
     if plan.budget.as_ref().is_some_and(|budget| !budget.allowed) {
         return Err(GovernanceError::Denied(
             plan.budget
@@ -82,7 +83,7 @@ pub(super) async fn admit(
             "sekai-chisei endpoint not set".into(),
         ));
     }
-    if let Err(error) = governance.probe().await
+    if let Err(error) = plane_session::probe(governance).await
         && governance.fail_closed
     {
         return Err(error);

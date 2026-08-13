@@ -15,6 +15,33 @@ use super::resume::{configured_workspace_adapter, validate_resumed_workspace};
 use super::transaction::RunTransaction;
 use super::{Engine, RunError, RunRequest, RunResult, SYSTEM_PROMPT};
 
+pub(super) fn check_bounds(
+    engine: &Engine,
+    run_id: &str,
+    request: &RunRequest,
+    started: tokio::time::Instant,
+    timeout: Option<Duration>,
+) -> Result<(), RunError> {
+    engine
+        .registry
+        .heartbeat(run_id)
+        .map_err(|error| RunError::Message(format!("run registry heartbeat failed: {error}")))?;
+    if let Some(rx) = &request.cancel
+        && *rx.borrow()
+    {
+        return Err(RunError::Cancelled);
+    }
+    if engine.registry.cancel_requested(run_id) {
+        return Err(RunError::Cancelled);
+    }
+    if let Some(limit) = timeout
+        && started.elapsed() >= limit
+    {
+        return Err(RunError::TimedOut(limit));
+    }
+    Ok(())
+}
+
 pub(super) struct RunSupervision<'a> {
     engine: &'a Engine,
 }

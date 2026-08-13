@@ -15,6 +15,7 @@ use crate::model::{ChatMessage, ModelTurn, ToolCall};
 use crate::tools::{self, ToolOutput, ToolRegistry};
 
 use super::session::RunSession;
+use super::supervision::check_bounds;
 use super::{Engine, ParkInfo, RunError, RunRequest};
 
 pub(super) enum ToolBatchOutcome {
@@ -115,8 +116,7 @@ impl<'a> DurableToolBatch<'a> {
 
         // Parallel path only for all-read batches (no report/park/write).
         let batch_outcomes: Vec<(ToolCall, Result<ToolOutput, String>)> = if can_parallel {
-            self.engine
-                .check_bounds(&session.run_id, request, started, timeout)?;
+            check_bounds(self.engine, &session.run_id, request, started, timeout)?;
             let sem = Arc::new(Semaphore::new(concurrency));
             let mut set = JoinSet::new();
             let turn_number = session.turns;
@@ -127,7 +127,7 @@ impl<'a> DurableToolBatch<'a> {
                 let sem = Arc::clone(&sem);
                 set.spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore");
-                    let stable_call_id = Engine::stable_tool_call_id(&call, turn_number, i);
+                    let stable_call_id = stable_tool_call_id(&call, turn_number, i);
                     if let Err(e) = gov
                         .authorize_tool_with_id(
                             &handle,
@@ -159,8 +159,7 @@ impl<'a> DurableToolBatch<'a> {
         } else {
             let mut out = Vec::with_capacity(turn.tool_calls.len());
             for (index, call) in turn.tool_calls.iter().enumerate() {
-                self.engine
-                    .check_bounds(&session.run_id, request, started, timeout)?;
+                check_bounds(self.engine, &session.run_id, request, started, timeout)?;
                 if let Err(e) = hooks::run_hooks(
                     &self.engine.config.hooks,
                     HookEvent::PreTool,
@@ -175,7 +174,7 @@ impl<'a> DurableToolBatch<'a> {
                     out.push((call.clone(), Err(e)));
                     continue;
                 }
-                let stable_call_id = Engine::stable_tool_call_id(call, session.turns, index);
+                let stable_call_id = stable_tool_call_id(call, session.turns, index);
                 if self
                     .engine
                     .governance
@@ -261,7 +260,7 @@ impl<'a> DurableToolBatch<'a> {
                     .governance
                     .mark_tool_execution_complete(
                         handle,
-                        &Engine::stable_tool_call_id(call, session.turns, index),
+                        &stable_tool_call_id(call, session.turns, index),
                     )
                     .await?;
             }
@@ -270,7 +269,7 @@ impl<'a> DurableToolBatch<'a> {
             .iter()
             .enumerate()
             .map(|(index, (call, outcome))| StagedToolReport {
-                call_id: Engine::stable_tool_call_id(call, session.turns, index),
+                call_id: stable_tool_call_id(call, session.turns, index),
                 name: call.name.clone(),
                 ok: match outcome {
                     Ok(ToolOutput::Text(_)) => true,
@@ -302,7 +301,7 @@ impl<'a> DurableToolBatch<'a> {
 
         let mut terminal_report = None;
         for (index, (call, outcome)) in batch_outcomes.into_iter().enumerate() {
-            let report_call_id = Engine::stable_tool_call_id(&call, session.turns, index);
+            let report_call_id = stable_tool_call_id(&call, session.turns, index);
             match outcome {
                 Ok(ToolOutput::Text(text)) => {
                     self.engine
@@ -368,20 +367,12 @@ impl<'a> DurableToolBatch<'a> {
                     let parked = ParkedState {
                         reason: park.reason.clone(),
                         question: park.question.clone(),
-                        tool_call_id: Engine::conversation_tool_call_id(
-                            &call,
-                            session.turns,
-                            index,
-                        ),
+                        tool_call_id: conversation_tool_call_id(&call, session.turns, index),
                     };
                     let info = ParkInfo {
                         reason: park.reason.clone(),
                         question: park.question.clone(),
-                        tool_call_id: Engine::conversation_tool_call_id(
-                            &call,
-                            session.turns,
-                            index,
-                        ),
+                        tool_call_id: conversation_tool_call_id(&call, session.turns, index),
                     };
                     *pending_park = Some(parked.clone());
                     let report_result = self
@@ -459,5 +450,44 @@ impl<'a> DurableToolBatch<'a> {
             Some((summary, success)) => Ok(ToolBatchOutcome::Completed { summary, success }),
             None => Ok(ToolBatchOutcome::Continue),
         }
+    }
+}
+
+fn stable_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
+    if call.id.is_empty() {
+        format!("tool-{turn}-{index}")
+    } else {
+        format!("tool-{turn}-{index}-{}", call.id)
+    }
+}
+
+fn conversation_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
+    if call.id.is_empty() {
+        format!("tool-{turn}-{index}")
+    } else {
+        call.id.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_ids_qualify_model_ids_and_synthesize_missing_ones() {
+        let named = ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            args_json: "{}".into(),
+        };
+        let anonymous = ToolCall {
+            id: String::new(),
+            name: "read_file".into(),
+            args_json: "{}".into(),
+        };
+        assert_eq!(stable_tool_call_id(&named, 2, 3), "tool-2-3-call-1");
+        assert_eq!(stable_tool_call_id(&anonymous, 2, 3), "tool-2-3");
+        assert_eq!(conversation_tool_call_id(&named, 2, 3), "call-1");
+        assert_eq!(conversation_tool_call_id(&anonymous, 2, 3), "tool-2-3");
     }
 }
