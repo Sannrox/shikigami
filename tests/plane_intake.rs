@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use shikigami::{
-    ClaimedPlaneWork, Config, Harness, PlaneAck, PlaneAckOutcome, PlaneClaim, PlaneClaimEventKind,
-    PlaneClaimLease, PlaneIntakeError, PlaneIntakePort, PlaneServeOptions, PlaneWorkContinuation,
-    StateRoot, WorkerLifecycle, WorkerLifecycleIdentity, WorkerLifecycleState, run_plane_serve,
+    ClaimedPlaneWork, Config, Harness, PermissionMode, PlaneAck, PlaneAckOutcome, PlaneClaim,
+    PlaneClaimEventKind, PlaneClaimLease, PlaneIntakeError, PlaneIntakePort, PlaneServeOptions,
+    PlaneWorkContinuation, StateRoot, WorkerLifecycle, WorkerLifecycleIdentity,
+    WorkerLifecycleState, run_plane_serve,
 };
 use tempfile::tempdir;
 
@@ -201,7 +202,7 @@ async fn claim_run_and_ack_with_mock_plane() {
     );
     assert_eq!(*intake.ack_attempts.lock().unwrap(), 2);
     assert!(
-        *intake.heartbeat_calls.lock().unwrap() >= 2,
+        *intake.heartbeat_calls.lock().unwrap() >= 1,
         "ack retry must renew the live fence, got {} heartbeats",
         *intake.heartbeat_calls.lock().unwrap()
     );
@@ -671,6 +672,15 @@ async fn lifecycle_records_fence_lost() {
     config.model.adapter = "scripted".into();
     config.events.adapter = "none".into();
     config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    // In-run HeartbeatActionClaim FailedPrecondition must stay FenceLost, never idle.
+    config.tools.mode = PermissionMode::WorkspaceExec;
+    config.model.script_json = Some(
+        json!([
+            {"tool_calls":[{"name":"bash","args_json":"{\"command\":\"sleep 0.2\"}"}]},
+            {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}
+        ])
+        .to_string(),
+    );
     let harness = Harness::from_config(config, state).unwrap();
 
     let lifecycle = WorkerLifecycle::open(
@@ -684,35 +694,14 @@ async fn lifecycle_records_fence_lost() {
     .unwrap();
     lifecycle.mark_serving().unwrap();
 
-    // Replacement path heartbeats before the run; fail that heartbeat to hit fence_lost.
-    let mut claim = sample_claim("effect-fence");
-    let input_json = json!({"answer": "retry"}).to_string();
-    let input_digest = Sha256::digest(input_json.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    claim.work.continuation = Some(PlaneWorkContinuation {
-        resolution_id: "resolution-1".into(),
-        park_id: "park-1".into(),
-        effect_id: claim.work.effect_id.clone(),
-        operation_id: claim.work.operation_id.clone(),
-        park_generation: 1,
-        input_json,
-        input_digest: format!("sha256:{input_digest}"),
-        checkpoint: Some(shikigami::PlaneCheckpoint {
-            store_id: "missing-store".into(),
-            reference: "run-missing".into(),
-            digest: "sha256:deadbeef".into(),
-        }),
-    });
-
     let intake = FenceFailIntake {
-        claims: Mutex::new(VecDeque::from([claim])),
+        claims: Mutex::new(VecDeque::from([sample_claim("effect-fence")])),
     };
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let options = PlaneServeOptions {
         max_jobs: Some(1),
-        checkpoint_store_id: Some("shikigami-local".into()),
+        claim_ttl: Duration::from_secs(5),
+        heartbeat_interval: Duration::from_millis(20),
         lifecycle: Some(lifecycle.clone()),
         ..Default::default()
     };
@@ -742,17 +731,12 @@ impl PlaneIntakePort for InRunFenceLostIntake {
 
     async fn heartbeat(
         &self,
-        claim: &PlaneClaim,
-        ttl: Duration,
+        _claim: &PlaneClaim,
+        _ttl: Duration,
     ) -> Result<PlaneClaimLease, PlaneIntakeError> {
-        let mut count = self.heartbeats.lock().unwrap();
-        *count += 1;
-        if *count > 1 {
-            return Err(PlaneIntakeError::FenceLost("in-run lease fenced".into()));
-        }
-        let mut lease = claim.lease.clone();
-        lease.valid_until = std::time::Instant::now() + ttl;
-        Ok(lease)
+        *self.heartbeats.lock().unwrap() += 1;
+        // No extra pre-run heartbeat: the first claimed_run heartbeat is in-run.
+        Err(PlaneIntakeError::FenceLost("in-run lease fenced".into()))
     }
 
     async fn ack(&self, _claim: &PlaneClaim, ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
@@ -838,7 +822,82 @@ async fn in_run_fence_lost_cancels_without_stale_ack() {
         intake.acks.lock().unwrap()
     );
     assert!(
-        *intake.heartbeats.lock().unwrap() >= 2,
-        "pre-run heartbeat must succeed before in-run fence loss"
+        *intake.heartbeats.lock().unwrap() >= 1,
+        "in-run heartbeat must fail closed after fence loss"
+    );
+}
+
+struct HeartbeatCountingIntake {
+    claims: Mutex<VecDeque<PlaneClaim>>,
+    heartbeats: Mutex<u32>,
+}
+
+#[async_trait]
+impl PlaneIntakePort for HeartbeatCountingIntake {
+    async fn claim_next(
+        &self,
+        _runtime_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError> {
+        Ok(self.claims.lock().unwrap().pop_front())
+    }
+
+    async fn heartbeat(
+        &self,
+        claim: &PlaneClaim,
+        ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        *self.heartbeats.lock().unwrap() += 1;
+        let mut lease = claim.lease.clone();
+        lease.valid_until = std::time::Instant::now() + ttl;
+        Ok(lease)
+    }
+
+    async fn ack(&self, _claim: &PlaneClaim, _ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+
+    async fn report_claim_event(
+        &self,
+        _claim: &PlaneClaim,
+        _kind: PlaneClaimEventKind,
+        _checkpoint_digest: &str,
+        _reason_code: &str,
+        _request_id: &str,
+    ) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn claimed_run_does_not_heartbeat_before_harness_run() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+
+    let intake = HeartbeatCountingIntake {
+        claims: Mutex::new(VecDeque::from([sample_claim("effect-once")])),
+        heartbeats: Mutex::new(0),
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        max_jobs: Some(1),
+        claim_ttl: Duration::from_secs(60),
+        heartbeat_interval: Duration::from_secs(30),
+        ..Default::default()
+    };
+    let completed = run_plane_serve(&harness, &intake, options, rx)
+        .await
+        .unwrap();
+    assert_eq!(completed, 1);
+    assert_eq!(
+        *intake.heartbeats.lock().unwrap(),
+        0,
+        "admit already renewed the fence; claimed_run must not heartbeat again before harness.run"
     );
 }

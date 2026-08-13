@@ -57,7 +57,9 @@ Feature flag: `governance-sekai-chisei` (default **on**) enables the pinned
 operation events, and receipts; the adapter uses its bounded raw escape hatch
 for supported RPCs without a typed helper yet. A private plane-session module
 applies connection setup, authentication metadata, deadlines, and SDK error
-mapping. The facade consumes the canonical upstream `sekai-proto`
+mapping. The plane claim client reuses one connected Channel for
+list/claim/lease RPCs and reconnects only after a transport error. The facade
+consumes the canonical upstream `sekai-proto`
 crate, so Shikigami does not carry a second protocol snapshot. The supported
 boundary is `sekai-client` 0.1.x with `sekai-proto` 1.x, pinned in
 `Cargo.toml`/`Cargo.lock`; the SDK permits plain HTTP only for loopback
