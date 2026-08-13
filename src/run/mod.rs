@@ -2,7 +2,9 @@
 //!
 //! Public surface: [`Engine`], [`RunRequest`], [`RunResult`], and related types.
 //! Internals:
-//! - [`supervision`] — run admission, ownership, heartbeat, and finalization
+//! - [`supervision`] — run admission, ownership, heartbeat, cancel/timeout bounds, and finalization
+//! - [`model_turn`] — durable model turns and context compaction
+//! - [`tool_batch`] — durable tool batches and stable call identity
 //! - [`session::RunSession`] — owned attempt state + deep checkpoint interface
 //! - [`resume`] — checkpoint workspace boundary checks
 
@@ -19,7 +21,7 @@ use crate::checkpoint::CheckpointError;
 use crate::config::Config;
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort};
-use crate::model::{ChatMessage, CostEstimate, ModelError, ModelPort, TokenUsage, ToolCall};
+use crate::model::{CostEstimate, ModelError, ModelPort, TokenUsage};
 use crate::registry::RunRegistry;
 use crate::tools::{TodoItem, ToolError};
 use crate::workspace::{WorkspaceError, WorkspacePort};
@@ -35,42 +37,13 @@ mod transaction;
 
 use supervision::RunSupervision;
 
+pub use model_turn::compact_messages;
+
 #[cfg(test)]
 use resume::validate_resumed_workspace;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
-
-/// Compact middle of the message list when over `threshold`.
-/// Keeps the first message (task) and the last `keep_tail` messages.
-/// Returns `(before, after)` when compaction ran.
-pub fn compact_messages(
-    messages: &mut Vec<ChatMessage>,
-    threshold: usize,
-    keep_tail: usize,
-) -> Option<(usize, usize)> {
-    let before = messages.len();
-    if before <= threshold || before <= keep_tail + 1 {
-        return None;
-    }
-    let head = messages.first().cloned()?;
-    let tail_start = before.saturating_sub(keep_tail);
-    let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
-    let dropped = before.saturating_sub(1 + tail.len());
-    let summary = ChatMessage {
-        role: "user".into(),
-        content: format!(
-            "[context compacted: {dropped} earlier messages omitted; continue the original task]"
-        ),
-        tool_call_id: String::new(),
-        tool_calls: vec![],
-    };
-    *messages = std::iter::once(head)
-        .chain(std::iter::once(summary))
-        .chain(tail)
-        .collect();
-    Some((before, messages.len()))
-}
 
 /// How a run ended (success or not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -273,48 +246,6 @@ impl Engine {
         Ok(())
     }
 
-    fn stable_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
-        if call.id.is_empty() {
-            format!("tool-{turn}-{index}")
-        } else {
-            format!("tool-{turn}-{index}-{}", call.id)
-        }
-    }
-
-    fn conversation_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
-        if call.id.is_empty() {
-            format!("tool-{turn}-{index}")
-        } else {
-            call.id.clone()
-        }
-    }
-
-    fn check_bounds(
-        &self,
-        run_id: &str,
-        request: &RunRequest,
-        started: tokio::time::Instant,
-        timeout: Option<Duration>,
-    ) -> Result<(), RunError> {
-        self.registry.heartbeat(run_id).map_err(|error| {
-            RunError::Message(format!("run registry heartbeat failed: {error}"))
-        })?;
-        if let Some(rx) = &request.cancel
-            && *rx.borrow()
-        {
-            return Err(RunError::Cancelled);
-        }
-        if self.registry.cancel_requested(run_id) {
-            return Err(RunError::Cancelled);
-        }
-        if let Some(limit) = timeout
-            && started.elapsed() >= limit
-        {
-            return Err(RunError::TimedOut(limit));
-        }
-        Ok(())
-    }
-
     pub(super) fn emit(&self, run_id: &str, event: HarnessEvent) {
         self.registry.append_event(run_id, &event);
         self.events.emit(event);
@@ -347,24 +278,6 @@ mod tests {
     use crate::tools;
     use crate::workspace;
     use tempfile::tempdir;
-
-    #[test]
-    fn compact_messages_shrinks_list() {
-        let mut msgs: Vec<ChatMessage> = (0..20)
-            .map(|i| ChatMessage {
-                role: if i == 0 { "user" } else { "assistant" }.into(),
-                content: format!("m{i}"),
-                tool_call_id: String::new(),
-                tool_calls: vec![],
-            })
-            .collect();
-        let (before, after) = compact_messages(&mut msgs, 10, 4).unwrap();
-        assert_eq!(before, 20);
-        assert!(after < before);
-        assert_eq!(msgs[0].content, "m0");
-        assert!(msgs[1].content.contains("compacted"));
-        assert_eq!(msgs.last().unwrap().content, "m19");
-    }
 
     #[test]
     fn resumed_workspace_must_match_configured_run_boundary() {

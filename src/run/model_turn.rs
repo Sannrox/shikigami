@@ -10,7 +10,39 @@ use crate::model::{ChatMessage, ModelTurn, TokenUsage};
 use crate::tools::{ToolDef, ToolRegistry};
 
 use super::session::RunSession;
-use super::{Engine, RunError, RunRequest, compact_messages};
+use super::supervision::check_bounds;
+use super::{Engine, RunError, RunRequest};
+
+/// Compact middle of the message list when over `threshold`.
+/// Keeps the first message (task) and the last `keep_tail` messages.
+/// Returns `(before, after)` when compaction ran.
+pub fn compact_messages(
+    messages: &mut Vec<ChatMessage>,
+    threshold: usize,
+    keep_tail: usize,
+) -> Option<(usize, usize)> {
+    let before = messages.len();
+    if before <= threshold || before <= keep_tail + 1 {
+        return None;
+    }
+    let head = messages.first().cloned()?;
+    let tail_start = before.saturating_sub(keep_tail);
+    let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
+    let dropped = before.saturating_sub(1 + tail.len());
+    let summary = ChatMessage {
+        role: "user".into(),
+        content: format!(
+            "[context compacted: {dropped} earlier messages omitted; continue the original task]"
+        ),
+        tool_call_id: String::new(),
+        tool_calls: vec![],
+    };
+    *messages = std::iter::once(head)
+        .chain(std::iter::once(summary))
+        .chain(tail)
+        .collect();
+    Some((before, messages.len()))
+}
 
 /// Deep private module that owns the durable protocol around model planning.
 pub(super) struct DurableModelTurn<'a> {
@@ -60,8 +92,13 @@ impl<'a> DurableModelTurn<'a> {
 
     /// Return one model turn only after its result and report cursor are durable.
     pub(super) async fn next(&mut self, session: &mut RunSession) -> Result<ModelTurn, RunError> {
-        self.engine
-            .check_bounds(&session.run_id, self.request, self.started, self.timeout)?;
+        check_bounds(
+            self.engine,
+            &session.run_id,
+            self.request,
+            self.started,
+            self.timeout,
+        )?;
 
         if self.staged_turn.is_none() && session.turns >= self.engine.config.run.max_turns {
             return Err(RunError::MaxTurns(self.engine.config.run.max_turns));
@@ -130,8 +167,13 @@ impl<'a> DurableModelTurn<'a> {
 
         // A stopped run resumes from the durable assistant result instead of
         // repeating a paid or governed model call.
-        self.engine
-            .check_bounds(&session.run_id, self.request, self.started, self.timeout)?;
+        check_bounds(
+            self.engine,
+            &session.run_id,
+            self.request,
+            self.started,
+            self.timeout,
+        )?;
         Ok(turn)
     }
 
@@ -192,5 +234,23 @@ mod tests {
         }];
 
         assert!(staged_model_turn(true, &messages).is_none());
+    }
+
+    #[test]
+    fn compact_messages_shrinks_list() {
+        let mut msgs: Vec<ChatMessage> = (0..20)
+            .map(|i| ChatMessage {
+                role: if i == 0 { "user" } else { "assistant" }.into(),
+                content: format!("m{i}"),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            })
+            .collect();
+        let (before, after) = compact_messages(&mut msgs, 10, 4).unwrap();
+        assert_eq!(before, 20);
+        assert!(after < before);
+        assert_eq!(msgs[0].content, "m0");
+        assert!(msgs[1].content.contains("compacted"));
+        assert_eq!(msgs.last().unwrap().content, "m19");
     }
 }

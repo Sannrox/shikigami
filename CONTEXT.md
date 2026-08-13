@@ -30,17 +30,18 @@ the private implementation. It is not a new public port or adapter seam.
 ## Durable tool batch
 
 One model turn's ordered set of tool calls, including authorization, execution,
-checkpoint markers, report replay, hooks, events, and park handling. The Run
-transaction delegates this protocol to a private deep module; it is not a new
-public port or adapter seam.
+stable and conversation tool-call identity, checkpoint markers, report replay,
+hooks, events, and park handling. The Run transaction delegates this protocol
+to a private deep module; it is not a new public port or adapter seam.
 
 ## Run admission and supervision
 
 One Run's host-local protocol around the durable Run transaction, including
 checkpoint preflight, registry ownership, independent heartbeat publication,
-transaction invocation, and durable result or error finalization. `Engine`
-delegates this protocol to a private deep module behind its existing public
-interface; it is not a new public port or adapter seam.
+cancel and timeout bounds checks, transaction invocation, and durable result
+or error finalization. `Engine` delegates this protocol to a private deep
+module behind its existing public interface; it is not a new public port or
+adapter seam.
 
 ## Run preparation
 
@@ -66,6 +67,7 @@ turn limits, context compaction, governed planning, usage accounting, assistant
 checkpointing, model-report acknowledgement, and post-turn cancellation. The
 Run transaction delegates this protocol to a private deep module; it is not a
 new public port or adapter seam.
+
 ## Claimed run transaction
 
 One plane-acquired claim's fenced execution protocol, including continuation
