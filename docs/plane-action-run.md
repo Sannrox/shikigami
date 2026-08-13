@@ -106,12 +106,12 @@ plane state. For detailed event fields, see [harvest.md](harvest.md) and
 | --- | --- |
 | Plane unavailable before claim | Do not start admitted work |
 | Claim race lost | Poll again; do not run the candidate |
-| Lease or fence lost mid-run | Stop polling/cancel local execution; do not acknowledge under stale authority |
+| Lease or fence lost mid-run | Cancel and drain local execution (reap bash process groups); do not acknowledge under stale authority |
 | Claimed envelope fails validation | Acknowledge `failed` while the fence is live |
 | Run parks for operator input | Acknowledge `parked`; wait for governed `resolve_parked_work/v1` |
 | Checkpoint unavailable after resolution | Report fenced fallback events and start a replacement under the same operation |
 | Retry or park limit exhausted | Plane dead-letters the effect; host must not invent another retry |
-| Terminal/event RPC is transient | Retry the same idempotency key within the live lease |
+| Terminal/event RPC is transient | Retry the same idempotency key within the live lease, renewing the fence between attempts |
 
 ## Trust boundaries
 
