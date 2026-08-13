@@ -6,18 +6,17 @@
 //! Authority: issue #155 / Tenkai ADR 0011. Managed contract applies to
 //! `serve --intake plane` only.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, watch};
 
 use crate::identity::{PRODUCT, VERSION};
+
+mod http_probe;
+
+pub use http_probe::serve_lifecycle_http;
 
 /// Protocol name for the worker lifecycle document.
 pub const WORKER_LIFECYCLE_PROTOCOL: &str = "shikigami.worker_lifecycle";
@@ -388,158 +387,6 @@ pub fn lifecycle_path(state_root: &Path) -> PathBuf {
     state_root.join("worker").join("lifecycle.json")
 }
 
-const LIFECYCLE_HTTP_MAX_CONNS: usize = 32;
-const LIFECYCLE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(2);
-const LIFECYCLE_HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
-const LIFECYCLE_HTTP_MAX_REQUEST_BYTES: usize = 2048;
-
-/// Read until the end of HTTP headers (or the max size) so probes that send a
-/// full request are not reset mid-write, and so the request line is complete.
-async fn read_http_request_prefix(
-    stream: &mut tokio::net::TcpStream,
-) -> Result<String, std::io::Error> {
-    let mut buf = Vec::with_capacity(256);
-    let mut chunk = [0u8; 256];
-    while buf.len() < LIFECYCLE_HTTP_MAX_REQUEST_BYTES {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.windows(2).any(|w| w == b"\n\n") {
-            break;
-        }
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// Bind an HTTP probe server for fleet readiness/liveness.
-///
-/// Routes:
-/// - `GET /readyz` — 200 when fleet-ready (`ready`|`active`), else 503
-/// - `GET /livez` — 200 unless `unhealthy`
-/// - `GET /lifecycle` — full JSON **only** when bound to loopback; otherwise 404
-///
-/// Cluster binds (`0.0.0.0`) intentionally omit detailed claim metadata so
-/// unauthenticated pod-network peers cannot scrape operational identifiers.
-/// Connections are capped and read/write timed out.
-pub async fn serve_lifecycle_http(
-    bind: SocketAddr,
-    lifecycle: WorkerLifecycle,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<SocketAddr, WorkerLifecycleError> {
-    let listener = TcpListener::bind(bind).await?;
-    let local = listener.local_addr()?;
-    let detail_routes = local.ip().is_loopback();
-    let permits = Arc::new(Semaphore::new(LIFECYCLE_HTTP_MAX_CONNS));
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                accept = listener.accept() => {
-                    match accept {
-                        Ok((mut stream, _)) => {
-                            let Ok(permit) = permits.clone().try_acquire_owned() else {
-                                let body = r#"{"error":"busy"}"#;
-                                let resp = format!(
-                                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                    body.len()
-                                );
-                                let _ = tokio::time::timeout(
-                                    LIFECYCLE_HTTP_WRITE_TIMEOUT,
-                                    stream.write_all(resp.as_bytes()),
-                                )
-                                .await;
-                                continue;
-                            };
-                            let lc = lifecycle.clone();
-                            tokio::spawn(async move {
-                                let _permit = permit;
-                                let Ok(req) = tokio::time::timeout(
-                                    LIFECYCLE_HTTP_READ_TIMEOUT,
-                                    read_http_request_prefix(&mut stream),
-                                )
-                                .await
-                                else {
-                                    return;
-                                };
-                                let Ok(req) = req else {
-                                    return;
-                                };
-                                let line = req.lines().next().unwrap_or("");
-                                let mut parts = line.split_whitespace();
-                                let method = parts.next().unwrap_or("");
-                                let path = parts.next().unwrap_or("/");
-                                let snap = lc.snapshot();
-                                let (status, body) = if !method.eq_ignore_ascii_case("GET") {
-                                    (405, r#"{"error":"method_not_allowed"}"#.to_string())
-                                } else {
-                                    match path {
-                                        "/livez" | "/livez/" => {
-                                            if matches!(snap.state, WorkerLifecycleState::Unhealthy)
-                                            {
-                                                (503, r#"{"ok":false}"#.to_string())
-                                            } else {
-                                                (200, r#"{"ok":true}"#.to_string())
-                                            }
-                                        }
-                                        "/readyz" | "/readyz/" => {
-                                            if snap.state.ready_for_fleet() {
-                                                (200, r#"{"ok":true}"#.to_string())
-                                            } else {
-                                                (
-                                                    503,
-                                                    format!(
-                                                        r#"{{"ok":false,"state":"{}"}}"#,
-                                                        snap.state.as_str()
-                                                    ),
-                                                )
-                                            }
-                                        }
-                                        "/lifecycle" | "/lifecycle/" | "/" if detail_routes => {
-                                            match serde_json::to_string(&snap) {
-                                                Ok(j) => (200, j),
-                                                Err(_) => {
-                                                    (500, r#"{"error":"serialize"}"#.into())
-                                                }
-                                            }
-                                        }
-                                        _ => (404, r#"{"error":"not_found"}"#.into()),
-                                    }
-                                };
-                                let resp = format!(
-                                    "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                    match status {
-                                        200 => "OK",
-                                        404 => "Not Found",
-                                        405 => "Method Not Allowed",
-                                        503 => "Service Unavailable",
-                                        _ => "Error",
-                                    },
-                                    body.len()
-                                );
-                                let _ = tokio::time::timeout(
-                                    LIFECYCLE_HTTP_WRITE_TIMEOUT,
-                                    stream.write_all(resp.as_bytes()),
-                                )
-                                .await;
-                            });
-                        }
-                        Err(_) => break,
-                    }
-                }
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    // Tiny settle so callers can connect immediately in tests.
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    Ok(local)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,41 +499,5 @@ mod tests {
         lc.set_unhealthy("doctor_failed").unwrap();
         assert_eq!(lc.snapshot().state, WorkerLifecycleState::Unhealthy);
         assert!(!lc.accepting_claims());
-    }
-
-    #[tokio::test]
-    async fn http_readyz_reflects_state() {
-        let dir = tempdir().unwrap();
-        let lc = WorkerLifecycle::open(dir.path(), identity()).unwrap();
-        lc.mark_serving().unwrap();
-        let (tx, rx) = watch::channel(false);
-        let addr = serve_lifecycle_http("127.0.0.1:0".parse().unwrap(), lc.clone(), rx)
-            .await
-            .unwrap();
-
-        let body = http_get(addr, "/readyz").await;
-        assert!(body.starts_with("HTTP/1.1 200"), "{body}");
-
-        lc.set_draining().unwrap();
-        let body = http_get(addr, "/readyz").await;
-        assert!(body.starts_with("HTTP/1.1 503"), "{body}");
-
-        let body = http_get(addr, "/lifecycle").await;
-        assert!(
-            body.contains("\"draining\"") || body.contains("draining"),
-            "{body}"
-        );
-
-        let _ = tx.send(true);
-    }
-
-    async fn http_get(addr: SocketAddr, path: &str) -> String {
-        use tokio::net::TcpStream;
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-        stream.write_all(req.as_bytes()).await.unwrap();
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.unwrap();
-        String::from_utf8_lossy(&buf).into_owned()
     }
 }
