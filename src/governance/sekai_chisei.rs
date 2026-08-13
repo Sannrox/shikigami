@@ -1,13 +1,9 @@
 //! First-party sekai-chisei governance adapter.
 
 use std::collections::HashMap;
-use std::env;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sekai_client::{
-    CallContext, CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, SdkError, SdkErrorCode,
-};
 
 use crate::checkpoint::{
     GovernanceCheckpoint, GovernanceEvidenceReference, StagedToolExecution, StagedToolReport,
@@ -23,18 +19,13 @@ use sha2::{Digest, Sha256};
 
 use proto::chisei::GetEffectivePolicySummaryRequest;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const RPC_TIMEOUT: Duration = Duration::from_secs(120);
-const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
-
-type PlaneClient = CoreLoopClient<GrpcTransport>;
-
 mod claim_acquisition;
 mod governed_model_turn;
 mod governed_run_admission;
 mod governed_run_completion;
 mod harvest_event_reporting;
 mod harvest_transaction;
+mod plane_session;
 mod tool_authorization;
 
 use harvest_transaction::HarvestTransaction;
@@ -217,64 +208,6 @@ impl SekaiChiseiGovernance {
             .collect()
     }
 
-    fn auth_source(&self) -> &'static str {
-        self.token_env
-            .as_ref()
-            .and_then(|name| env::var(name).ok())
-            .filter(|token| !token.trim().is_empty())
-            .map(|_| "token")
-            .unwrap_or("local")
-    }
-
-    pub(super) fn sdk_call_options(
-        &self,
-        namespace: Option<&str>,
-        operation_id: Option<&str>,
-        request_id: Option<&str>,
-    ) -> CallOptions {
-        let context =
-            CallContext::default().with_metadata(AUTH_SOURCE_METADATA, self.auth_source());
-        let mut options = CallOptions::new()
-            .with_timeout(RPC_TIMEOUT)
-            .with_context(context);
-        if let Some(namespace) = namespace {
-            options = options.with_namespace(namespace);
-        }
-        if let Some(operation_id) = operation_id {
-            options = options.with_operation_id(operation_id);
-        }
-        if let Some(request_id) = request_id {
-            options = options.with_request_id(request_id);
-        }
-        options
-    }
-
-    pub(super) fn sdk_error(operation: &str, error: SdkError) -> GovernanceError {
-        let detail = format!("{operation}: {error}");
-        match error.code {
-            SdkErrorCode::Unavailable | SdkErrorCode::DeadlineExceeded => {
-                GovernanceError::Unavailable(detail)
-            }
-            _ => GovernanceError::Message(detail),
-        }
-    }
-
-    fn token(&self) -> Option<String> {
-        let token = self
-            .token_env
-            .as_ref()
-            .and_then(|name| env::var(name).ok())
-            .map(|token| token.trim().to_string())
-            .filter(|token| !token.is_empty())?;
-        Some(
-            token
-                .strip_prefix("Bearer ")
-                .unwrap_or(&token)
-                .trim()
-                .to_string(),
-        )
-    }
-
     pub(super) async fn retry_pending_harvest_event(
         &self,
         handle: &RunHandle,
@@ -323,40 +256,6 @@ impl SekaiChiseiGovernance {
         handle: &RunHandle,
     ) -> Result<proto::chisei::GetOperationReceiptResponse, GovernanceError> {
         harvest_event_reporting::harvest_receipt(self, handle).await
-    }
-
-    pub(super) async fn connect(&self) -> Result<PlaneClient, GovernanceError> {
-        if self.endpoint.trim().is_empty() {
-            return Err(GovernanceError::Unavailable(
-                "sekai-chisei endpoint not set (governance.endpoint or SHIKIGAMI_CONTROL_PLANE)"
-                    .into(),
-            ));
-        }
-        let mut config = ClientConfig::new(self.endpoint.clone(), self.principal.clone())
-            .with_namespace(self.namespace.clone())
-            .with_default_timeout(CONNECT_TIMEOUT);
-        if let Some(token) = self.token() {
-            config = config
-                .with_token(token)
-                .map_err(|error| Self::sdk_error("configure plane credential", error))?;
-        }
-        CoreLoopClient::connect(config)
-            .await
-            .map_err(|error| Self::sdk_error("connect", error))
-    }
-
-    async fn probe(&self) -> Result<(), GovernanceError> {
-        let client = self.connect().await?;
-        let _: proto::sekai::ListSchemaTypesResponse = client
-            .raw()
-            .unary(
-                "/sekai.SekaiService/ListSchemaTypes",
-                proto::sekai::ListSchemaTypesRequest {},
-                self.sdk_call_options(Some(&self.namespace), None, None),
-            )
-            .await
-            .map_err(|error| Self::sdk_error("probe", error))?;
-        Ok(())
     }
 
     pub(super) fn arguments_digest(args_json: &str) -> String {
@@ -460,7 +359,7 @@ impl GovernancePort for SekaiChiseiGovernance {
     }
 
     async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
-        let client = self.connect().await?;
+        let client = plane_session::connect(self).await?;
         let response: proto::chisei::GetEffectivePolicySummaryResponse = client
             .raw()
             .unary(
@@ -469,10 +368,10 @@ impl GovernancePort for SekaiChiseiGovernance {
                     namespace: self.namespace.clone(),
                     provider: String::new(),
                 },
-                self.sdk_call_options(Some(&self.namespace), None, None),
+                plane_session::call_options(self, Some(&self.namespace), None, None),
             )
             .await
-            .map_err(|error| Self::sdk_error("GetEffectivePolicySummary", error))?;
+            .map_err(|error| plane_session::map_error("GetEffectivePolicySummary", error))?;
         Ok(available_models_from_summary(response))
     }
 
@@ -774,7 +673,7 @@ pub async fn live_probe(config: &Config) -> Result<String, GovernanceError> {
             "sekai-chisei endpoint not set".into(),
         ));
     }
-    g.probe().await?;
+    plane_session::probe(&g).await?;
     Ok(format!("reachable at {}", g.endpoint))
 }
 
@@ -826,20 +725,6 @@ mod tests {
             proto::chisei::GetEffectivePolicySummaryResponse::default(),
         );
         assert!(projected.is_empty());
-    }
-
-    #[test]
-    fn sdk_call_options_preserve_auth_source_and_correlation() {
-        let governance = SekaiChiseiGovernance::from_config(&Config::default()).unwrap();
-        let options =
-            governance.sdk_call_options(Some("default"), Some("operation-1"), Some("request-1"));
-        assert_eq!(
-            options.context.metadata,
-            vec![(AUTH_SOURCE_METADATA.into(), "local".into())]
-        );
-        assert_eq!(options.context.namespace.as_deref(), Some("default"));
-        assert_eq!(options.context.operation_id.as_deref(), Some("operation-1"));
-        assert_eq!(options.request_id.as_deref(), Some("request-1"));
     }
 
     #[test]
