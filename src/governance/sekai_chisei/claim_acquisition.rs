@@ -130,13 +130,15 @@ pub(super) async fn claim_next(
         )
     })?;
     let lease = lease_from_granted_effect(
-        &claimed_effect.effect_id,
-        runtime_id,
-        claimed_effect.claim_generation,
-        Some(&claimed_effect.claim_fencing_token),
-        ttl,
-        renew_started,
-        wall_now_ms(),
+        &LeaseGrant {
+            expected_effect_id: &claimed_effect.effect_id,
+            requested_runtime_id: runtime_id,
+            expected_generation: claimed_effect.claim_generation,
+            held_fencing_token: Some(&claimed_effect.claim_fencing_token),
+            requested_ttl: ttl,
+            renew_started,
+            now_ms: wall_now_ms(),
+        },
         &heartbeat_effect,
     )?;
 
@@ -194,13 +196,15 @@ pub(super) async fn heartbeat(
         )
     })?;
     lease_from_granted_effect(
-        &claim.work.effect_id,
-        &claim.lease.runtime_id,
-        claim.lease.generation,
-        Some(&claim.lease.fencing_token),
-        ttl,
-        renew_started,
-        wall_now_ms(),
+        &LeaseGrant {
+            expected_effect_id: &claim.work.effect_id,
+            requested_runtime_id: &claim.lease.runtime_id,
+            expected_generation: claim.lease.generation,
+            held_fencing_token: Some(&claim.lease.fencing_token),
+            requested_ttl: ttl,
+            renew_started,
+            now_ms: wall_now_ms(),
+        },
         &effect,
     )
 }
@@ -338,6 +342,16 @@ fn wall_now_ms() -> i64 {
 /// Heartbeat/claim generation may stay the same or advance by one renew step.
 const MAX_GENERATION_BUMP: u64 = 1;
 
+struct LeaseGrant<'a> {
+    expected_effect_id: &'a str,
+    requested_runtime_id: &'a str,
+    expected_generation: u64,
+    held_fencing_token: Option<&'a str>,
+    requested_ttl: Duration,
+    renew_started: Instant,
+    now_ms: i64,
+}
+
 fn bind_granted_identity(
     expected_effect_id: &str,
     requested_runtime_id: &str,
@@ -408,32 +422,26 @@ fn granted_valid_until(
 }
 
 fn lease_from_granted_effect(
-    expected_effect_id: &str,
-    requested_runtime_id: &str,
-    expected_generation: u64,
-    held_fencing_token: Option<&str>,
-    requested_ttl: Duration,
-    renew_started: Instant,
-    now_ms: i64,
+    grant: &LeaseGrant<'_>,
     effect: &proto::sekai::ActionEffect,
 ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
     bind_granted_identity(
-        expected_effect_id,
-        requested_runtime_id,
-        expected_generation,
-        held_fencing_token,
+        grant.expected_effect_id,
+        grant.requested_runtime_id,
+        grant.expected_generation,
+        grant.held_fencing_token,
         effect,
     )?;
     Ok(crate::plane_intake::PlaneClaimLease {
-        runtime_id: requested_runtime_id.to_owned(),
+        runtime_id: grant.requested_runtime_id.to_owned(),
         generation: effect.claim_generation,
         fencing_token: effect.claim_fencing_token.clone(),
         expires_at_ms: effect.claim_expires_at_ms,
         valid_until: granted_valid_until(
-            renew_started,
-            requested_ttl,
+            grant.renew_started,
+            grant.requested_ttl,
             effect.claim_expires_at_ms,
-            now_ms,
+            grant.now_ms,
         )?,
     })
 }
@@ -600,6 +608,28 @@ mod tests {
         );
     }
 
+    fn bind_lease(
+        start: Instant,
+        now_ms: i64,
+        ttl: Duration,
+        generation: u64,
+        token: Option<&str>,
+        effect: &proto::sekai::ActionEffect,
+    ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
+        lease_from_granted_effect(
+            &LeaseGrant {
+                expected_effect_id: "effect-1",
+                requested_runtime_id: "runtime-1",
+                expected_generation: generation,
+                held_fencing_token: token,
+                requested_ttl: ttl,
+                renew_started: start,
+                now_ms,
+            },
+            effect,
+        )
+    }
+
     #[test]
     fn duration_millis_rejects_zero_and_sub_millisecond_ttl() {
         let zero = duration_millis(Duration::ZERO).unwrap_err();
@@ -621,69 +651,33 @@ mod tests {
         let start = Instant::now();
         let now_ms = 1_700_000_000_000;
         let ttl = Duration::from_secs(60);
-        let held = "fence-1";
+        let held = Some("fence-1");
 
         let mut owner = granted_effect();
         owner.claim_owner = "other-runtime".into();
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                1,
-                Some(held),
-                ttl,
-                start,
-                now_ms,
-                &owner,
-            ),
+            bind_lease(start, now_ms, ttl, 1, held, &owner),
             "claim owner",
         );
 
         let mut token = granted_effect();
         token.claim_fencing_token = "fence-other".into();
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                1,
-                Some(held),
-                ttl,
-                start,
-                now_ms,
-                &token,
-            ),
+            bind_lease(start, now_ms, ttl, 1, held, &token),
             "fencing token",
         );
 
         let mut generation = granted_effect();
         generation.claim_generation = 3;
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                1,
-                Some(held),
-                ttl,
-                start,
-                now_ms,
-                &generation,
-            ),
+            bind_lease(start, now_ms, ttl, 1, held, &generation),
             "claim generation",
         );
 
         let mut effect_id = granted_effect();
         effect_id.effect_id = "effect-other".into();
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                1,
-                Some(held),
-                ttl,
-                start,
-                now_ms,
-                &effect_id,
-            ),
+            bind_lease(start, now_ms, ttl, 1, held, &effect_id),
             "effect_id",
         );
     }
@@ -697,30 +691,21 @@ mod tests {
         let mut owner = granted_effect();
         owner.claim_owner.clear();
         assert_fence_lost(
-            lease_from_granted_effect("effect-1", "runtime-1", 0, None, ttl, start, now_ms, &owner),
+            bind_lease(start, now_ms, ttl, 0, None, &owner),
             "claim owner",
         );
 
         let mut token = granted_effect();
         token.claim_fencing_token.clear();
         assert_fence_lost(
-            lease_from_granted_effect("effect-1", "runtime-1", 0, None, ttl, start, now_ms, &token),
+            bind_lease(start, now_ms, ttl, 0, None, &token),
             "fencing token",
         );
 
         let mut generation = granted_effect();
         generation.claim_generation = 0;
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                0,
-                None,
-                ttl,
-                start,
-                now_ms,
-                &generation,
-            ),
+            bind_lease(start, now_ms, ttl, 0, None, &generation),
             "claim generation",
         );
     }
@@ -731,17 +716,7 @@ mod tests {
         let now_ms = 1_700_000_000_000;
         let ttl = Duration::from_secs(60);
         let same = granted_effect();
-        let lease = lease_from_granted_effect(
-            "effect-1",
-            "runtime-1",
-            1,
-            Some("fence-1"),
-            ttl,
-            start,
-            now_ms,
-            &same,
-        )
-        .unwrap();
+        let lease = bind_lease(start, now_ms, ttl, 1, Some("fence-1"), &same).unwrap();
         assert_eq!(lease.generation, 1);
         assert_eq!(lease.runtime_id, "runtime-1");
         assert_eq!(lease.fencing_token, "fence-1");
@@ -749,17 +724,7 @@ mod tests {
         let mut bumped = granted_effect();
         bumped.claim_generation = 2;
         bumped.claim_fencing_token = "fence-2".into();
-        let lease = lease_from_granted_effect(
-            "effect-1",
-            "runtime-1",
-            1,
-            Some("fence-1"),
-            ttl,
-            start,
-            now_ms,
-            &bumped,
-        )
-        .unwrap();
+        let lease = bind_lease(start, now_ms, ttl, 1, Some("fence-1"), &bumped).unwrap();
         assert_eq!(lease.generation, 2);
         assert_eq!(lease.fencing_token, "fence-2");
     }
@@ -770,14 +735,12 @@ mod tests {
         let now_ms = 1_700_000_000_000;
         let mut effect = granted_effect();
         effect.claim_expires_at_ms = now_ms + 10_000;
-        let lease = lease_from_granted_effect(
-            "effect-1",
-            "runtime-1",
-            1,
-            Some("fence-1"),
-            Duration::from_secs(60),
+        let lease = bind_lease(
             start,
             now_ms,
+            Duration::from_secs(60),
+            1,
+            Some("fence-1"),
             &effect,
         )
         .unwrap();
@@ -794,17 +757,7 @@ mod tests {
         let requested = Duration::from_secs(10);
         let mut effect = granted_effect();
         effect.claim_expires_at_ms = now_ms + 60_000;
-        let lease = lease_from_granted_effect(
-            "effect-1",
-            "runtime-1",
-            1,
-            Some("fence-1"),
-            requested,
-            start,
-            now_ms,
-            &effect,
-        )
-        .unwrap();
+        let lease = bind_lease(start, now_ms, requested, 1, Some("fence-1"), &effect).unwrap();
         assert_eq!(
             lease.valid_until.saturating_duration_since(start),
             requested
@@ -821,32 +774,14 @@ mod tests {
         let mut missing = granted_effect();
         missing.claim_expires_at_ms = 0;
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                1,
-                Some("fence-1"),
-                ttl,
-                start,
-                now_ms,
-                &missing,
-            ),
+            bind_lease(start, now_ms, ttl, 1, Some("fence-1"), &missing),
             "missing expires_at_ms",
         );
 
         let mut past = granted_effect();
         past.claim_expires_at_ms = now_ms;
         assert_fence_lost(
-            lease_from_granted_effect(
-                "effect-1",
-                "runtime-1",
-                1,
-                Some("fence-1"),
-                ttl,
-                start,
-                now_ms,
-                &past,
-            ),
+            bind_lease(start, now_ms, ttl, 1, Some("fence-1"), &past),
             "already expired",
         );
     }
