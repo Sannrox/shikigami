@@ -44,9 +44,7 @@ pub(super) async fn execute(
                 request_id: Uuid::new_v4().to_string(),
                 checkpoint: None,
             };
-            if let Err(ack_err) = intake
-                .ack_with_retry(&mut claim, &ack, options, shutdown)
-                .await
+            if let Err(ack_err) = ack_with_retry(intake, &mut claim, &ack, options, shutdown).await
             {
                 lifecycle_observe_error(options, Some(&claim_id), &ack_err);
                 return Err(ack_err);
@@ -217,8 +215,7 @@ pub(super) async fn execute(
             )
         }
     };
-    intake
-        .ack_with_retry(&mut claim, &ack, options, shutdown)
+    ack_with_retry(intake, &mut claim, &ack, options, shutdown)
         .await
         .inspect_err(|error| lifecycle_observe_error(options, Some(&claim_id), error))?;
     if let Some(lc) = &options.lifecycle {
@@ -288,6 +285,75 @@ async fn report_claim_event_with_retry(
     shutdown: &watch::Receiver<bool>,
 ) -> Result<(), PlaneIntakeError> {
     let request_id = Uuid::new_v4().to_string();
+    retry_while_fenced(
+        intake,
+        claim,
+        options,
+        shutdown,
+        FencedRetryOp::ClaimEvent {
+            kind,
+            checkpoint_digest,
+            reason_code,
+            request_id: &request_id,
+        },
+    )
+    .await
+}
+
+async fn ack_with_retry(
+    intake: &dyn PlaneIntakePort,
+    claim: &mut PlaneClaim,
+    ack: &PlaneAck,
+    options: &PlaneServeOptions,
+    shutdown: &watch::Receiver<bool>,
+) -> Result<(), PlaneIntakeError> {
+    retry_while_fenced(intake, claim, options, shutdown, FencedRetryOp::Ack(ack)).await
+}
+
+enum FencedRetryOp<'a> {
+    Ack(&'a PlaneAck),
+    ClaimEvent {
+        kind: PlaneClaimEventKind,
+        checkpoint_digest: &'a str,
+        reason_code: &'a str,
+        request_id: &'a str,
+    },
+}
+
+impl FencedRetryOp<'_> {
+    fn timeout_message(&self) -> &'static str {
+        match self {
+            Self::Ack(_) => "acknowledgement timed out before the lease safety deadline",
+            Self::ClaimEvent { .. } => "claim event timed out before the lease safety deadline",
+        }
+    }
+
+    fn heartbeat_message(&self) -> &'static str {
+        match self {
+            Self::Ack(_) => "acknowledgement heartbeat exceeded the lease safety deadline",
+            Self::ClaimEvent { .. } => "claim-event heartbeat exceeded the lease safety deadline",
+        }
+    }
+
+    fn shutdown_message(&self) -> &'static str {
+        match self {
+            Self::Ack(_) => "shutdown requested while acknowledgement was retrying",
+            Self::ClaimEvent { .. } => "shutdown requested while claim event was retrying",
+        }
+    }
+}
+
+/// Retry one fenced plane RPC while the claim lease remains live.
+///
+/// Owns call-window enforcement, FenceLost fail-closed, heartbeat between
+/// attempts, and never sleeping past half the remaining lease.
+async fn retry_while_fenced(
+    intake: &dyn PlaneIntakePort,
+    claim: &mut PlaneClaim,
+    options: &PlaneServeOptions,
+    shutdown: &watch::Receiver<bool>,
+    op: FencedRetryOp<'_>,
+) -> Result<(), PlaneIntakeError> {
     let retry_interval = options
         .poll_interval
         .clamp(Duration::from_millis(100), Duration::from_millis(250));
@@ -295,115 +361,68 @@ async fn report_claim_event_with_retry(
         let call_window = claim_call_window(claim, options.heartbeat_interval)?;
         let error = match tokio::time::timeout(
             call_window,
-            intake.report_claim_event(claim, kind, checkpoint_digest, reason_code, &request_id),
+            dispatch_fenced_retry(intake, claim, &op),
         )
         .await
         {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(error @ PlaneIntakeError::FenceLost(_))) => return Err(error),
             Ok(Err(error)) => error,
-            Err(_) => PlaneIntakeError::Source(
-                "claim event timed out before the lease safety deadline".into(),
-            ),
+            Err(_) => PlaneIntakeError::Source(op.timeout_message().into()),
         };
         if attempt == options.ack_retry_limit {
             return Err(error);
         }
         if *shutdown.borrow() {
-            return Err(PlaneIntakeError::Source(
-                "shutdown requested while claim event was retrying".into(),
-            ));
+            return Err(PlaneIntakeError::Source(op.shutdown_message().into()));
         }
         let call_window = claim_call_window(claim, options.heartbeat_interval)?;
         claim.lease = tokio::time::timeout(call_window, intake.heartbeat(claim, options.claim_ttl))
             .await
-            .map_err(|_| {
-                PlaneIntakeError::FenceLost(
-                    "claim-event heartbeat exceeded the lease safety deadline".into(),
-                )
-            })??;
+            .map_err(|_| PlaneIntakeError::FenceLost(op.heartbeat_message().into()))??;
+        let sleep_for = fenced_retry_sleep(
+            claim.lease.valid_until,
+            retry_interval,
+            options.heartbeat_interval,
+        );
         tokio::select! {
-            _ = tokio::time::sleep(retry_interval.min(options.heartbeat_interval / 2)) => {}
+            _ = tokio::time::sleep(sleep_for) => {}
             _ = wait_for_shutdown(shutdown.clone()) => {
-                return Err(PlaneIntakeError::Source(
-                    "shutdown requested while claim event was retrying".into(),
-                ));
+                return Err(PlaneIntakeError::Source(op.shutdown_message().into()));
             }
         }
     }
     unreachable!("positive acknowledgement retry limit validated")
 }
 
-trait PlaneIntakeAckExt {
-    async fn ack_with_retry(
-        &self,
-        claim: &mut PlaneClaim,
-        ack: &PlaneAck,
-        options: &PlaneServeOptions,
-        shutdown: &watch::Receiver<bool>,
-    ) -> Result<(), PlaneIntakeError>;
+async fn dispatch_fenced_retry(
+    intake: &dyn PlaneIntakePort,
+    claim: &PlaneClaim,
+    op: &FencedRetryOp<'_>,
+) -> Result<(), PlaneIntakeError> {
+    match op {
+        FencedRetryOp::Ack(ack) => intake.ack(claim, ack).await,
+        FencedRetryOp::ClaimEvent {
+            kind,
+            checkpoint_digest,
+            reason_code,
+            request_id,
+        } => {
+            intake
+                .report_claim_event(claim, *kind, checkpoint_digest, reason_code, request_id)
+                .await
+        }
+    }
 }
 
-impl<T: PlaneIntakePort + ?Sized> PlaneIntakeAckExt for T {
-    async fn ack_with_retry(
-        &self,
-        claim: &mut PlaneClaim,
-        ack: &PlaneAck,
-        options: &PlaneServeOptions,
-        shutdown: &watch::Receiver<bool>,
-    ) -> Result<(), PlaneIntakeError> {
-        let retry_interval = options
-            .poll_interval
-            .clamp(Duration::from_millis(100), Duration::from_millis(250));
-        for attempt in 1..=options.ack_retry_limit {
-            let call_window = claim_call_window(claim, options.heartbeat_interval)?;
-            let ack_error = match tokio::time::timeout(call_window, self.ack(claim, ack)).await {
-                Err(_) => PlaneIntakeError::Source(
-                    "acknowledgement timed out before the lease safety deadline".into(),
-                ),
-                Ok(Ok(())) => return Ok(()),
-                Ok(Err(error @ PlaneIntakeError::FenceLost(_))) => return Err(error),
-                Ok(Err(error)) => error,
-            };
-            if attempt == options.ack_retry_limit {
-                return Err(ack_error);
-            }
-            if *shutdown.borrow() {
-                return Err(PlaneIntakeError::Source(
-                    "shutdown requested while acknowledgement was retrying".into(),
-                ));
-            }
-            // Renew the same fence before retrying. Claim-event retries already
-            // do this; without it, hung acks consume the remaining lease and a
-            // completed run can expire, be reclaimed, and execute twice.
-            let call_window = claim_call_window(claim, options.heartbeat_interval)?;
-            claim.lease =
-                tokio::time::timeout(call_window, self.heartbeat(claim, options.claim_ttl))
-                    .await
-                    .map_err(|_| {
-                        PlaneIntakeError::FenceLost(
-                            "acknowledgement heartbeat exceeded the lease safety deadline".into(),
-                        )
-                    })??;
-            let safe_sleep = claim
-                .lease
-                .valid_until
-                .saturating_duration_since(Instant::now())
-                / 2;
-            let sleep_for = retry_interval
-                .min(options.heartbeat_interval / 2)
-                .min(safe_sleep);
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_for) => {}
-                _ = wait_for_shutdown(shutdown.clone()) => {
-                    return Err(PlaneIntakeError::Source(
-                        "shutdown requested while acknowledgement was retrying".into(),
-                    ));
-                }
-            }
-        }
-        unreachable!("positive acknowledgement retry limit validated")
-    }
+/// Sleep between fenced RPC retries: never past half remaining lease.
+fn fenced_retry_sleep(
+    valid_until: Instant,
+    retry_interval: Duration,
+    heartbeat_interval: Duration,
+) -> Duration {
+    let safe_sleep = valid_until.saturating_duration_since(Instant::now()) / 2;
+    retry_interval.min(heartbeat_interval / 2).min(safe_sleep)
 }
 
 struct PreparedClaimedRun {
@@ -628,4 +647,44 @@ pub(super) fn claim_call_window(
     }
     let safety = (remaining / 10).clamp(Duration::from_millis(10), Duration::from_millis(250));
     Ok(maximum.min(remaining - safety))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fenced_retry_sleep_clamps_to_half_remaining_lease() {
+        let remaining = Duration::from_millis(80);
+        let sleep = fenced_retry_sleep(
+            Instant::now() + remaining,
+            Duration::from_millis(250),
+            Duration::from_secs(1),
+        );
+        assert!(
+            sleep <= remaining / 2,
+            "sleep {sleep:?} must not exceed half remaining {remaining:?}"
+        );
+        assert!(sleep > Duration::ZERO);
+    }
+
+    #[test]
+    fn fenced_retry_sleep_is_zero_when_lease_has_elapsed() {
+        let sleep = fenced_retry_sleep(
+            Instant::now() - Duration::from_millis(1),
+            Duration::from_millis(250),
+            Duration::from_secs(1),
+        );
+        assert_eq!(sleep, Duration::ZERO);
+    }
+
+    #[test]
+    fn fenced_retry_sleep_uses_retry_interval_when_lease_is_long() {
+        let sleep = fenced_retry_sleep(
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+        );
+        assert_eq!(sleep, Duration::from_millis(200));
+    }
 }

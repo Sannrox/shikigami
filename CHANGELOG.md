@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clamp claim-event retry sleep to half remaining lease, matching
+  acknowledgement retries after a long harness run.
 - Reuse one sekai-chisei `CoreLoopClient` / Channel on the plane claim client
   for heartbeat, ack, and claim-event RPCs; reconnect only after transport
   errors instead of paying TCP/TLS or Unix handshake plus `token()` on every
@@ -51,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deepen lease-safe claimed-run RPC retry behind one private helper so
+  acknowledgement and claim-event retries share call-window, FenceLost
+  fail-closed, heartbeat, and remaining-lease sleep clamp.
 - Deepen the worker lifecycle HTTP probe behind the thin `serve_lifecycle_http`
   interface so connection caps, bounded header reads, `/readyz` `/livez`
   mapping, and loopback-only `/lifecycle` detail no longer crowd the snapshot
