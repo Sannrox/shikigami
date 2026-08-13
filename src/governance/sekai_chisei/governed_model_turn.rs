@@ -6,7 +6,7 @@ use super::proto::chisei::{
     ChatMessage as ProtoChatMessage, ExecutionInput, ToolCall as ProtoToolCall,
     ToolDef as ProtoToolDef,
 };
-use super::{GovernanceError, RunHandle, SekaiChiseiGovernance};
+use super::{GovernanceError, RunHandle, SekaiChiseiGovernance, plane_session};
 use crate::model::{ChatMessage, ModelTurn, ToolCall};
 use crate::tools::ToolDef;
 
@@ -18,11 +18,12 @@ pub(super) async fn execute(
     messages: &[ChatMessage],
     tools: &[ToolDef],
 ) -> Result<ModelTurn, GovernanceError> {
-    let client = governance.connect().await?;
+    let client = plane_session::connect(governance).await?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let input = execution_input(governance, handle, system, messages, tools, &request_id);
     let call_options = || {
-        governance.sdk_call_options(
+        plane_session::call_options(
+            governance,
             Some(&handle.namespace),
             Some(&handle.operation_id),
             Some(&request_id),
@@ -32,7 +33,7 @@ pub(super) async fn execute(
     let plan = client
         .plan_execution(input, call_options())
         .await
-        .map_err(|error| SekaiChiseiGovernance::sdk_error("PlanExecution", error))?;
+        .map_err(|error| plane_session::map_error("PlanExecution", error))?;
     governance.update_harvest_plan(&handle.run_id, plan.plan_id.clone())?;
 
     if plan.budget.as_ref().is_some_and(|budget| !budget.allowed) {
@@ -61,7 +62,7 @@ pub(super) async fn execute(
         Ok(stream) => stream,
         Err(error) => {
             governance.report_failed_model_event(handle).await?;
-            return Err(SekaiChiseiGovernance::sdk_error("ExecutePlanStream", error));
+            return Err(plane_session::map_error("ExecutePlanStream", error));
         }
     };
 
@@ -71,7 +72,7 @@ pub(super) async fn execute(
             Ok(event) => event,
             Err(error) => {
                 governance.report_failed_model_event(handle).await?;
-                return Err(SekaiChiseiGovernance::sdk_error("ExecutePlanStream", error));
+                return Err(plane_session::map_error("ExecutePlanStream", error));
             }
         };
         if event.response.is_some() {

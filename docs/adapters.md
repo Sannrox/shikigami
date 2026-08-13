@@ -53,10 +53,11 @@ Read/search/report/todo tools skip the host callback after the local allow-list
 check. Requires the `model-http` feature (default) for the HTTP client.
 
 Feature flag: `governance-sekai-chisei` (default **on**) enables the pinned
-`sekai-client` Rust facade. It owns connection setup, authentication metadata,
-deadlines, typed core-loop errors, streaming, operation events, and receipts;
-the adapter uses its bounded raw escape hatch for supported RPCs without a
-typed helper yet. The facade consumes the canonical upstream `sekai-proto`
+`sekai-client` Rust facade. It owns typed core-loop helpers, streaming,
+operation events, and receipts; the adapter uses its bounded raw escape hatch
+for supported RPCs without a typed helper yet. A private plane-session module
+applies connection setup, authentication metadata, deadlines, and SDK error
+mapping. The facade consumes the canonical upstream `sekai-proto`
 crate, so Shikigami does not carry a second protocol snapshot. The supported
 boundary is `sekai-client` 0.1.x with `sekai-proto` 1.x, pinned in
 `Cargo.toml`/`Cargo.lock`; the SDK permits plain HTTP only for loopback

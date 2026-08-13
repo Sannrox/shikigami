@@ -9,14 +9,14 @@ use std::collections::{BTreeMap, HashMap};
 use crate::checkpoint::PendingGovernanceEvent;
 use crate::governance::{GovernanceError, RunHandle, RunOutcome};
 
-use super::{SekaiChiseiGovernance, harvest, proto};
+use super::{SekaiChiseiGovernance, harvest, plane_session, proto};
 use proto::chisei::{GetOperationReceiptRequest, ReportOperationEventRequest};
 
 pub(super) async fn send_pending(
     governance: &SekaiChiseiGovernance,
     pending: &PendingGovernanceEvent,
 ) -> Result<proto::chisei::ReportOperationEventResponse, GovernanceError> {
-    let client = governance.connect().await?;
+    let client = plane_session::connect(governance).await?;
     client
         .report_operation_event(
             ReportOperationEventRequest {
@@ -28,14 +28,15 @@ pub(super) async fn send_pending(
                 attributes: pending.attributes.clone().into_iter().collect(),
                 references: SekaiChiseiGovernance::proto_event_references(&pending.references),
             },
-            governance.sdk_call_options(
+            plane_session::call_options(
+                governance,
                 Some(&governance.namespace),
                 Some(&pending.operation_id),
                 Some(&pending.event_id),
             ),
         )
         .await
-        .map_err(|error| SekaiChiseiGovernance::sdk_error("ReportOperationEvent", error))
+        .map_err(|error| plane_session::map_error("ReportOperationEvent", error))
 }
 
 pub(super) async fn retry_pending(
@@ -197,7 +198,7 @@ pub(super) async fn harvest_receipt(
     handle: &RunHandle,
 ) -> Result<proto::chisei::GetOperationReceiptResponse, GovernanceError> {
     let operation_id = governance.host_harvest_operation_id(handle)?;
-    let client = governance.connect().await?;
+    let client = plane_session::connect(governance).await?;
     client
         .get_operation_receipt(
             GetOperationReceiptRequest {
@@ -206,10 +207,15 @@ pub(super) async fn harvest_receipt(
                 caller_scope: String::new(),
                 attempt: 0,
             },
-            governance.sdk_call_options(Some(&governance.namespace), Some(&operation_id), None),
+            plane_session::call_options(
+                governance,
+                Some(&governance.namespace),
+                Some(&operation_id),
+                None,
+            ),
         )
         .await
-        .map_err(|error| SekaiChiseiGovernance::sdk_error("GetOperationReceipt", error))
+        .map_err(|error| plane_session::map_error("GetOperationReceipt", error))
 }
 
 pub(super) async fn abort_uncheckpointed_receipt(
