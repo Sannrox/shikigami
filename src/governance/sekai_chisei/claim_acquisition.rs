@@ -2,6 +2,8 @@
 //!
 //! Owns list → claim → continuation validation → instance lookup → pre-run
 //! fence renew, plus post-admit heartbeat, ack, and claim-event reporting.
+//! Claim and heartbeat grants are bound to the claimed work and requested
+//! runtime; `valid_until` never exceeds `min(requested, granted)` remaining.
 
 use std::time::{Duration, Instant};
 
@@ -42,13 +44,14 @@ pub(super) async fn claim_next(
     let Some(candidate) = listed.effects.into_iter().next() else {
         return Ok(None);
     };
+    let candidate_effect_id = candidate.effect_id.clone();
     let claim_request_id = uuid::Uuid::new_v4().to_string();
     let claimed: proto::sekai::ClaimActionWorkResponse = match plane
         .raw()
         .unary(
             "/sekai.SekaiService/ClaimActionWork",
             ClaimActionWorkRequest {
-                effect_id: candidate.effect_id,
+                effect_id: candidate_effect_id.clone(),
                 runtime_id: runtime_id.into(),
                 request_id: claim_request_id.clone(),
                 ttl_ms: duration_millis(ttl)?,
@@ -68,15 +71,16 @@ pub(super) async fn claim_next(
         }
     };
     let continuation = project_continuation(claimed.continuation, claimed.park)?;
-    let effect = claimed.effect.ok_or_else(|| {
+    let claimed_effect = claimed.effect.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source("ClaimActionWork returned no effect".into())
     })?;
+    bind_granted_identity(&candidate_effect_id, runtime_id, 0, None, &claimed_effect)?;
     let instance_response: proto::sekai::GetActionInstanceResponse = plane
         .raw()
         .unary(
             "/sekai.SekaiService/GetActionInstance",
             GetActionInstanceRequest {
-                instance_id: effect.instance_id.clone(),
+                instance_id: claimed_effect.instance_id.clone(),
                 namespace: String::new(),
                 idempotency_key: String::new(),
             },
@@ -102,10 +106,10 @@ pub(super) async fn claim_next(
         .unary(
             "/sekai.SekaiService/HeartbeatActionClaim",
             HeartbeatActionClaimRequest {
-                effect_id: effect.effect_id,
-                runtime_id: effect.claim_owner,
-                claim_generation: effect.claim_generation,
-                fencing_token: effect.claim_fencing_token,
+                effect_id: claimed_effect.effect_id.clone(),
+                runtime_id: runtime_id.into(),
+                claim_generation: claimed_effect.claim_generation,
+                fencing_token: claimed_effect.claim_fencing_token.clone(),
                 ttl_ms: duration_millis(ttl)?,
             },
             client
@@ -120,31 +124,35 @@ pub(super) async fn claim_next(
         // serve loop and keep the worker accepting claims.
         Err(error) => return Err(map_owned_claim_heartbeat_error(&error)),
     };
-    let effect = effect_response.effect.ok_or_else(|| {
+    let heartbeat_effect = effect_response.effect.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source(
             "HeartbeatActionClaim before run returned no effect".into(),
         )
     })?;
+    let lease = lease_from_granted_effect(
+        &claimed_effect.effect_id,
+        runtime_id,
+        claimed_effect.claim_generation,
+        Some(&claimed_effect.claim_fencing_token),
+        ttl,
+        renew_started,
+        wall_now_ms(),
+        &heartbeat_effect,
+    )?;
 
     Ok(Some(crate::plane_intake::PlaneClaim {
         work: crate::plane_intake::ClaimedPlaneWork {
-            effect_id: effect.effect_id,
-            instance_id: effect.instance_id,
-            operation_id: effect.operation_id,
-            kind: effect.kind,
-            status: effect.status,
-            payload_json: effect.payload_json,
+            effect_id: claimed_effect.effect_id,
+            instance_id: claimed_effect.instance_id,
+            operation_id: claimed_effect.operation_id,
+            kind: claimed_effect.kind,
+            status: claimed_effect.status,
+            payload_json: claimed_effect.payload_json,
             parameters_json: instance.parameters_json,
             resolved_task: None,
             continuation,
         },
-        lease: crate::plane_intake::PlaneClaimLease {
-            runtime_id: effect.claim_owner,
-            generation: effect.claim_generation,
-            fencing_token: effect.claim_fencing_token,
-            expires_at_ms: effect.claim_expires_at_ms,
-            valid_until: renew_started + ttl,
-        },
+        lease,
     }))
 }
 
@@ -154,6 +162,13 @@ pub(super) async fn heartbeat(
     claim: &crate::plane_intake::PlaneClaim,
     ttl: Duration,
 ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
+    if claim.work.effect_id.is_empty()
+        || claim.lease.runtime_id.is_empty()
+        || claim.lease.generation == 0
+        || claim.lease.fencing_token.is_empty()
+    {
+        return Err(fence_lost("held claim fence identity is empty"));
+    }
     let renew_started = Instant::now();
     let plane = client.inner.connect().await.map_err(plane_intake_source)?;
     let response: proto::sekai::HeartbeatActionClaimResponse = plane
@@ -178,13 +193,16 @@ pub(super) async fn heartbeat(
             "HeartbeatActionClaim returned no effect".into(),
         )
     })?;
-    Ok(crate::plane_intake::PlaneClaimLease {
-        runtime_id: effect.claim_owner,
-        generation: effect.claim_generation,
-        fencing_token: effect.claim_fencing_token,
-        expires_at_ms: effect.claim_expires_at_ms,
-        valid_until: renew_started + ttl,
-    })
+    lease_from_granted_effect(
+        &claim.work.effect_id,
+        &claim.lease.runtime_id,
+        claim.lease.generation,
+        Some(&claim.lease.fencing_token),
+        ttl,
+        renew_started,
+        wall_now_ms(),
+        &effect,
+    )
 }
 
 /// Acknowledge a claimed effect with the plane.
@@ -309,10 +327,127 @@ fn project_continuation(
     }
 }
 
-fn duration_millis(duration: Duration) -> Result<i64, crate::plane_intake::PlaneIntakeError> {
-    i64::try_from(duration.as_millis()).map_err(|_| {
-        crate::plane_intake::PlaneIntakeError::Source("claim TTL exceeds i64 milliseconds".into())
+fn fence_lost(message: impl Into<String>) -> crate::plane_intake::PlaneIntakeError {
+    crate::plane_intake::PlaneIntakeError::FenceLost(message.into())
+}
+
+fn wall_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Heartbeat/claim generation may stay the same or advance by one renew step.
+const MAX_GENERATION_BUMP: u64 = 1;
+
+fn bind_granted_identity(
+    expected_effect_id: &str,
+    requested_runtime_id: &str,
+    expected_generation: u64,
+    held_fencing_token: Option<&str>,
+    effect: &proto::sekai::ActionEffect,
+) -> Result<(), crate::plane_intake::PlaneIntakeError> {
+    if expected_effect_id.is_empty() || requested_runtime_id.is_empty() {
+        return Err(fence_lost("held claim fence identity is empty"));
+    }
+    if held_fencing_token.is_some_and(str::is_empty)
+        || (held_fencing_token.is_some() && expected_generation == 0)
+    {
+        return Err(fence_lost("held claim fence identity is empty"));
+    }
+    if effect.effect_id.is_empty() || effect.effect_id != expected_effect_id {
+        return Err(fence_lost("claim effect_id does not match claimed work"));
+    }
+    if effect.claim_owner.is_empty() || effect.claim_owner != requested_runtime_id {
+        return Err(fence_lost(
+            "claim owner does not match requested runtime_id",
+        ));
+    }
+    if effect.claim_fencing_token.is_empty() {
+        return Err(fence_lost("claim fencing token is empty"));
+    }
+    if effect.claim_generation == 0 {
+        return Err(fence_lost("claim generation is empty"));
+    }
+    if expected_generation > 0
+        && (effect.claim_generation < expected_generation
+            || effect.claim_generation.saturating_sub(expected_generation) > MAX_GENERATION_BUMP)
+    {
+        return Err(fence_lost(
+            "claim generation is neither unchanged nor a single renew step",
+        ));
+    }
+    if expected_generation > 0
+        && effect.claim_generation == expected_generation
+        && let Some(held) = held_fencing_token
+        && effect.claim_fencing_token != held
+    {
+        return Err(fence_lost(
+            "claim fencing token does not match the held fence",
+        ));
+    }
+    Ok(())
+}
+
+fn granted_valid_until(
+    renew_started: Instant,
+    requested: Duration,
+    expires_at_ms: i64,
+    now_ms: i64,
+) -> Result<Instant, crate::plane_intake::PlaneIntakeError> {
+    if expires_at_ms <= 0 {
+        return Err(fence_lost("claim grant is missing expires_at_ms"));
+    }
+    if expires_at_ms <= now_ms {
+        return Err(fence_lost("claim grant is already expired"));
+    }
+    let remaining_ms = u64::try_from(expires_at_ms - now_ms)
+        .map_err(|_| fence_lost("claim grant remaining TTL is invalid"))?;
+    let remaining = Duration::from_millis(remaining_ms);
+    // Never overstay the requested TTL. An over-grant is clamped rather than
+    // adopted, so a slightly fast host clock cannot extend the local fence.
+    Ok(renew_started + remaining.min(requested))
+}
+
+fn lease_from_granted_effect(
+    expected_effect_id: &str,
+    requested_runtime_id: &str,
+    expected_generation: u64,
+    held_fencing_token: Option<&str>,
+    requested_ttl: Duration,
+    renew_started: Instant,
+    now_ms: i64,
+    effect: &proto::sekai::ActionEffect,
+) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
+    bind_granted_identity(
+        expected_effect_id,
+        requested_runtime_id,
+        expected_generation,
+        held_fencing_token,
+        effect,
+    )?;
+    Ok(crate::plane_intake::PlaneClaimLease {
+        runtime_id: requested_runtime_id.to_owned(),
+        generation: effect.claim_generation,
+        fencing_token: effect.claim_fencing_token.clone(),
+        expires_at_ms: effect.claim_expires_at_ms,
+        valid_until: granted_valid_until(
+            renew_started,
+            requested_ttl,
+            effect.claim_expires_at_ms,
+            now_ms,
+        )?,
     })
+}
+
+fn duration_millis(duration: Duration) -> Result<i64, crate::plane_intake::PlaneIntakeError> {
+    let millis = i64::try_from(duration.as_millis()).map_err(|_| {
+        crate::plane_intake::PlaneIntakeError::Source("claim TTL exceeds i64 milliseconds".into())
+    })?;
+    if millis <= 0 {
+        return Err(crate::plane_intake::PlaneIntakeError::Source(
+            "claim TTL must be greater than zero".into(),
+        ));
+    }
+    Ok(millis)
 }
 
 fn is_claim_contention(error: &SdkError) -> bool {
@@ -433,5 +568,286 @@ mod tests {
         };
         let err = project_continuation(Some(continuation), Some(park)).unwrap_err();
         assert!(err.to_string().contains("mismatched continuation"));
+    }
+
+    fn granted_effect() -> proto::sekai::ActionEffect {
+        proto::sekai::ActionEffect {
+            effect_id: "effect-1".into(),
+            instance_id: "inst-1".into(),
+            operation_id: "op-1".into(),
+            kind: "runtime_dispatch".into(),
+            status: "claimed".into(),
+            claim_owner: "runtime-1".into(),
+            claim_generation: 1,
+            claim_fencing_token: "fence-1".into(),
+            claim_expires_at_ms: 1_700_000_060_000,
+            ..Default::default()
+        }
+    }
+
+    fn assert_fence_lost(
+        result: Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError>,
+        needle: &str,
+    ) {
+        let err = result.expect_err("expected FenceLost");
+        assert!(
+            matches!(err, crate::plane_intake::PlaneIntakeError::FenceLost(_)),
+            "expected FenceLost, got {err}"
+        );
+        assert!(
+            err.to_string().contains(needle),
+            "expected {needle:?} in {err}"
+        );
+    }
+
+    #[test]
+    fn duration_millis_rejects_zero_and_sub_millisecond_ttl() {
+        let zero = duration_millis(Duration::ZERO).unwrap_err();
+        assert!(
+            matches!(zero, crate::plane_intake::PlaneIntakeError::Source(_)),
+            "expected Source, got {zero}"
+        );
+        assert!(zero.to_string().contains("greater than zero"), "{zero}");
+        let sub_ms = duration_millis(Duration::from_nanos(1)).unwrap_err();
+        assert!(
+            matches!(sub_ms, crate::plane_intake::PlaneIntakeError::Source(_)),
+            "expected Source, got {sub_ms}"
+        );
+        assert_eq!(duration_millis(Duration::from_millis(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn mismatched_owner_token_generation_or_effect_id_is_fence_lost() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let ttl = Duration::from_secs(60);
+        let held = "fence-1";
+
+        let mut owner = granted_effect();
+        owner.claim_owner = "other-runtime".into();
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                1,
+                Some(held),
+                ttl,
+                start,
+                now_ms,
+                &owner,
+            ),
+            "claim owner",
+        );
+
+        let mut token = granted_effect();
+        token.claim_fencing_token = "fence-other".into();
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                1,
+                Some(held),
+                ttl,
+                start,
+                now_ms,
+                &token,
+            ),
+            "fencing token",
+        );
+
+        let mut generation = granted_effect();
+        generation.claim_generation = 3;
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                1,
+                Some(held),
+                ttl,
+                start,
+                now_ms,
+                &generation,
+            ),
+            "claim generation",
+        );
+
+        let mut effect_id = granted_effect();
+        effect_id.effect_id = "effect-other".into();
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                1,
+                Some(held),
+                ttl,
+                start,
+                now_ms,
+                &effect_id,
+            ),
+            "effect_id",
+        );
+    }
+
+    #[test]
+    fn empty_owner_token_or_generation_is_fence_lost() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let ttl = Duration::from_secs(60);
+
+        let mut owner = granted_effect();
+        owner.claim_owner.clear();
+        assert_fence_lost(
+            lease_from_granted_effect("effect-1", "runtime-1", 0, None, ttl, start, now_ms, &owner),
+            "claim owner",
+        );
+
+        let mut token = granted_effect();
+        token.claim_fencing_token.clear();
+        assert_fence_lost(
+            lease_from_granted_effect("effect-1", "runtime-1", 0, None, ttl, start, now_ms, &token),
+            "fencing token",
+        );
+
+        let mut generation = granted_effect();
+        generation.claim_generation = 0;
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                0,
+                None,
+                ttl,
+                start,
+                now_ms,
+                &generation,
+            ),
+            "claim generation",
+        );
+    }
+
+    #[test]
+    fn generation_may_stay_or_advance_by_one() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let ttl = Duration::from_secs(60);
+        let same = granted_effect();
+        let lease = lease_from_granted_effect(
+            "effect-1",
+            "runtime-1",
+            1,
+            Some("fence-1"),
+            ttl,
+            start,
+            now_ms,
+            &same,
+        )
+        .unwrap();
+        assert_eq!(lease.generation, 1);
+        assert_eq!(lease.runtime_id, "runtime-1");
+        assert_eq!(lease.fencing_token, "fence-1");
+
+        let mut bumped = granted_effect();
+        bumped.claim_generation = 2;
+        bumped.claim_fencing_token = "fence-2".into();
+        let lease = lease_from_granted_effect(
+            "effect-1",
+            "runtime-1",
+            1,
+            Some("fence-1"),
+            ttl,
+            start,
+            now_ms,
+            &bumped,
+        )
+        .unwrap();
+        assert_eq!(lease.generation, 2);
+        assert_eq!(lease.fencing_token, "fence-2");
+    }
+
+    #[test]
+    fn granted_shorter_ttl_sets_valid_until_from_remaining() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let mut effect = granted_effect();
+        effect.claim_expires_at_ms = now_ms + 10_000;
+        let lease = lease_from_granted_effect(
+            "effect-1",
+            "runtime-1",
+            1,
+            Some("fence-1"),
+            Duration::from_secs(60),
+            start,
+            now_ms,
+            &effect,
+        )
+        .unwrap();
+        assert_eq!(
+            lease.valid_until.saturating_duration_since(start),
+            Duration::from_millis(10_000)
+        );
+    }
+
+    #[test]
+    fn granted_longer_ttl_is_clamped_to_requested() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let requested = Duration::from_secs(10);
+        let mut effect = granted_effect();
+        effect.claim_expires_at_ms = now_ms + 60_000;
+        let lease = lease_from_granted_effect(
+            "effect-1",
+            "runtime-1",
+            1,
+            Some("fence-1"),
+            requested,
+            start,
+            now_ms,
+            &effect,
+        )
+        .unwrap();
+        assert_eq!(
+            lease.valid_until.saturating_duration_since(start),
+            requested
+        );
+        assert!(lease.valid_until < start + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn missing_or_past_grant_is_fence_lost() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let ttl = Duration::from_secs(60);
+
+        let mut missing = granted_effect();
+        missing.claim_expires_at_ms = 0;
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                1,
+                Some("fence-1"),
+                ttl,
+                start,
+                now_ms,
+                &missing,
+            ),
+            "missing expires_at_ms",
+        );
+
+        let mut past = granted_effect();
+        past.claim_expires_at_ms = now_ms;
+        assert_fence_lost(
+            lease_from_granted_effect(
+                "effect-1",
+                "runtime-1",
+                1,
+                Some("fence-1"),
+                ttl,
+                start,
+                now_ms,
+                &past,
+            ),
+            "already expired",
+        );
     }
 }

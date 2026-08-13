@@ -129,8 +129,10 @@ pub struct PlaneClaimLease {
     pub generation: u64,
     pub fencing_token: String,
     pub expires_at_ms: i64,
-    /// Local monotonic deadline bounded from the acquire/renew RPC start.
-    /// Fencing decisions never compare host and plane wall clocks.
+    /// Local monotonic deadline: `min(requested TTL from RPC start, granted remaining)`.
+    /// Granted remaining comes from plane `expires_at_ms` versus the local wall
+    /// clock at grant interpretation. Missing or already-expired grants are
+    /// fence loss. After that, local fencing uses this Instant only.
     pub valid_until: Instant,
 }
 
