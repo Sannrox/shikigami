@@ -50,6 +50,13 @@ queue/
 }
 ```
 
+HTTP / control admission writes `p{sortkey}-{uuid}.json` so the daemon can
+claim the highest priority file without parsing every inbox JSON. Dropped
+files that do not use that name still claim (priority `0`, then filename
+order). The claimed job is parsed once and passed into the run; idle polls
+stat the inbox mtime instead of rereading every file. `health.json` is compact
+and rewritten only when the snapshot changes.
+
 ## Plane claim intake
 
 Direct claim intake is explicit; filesystem intake remains the default:
@@ -73,8 +80,9 @@ Requirements:
 - keep `runtime_id` aligned with the admitted `runtime_dispatch` payload.
 
 The host lists claimable work, acquires a fenced claim, fetches the parent
-ActionInstance parameters, maps them to `RunRequest`, executes the existing
-`Harness`, heartbeats while the run is active, and acknowledges `completed`,
+ActionInstance parameters, renews the fence once before returning the claim,
+maps them to `RunRequest`, executes the existing `Harness`, heartbeats while
+the run is active, and acknowledges `completed`,
 `failed`, or an intentional `parked` outcome. A park is not immediately
 claimable. The plane records it as `awaiting_continuation` until an authorized
 `resolve_parked_work/v1` Action is invoked. Governed planning and harvest still

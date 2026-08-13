@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reuse one sekai-chisei `CoreLoopClient` / Channel on the plane claim client
+  for heartbeat, ack, and claim-event RPCs; reconnect only after transport
+  errors instead of paying TCP/TLS or Unix handshake plus `token()` on every
+  unary.
+- Drop the extra pre-run `HeartbeatActionClaim` in `claimed_run` after admit
+  already renewed the fence; in-run timer heartbeats and `#212` fence-loss
+  mapping are unchanged.
+- Claim filesystem inbox jobs from filename-encoded priority (parse only the
+  winner), skip idle inbox rescans when the directory mtime is unchanged, and
+  write compact `health.json` only when the snapshot changes.
 - Drain the harness future on in-run claim fence loss (instead of dropping it)
   and reap bash process groups on tool/registry drop so descendants cannot keep
   mutating the workspace after another claimant takes the lease.

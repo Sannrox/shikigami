@@ -68,30 +68,8 @@ pub(super) async fn execute(
         .inspect_err(|error| lifecycle_observe_error(options, Some(&claim_id), error))?;
     }
 
-    let call_window = match claim_call_window(&claim, options.heartbeat_interval) {
-        Ok(window) => window,
-        Err(error) => {
-            lifecycle_observe_error(options, Some(&claim_id), &error);
-            return Err(error);
-        }
-    };
-    claim.lease = tokio::select! {
-        result = tokio::time::timeout(call_window, intake.heartbeat(&claim, options.claim_ttl)) => {
-            result
-                .map_err(|_| {
-                    let error = PlaneIntakeError::FenceLost(
-                        "pre-run heartbeat did not complete before the lease safety deadline".into(),
-                    );
-                    lifecycle_observe_error(options, Some(&claim_id), &error);
-                    error
-                })?
-                .inspect_err(|error| lifecycle_observe_error(options, Some(&claim_id), error))?
-        }
-        _ = wait_for_shutdown(shutdown.clone()) => {
-            drain_claim(options, &claim_id);
-            return Ok(Execution::Shutdown);
-        }
-    };
+    // Admit already renewed the fence (List + Claim + Get + HeartbeatActionClaim).
+    // In-run timer heartbeats keep the lease; do not pay a second pre-run renew.
     if *shutdown.borrow() {
         drain_claim(options, &claim_id);
         return Ok(Execution::Shutdown);
