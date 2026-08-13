@@ -9,7 +9,17 @@ use std::time::{Duration, Instant};
 
 use sekai_client::{SdkError, SdkErrorCode};
 
-use super::{SekaiClaimClient, plane_intake_source, plane_session, proto};
+use super::{SekaiClaimClient, plane_session, proto};
+
+macro_rules! cached_unary {
+    ($slot:ident, $call:expr) => {{
+        let result = $call;
+        if let Err(error) = &result {
+            invalidate_on_transport(&mut $slot, error);
+        }
+        result
+    }};
+}
 use proto::sekai::{
     AckActionWorkRequest, ClaimActionWorkRequest, GetActionInstanceRequest,
     HeartbeatActionClaimRequest, ListClaimableActionWorkRequest, ReportActionClaimEventRequest,
@@ -21,50 +31,60 @@ pub(super) async fn claim_next(
     runtime_id: &str,
     ttl: Duration,
 ) -> Result<Option<crate::plane_intake::PlaneClaim>, crate::plane_intake::PlaneIntakeError> {
-    let plane = plane_session::connect(&client.inner)
-        .await
-        .map_err(plane_intake_source)?;
-    let listed: proto::sekai::ListClaimableActionWorkResponse = plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/ListClaimableActionWork",
-            ListClaimableActionWorkRequest {
-                namespace: client.namespace.clone(),
-                runtime_id: runtime_id.into(),
-                limit: 1,
-            },
-            plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
-        )
-        .await
-        .map_err(|error| {
-            crate::plane_intake::PlaneIntakeError::Source(format!(
+    let mut plane_slot = client.connected_plane().await?;
+    let ttl_ms = duration_millis(ttl)?;
+    let listed: proto::sekai::ListClaimableActionWorkResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ListClaimableActionWork",
+                ListClaimableActionWorkRequest {
+                    namespace: client.namespace.clone(),
+                    runtime_id: runtime_id.into(),
+                    limit: 1,
+                },
+                plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
+            )
+            .await
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
                 "ListClaimableActionWork: {error}"
-            ))
-        })?;
+            )));
+        }
+    };
     let Some(candidate) = listed.effects.into_iter().next() else {
         return Ok(None);
     };
     let candidate_effect_id = candidate.effect_id.clone();
     let claim_request_id = uuid::Uuid::new_v4().to_string();
-    let claimed: proto::sekai::ClaimActionWorkResponse = match plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/ClaimActionWork",
-            ClaimActionWorkRequest {
-                effect_id: candidate_effect_id.clone(),
-                runtime_id: runtime_id.into(),
-                request_id: claim_request_id.clone(),
-                ttl_ms: duration_millis(ttl)?,
-            },
-            plane_session::call_options(
-                &client.inner,
-                Some(&client.namespace),
-                None,
-                Some(&claim_request_id),
-            ),
-        )
-        .await
-    {
+    let claimed: proto::sekai::ClaimActionWorkResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ClaimActionWork",
+                ClaimActionWorkRequest {
+                    effect_id: candidate_effect_id.clone(),
+                    runtime_id: runtime_id.into(),
+                    request_id: claim_request_id.clone(),
+                    ttl_ms,
+                },
+                plane_session::call_options(
+                    &client.inner,
+                    Some(&client.namespace),
+                    None,
+                    Some(&claim_request_id),
+                ),
+            )
+            .await
+    ) {
         Ok(response) => response,
         Err(error) if is_claim_contention(&error) => return Ok(None),
         Err(error) => {
@@ -78,21 +98,30 @@ pub(super) async fn claim_next(
         crate::plane_intake::PlaneIntakeError::Source("ClaimActionWork returned no effect".into())
     })?;
     bind_granted_identity(&candidate_effect_id, runtime_id, 0, None, &claimed_effect)?;
-    let instance_response: proto::sekai::GetActionInstanceResponse = plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/GetActionInstance",
-            GetActionInstanceRequest {
-                instance_id: claimed_effect.instance_id.clone(),
-                namespace: String::new(),
-                idempotency_key: String::new(),
-            },
-            plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
-        )
-        .await
-        .map_err(|error| {
-            crate::plane_intake::PlaneIntakeError::Source(format!("GetActionInstance: {error}"))
-        })?;
+    let instance_response: proto::sekai::GetActionInstanceResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/GetActionInstance",
+                GetActionInstanceRequest {
+                    instance_id: claimed_effect.instance_id.clone(),
+                    namespace: String::new(),
+                    idempotency_key: String::new(),
+                },
+                plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
+            )
+            .await
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
+                "GetActionInstance: {error}"
+            )));
+        }
+    };
     let instance = instance_response.instance.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source(
             "GetActionInstance returned no instance".into(),
@@ -102,21 +131,25 @@ pub(super) async fn claim_next(
     // initial TTL. Revalidate and renew the same fence before the host is
     // allowed to start the run.
     let renew_started = Instant::now();
-    let effect_response: proto::sekai::HeartbeatActionClaimResponse = match plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/HeartbeatActionClaim",
-            HeartbeatActionClaimRequest {
-                effect_id: claimed_effect.effect_id.clone(),
-                runtime_id: runtime_id.into(),
-                claim_generation: claimed_effect.claim_generation,
-                fencing_token: claimed_effect.claim_fencing_token.clone(),
-                ttl_ms: duration_millis(ttl)?,
-            },
-            plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
-        )
-        .await
-    {
+    let effect_response: proto::sekai::HeartbeatActionClaimResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/HeartbeatActionClaim",
+                HeartbeatActionClaimRequest {
+                    effect_id: claimed_effect.effect_id.clone(),
+                    runtime_id: runtime_id.into(),
+                    claim_generation: claimed_effect.claim_generation,
+                    fencing_token: claimed_effect.claim_fencing_token.clone(),
+                    ttl_ms,
+                },
+                plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
+            )
+            .await
+    ) {
         Ok(response) => response,
         // ClaimActionWork already succeeded: FailedPrecondition is fence loss,
         // not idle contention. Mapping to Ok(None) would hide FenceLost from the
@@ -171,24 +204,29 @@ pub(super) async fn heartbeat(
         return Err(fence_lost("held claim fence identity is empty"));
     }
     let renew_started = Instant::now();
-    let plane = plane_session::connect(&client.inner)
-        .await
-        .map_err(plane_intake_source)?;
-    let response: proto::sekai::HeartbeatActionClaimResponse = plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/HeartbeatActionClaim",
-            HeartbeatActionClaimRequest {
-                effect_id: claim.work.effect_id.clone(),
-                runtime_id: claim.lease.runtime_id.clone(),
-                claim_generation: claim.lease.generation,
-                fencing_token: claim.lease.fencing_token.clone(),
-                ttl_ms: duration_millis(ttl)?,
-            },
-            plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
-        )
-        .await
-        .map_err(|error| map_lease_rpc_error("HeartbeatActionClaim", &error))?;
+    let mut plane_slot = client.connected_plane().await?;
+    let response: proto::sekai::HeartbeatActionClaimResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/HeartbeatActionClaim",
+                HeartbeatActionClaimRequest {
+                    effect_id: claim.work.effect_id.clone(),
+                    runtime_id: claim.lease.runtime_id.clone(),
+                    claim_generation: claim.lease.generation,
+                    fencing_token: claim.lease.fencing_token.clone(),
+                    ttl_ms: duration_millis(ttl)?,
+                },
+                plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
+            )
+            .await
+    ) {
+        Ok(response) => response,
+        Err(error) => return Err(map_lease_rpc_error("HeartbeatActionClaim", &error)),
+    };
     let effect = response.effect.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source(
             "HeartbeatActionClaim returned no effect".into(),
@@ -214,46 +252,51 @@ pub(super) async fn ack(
     claim: &crate::plane_intake::PlaneClaim,
     ack: &crate::plane_intake::PlaneAck,
 ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
-    let plane = plane_session::connect(&client.inner)
-        .await
-        .map_err(plane_intake_source)?;
-    let _: proto::sekai::AckActionWorkResponse = plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/AckActionWork",
-            AckActionWorkRequest {
-                effect_id: claim.work.effect_id.clone(),
-                runtime_id: claim.lease.runtime_id.clone(),
-                claim_generation: claim.lease.generation,
-                fencing_token: claim.lease.fencing_token.clone(),
-                outcome: ack.outcome.as_str().into(),
-                reason: ack.reason.clone(),
-                request_id: ack.request_id.clone(),
-                checkpoint_store_id: ack
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.store_id.clone())
-                    .unwrap_or_default(),
-                checkpoint_ref: ack
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.reference.clone())
-                    .unwrap_or_default(),
-                checkpoint_digest: ack
-                    .checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.digest.clone())
-                    .unwrap_or_default(),
-            },
-            plane_session::call_options(
-                &client.inner,
-                Some(&client.namespace),
-                None,
-                Some(&ack.request_id),
-            ),
-        )
-        .await
-        .map_err(|error| map_lease_rpc_error("AckActionWork", &error))?;
+    let mut plane_slot = client.connected_plane().await?;
+    let _: proto::sekai::AckActionWorkResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/AckActionWork",
+                AckActionWorkRequest {
+                    effect_id: claim.work.effect_id.clone(),
+                    runtime_id: claim.lease.runtime_id.clone(),
+                    claim_generation: claim.lease.generation,
+                    fencing_token: claim.lease.fencing_token.clone(),
+                    outcome: ack.outcome.as_str().into(),
+                    reason: ack.reason.clone(),
+                    request_id: ack.request_id.clone(),
+                    checkpoint_store_id: ack
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.store_id.clone())
+                        .unwrap_or_default(),
+                    checkpoint_ref: ack
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.reference.clone())
+                        .unwrap_or_default(),
+                    checkpoint_digest: ack
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.digest.clone())
+                        .unwrap_or_default(),
+                },
+                plane_session::call_options(
+                    &client.inner,
+                    Some(&client.namespace),
+                    None,
+                    Some(&ack.request_id),
+                ),
+            )
+            .await
+    ) {
+        Ok(response) => response,
+        Err(error) => return Err(map_lease_rpc_error("AckActionWork", &error)),
+    };
     Ok(())
 }
 
@@ -266,33 +309,47 @@ pub(super) async fn report_claim_event(
     reason_code: &str,
     request_id: &str,
 ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
-    let plane = plane_session::connect(&client.inner)
-        .await
-        .map_err(plane_intake_source)?;
-    let _: proto::sekai::ReportActionClaimEventResponse = plane
-        .raw()
-        .unary(
-            "/sekai.SekaiService/ReportActionClaimEvent",
-            ReportActionClaimEventRequest {
-                effect_id: claim.work.effect_id.clone(),
-                runtime_id: claim.lease.runtime_id.clone(),
-                claim_generation: claim.lease.generation,
-                fencing_token: claim.lease.fencing_token.clone(),
-                kind: kind.as_str().into(),
-                checkpoint_digest: checkpoint_digest.into(),
-                reason_code: reason_code.into(),
-                request_id: request_id.into(),
-            },
-            plane_session::call_options(
-                &client.inner,
-                Some(&client.namespace),
-                None,
-                Some(request_id),
-            ),
-        )
-        .await
-        .map_err(|error| map_lease_rpc_error("ReportActionClaimEvent", &error))?;
+    let mut plane_slot = client.connected_plane().await?;
+    let _: proto::sekai::ReportActionClaimEventResponse = match cached_unary!(
+        plane_slot,
+        plane_slot
+            .as_ref()
+            .expect("connected plane is inserted")
+            .raw()
+            .unary(
+                "/sekai.SekaiService/ReportActionClaimEvent",
+                ReportActionClaimEventRequest {
+                    effect_id: claim.work.effect_id.clone(),
+                    runtime_id: claim.lease.runtime_id.clone(),
+                    claim_generation: claim.lease.generation,
+                    fencing_token: claim.lease.fencing_token.clone(),
+                    kind: kind.as_str().into(),
+                    checkpoint_digest: checkpoint_digest.into(),
+                    reason_code: reason_code.into(),
+                    request_id: request_id.into(),
+                },
+                plane_session::call_options(
+                    &client.inner,
+                    Some(&client.namespace),
+                    None,
+                    Some(request_id),
+                ),
+            )
+            .await
+    ) {
+        Ok(response) => response,
+        Err(error) => return Err(map_lease_rpc_error("ReportActionClaimEvent", &error)),
+    };
     Ok(())
+}
+
+fn invalidate_on_transport(plane_slot: &mut Option<super::PlaneClient>, error: &SdkError) {
+    if matches!(
+        error.code,
+        SdkErrorCode::Unavailable | SdkErrorCode::DeadlineExceeded
+    ) {
+        *plane_slot = None;
+    }
 }
 
 fn project_continuation(

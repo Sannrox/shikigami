@@ -70,7 +70,7 @@ pub(super) async fn run_until_shutdown(
                 .map(|max| completed + (active as u64) < max)
                 .unwrap_or(true)
         {
-            let Some(job_path) = queue.claim_next()? else {
+            let Some(claimed) = queue.claim_next()? else {
                 break;
             };
             let worker = harness.clone();
@@ -78,7 +78,7 @@ pub(super) async fn run_until_shutdown(
             let retry_limit = runtime.retry_limit;
             jobs.spawn(async move {
                 worker_queue
-                    .run_claimed(&worker, &job_path, retry_limit)
+                    .run_claimed(&worker, claimed, retry_limit)
                     .await
             });
             active += 1;

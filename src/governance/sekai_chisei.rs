@@ -1,6 +1,7 @@
 //! First-party sekai-chisei governance adapter.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -29,6 +30,7 @@ mod plane_session;
 mod tool_authorization;
 
 use harvest_transaction::HarvestTransaction;
+pub(super) type PlaneClient = plane_session::PlaneClient;
 
 fn available_model(model: proto::chisei::AvailableModelRecord) -> AvailableModel {
     AvailableModel {
@@ -63,9 +65,12 @@ pub struct SekaiChiseiGovernance {
 ///
 /// This client only claims and acknowledges already-admitted work. Governance
 /// planning, tool authorization, and harvest remain on [`SekaiChiseiGovernance`].
+/// One connected plane client is reused for list/claim/lease RPCs and is
+/// dropped only after a transport error.
 pub struct SekaiClaimClient {
     inner: SekaiChiseiGovernance,
     namespace: String,
+    plane: CachedClient<PlaneClient>,
 }
 
 impl SekaiClaimClient {
@@ -73,7 +78,48 @@ impl SekaiClaimClient {
         Ok(Self {
             inner: SekaiChiseiGovernance::from_config(config)?,
             namespace: config.governance.namespace.clone(),
+            plane: CachedClient::new(),
         })
+    }
+
+    pub(super) async fn connected_plane(
+        &self,
+    ) -> Result<
+        tokio::sync::MutexGuard<'_, Option<PlaneClient>>,
+        crate::plane_intake::PlaneIntakeError,
+    > {
+        self.plane
+            .get_or_try_insert_with(|| plane_session::connect(&self.inner))
+            .await
+            .map_err(plane_intake_source)
+    }
+}
+
+/// Reuses one connected value until a caller invalidates it after a transport error.
+struct CachedClient<T> {
+    slot: tokio::sync::Mutex<Option<T>>,
+}
+
+impl<T> CachedClient<T> {
+    fn new() -> Self {
+        Self {
+            slot: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn get_or_try_insert_with<F, Fut, E>(
+        &self,
+        connect: F,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<T>>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let mut guard = self.slot.lock().await;
+        if guard.is_none() {
+            *guard = Some(connect().await?);
+        }
+        Ok(guard)
     }
 }
 
@@ -991,6 +1037,28 @@ mod tests {
         );
         assert_eq!(attrs.get("task").map(String::as_str), Some("do the thing"));
         assert_eq!(attrs.get("principal").map(String::as_str), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn lease_rpcs_reuse_one_cached_connect() {
+        let cache = CachedClient::new();
+        let connects = std::sync::atomic::AtomicU32::new(0);
+        let connect = || async {
+            connects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, &'static str>("channel")
+        };
+        for _ in 0..3 {
+            let guard = cache.get_or_try_insert_with(&connect).await.unwrap();
+            assert_eq!(guard.as_deref(), Some("channel"));
+        }
+        assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 1);
+        {
+            let mut guard = cache.get_or_try_insert_with(&connect).await.unwrap();
+            *guard = None;
+        }
+        let guard = cache.get_or_try_insert_with(&connect).await.unwrap();
+        assert_eq!(guard.as_deref(), Some("channel"));
+        assert_eq!(connects.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
