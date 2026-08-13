@@ -176,12 +176,18 @@ impl ToolExecutor {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = command.spawn()?;
         let pid = child.id();
+        // kill_on_drop SIGKILLs only the bash parent. rlimit children live in a
+        // new process group; dropping this future (fence-loss / cancel) must
+        // still reap the group or descendants keep mutating the workspace.
+        let _guard = ProcessGroupGuard {
+            sandbox: &self.sandbox,
+            pid,
+        };
 
         let output = match timeout(limit, child.wait_with_output()).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => return Err(ToolError::Io(e)),
             Err(_) => {
-                self.sandbox.kill_process_group(pid);
                 return Err(ToolError::BashTimeout(limit));
             }
         };
@@ -202,5 +208,16 @@ impl ToolExecutor {
             });
         }
         Ok(combined)
+    }
+}
+
+struct ProcessGroupGuard<'a> {
+    sandbox: &'a crate::sandbox::Sandbox,
+    pid: Option<u32>,
+}
+
+impl Drop for ProcessGroupGuard<'_> {
+    fn drop(&mut self) {
+        self.sandbox.kill_process_group(self.pid);
     }
 }

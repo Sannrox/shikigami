@@ -17,6 +17,7 @@ struct MockPlaneIntake {
     acks: Mutex<Vec<(String, PlaneAckOutcome)>>,
     ack_attempts: Mutex<u32>,
     transient_ack_failures: Mutex<u32>,
+    heartbeat_calls: Mutex<u32>,
 }
 
 #[async_trait]
@@ -34,6 +35,7 @@ impl PlaneIntakePort for MockPlaneIntake {
         claim: &PlaneClaim,
         ttl: Duration,
     ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        *self.heartbeat_calls.lock().unwrap() += 1;
         let mut lease = claim.lease.clone();
         lease.valid_until = std::time::Instant::now() + ttl;
         Ok(lease)
@@ -178,6 +180,7 @@ async fn claim_run_and_ack_with_mock_plane() {
         acks: Mutex::new(Vec::new()),
         ack_attempts: Mutex::new(0),
         transient_ack_failures: Mutex::new(1),
+        heartbeat_calls: Mutex::new(0),
     };
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let options = PlaneServeOptions {
@@ -197,6 +200,11 @@ async fn claim_run_and_ack_with_mock_plane() {
         vec![("effect-1".into(), PlaneAckOutcome::Completed)]
     );
     assert_eq!(*intake.ack_attempts.lock().unwrap(), 2);
+    assert!(
+        *intake.heartbeat_calls.lock().unwrap() >= 2,
+        "ack retry must renew the live fence, got {} heartbeats",
+        *intake.heartbeat_calls.lock().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -444,6 +452,7 @@ async fn lifecycle_ready_active_and_terminal_counters() {
         acks: Mutex::new(Vec::new()),
         ack_attempts: Mutex::new(0),
         transient_ack_failures: Mutex::new(0),
+        heartbeat_calls: Mutex::new(0),
     };
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let options = PlaneServeOptions {
@@ -713,4 +722,123 @@ async fn lifecycle_records_fence_lost() {
     assert!(matches!(err, PlaneIntakeError::FenceLost(_)), "{err}");
     assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::FenceLost);
     assert!(!lifecycle.accepting_claims());
+}
+
+struct InRunFenceLostIntake {
+    claims: Mutex<VecDeque<PlaneClaim>>,
+    heartbeats: Mutex<u32>,
+    acks: Mutex<Vec<PlaneAckOutcome>>,
+}
+
+#[async_trait]
+impl PlaneIntakePort for InRunFenceLostIntake {
+    async fn claim_next(
+        &self,
+        _runtime_id: &str,
+        _ttl: Duration,
+    ) -> Result<Option<PlaneClaim>, PlaneIntakeError> {
+        Ok(self.claims.lock().unwrap().pop_front())
+    }
+
+    async fn heartbeat(
+        &self,
+        claim: &PlaneClaim,
+        ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError> {
+        let mut count = self.heartbeats.lock().unwrap();
+        *count += 1;
+        if *count > 1 {
+            return Err(PlaneIntakeError::FenceLost("in-run lease fenced".into()));
+        }
+        let mut lease = claim.lease.clone();
+        lease.valid_until = std::time::Instant::now() + ttl;
+        Ok(lease)
+    }
+
+    async fn ack(&self, _claim: &PlaneClaim, ack: &PlaneAck) -> Result<(), PlaneIntakeError> {
+        self.acks.lock().unwrap().push(ack.outcome);
+        Ok(())
+    }
+
+    async fn report_claim_event(
+        &self,
+        _claim: &PlaneClaim,
+        _kind: PlaneClaimEventKind,
+        _checkpoint_digest: &str,
+        _reason_code: &str,
+        _request_id: &str,
+    ) -> Result<(), PlaneIntakeError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn in_run_fence_lost_cancels_without_stale_ack() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state");
+    let state = StateRoot::new(&state_path);
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.tools.mode = shikigami::PermissionMode::WorkspaceExec;
+    config.sandbox.backend = shikigami::SandboxBackend::Rlimit;
+    config.model.script_json = Some(
+        json!([
+            {
+                "tool_calls": [{
+                    "name": "bash",
+                    "args_json": "{\"command\":\"sleep 2\"}"
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": "{\"summary\":\"should not ack\",\"success\":true}"
+                }]
+            }
+        ])
+        .to_string(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, state).unwrap();
+
+    let lifecycle = WorkerLifecycle::open(
+        &state_path,
+        WorkerLifecycleIdentity {
+            worker_id: "w1".into(),
+            namespace: "ns".into(),
+            runtime_id: "shikigami".into(),
+        },
+    )
+    .unwrap();
+    lifecycle.mark_serving().unwrap();
+
+    let intake = InRunFenceLostIntake {
+        claims: Mutex::new(VecDeque::from([sample_claim("effect-in-run-fence")])),
+        heartbeats: Mutex::new(0),
+        acks: Mutex::new(Vec::new()),
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let options = PlaneServeOptions {
+        max_jobs: Some(1),
+        claim_ttl: Duration::from_secs(5),
+        heartbeat_interval: Duration::from_millis(80),
+        lifecycle: Some(lifecycle.clone()),
+        ..Default::default()
+    };
+    let err = run_plane_serve(&harness, &intake, options, rx)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PlaneIntakeError::FenceLost(_)), "{err}");
+    assert_eq!(lifecycle.snapshot().state, WorkerLifecycleState::FenceLost);
+    assert!(
+        intake.acks.lock().unwrap().is_empty(),
+        "must not ack under a lost fence, got {:?}",
+        intake.acks.lock().unwrap()
+    );
+    assert!(
+        *intake.heartbeats.lock().unwrap() >= 2,
+        "pre-run heartbeat must succeed before in-run fence loss"
+    );
 }
