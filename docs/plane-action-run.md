@@ -53,7 +53,12 @@ the plane and the host state is intended to support parked-run resume. See
    authorization. Heartbeats preserve claim authority; loss of authority stops
    local execution fail closed.
 6. **Harvest and acknowledge.** Run and tool events are harvested under the
-   stable `operation_id`. The live claimant acknowledges `completed`, `failed`,
+   stable `operation_id`. A completed acknowledgement includes `artifact_json`
+   when the retained inventory covers `app/` or `application/`, `sdk/` or
+   `typed_sdk/`, `tests/` or `test/`, and `deploy/`, `delivery/`, or
+   `delivery_inputs/`. The host classifies captured files only; it does not
+   invent projections or put file bytes on the receipt. Incomplete inventories
+   omit the field. The live claimant acknowledges `completed`, `failed`,
    or an intentional `parked` outcome. A park requires a governed resolution
    before the same effect becomes claimable again.
 

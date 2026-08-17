@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Add changes for the next release here. -->
 
+### Added
+
+- Completed plane acknowledgements send a credential-free retained-artifact
+  manifest when the captured workspace covers application, typed SDK, tests,
+  and delivery-input path prefixes. The host does not invent projection files.
+
 ### Fixed
 
 - Clamp claim-event retry sleep to half remaining lease, matching
