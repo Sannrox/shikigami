@@ -1557,7 +1557,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 [[package]]
 name = "sekai-client"
 version = "0.1.2"
-source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=b9a0243eefb0af9b18e9940f44dd8aee2dc0525e#b9a0243eefb0af9b18e9940f44dd8aee2dc0525e"
+source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=f6643ee1d2e539301947d1457d3ab0f22395de2f#f6643ee1d2e539301947d1457d3ab0f22395de2f"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1578,7 +1578,7 @@ dependencies = [
 [[package]]
 name = "sekai-proto"
 version = "1.0.1"
-source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=b9a0243eefb0af9b18e9940f44dd8aee2dc0525e#b9a0243eefb0af9b18e9940f44dd8aee2dc0525e"
+source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=f6643ee1d2e539301947d1457d3ab0f22395de2f#f6643ee1d2e539301947d1457d3ab0f22395de2f"
 dependencies = [
  "prost",
  "prost-types",
@@ -1795,7 +1795,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
