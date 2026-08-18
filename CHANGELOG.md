@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Add changes for the next release here. -->
 
+## [1.0.7] — 2026-08-18
+
 ### Added
 
 - Completed plane acknowledgements send a credential-free retained-artifact
@@ -17,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update `h2` to 0.4.16 for RUSTSEC-2026-0258 (unbounded empty DATA frames).
 - Clamp claim-event retry sleep to half remaining lease, matching
   acknowledgement retries after a long harness run.
 - Reuse one sekai-chisei `CoreLoopClient` / Channel on the plane claim client
