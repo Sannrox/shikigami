@@ -17,6 +17,7 @@ use crate::harness::{Harness, HarnessError};
 use crate::run::RunRequest;
 
 mod claimed_run;
+mod receipt_artifact;
 mod serve_loop;
 
 pub const RUNTIME_DISPATCH_KIND: &str = "runtime_dispatch";
@@ -155,6 +156,8 @@ pub struct PlaneAck {
     pub reason: String,
     pub request_id: String,
     pub checkpoint: Option<PlaneCheckpoint>,
+    /// Credential-free retained-artifact manifest JSON. Empty means omitted.
+    pub artifact_json: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

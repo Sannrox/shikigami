@@ -43,6 +43,7 @@ pub(super) async fn execute(
                 reason: bounded_reason(&error.to_string()),
                 request_id: Uuid::new_v4().to_string(),
                 checkpoint: None,
+                artifact_json: String::new(),
             };
             if let Err(ack_err) = ack_with_retry(intake, &mut claim, &ack, options, shutdown).await
             {
@@ -175,6 +176,7 @@ pub(super) async fn execute(
                     reason: bounded_reason(&park_reason(&result)),
                     request_id: Uuid::new_v4().to_string(),
                     checkpoint,
+                    artifact_json: String::new(),
                 },
                 false,
             )
@@ -185,6 +187,11 @@ pub(super) async fn execute(
                 reason: bounded_reason(&result.summary),
                 request_id: Uuid::new_v4().to_string(),
                 checkpoint: None,
+                artifact_json: super::receipt_artifact::from_retained_manifest(
+                    result.artifact_dir.as_deref(),
+                    &result.run_id,
+                )
+                .unwrap_or_default(),
             },
             false,
         ),
@@ -194,6 +201,7 @@ pub(super) async fn execute(
                 reason: bounded_reason(&result.summary),
                 request_id: Uuid::new_v4().to_string(),
                 checkpoint: None,
+                artifact_json: String::new(),
             },
             false,
         ),
@@ -210,6 +218,7 @@ pub(super) async fn execute(
                     reason: bounded_reason(&error.to_string()),
                     request_id: Uuid::new_v4().to_string(),
                     checkpoint: None,
+                    artifact_json: String::new(),
                 },
                 governance_fail,
             )

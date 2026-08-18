@@ -284,6 +284,7 @@ pub(super) async fn ack(
                         .as_ref()
                         .map(|checkpoint| checkpoint.digest.clone())
                         .unwrap_or_default(),
+                    artifact_json: ack.artifact_json.clone(),
                 },
                 plane_session::call_options(
                     &client.inner,
