@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Add changes for the next release here. -->
 
+## [1.0.7] — 2026-08-18
+
 ### Added
 
 - Completed plane acknowledgements send a credential-free retained-artifact
