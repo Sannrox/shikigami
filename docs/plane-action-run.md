@@ -57,8 +57,9 @@ the plane and the host state is intended to support parked-run resume. See
    when the retained inventory covers `app/` or `application/`, `sdk/` or
    `typed_sdk/`, `tests/` or `test/`, and `deploy/`, `delivery/`, or
    `delivery_inputs/`. The host classifies captured files only; it does not
-   invent projections or put file bytes on the receipt. Incomplete inventories
-   omit the field. The live claimant acknowledges `completed`, `failed`,
+   invent projections or put file bytes on the receipt. Incomplete, truncated,
+   run-mismatched, or over-64KiB inventories omit the field so the completed
+   ack still lands. The live claimant acknowledges `completed`, `failed`,
    or an intentional `parked` outcome. A park requires a governed resolution
    before the same effect becomes claimable again.
 

@@ -2,7 +2,8 @@
 //!
 //! The host does not invent projection files. It only classifies captured
 //! workspace files under the documented path prefixes and omits `artifact_json`
-//! when the four required kinds are not all present.
+//! when the four required kinds are not all present, the inventory is
+//! truncated or bound to another run, or the compact JSON exceeds 64 KiB.
 
 use std::fs;
 use std::path::Path;
@@ -13,6 +14,9 @@ use sha2::{Digest, Sha256};
 use crate::artifacts::ArtifactManifest;
 
 const REQUIRED_KINDS: [&str; 4] = ["application", "typed_sdk", "tests", "delivery_inputs"];
+/// Same wire limit as sekai-chisei #646 `ACK_ARTIFACT_JSON_MAX_BYTES`.
+/// Oversized JSON is omitted so the completed ack still lands.
+const ACK_ARTIFACT_JSON_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ReceiptArtifactFile {
@@ -33,8 +37,9 @@ struct ReceiptArtifact {
 
 /// Build compact receipt `artifact_json` from a retained run manifest.
 ///
-/// Returns `None` when the inventory is missing, truncated, or does not cover
-/// every required projection kind. Callers then ack without an artifact.
+/// Returns `None` when the inventory is missing, truncated, bound to a
+/// different run, over the Chisei 64 KiB ack limit, or does not cover every
+/// required projection kind. Callers then ack without an artifact.
 pub(super) fn from_retained_manifest(artifact_dir: Option<&Path>, run_id: &str) -> Option<String> {
     let artifact_dir = artifact_dir?;
     let raw = fs::read(artifact_dir.join("manifest.json")).ok()?;
@@ -43,7 +48,7 @@ pub(super) fn from_retained_manifest(artifact_dir: Option<&Path>, run_id: &str) 
 }
 
 fn from_captured_manifest(manifest: &ArtifactManifest, run_id: &str) -> Option<String> {
-    if manifest.files_truncated || run_id.trim().is_empty() {
+    if manifest.files_truncated || run_id.trim().is_empty() || manifest.run_id != run_id {
         return None;
     }
     let mut files = Vec::new();
@@ -74,13 +79,17 @@ fn from_captured_manifest(manifest: &ArtifactManifest, run_id: &str) -> Option<S
     let tree_digest = content_digest(&files_json);
     let artifact_id = format!("artifact:{run_id}");
     let digest = content_digest(format!("{artifact_id}\n{tree_digest}").as_bytes());
-    serde_json::to_string(&ReceiptArtifact {
+    let json = serde_json::to_string(&ReceiptArtifact {
         artifact_id,
         digest,
         tree_digest,
         files,
     })
-    .ok()
+    .ok()?;
+    if json.len() > ACK_ARTIFACT_JSON_MAX_BYTES {
+        return None;
+    }
+    Some(json)
 }
 
 fn projection_kind(path: &str) -> Option<&'static str> {
@@ -207,5 +216,34 @@ mod tests {
         ]);
         captured.files_truncated = true;
         assert!(from_captured_manifest(&captured, "run-1").is_none());
+    }
+
+    #[test]
+    fn omits_manifest_bound_to_a_different_run() {
+        let captured = manifest(vec![
+            file("app/index.html"),
+            file("sdk/client.ts"),
+            file("tests/acceptance.test.ts"),
+            file("deploy/compose.yaml"),
+        ]);
+        assert!(from_captured_manifest(&captured, "run-other").is_none());
+    }
+
+    #[test]
+    fn omits_artifact_that_exceeds_chisei_ack_json_limit() {
+        let mut files: Vec<ArtifactFile> = (0..900)
+            .map(|index| file(&format!("app/generated-{index:04}.ts")))
+            .collect();
+        files.extend([
+            file("app/index.html"),
+            file("sdk/client.ts"),
+            file("tests/acceptance.test.ts"),
+            file("deploy/compose.yaml"),
+        ]);
+        let captured = manifest(files);
+        assert!(
+            from_captured_manifest(&captured, "run-1").is_none(),
+            "expected omit when classified JSON exceeds {ACK_ARTIFACT_JSON_MAX_BYTES} bytes"
+        );
     }
 }
