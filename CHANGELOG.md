@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Omit plane `artifact_json` when the classified retained inventory is bound
+  to a different run id or the compact JSON exceeds the sekai-chisei #646
+  64 KiB ack limit, so a completed acknowledgement still lands.
+
 <!-- Add changes for the next release here. -->
 
 ## [1.0.7] — 2026-08-18
