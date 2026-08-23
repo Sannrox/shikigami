@@ -8,6 +8,14 @@ pub struct ToolDef {
     pub schema: String,
 }
 
+/// Replay authority assigned before a tool call can enter execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplayToolAuthority {
+    Observation,
+    Terminal,
+    Denied,
+}
+
 fn def(name: &str, description: &str, schema: &str) -> ToolDef {
     ToolDef {
         name: name.into(),
@@ -110,6 +118,15 @@ pub fn is_parallel_safe_tool(name: &str) -> bool {
     matches!(name, "read_file" | "glob" | "grep" | "web_fetch")
 }
 
+/// Conservative replay classification. Unknown and external tools are denied.
+pub(crate) fn replay_tool_authority(name: &str) -> ReplayToolAuthority {
+    match name {
+        "read_file" | "glob" | "grep" => ReplayToolAuthority::Observation,
+        "report" => ReplayToolAuthority::Terminal,
+        _ => ReplayToolAuthority::Denied,
+    }
+}
+
 /// Background bash tools that share `bash` allow-list authority.
 pub(crate) const BASH_HELPER_TOOLS: &[&str] =
     &["bash_background", "bash_job_status", "bash_job_logs"];
@@ -189,5 +206,26 @@ mod tests {
             .map(|definition| definition.name)
             .collect();
         assert_eq!(names, vec!["read_file"]);
+    }
+
+    #[test]
+    fn replay_authority_allows_only_observation_and_terminal_tools() {
+        for definition in builtin_catalog() {
+            let expected = match definition.name.as_str() {
+                "read_file" | "glob" | "grep" => ReplayToolAuthority::Observation,
+                "report" => ReplayToolAuthority::Terminal,
+                _ => ReplayToolAuthority::Denied,
+            };
+            assert_eq!(
+                replay_tool_authority(&definition.name),
+                expected,
+                "{}",
+                definition.name
+            );
+        }
+        assert_eq!(
+            replay_tool_authority("external_or_unknown"),
+            ReplayToolAuthority::Denied
+        );
     }
 }

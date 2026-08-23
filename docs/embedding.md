@@ -85,6 +85,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | `Config` / `ConfigSource` | Versioned settings (`version = 1`, deny unknown) |
 | `StateRoot` | Local state layout |
 | `RunRequest` / `RunResult` | Run I/O (incl. park, usage, optional `cost`) |
+| `Harness::{replay, replay_with_events}` / replay types | Additive content-bound comparison API; not part of the original 1.0 freeze core |
 | `DoctorReport` / `HarnessError` | Diagnostics and errors |
 | `export_run_transcript` / `ExportOptions` | Offline JSONL from checkpoints |
 | `governance::GovernancePort` | Trait for custom governance (may still grow; not freeze-core) |
@@ -169,6 +170,14 @@ let jsonl = export_run_transcript(
 CLI: `shikigami export <run_id> [-o transcript.jsonl]`. Fields are truncated and
 optional config redaction applies the same secret scrubbing as doctor.
 
+### Content-bound replay
+
+`Harness::replay` admits a strict versioned manifest and immutable evidence
+bundle, creates a new isolated attempt, and returns ordered step and terminal
+comparisons. It is distinct from same-attempt resume and truncated transcript
+export. See [replay.md](replay.md) for binding, tool-denial, restart, and
+governance limits.
+
 ### Evolving / host-only (not freeze core)
 
 | Surface | Notes |
@@ -183,6 +192,7 @@ optional config redaction applies the same secret scrubbing as doctor.
 | Lifecycle hooks (`[[hooks]]`) | Settings-driven; schema may grow |
 | Interactive TUI | Explicit non-goal for default product; not in this crate’s 1.0 must-haves |
 | Cost rate settings field names | Optional ops; misconfig is operator error |
+| Replay request/result schemas and `Harness` replay methods | Additive post-1.0 surface; versioned independently from `RunRequest` and transcript export |
 
 ### CHANGELOG policy for embedders
 

@@ -10,6 +10,7 @@ mod registry;
 mod todo;
 mod web_fetch;
 
+pub(crate) use catalog::{ReplayToolAuthority, replay_tool_authority};
 pub(crate) use environment::ToolEnvironment;
 
 pub use catalog::{

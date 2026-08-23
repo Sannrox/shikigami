@@ -23,6 +23,7 @@ use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort};
 use crate::model::{CostEstimate, ModelError, ModelPort, TokenUsage};
 use crate::registry::RunRegistry;
+use crate::replay::{ReplayError, ReplayRequest, ReplayResult};
 use crate::tools::{TodoItem, ToolError};
 use crate::workspace::{WorkspaceError, WorkspacePort};
 
@@ -264,6 +265,107 @@ impl Engine {
             .execute(request, expected_checkpoint_digest)
             .await
     }
+
+    pub(crate) async fn replay(&self, request: ReplayRequest) -> Result<ReplayResult, ReplayError> {
+        let execution = request.admit()?;
+        if let Some(run_id) = request.resume_run_id.as_deref()
+            && let Some(mut recovered) = crate::replay::recover_terminal_replay(
+                &self.state_runs,
+                self.registry.as_ref(),
+                run_id,
+                &execution,
+            )?
+        {
+            let registry_record = self.registry.load(run_id)?;
+            if self.registry.run_is_active(run_id)? {
+                return Err(ReplayError::Run(RunError::Message(format!(
+                    "replay attempt {run_id} is still finalizing"
+                ))));
+            }
+            if !recovered.finalized {
+                let artifact_dir = if recovered.run.workspace.try_exists()? {
+                    let checkpoint = crate::checkpoint::Checkpoint::load(&self.state_runs, run_id)?;
+                    recovered.run.workspace = resume::validate_resumed_workspace(
+                        &self.config,
+                        &self.state_runs,
+                        run_id,
+                        &checkpoint,
+                    )?;
+                    let tools = crate::tools::ToolRegistry::from_config(
+                        &recovered.run.workspace,
+                        &self.config,
+                    )
+                    .map_err(RunError::from)?;
+                    let artifact_dir = artifact_lifecycle::RunArtifactLifecycle::new(self)
+                        .finalize(run_id, &recovered.run.workspace, &tools)
+                        .await;
+                    if !recovered.keep_workspace && recovered.run.success {
+                        let cleanup = match recovered.workspace_adapter.as_str() {
+                            "directory" => crate::workspace::WorkspaceCleanup::RemoveDir,
+                            "git-worktree" => {
+                                crate::workspace::WorkspaceCleanup::RemoveGitWorktree {
+                                    repo: std::path::PathBuf::from(&self.config.workspace.root),
+                                    branch: format!(
+                                        "{}{run_id}",
+                                        self.config.workspace.branch_prefix
+                                    ),
+                                }
+                            }
+                            _ => crate::workspace::WorkspaceCleanup::None,
+                        };
+                        let workspace = crate::workspace::MaterializedWorkspace {
+                            path: recovered.run.workspace.clone(),
+                            adapter: recovered.workspace_adapter,
+                            cleanup,
+                        };
+                        let _ = self.workspace.cleanup(&workspace);
+                    }
+                    artifact_dir
+                } else {
+                    Some(
+                        registry_record
+                            .artifact_dir
+                            .clone()
+                            .filter(|path| std::path::Path::new(path).is_dir())
+                            .map(std::path::PathBuf::from)
+                            .ok_or_else(|| {
+                                ReplayError::Run(RunError::Message(format!(
+                                    "replay workspace is unavailable before artifact finalization: {}",
+                                    recovered.run.workspace.display()
+                                )))
+                            })?,
+                    )
+                };
+                recovered.run.artifact_dir = artifact_dir.clone();
+                self.emit(
+                    run_id,
+                    HarnessEvent::RunFinished {
+                        run_id: run_id.into(),
+                        success: recovered.run.success,
+                        summary: recovered.run.summary.clone(),
+                    },
+                );
+                crate::replay::mark_replay_finalized(
+                    &self.state_runs,
+                    run_id,
+                    artifact_dir.as_deref(),
+                )?;
+                self.registry.finish_result(&recovered.run)?;
+            } else if matches!(registry_record.status.as_str(), "starting" | "running") {
+                self.registry.finish_result(&recovered.run)?;
+            }
+            return crate::replay::complete_replay(&self.state_runs, recovered.run, execution);
+        }
+        let mut run_request = RunRequest::new(request.evidence.task.clone());
+        run_request.keep_workspace = request.keep_workspace;
+        run_request.cancel = request.cancel;
+        run_request.resume_run_id = request.resume_run_id;
+        run_request.logical_operation_id = execution.logical_operation_id.clone();
+        let run = RunSupervision::new(self)
+            .execute_replay(run_request, execution.clone())
+            .await?;
+        crate::replay::complete_replay(&self.state_runs, run, execution)
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +406,7 @@ mod tests {
             park: None,
             todos: vec![],
             governance: None,
+            replay: None,
         };
 
         let err =
@@ -346,6 +449,7 @@ mod tests {
             park: None,
             todos: vec![],
             governance: None,
+            replay: None,
         };
 
         let err =

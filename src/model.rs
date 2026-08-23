@@ -99,6 +99,10 @@ pub enum ModelError {
 #[async_trait]
 pub trait ModelPort: Send + Sync {
     fn id(&self) -> &'static str;
+    /// Restore adapter-local replay position from durable completed turns.
+    fn restore_replay_cursor(&self, _completed_turns: u32) -> Result<(), ModelError> {
+        Ok(())
+    }
     async fn next_turn(
         &self,
         system: &str,
@@ -129,7 +133,8 @@ pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
 
 /// Deterministic multi-turn script for tests and offline demos.
 pub struct ScriptedModel {
-    turns: std::sync::Mutex<Vec<ModelTurn>>,
+    turns: Vec<ModelTurn>,
+    cursor: std::sync::Mutex<usize>,
 }
 
 impl ScriptedModel {
@@ -158,13 +163,15 @@ impl ScriptedModel {
             })
             .collect();
         Ok(Self {
-            turns: std::sync::Mutex::new(turns),
+            turns,
+            cursor: std::sync::Mutex::new(0),
         })
     }
 
     pub fn from_turns(turns: Vec<ModelTurn>) -> Self {
         Self {
-            turns: std::sync::Mutex::new(turns),
+            turns,
+            cursor: std::sync::Mutex::new(0),
         }
     }
 }
@@ -200,17 +207,33 @@ impl ModelPort for ScriptedModel {
         "scripted"
     }
 
+    fn restore_replay_cursor(&self, completed_turns: u32) -> Result<(), ModelError> {
+        let cursor = usize::try_from(completed_turns)
+            .map_err(|_| ModelError::Message("completed turn count exceeds usize".into()))?;
+        if cursor > self.turns.len() {
+            return Err(ModelError::ScriptExhausted);
+        }
+        *self
+            .cursor
+            .lock()
+            .map_err(|_| ModelError::Message("script cursor lock poisoned".into()))? = cursor;
+        Ok(())
+    }
+
     async fn next_turn(
         &self,
         _system: &str,
         _messages: &[ChatMessage],
         _tools: &[ToolDef],
     ) -> Result<ModelTurn, ModelError> {
-        let mut guard = self.turns.lock().expect("script lock");
-        if guard.is_empty() {
-            return Err(ModelError::ScriptExhausted);
-        }
-        Ok(guard.remove(0))
+        let mut cursor = self.cursor.lock().expect("script cursor lock");
+        let turn = self
+            .turns
+            .get(*cursor)
+            .cloned()
+            .ok_or(ModelError::ScriptExhausted)?;
+        *cursor += 1;
+        Ok(turn)
     }
 }
 

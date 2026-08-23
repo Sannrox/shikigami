@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::checkpoint::{self, Checkpoint, ParkedState};
 use crate::governance::GovernancePort;
-use crate::model::ChatMessage;
+use crate::model::{ChatMessage, TokenUsage};
+use crate::replay::{ReplayCheckpoint, ReplayTerminalCheckpoint};
 use crate::tools::ToolRegistry;
 
 use super::{RunError, SYSTEM_PROMPT};
@@ -28,6 +29,7 @@ pub(super) struct RunSession {
     pub keep_workspace: bool,
     pub messages: Vec<ChatMessage>,
     pub turns: u32,
+    replay: Option<ReplayCheckpoint>,
 }
 
 impl RunSession {
@@ -53,6 +55,41 @@ impl RunSession {
             keep_workspace,
             messages,
             turns,
+            replay: None,
+        }
+    }
+
+    pub fn set_replay(&mut self, replay: Option<ReplayCheckpoint>) {
+        self.replay = replay;
+    }
+
+    pub fn replay_usage(&self) -> TokenUsage {
+        self.replay
+            .as_ref()
+            .map(|replay| replay.usage)
+            .unwrap_or_default()
+    }
+
+    pub fn set_replay_usage(&mut self, usage: TokenUsage) {
+        if let Some(replay) = &mut self.replay {
+            replay.usage = usage;
+        }
+    }
+
+    pub fn mark_replay_terminal(&mut self, terminal: ReplayTerminalCheckpoint) {
+        if let Some(replay) = &mut self.replay {
+            replay.terminal = Some(terminal);
+        }
+    }
+
+    pub fn mark_replay_finalized(&mut self, artifact_dir: Option<&std::path::Path>) {
+        if let Some(terminal) = self
+            .replay
+            .as_mut()
+            .and_then(|replay| replay.terminal.as_mut())
+        {
+            terminal.finalized = true;
+            terminal.artifact_dir = artifact_dir.map(|path| path.display().to_string());
         }
     }
 
@@ -76,6 +113,15 @@ impl RunSession {
         park: Option<ParkedState>,
         tools: &ToolRegistry,
     ) -> Result<(), RunError> {
+        let mut replay = self.replay.clone();
+        if let Some(replay) = &mut replay {
+            replay.workspace = self.workspace.display().to_string();
+            replay.comparison_cursor = self
+                .messages
+                .iter()
+                .filter(|message| matches!(message.role.as_str(), "assistant" | "tool"))
+                .count();
+        }
         Checkpoint {
             version: checkpoint::CHECKPOINT_VERSION,
             run_id: self.run_id.clone(),
@@ -89,6 +135,7 @@ impl RunSession {
             park,
             todos: tools.todos(),
             governance: self.governance.checkpoint_state(&self.run_id),
+            replay,
         }
         .save(&self.state_runs)?;
         Ok(())

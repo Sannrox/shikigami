@@ -9,6 +9,7 @@ use crate::governance::{self, AvailableModel, GovernanceError, GovernancePort};
 use crate::metrics::{Metrics, MetricsError};
 use crate::model::{self, ModelError, ModelPort};
 use crate::registry::{RegistryError, RunRegistry};
+use crate::replay::{ReplayError, ReplayRequest, ReplayResult};
 use crate::run::{Engine, RunError, RunRequest, RunResult, RunTermination};
 use crate::state::{StateError, StateRoot};
 use crate::workspace::{self, WorkspaceError, WorkspacePort};
@@ -35,6 +36,8 @@ pub enum HarnessError {
     Metrics(#[from] MetricsError),
     #[error(transparent)]
     Run(#[from] RunError),
+    #[error(transparent)]
+    Replay(#[from] ReplayError),
     #[error("doctor failed: {0}")]
     Doctor(String),
 }
@@ -196,6 +199,70 @@ impl Harness {
     ) -> Result<RunResult, HarnessError> {
         self.run_with_events_and_checkpoint_digest(request, extra, None)
             .await
+    }
+
+    /// Execute a content-bound replay as a new isolated attempt.
+    pub async fn replay(&self, request: ReplayRequest) -> Result<ReplayResult, HarnessError> {
+        self.replay_with_events(request, None).await
+    }
+
+    /// Replay with an optional additional event sink.
+    pub async fn replay_with_events(
+        &self,
+        request: ReplayRequest,
+        extra: Option<Arc<dyn EventSink>>,
+    ) -> Result<ReplayResult, HarnessError> {
+        // Reject malformed or mismatched host evidence before a live doctor
+        // probe can contact a configured governance adapter.
+        let execution = request.admit()?;
+        if self.config.requires_governance() {
+            return Err(HarnessError::Replay(
+                ReplayError::GovernanceEvidenceUnsupported(self.config.governance.adapter.clone()),
+            ));
+        }
+        crate::replay::validate_host_policy(&self.config, &execution.bindings)?;
+        let report = self.doctor_async().await;
+        if !report.ok {
+            return Err(HarnessError::Doctor(report.lines.join("; ")));
+        }
+        if matches!(
+            self.config.workspace.adapter.as_str(),
+            "inplace" | "directory-inplace"
+        ) {
+            return Err(HarnessError::Replay(ReplayError::Invalid(
+                "replay requires an isolated `directory` or `git-worktree` workspace".into(),
+            )));
+        }
+        let events = match extra {
+            Some(extra) => Arc::new(FanoutSink::new(vec![Arc::clone(&self.events), extra]))
+                as Arc<dyn EventSink>,
+            None => Arc::clone(&self.events),
+        };
+        let engine = Engine::new(
+            crate::replay::replay_config(&self.config),
+            Arc::clone(&self.governance),
+            Arc::clone(&self.workspace),
+            Arc::clone(&self.model),
+            events,
+            self.state.runs_dir(),
+            Arc::clone(&self.registry),
+        );
+        match engine.replay(request).await {
+            Ok(result) => {
+                self.metrics.record_run(
+                    result.run.success,
+                    result.run.termination == RunTermination::Parked,
+                    result.run.turns,
+                    result.run.usage.input_tokens,
+                    result.run.usage.output_tokens,
+                );
+                Ok(result)
+            }
+            Err(error) => {
+                self.metrics.record_run(false, false, 0, 0, 0);
+                Err(error.into())
+            }
+        }
     }
 
     pub(crate) async fn run_with_checkpoint_digest(

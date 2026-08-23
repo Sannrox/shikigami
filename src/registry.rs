@@ -294,6 +294,14 @@ impl RunRegistry {
         self.load_unlocked(run_id)
     }
 
+    pub(crate) fn run_is_active(&self, run_id: &str) -> Result<bool, RegistryError> {
+        let run_lock = self.lock_for(run_id)?;
+        let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
+        let record = self.load_unlocked(run_id)?;
+        Ok(matches!(record.status.as_str(), "starting" | "running")
+            && self.owner_lease_is_live(run_id, &record))
+    }
+
     fn load_unlocked(&self, run_id: &str) -> Result<RunRecord, RegistryError> {
         let path = self.run_dir(run_id)?.join(RUN_RECORD_FILENAME);
         if !path.is_file() {

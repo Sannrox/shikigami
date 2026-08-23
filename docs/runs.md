@@ -6,6 +6,7 @@ $SHIKIGAMI_STATE/runs/<run_id>/:
 ~~~
 run.json       # status, outcome, digests, usage, workspace, artifact path
 events.jsonl   # redacted event journal; tool arguments are not persisted
+checkpoint.json # resumable conversation plus optional replay binding
 cancel         # presence requests cooperative cancellation
 artifacts/
   baseline.json # hash-only workspace baseline used to scope changes
@@ -18,6 +19,12 @@ operation truth, policy, leases, budgets, and retry limits remain owned by
 sekai-chisei. A durable per-run ownership lease prevents another process from
 resuming an active run; the lease is refreshed independently while a model or
 tool call is in progress and expires only after the owner stops heartbeating.
+
+Replay attempts use the same run directory layout and registry lifecycle. Their
+checkpoint adds a manifest digest, source identity, isolated workspace binding,
+and comparison cursor. That block is recovery metadata only; the immutable
+host-supplied replay evidence bundle remains the comparison input, and the
+governance plane remains authoritative when used. See [replay.md](replay.md).
 
 ## CLI
 

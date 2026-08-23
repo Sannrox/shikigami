@@ -13,6 +13,8 @@ How shikigami identifiers map to sekai-chisei plane fields. Authority:
 | host `PlanExecution.plan_id` | aggregate receipt `operation_id` | Plane-generated host lifecycle receipt; created once per run |
 | model `PlanExecution.plan_id` | per-turn model receipt | Plane-generated receipt executed for each governed model call |
 | resume `resume_run_id` | continues same attempt | Loads checkpoint for that `run_id` |
+| replay `source_run_id` | retained comparison evidence | Never reused as the replay attempt id |
+| `ReplayResult.run.run_id` | replay attempt id | New UUID, or the same replay id when restarting that attempt |
 
 ### Governed path population
 
@@ -79,3 +81,15 @@ Resume reuses the same `run_id` (attempt). The governance checkpoint preserves
 the original logical lineage, host/model receipt ids, and any pending report;
 an explicit `RunRequest.logical_operation_id` still takes precedence when a
 host intentionally changes the correlation.
+
+## Replay
+
+Replay creates a new attempt. The source run id identifies retained evidence;
+it is not a resume key and does not authorize reuse of the source workspace or
+governance receipt. A source logical-operation id may be carried into the new
+attempt for lineage.
+
+Restart uses `ReplayRequest.resume_run_id` with the replay attempt id and the
+same manifest digest. Ordinary `RunRequest.resume_run_id` rejects replay
+checkpoints so a host cannot accidentally continue replay under normal run
+semantics.

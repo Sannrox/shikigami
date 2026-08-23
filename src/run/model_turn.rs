@@ -71,10 +71,12 @@ impl<'a> DurableModelTurn<'a> {
         tools: Arc<ToolRegistry>,
         governance_checkpoint: Option<&GovernanceCheckpoint>,
         session: &RunSession,
+        replay: bool,
     ) -> Self {
         let governed_model_checkpoint = request.resume_run_id.is_some()
-            && governance_checkpoint
-                .is_some_and(|checkpoint| !checkpoint.model_operation_id.is_empty());
+            && (replay
+                || governance_checkpoint
+                    .is_some_and(|checkpoint| !checkpoint.model_operation_id.is_empty()));
         let staged_turn = staged_model_turn(governed_model_checkpoint, &session.messages);
         Self {
             engine,
@@ -86,7 +88,11 @@ impl<'a> DurableModelTurn<'a> {
             tool_defs,
             tools,
             staged_turn,
-            usage: TokenUsage::default(),
+            usage: if replay {
+                session.replay_usage()
+            } else {
+                TokenUsage::default()
+            },
         }
     }
 
@@ -146,6 +152,7 @@ impl<'a> DurableModelTurn<'a> {
                 self.usage.output_tokens =
                     self.usage.output_tokens.saturating_add(usage.output_tokens);
             }
+            session.set_replay_usage(self.usage);
             self.engine.emit(
                 &session.run_id,
                 HarnessEvent::ModelTurn {

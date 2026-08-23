@@ -40,6 +40,7 @@ pub mod plane_host;
 pub mod plane_intake;
 pub mod prompts;
 pub mod registry;
+pub mod replay;
 pub mod run;
 pub mod sandbox;
 pub mod serve;
@@ -73,6 +74,13 @@ pub use plane_intake::{
 };
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use registry::{RunEventRecord, RunRecord, RunRegistry};
+pub use replay::{
+    MAX_REPLAY_BUNDLE_BYTES, MAX_REPLAY_STEPS, REPLAY_SCHEMA_VERSION, ReplayBindings,
+    ReplayComparisonStatus, ReplayError, ReplayEvidenceBundle, ReplayManifest, ReplayRequest,
+    ReplayResult, ReplayStepComparison, ReplayStepEvidence, ReplayStepKind,
+    ReplayTerminalComparison, ReplayTerminalEvidence, digest_bytes, empty_workspace_digest,
+    steps_from_messages, text_digest, workspace_digest,
+};
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,

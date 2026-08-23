@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Add schema-v1, content-bound run replay through additive
+  `Harness::{replay,replay_with_events}` APIs. Replay creates a new isolated
+  attempt, permits only observation tools, compares ordered digest evidence,
+  and binds restart checkpoints without changing `RunRequest`, resume,
+  transcript, serve, or MCP behavior.
+
 ### Fixed
 
 - Omit plane `artifact_json` when the classified retained inventory is bound

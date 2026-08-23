@@ -14,6 +14,7 @@ use crate::events::HarnessEvent;
 use crate::governance::{GovernanceError, RunHandle};
 use crate::hooks::{self, HookEvent};
 use crate::model::ChatMessage;
+use crate::replay::{ReplayCheckpoint, ReplayExecution};
 use crate::tools::{ToolDef, ToolRegistry};
 use crate::workspace::{
     MaterializedWorkspace, SnapshotOutcome, SnapshotPlan, WorkspaceCleanup, WorkspaceSnapshots,
@@ -39,9 +40,19 @@ pub(super) async fn prepare(
     request: &RunRequest,
     fresh_run_id: String,
     resume_checkpoint: Option<Checkpoint>,
+    replay: Option<&ReplayExecution>,
 ) -> Result<PreparedRun, RunError> {
-    let (run_id, messages, turns, workspace, task, keep_workspace, todos, governance_checkpoint) =
-        initial_state(engine, request, fresh_run_id, resume_checkpoint)?;
+    let (
+        run_id,
+        messages,
+        turns,
+        workspace,
+        task,
+        keep_workspace,
+        todos,
+        governance_checkpoint,
+        replay_checkpoint,
+    ) = initial_state(engine, request, fresh_run_id, resume_checkpoint, replay)?;
 
     engine
         .registry
@@ -64,7 +75,18 @@ pub(super) async fn prepare(
     }
     let tool_defs = tools.definitions();
     let tools = Arc::new(tools);
-    let session = RunSession::new(
+    if let Some(replay) = replay {
+        crate::replay::validate_runtime_bindings(
+            &engine.config,
+            replay,
+            &task,
+            &system_prompt,
+            &tool_defs,
+            &workspace.path,
+        )
+        .map_err(|error| RunError::Message(error.to_string()))?;
+    }
+    let mut session = RunSession::new(
         engine.state_runs.clone(),
         Arc::clone(&engine.governance),
         run_id,
@@ -75,6 +97,7 @@ pub(super) async fn prepare(
         messages,
         turns,
     );
+    session.set_replay(replay_checkpoint);
     let handle = engine
         .governance
         .begin_run_with_checkpoint(
@@ -112,6 +135,7 @@ fn initial_state(
     request: &RunRequest,
     fresh_run_id: String,
     resume_checkpoint: Option<Checkpoint>,
+    replay: Option<&ReplayExecution>,
 ) -> Result<
     (
         String,
@@ -122,6 +146,7 @@ fn initial_state(
         bool,
         Vec<crate::tools::TodoItem>,
         Option<GovernanceCheckpoint>,
+        Option<ReplayCheckpoint>,
     ),
     RunError,
 > {
@@ -183,6 +208,7 @@ fn initial_state(
             checkpoint.keep_workspace || request.keep_workspace,
             checkpoint.todos,
             checkpoint.governance,
+            checkpoint.replay,
         ));
     }
 
@@ -195,6 +221,13 @@ fn initial_state(
     let workspace = engine
         .workspace
         .materialize(&fresh_run_id, &engine.state_runs)?;
+    if replay.is_some() && workspace.adapter == "inplace" {
+        return Err(RunError::Message(
+            "replay requires an isolated `directory` or `git-worktree` workspace".into(),
+        ));
+    }
+    let replay_checkpoint =
+        replay.map(|execution| crate::replay::replay_checkpoint(execution, &workspace.path));
     Ok((
         fresh_run_id,
         vec![ChatMessage {
@@ -209,6 +242,7 @@ fn initial_state(
         request.keep_workspace,
         Vec::new(),
         None,
+        replay_checkpoint,
     ))
 }
 
@@ -385,6 +419,7 @@ mod tests {
                 ..RunRequest::new("")
             },
             run_id.into(),
+            None,
             None,
         )
         .await
