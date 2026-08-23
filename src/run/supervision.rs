@@ -10,6 +10,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::checkpoint::Checkpoint;
+use crate::replay::ReplayExecution;
 
 use super::resume::{configured_workspace_adapter, validate_resumed_workspace};
 use super::transaction::RunTransaction;
@@ -56,7 +57,26 @@ impl<'a> RunSupervision<'a> {
         request: RunRequest,
         expected_checkpoint_digest: Option<&str>,
     ) -> Result<RunResult, RunError> {
-        let resume_checkpoint = self.preflight(&request, expected_checkpoint_digest)?;
+        self.execute_inner(request, expected_checkpoint_digest, None)
+            .await
+    }
+
+    pub(super) async fn execute_replay(
+        &self,
+        request: RunRequest,
+        replay: ReplayExecution,
+    ) -> Result<RunResult, RunError> {
+        self.execute_inner(request, None, Some(replay)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        request: RunRequest,
+        expected_checkpoint_digest: Option<&str>,
+        replay: Option<ReplayExecution>,
+    ) -> Result<RunResult, RunError> {
+        let resume_checkpoint =
+            self.preflight(&request, expected_checkpoint_digest, replay.as_ref())?;
         let run_id = request
             .resume_run_id
             .clone()
@@ -65,7 +85,7 @@ impl<'a> RunSupervision<'a> {
 
         let heartbeat_task = self.spawn_heartbeat(run_id.clone());
         let result = RunTransaction::new(self.engine)
-            .execute(request, run_id.clone(), resume_checkpoint)
+            .execute(request, run_id.clone(), resume_checkpoint, replay)
             .await;
         heartbeat_task.abort();
         let _ = heartbeat_task.await;
@@ -77,6 +97,7 @@ impl<'a> RunSupervision<'a> {
         &self,
         request: &RunRequest,
         expected_checkpoint_digest: Option<&str>,
+        replay: Option<&ReplayExecution>,
     ) -> Result<Option<Checkpoint>, RunError> {
         let Some(resume_id) = &request.resume_run_id else {
             if expected_checkpoint_digest.is_some() {
@@ -93,6 +114,45 @@ impl<'a> RunSupervision<'a> {
             return Err(RunError::Message(format!(
                 "checkpoint digest mismatch for run {resume_id}"
             )));
+        }
+        match (&checkpoint.replay, replay) {
+            (Some(_), None) => {
+                return Err(RunError::Message(
+                    "replay checkpoints must be resumed through Harness::replay".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(RunError::Message(format!(
+                    "run {resume_id} is not a replay attempt"
+                )));
+            }
+            (Some(checkpoint_replay), Some(replay))
+                if checkpoint_replay.manifest_digest != replay.manifest_digest =>
+            {
+                return Err(RunError::Message(format!(
+                    "replay manifest digest mismatch for run {resume_id}"
+                )));
+            }
+            (Some(checkpoint_replay), Some(_)) if checkpoint_replay.terminal.is_some() => {
+                return Err(RunError::Message(format!(
+                    "replay attempt {resume_id} is already terminal and cannot be restarted"
+                )));
+            }
+            (Some(checkpoint_replay), Some(replay))
+                if checkpoint_replay.source_run_id != replay.source_run_id =>
+            {
+                return Err(RunError::Message(format!(
+                    "replay source identity mismatch for run {resume_id}"
+                )));
+            }
+            (Some(checkpoint_replay), Some(_))
+                if checkpoint_replay.workspace != checkpoint.workspace.display().to_string() =>
+            {
+                return Err(RunError::Message(format!(
+                    "replay workspace binding mismatch for run {resume_id}"
+                )));
+            }
+            _ => {}
         }
         checkpoint.validate_prompt(SYSTEM_PROMPT)?;
         let _ = validate_resumed_workspace(

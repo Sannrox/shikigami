@@ -69,6 +69,19 @@ cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml \
 
 If the plane is down under `fail_closed`, doctor and run refuse to start.
 
+## Replay evidence
+
+Content-bound replay uses a new isolated attempt and never treats its local
+manifest, evidence bundle, comparison result, or checkpoint as a plane receipt.
+A profile that requires governance must verify the bound policy and receipt
+evidence before the first model call.
+
+The current sekai-chisei Rust facade does not expose replay-evidence
+verification. `Harness::replay` therefore fails closed for required governed
+profiles instead of selecting a local or `none` adapter. Deterministic offline
+replay and all denial tests remain available without a live service. See
+[replay.md](replay.md).
+
 ## Harvest (plane-visible run records)
 
 Governed runs emit operation events so outcomes are reconstructable without

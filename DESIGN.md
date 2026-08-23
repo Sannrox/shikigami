@@ -96,6 +96,10 @@ must not appear in harness process settings.
 Harness-local state is never a substitute for plane truth. If governance is
 required and unavailable, the run fails closed.
 
+Content-bound replay is a new isolated run attempt with local comparative
+evidence. It is not checkpoint resume, and its manifest, result, and checkpoint
+never replace a governed receipt. See [ADR 0005](docs/decisions/0005-governed-run-replay.md).
+
 ## Run lifecycle
 
 ```text
@@ -119,6 +123,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | --- | --- |
 | `src/harness.rs`, `src/harness/diagnosis.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep module |
 | `src/run/` | Thin `Engine` interface over deep run admission and supervision (including cancel/timeout bounds), host-local Run preparation, the Run artifact lifecycle, the durable run transaction, durable model turns (including compaction), durable tool batches (including call identity), resume validation, and `RunSession` checkpoints |
+| `src/replay.rs` | Versioned replay manifest/evidence admission, canonical bindings, observation-only authority, and ordered comparison results |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |
 | `src/plane_intake.rs`, `src/plane_intake/` | Claimed-work mapping plus thin `run_plane_serve` over private deep plane serve loop and claimed-run transaction (including one lease-safe fenced RPC retry protocol) |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates plane session, governed Run admission, governed model turns, run completion, tool authorization, harvest durability and event reporting, and plane claim acquisition plus lease RPCs to private deep modules |

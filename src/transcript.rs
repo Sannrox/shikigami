@@ -252,6 +252,7 @@ mod tests {
                 status: TodoStatus::Completed,
             }],
             governance: None,
+            replay: None,
         };
         cp.save(&runs).unwrap();
 
@@ -302,6 +303,7 @@ mod tests {
             }),
             todos: vec![],
             governance: None,
+            replay: None,
         };
         cp.save(&runs).unwrap();
 

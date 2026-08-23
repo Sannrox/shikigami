@@ -32,6 +32,7 @@ pub(super) struct DurableToolBatch<'a> {
     timeout: Option<Duration>,
     handle: &'a RunHandle,
     tools: Arc<ToolRegistry>,
+    replay: bool,
 }
 
 impl<'a> DurableToolBatch<'a> {
@@ -42,6 +43,7 @@ impl<'a> DurableToolBatch<'a> {
         timeout: Option<Duration>,
         handle: &'a RunHandle,
         tools: Arc<ToolRegistry>,
+        replay: bool,
     ) -> Self {
         Self {
             engine,
@@ -50,6 +52,7 @@ impl<'a> DurableToolBatch<'a> {
             timeout,
             handle,
             tools,
+            replay,
         }
     }
 
@@ -65,6 +68,20 @@ impl<'a> DurableToolBatch<'a> {
         let timeout = self.timeout;
         let handle = self.handle;
         let tools = Arc::clone(&self.tools);
+        if self.replay {
+            for call in &turn.tool_calls {
+                if crate::tools::replay_tool_authority(&call.name)
+                    == crate::tools::ReplayToolAuthority::Denied
+                {
+                    return Err(RunError::Governance(
+                        crate::governance::GovernanceError::Denied(format!(
+                            "replay forbids effect-capable or unknown tool `{}`",
+                            call.name
+                        )),
+                    ));
+                }
+            }
+        }
         let exclusive = turn
             .tool_calls
             .iter()

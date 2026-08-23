@@ -13,6 +13,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 use thiserror::Error;
 
 use crate::model::ChatMessage;
+use crate::replay::ReplayCheckpoint;
 use crate::tools::TodoItem;
 
 pub const CHECKPOINT_VERSION: u32 = 1;
@@ -128,6 +129,9 @@ pub struct Checkpoint {
     /// Governed receipt/event retry state; absent on older checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governance: Option<GovernanceCheckpoint>,
+    /// Content binding and comparison cursor for a replay attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<ReplayCheckpoint>,
 }
 
 #[derive(Debug, Error)]
@@ -187,7 +191,12 @@ impl Checkpoint {
             fs::create_dir_all(parent)?;
         }
         let raw = serde_json::to_string_pretty(self)?;
-        fs::write(&path, raw)?;
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, raw)?;
+        if let Err(error) = crate::atomic::replace_file(&temporary, &path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
         Ok(path)
     }
 
@@ -295,6 +304,7 @@ mod tests {
                 pending_tool_reports: vec![],
                 pending_tool_executions: vec![],
             }),
+            replay: None,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -332,6 +342,7 @@ mod tests {
             park: None,
             todos: vec![],
             governance: None,
+            replay: None,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -363,6 +374,7 @@ mod tests {
             }),
             todos: vec![],
             governance: None,
+            replay: None,
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();

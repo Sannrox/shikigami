@@ -14,6 +14,7 @@ use crate::events::HarnessEvent;
 use crate::governance::RunOutcome;
 use crate::hooks::{self, HookEvent};
 use crate::model::CostEstimate;
+use crate::replay::{ReplayExecution, ReplayTerminalCheckpoint};
 
 use super::model_turn::DurableModelTurn;
 use super::tool_batch::{DurableToolBatch, ToolBatchOutcome};
@@ -33,6 +34,7 @@ impl<'a> RunTransaction<'a> {
         request: RunRequest,
         fresh_run_id: String,
         resume_checkpoint: Option<Checkpoint>,
+        replay: Option<ReplayExecution>,
     ) -> Result<RunResult, RunError> {
         let started = tokio::time::Instant::now();
         let timeout = request
@@ -48,8 +50,17 @@ impl<'a> RunTransaction<'a> {
             prompt_id,
             handle,
             governance_checkpoint,
-        } = super::preparation::prepare(self.engine, &request, fresh_run_id, resume_checkpoint)
-            .await?;
+        } = super::preparation::prepare(
+            self.engine,
+            &request,
+            fresh_run_id,
+            resume_checkpoint,
+            replay.as_ref(),
+        )
+        .await?;
+        if replay.is_some() && request.resume_run_id.is_some() {
+            self.engine.model.restore_replay_cursor(session.turns)?;
+        }
 
         let mut final_summary = String::from("completed without report");
         let mut success = false;
@@ -69,6 +80,7 @@ impl<'a> RunTransaction<'a> {
             Arc::clone(&tools),
             governance_checkpoint.as_ref(),
             &session,
+            replay.is_some(),
         );
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
@@ -77,6 +89,11 @@ impl<'a> RunTransaction<'a> {
                 let turn = model_turns.next(&mut session).await?;
 
                 if turn.tool_calls.is_empty() {
+                    if replay.is_some() {
+                        return Err(RunError::Message(
+                            "replay requires the terminal `report` tool".into(),
+                        ));
+                    }
                     final_summary = if turn.content.is_empty() {
                         "model finished without tools".into()
                     } else {
@@ -94,6 +111,7 @@ impl<'a> RunTransaction<'a> {
                     timeout,
                     &handle,
                     Arc::clone(&tools),
+                    replay.is_some(),
                 )
                 .execute(&turn, &mut session, &mut pending_park)
                 .await?;
@@ -177,6 +195,11 @@ impl<'a> RunTransaction<'a> {
                 return Err(e);
             }
         };
+        let cost = CostEstimate::from_usage_and_rates(
+            usage,
+            self.engine.config.model.input_usd_micros_per_mtok,
+            self.engine.config.model.output_usd_micros_per_mtok,
+        );
 
         if termination != RunTermination::Parked {
             let completion = self
@@ -203,6 +226,16 @@ impl<'a> RunTransaction<'a> {
             // Successful completion clears adapter-owned receipt correlation
             // from the durable checkpoint. Parked runs intentionally retain
             // it for their governed continuation.
+            session.mark_replay_terminal(ReplayTerminalCheckpoint {
+                success,
+                termination,
+                summary: final_summary.clone(),
+                prompt_id: prompt_id.clone(),
+                usage,
+                cost: cost.clone(),
+                finalized: false,
+                artifact_dir: None,
+            });
             if let Err(error) = session.save(tools.as_ref()) {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
@@ -229,12 +262,10 @@ impl<'a> RunTransaction<'a> {
                 summary: final_summary.clone(),
             },
         );
-
-        let cost = CostEstimate::from_usage_and_rates(
-            usage,
-            self.engine.config.model.input_usd_micros_per_mtok,
-            self.engine.config.model.output_usd_micros_per_mtok,
-        );
+        if termination != RunTermination::Parked {
+            session.mark_replay_finalized(artifact_dir.as_deref());
+            session.save(tools.as_ref())?;
+        }
 
         let _ = hooks::run_hooks(
             &self.engine.config.hooks,
@@ -306,6 +337,7 @@ mod tests {
                     ..RunRequest::new("")
                 },
                 run_id.into(),
+                None,
                 None,
             )
             .await

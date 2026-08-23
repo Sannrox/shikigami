@@ -8,6 +8,7 @@ Accepted decisions that must outlive a single PR.
 | [0002](0002-run-identity.md) | Run identity and plane operation lineage | Accepted |
 | [0003](0003-serve-daemon.md) | `shikigami serve` local-queue daemon | Accepted |
 | [0004](0004-v1-contract.md) | v1.0 contract and bright-future sequencing | Accepted |
+| [0005](0005-governed-run-replay.md) | Governed run replay | Accepted |
 
 ## When to write an ADR
 

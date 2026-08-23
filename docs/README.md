@@ -19,6 +19,7 @@ Operator and contributor documentation for **shikigami**.
 | Plane/model credential patterns | [credentials.md](credentials.md) |
 | Run serve (queue or plane claim) + worker lifecycle | [serve.md](serve.md) |
 | Inspect runs, cancel, artifacts, and HTTP control | [runs.md](runs.md) |
+| Replay a run from content-bound evidence | [replay.md](replay.md) |
 | Run deterministic offline golden fixtures | [eval.md](eval.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
