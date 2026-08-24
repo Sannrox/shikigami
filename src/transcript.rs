@@ -51,6 +51,11 @@ pub fn export_run_transcript(
     options: &ExportOptions,
 ) -> Result<String, TranscriptError> {
     let cp = Checkpoint::load(state_runs, run_id)?;
+    if cp.content.is_some() {
+        return Err(TranscriptError::Message(
+            "bounded content runs require export_content_transcript".into(),
+        ));
+    }
     export_checkpoint(&cp, options)
 }
 
@@ -253,6 +258,7 @@ mod tests {
             }],
             governance: None,
             replay: None,
+            content: None,
         };
         cp.save(&runs).unwrap();
 
@@ -304,6 +310,7 @@ mod tests {
             todos: vec![],
             governance: None,
             replay: None,
+            content: None,
         };
         cp.save(&runs).unwrap();
 

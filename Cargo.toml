@@ -33,7 +33,7 @@ libc = "0.2"
 futures-util = { version = "0.3", optional = true }
 
 # Optional: sekai-chisei Rust SDK
-sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "f6643ee1d2e539301947d1457d3ab0f22395de2f", version = "0.1.1", optional = true }
+sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "1b4584c8194b74d9cbf37ffefc30820942a4b61d", version = "0.1.1", optional = true }
 
 # Optional: OpenAI-compatible HTTP model for local/ungoverned runs
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }

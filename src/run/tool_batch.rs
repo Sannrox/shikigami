@@ -11,7 +11,7 @@ use crate::checkpoint::{ParkedState, StagedToolExecution, StagedToolReport, Tool
 use crate::events::HarnessEvent;
 use crate::governance::RunHandle;
 use crate::hooks::{self, HookEvent};
-use crate::model::{ChatMessage, ModelTurn, ToolCall};
+use crate::model::{ChatMessage, ModelTurn, TokenUsage, ToolCall};
 use crate::tools::{self, ToolOutput, ToolRegistry};
 
 use super::session::RunSession;
@@ -62,12 +62,20 @@ impl<'a> DurableToolBatch<'a> {
         turn: &ModelTurn,
         session: &mut RunSession,
         pending_park: &mut Option<ParkedState>,
+        usage: TokenUsage,
     ) -> Result<ToolBatchOutcome, RunError> {
         let request = self.request;
         let started = self.started;
         let timeout = self.timeout;
         let handle = self.handle;
         let tools = Arc::clone(&self.tools);
+        if session.is_content() && turn.tool_calls.iter().any(|call| call.name == "escalate") {
+            return Err(RunError::Governance(
+                crate::governance::GovernanceError::Denied(
+                    "bounded content runs do not support parking".into(),
+                ),
+            ));
+        }
         if self.replay {
             for call in &turn.tool_calls {
                 if crate::tools::replay_tool_authority(&call.name)
@@ -87,11 +95,26 @@ impl<'a> DurableToolBatch<'a> {
             .iter()
             .any(|c| tools::must_be_exclusive_batch(&c.name));
         if exclusive && turn.tool_calls.len() != 1 {
-            for c in &turn.tool_calls {
+            for (index, c) in turn.tool_calls.iter().enumerate() {
+                let detail = "tool batch rejected: report/escalate must be the only call";
+                let tool_call_id = if session.is_content() {
+                    conversation_tool_call_id(c, session.turns, index)
+                } else {
+                    c.id.clone()
+                };
+                if session.is_content() {
+                    session
+                        .append_content_tool_text(tool_call_id.clone(), detail.into())
+                        .await?;
+                }
                 session.messages.push(ChatMessage {
                     role: "tool".into(),
-                    content: "tool batch rejected: report/escalate must be the only call".into(),
-                    tool_call_id: c.id.clone(),
+                    content: if session.is_content() {
+                        String::new()
+                    } else {
+                        detail.into()
+                    },
+                    tool_call_id,
                     tool_calls: vec![],
                 });
             }
@@ -126,7 +149,7 @@ impl<'a> DurableToolBatch<'a> {
                 &session.run_id,
                 HarnessEvent::ToolStart {
                     name: call.name.clone(),
-                    args_json: call.args_json.clone(),
+                    args_json: projected_detail(session.is_content(), &call.args_json),
                 },
             );
         }
@@ -177,6 +200,9 @@ impl<'a> DurableToolBatch<'a> {
             let mut out = Vec::with_capacity(turn.tool_calls.len());
             for (index, call) in turn.tool_calls.iter().enumerate() {
                 check_bounds(self.engine, &session.run_id, request, started, timeout)?;
+                // Pre-tool hooks are an execution-authorization boundary, not
+                // a durable projection. They must inspect the exact transient
+                // arguments that authorization and the host tool will receive.
                 if let Err(e) = hooks::run_hooks(
                     &self.engine.config.hooks,
                     HookEvent::PreTool,
@@ -197,6 +223,17 @@ impl<'a> DurableToolBatch<'a> {
                     .governance
                     .tool_requires_execution_checkpoint(&call.name)
                 {
+                    let durable_args = if session.is_content() {
+                        session
+                            .durable_content_tool_arguments(index)
+                            .ok_or_else(|| {
+                                RunError::Message(
+                                    "durable content tool arguments are missing".into(),
+                                )
+                            })?
+                    } else {
+                        call.args_json.clone()
+                    };
                     self.engine
                         .governance
                         .stage_tool_execution(
@@ -204,7 +241,7 @@ impl<'a> DurableToolBatch<'a> {
                             StagedToolExecution {
                                 call_id: stable_call_id.clone(),
                                 name: call.name.clone(),
-                                args_json: call.args_json.clone(),
+                                args_json: durable_args,
                                 status: ToolExecutionStatus::Authorizing,
                             },
                         )
@@ -243,27 +280,68 @@ impl<'a> DurableToolBatch<'a> {
         // batch before this reporting phase starts. Stage the entire
         // batch first so a required governance error cannot leave
         // later host-side effects absent from the resume checkpoint.
-        for (call, outcome) in &batch_outcomes {
+        let mut content_terminal_report = None;
+        for (index, (call, outcome)) in batch_outcomes.iter().enumerate() {
+            let tool_call_id = if session.is_content() {
+                conversation_tool_call_id(call, session.turns, index)
+            } else {
+                call.id.clone()
+            };
             match outcome {
-                Ok(ToolOutput::Text(text)) => session.messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: text.clone(),
-                    tool_call_id: call.id.clone(),
-                    tool_calls: vec![],
-                }),
-                Ok(ToolOutput::Report(report)) => session.messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: format!("report: {}", report.summary),
-                    tool_call_id: call.id.clone(),
-                    tool_calls: vec![],
-                }),
+                Ok(ToolOutput::Text(text)) => {
+                    if session.is_content() {
+                        session
+                            .append_content_tool_text(tool_call_id.clone(), text.clone())
+                            .await?;
+                    }
+                    session.messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: if session.is_content() {
+                            String::new()
+                        } else {
+                            text.clone()
+                        },
+                        tool_call_id,
+                        tool_calls: vec![],
+                    });
+                }
+                Ok(ToolOutput::Report(report)) => {
+                    let detail = format!("report: {}", report.summary);
+                    if session.is_content() {
+                        session
+                            .append_content_tool_text(tool_call_id.clone(), report.summary.clone())
+                            .await?;
+                        content_terminal_report = Some((report.success, report.summary.clone()));
+                    }
+                    session.messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: if session.is_content() {
+                            String::new()
+                        } else {
+                            detail
+                        },
+                        tool_call_id,
+                        tool_calls: vec![],
+                    });
+                }
                 Ok(ToolOutput::Park(_)) => {}
-                Err(detail) => session.messages.push(ChatMessage {
-                    role: "tool".into(),
-                    content: detail.clone(),
-                    tool_call_id: call.id.clone(),
-                    tool_calls: vec![],
-                }),
+                Err(detail) => {
+                    if session.is_content() {
+                        session
+                            .append_content_tool_text(tool_call_id.clone(), detail.clone())
+                            .await?;
+                    }
+                    session.messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: if session.is_content() {
+                            String::new()
+                        } else {
+                            detail.clone()
+                        },
+                        tool_call_id,
+                        tool_calls: vec![],
+                    });
+                }
             }
         }
 
@@ -294,10 +372,12 @@ impl<'a> DurableToolBatch<'a> {
                     Ok(ToolOutput::Park(_)) | Err(_) => false,
                 },
                 detail: match outcome {
-                    Ok(ToolOutput::Text(text)) => text.clone(),
-                    Ok(ToolOutput::Report(report)) => report.summary.clone(),
+                    Ok(ToolOutput::Text(text)) => projected_detail(session.is_content(), text),
+                    Ok(ToolOutput::Report(report)) => {
+                        projected_detail(session.is_content(), &report.summary)
+                    }
                     Ok(ToolOutput::Park(park)) => format!("parked: {}", park.reason),
-                    Err(detail) => detail.clone(),
+                    Err(detail) => projected_detail(session.is_content(), detail),
                 },
             })
             .collect();
@@ -314,6 +394,17 @@ impl<'a> DurableToolBatch<'a> {
             .governance
             .clear_staged_tool_executions(handle)
             .await?;
+        // A terminal marker is recoverable only when the same checkpoint also
+        // contains the pending governance report. Preparation drains those
+        // reports before transaction-level terminal recovery.
+        if let Some((success, summary)) = content_terminal_report {
+            session.mark_content_terminal(
+                success,
+                super::RunTermination::Completed,
+                &summary,
+                usage,
+            )?;
+        }
         session.save(tools.as_ref())?;
 
         let mut terminal_report = None;
@@ -321,13 +412,14 @@ impl<'a> DurableToolBatch<'a> {
             let report_call_id = stable_tool_call_id(&call, session.turns, index);
             match outcome {
                 Ok(ToolOutput::Text(text)) => {
+                    let detail = projected_detail(session.is_content(), &text);
                     self.engine
                         .report_governance_tool_with_id(
                             handle,
                             &report_call_id,
                             &call.name,
                             true,
-                            &text,
+                            &detail,
                         )
                         .await?;
                     if call.name == "todo_write" {
@@ -335,7 +427,7 @@ impl<'a> DurableToolBatch<'a> {
                         self.engine.emit(
                             &session.run_id,
                             HarnessEvent::TodosUpdated {
-                                summary: text.chars().take(500).collect(),
+                                summary: detail.chars().take(500).collect(),
                                 item_count: items.len(),
                             },
                         );
@@ -345,7 +437,7 @@ impl<'a> DurableToolBatch<'a> {
                         HarnessEvent::ToolEnd {
                             name: call.name.clone(),
                             ok: true,
-                            detail: text.chars().take(500).collect(),
+                            detail: detail.chars().take(500).collect(),
                         },
                     );
                     let _ = hooks::run_hooks(
@@ -360,13 +452,14 @@ impl<'a> DurableToolBatch<'a> {
                     .await;
                 }
                 Ok(ToolOutput::Report(report)) => {
+                    let detail = projected_detail(session.is_content(), &report.summary);
                     self.engine
                         .report_governance_tool_with_id(
                             handle,
                             &report_call_id,
                             "report",
                             report.success,
-                            &report.summary,
+                            &detail,
                         )
                         .await?;
                     self.engine.emit(
@@ -374,7 +467,7 @@ impl<'a> DurableToolBatch<'a> {
                         HarnessEvent::ToolEnd {
                             name: "report".into(),
                             ok: report.success,
-                            detail: report.summary.clone(),
+                            detail,
                         },
                     );
                     terminal_report = Some((report.summary, report.success));
@@ -431,13 +524,14 @@ impl<'a> DurableToolBatch<'a> {
                     });
                 }
                 Err(detail) => {
+                    let reported_detail = projected_detail(session.is_content(), &detail);
                     self.engine
                         .report_governance_tool_with_id(
                             handle,
                             &report_call_id,
                             &call.name,
                             false,
-                            &detail,
+                            &reported_detail,
                         )
                         .await?;
                     self.engine.emit(
@@ -445,7 +539,7 @@ impl<'a> DurableToolBatch<'a> {
                         HarnessEvent::ToolEnd {
                             name: call.name.clone(),
                             ok: false,
-                            detail: detail.clone(),
+                            detail: reported_detail,
                         },
                     );
                     let _ = hooks::run_hooks(
@@ -483,6 +577,18 @@ fn conversation_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String
         format!("tool-{turn}-{index}")
     } else {
         call.id.clone()
+    }
+}
+
+fn projected_detail(content_run: bool, detail: &str) -> String {
+    if content_run {
+        format!(
+            "bounded_content bytes={} digest={}",
+            detail.len(),
+            crate::content::sha256_digest(detail.as_bytes())
+        )
+    } else {
+        detail.to_string()
     }
 }
 

@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt, permits only observation tools, compares ordered digest evidence,
   and binds restart checkpoints without changing `RunRequest`, resume,
   transcript, serve, or MCP behavior.
+- Add library-first bounded text, image, audio, and document runs through
+  `Harness::{run_content,run_content_with_events}`. Content v1 validates
+  capabilities and host-resolved digests, uses the governance-native content
+  RPC when configured, checkpoints metadata in a crash-safe two-slot sidecar,
+  and keeps existing text run, host, transcript, and replay contracts
+  unchanged.
 
 ### Fixed
 

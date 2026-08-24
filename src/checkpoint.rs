@@ -12,6 +12,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 use thiserror::Error;
 
+use crate::content::ContentCheckpointBinding;
 use crate::model::ChatMessage;
 use crate::replay::ReplayCheckpoint;
 use crate::tools::TodoItem;
@@ -132,6 +133,9 @@ pub struct Checkpoint {
     /// Content binding and comparison cursor for a replay attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayCheckpoint>,
+    /// Binding to the authoritative metadata-only sidecar for a content run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentCheckpointBinding>,
 }
 
 #[derive(Debug, Error)]
@@ -305,6 +309,7 @@ mod tests {
                 pending_tool_executions: vec![],
             }),
             replay: None,
+            content: None,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -343,6 +348,7 @@ mod tests {
             todos: vec![],
             governance: None,
             replay: None,
+            content: None,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -375,6 +381,7 @@ mod tests {
             todos: vec![],
             governance: None,
             replay: None,
+            content: None,
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
