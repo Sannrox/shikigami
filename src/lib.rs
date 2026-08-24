@@ -25,6 +25,7 @@ pub mod artifacts;
 pub(crate) mod atomic;
 pub mod checkpoint;
 pub mod config;
+pub mod content;
 pub mod context;
 pub mod eval;
 pub mod events;
@@ -53,6 +54,14 @@ pub mod workspace;
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpServerSettings, PermissionMode,
     SandboxBackend, SandboxSettings,
+};
+pub use content::{
+    CONTENT_CONTRACT_VERSION, CONTENT_SCHEMA_VERSION, CONTENT_TRANSCRIPT_SCHEMA_VERSION,
+    ContentCapabilitiesV1, ContentDisclosureState, ContentError, ContentMessageV1,
+    ContentModelTurnV1, ContentPartDescriptor, ContentPartKind, ContentProvenanceV1,
+    ContentResolver, ContentRunRequestV1, ContentRunResultV1, ContentToStore,
+    MAX_CONTENT_AGGREGATE_BYTES, MAX_CONTENT_PART_BYTES, MAX_CONTENT_PARTS, ResolvedContent,
+    ResolvedContentPart, export_content_transcript,
 };
 pub use eval::{EVAL_SCHEMA_VERSION, EvalCaseResult, EvalError, EvalSuiteResult, run_fixture};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};

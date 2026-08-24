@@ -539,6 +539,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::ToolStart { .. } => "tool_start",
         HarnessEvent::ToolEnd { .. } => "tool_end",
         HarnessEvent::ModelTurn { .. } => "model_turn",
+        HarnessEvent::ContentTurn { .. } => "content_turn",
         HarnessEvent::Message { .. } => "message",
         HarnessEvent::RunFinished { .. } => "run_finished",
         HarnessEvent::Prompt { .. } => "prompt",
@@ -553,6 +554,9 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
         HarnessEvent::ToolStart { name, .. } => name.clone(),
         HarnessEvent::ToolEnd { name, ok, .. } => format!("{name} ok={ok}"),
         HarnessEvent::ModelTurn { turn, .. } => format!("turn={turn}"),
+        HarnessEvent::ContentTurn {
+            turn, part_count, ..
+        } => format!("turn={turn} parts={part_count}"),
         HarnessEvent::Message { level, .. } => format!("[{level}]"),
         HarnessEvent::RunFinished {
             run_id, success, ..

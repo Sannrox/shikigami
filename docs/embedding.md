@@ -82,6 +82,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | Item | Notes |
 | --- | --- |
 | `Harness` | Primary entry: `doctor`, `doctor_async`, `run`, `run_with_events` |
+| `Harness::{run_content, run_content_with_events}` / content v1 types | Additive bounded content API; library-only intake |
 | `Config` / `ConfigSource` | Versioned settings (`version = 1`, deny unknown) |
 | `StateRoot` | Local state layout |
 | `RunRequest` / `RunResult` | Run I/O (incl. park, usage, optional `cost`) |
@@ -178,6 +179,18 @@ comparisons. It is distinct from same-attempt resume and truncated transcript
 export. See [replay.md](replay.md) for binding, tool-denial, restart, and
 governance limits.
 
+### Bounded content runs
+
+`Harness::run_content` accepts a separate `ContentRunRequestV1` and a
+host-owned `ContentResolver`. It preserves ordered content descriptors while
+keeping resolved payload bytes out of checkpoints, transcripts, events, and
+registry journals. Resume and export use content-specific entrypoints;
+ordinary run resume, transcript v1, and replay v1 reject content checkpoints.
+
+The initial intake is library-only. CLI, MCP, serve, and plane intake continue
+to use the stable text contract. See [content.md](content.md) for descriptor
+bounds, resolver responsibilities, fail-closed adapter behavior, and recovery.
+
 ### Evolving / host-only (not freeze core)
 
 | Surface | Notes |
@@ -193,6 +206,7 @@ governance limits.
 | Interactive TUI | Explicit non-goal for default product; not in this crate’s 1.0 must-haves |
 | Cost rate settings field names | Optional ops; misconfig is operator error |
 | Replay request/result schemas and `Harness` replay methods | Additive post-1.0 surface; versioned independently from `RunRequest` and transcript export |
+| Content request/result/resolver schemas and `Harness` content methods | Additive post-1.0 surface; versioned independently from text run, resume, transcript, and replay |
 
 ### CHANGELOG policy for embedders
 

@@ -19,6 +19,9 @@ use tokio::sync::watch;
 use crate::checkpoint::Checkpoint;
 use crate::checkpoint::CheckpointError;
 use crate::config::Config;
+use crate::content::{
+    ContentCapabilitiesV1, ContentMessageV1, ContentResolver, ContentRunRequestV1,
+};
 use crate::events::{EventSink, HarnessEvent};
 use crate::governance::{GovernanceError, GovernancePort};
 use crate::model::{CostEstimate, ModelError, ModelPort, TokenUsage};
@@ -124,6 +127,12 @@ pub struct RunResult {
     pub cost: Option<CostEstimate>,
     /// Final run-scoped todo checklist (empty if never set).
     pub todos: Vec<TodoItem>,
+}
+
+pub(crate) struct ContentExecution {
+    pub messages: Vec<ContentMessageV1>,
+    pub capabilities: ContentCapabilitiesV1,
+    pub resolver: Arc<dyn ContentResolver>,
 }
 
 /// Operator-visible park payload (library + CLI).
@@ -254,6 +263,13 @@ impl Engine {
 
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, RunError> {
         self.run_with_checkpoint_digest(request, None).await
+    }
+
+    pub(crate) async fn run_content(
+        &self,
+        request: ContentRunRequestV1,
+    ) -> Result<RunResult, RunError> {
+        RunSupervision::new(self).execute_content(request).await
     }
 
     pub(crate) async fn run_with_checkpoint_digest(
@@ -407,6 +423,7 @@ mod tests {
             todos: vec![],
             governance: None,
             replay: None,
+            content: None,
         };
 
         let err =
@@ -450,6 +467,7 @@ mod tests {
             todos: vec![],
             governance: None,
             replay: None,
+            content: None,
         };
 
         let err =

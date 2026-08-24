@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::{Config, ConfigError, ConfigResolutionError, ConfigSource};
+use crate::content::{ContentError, ContentRunRequestV1, ContentRunResultV1};
 use crate::events::{self, EventError, EventSink, FanoutSink};
 use crate::governance::{self, AvailableModel, GovernanceError, GovernancePort};
 use crate::metrics::{Metrics, MetricsError};
@@ -38,6 +39,8 @@ pub enum HarnessError {
     Run(#[from] RunError),
     #[error(transparent)]
     Replay(#[from] ReplayError),
+    #[error(transparent)]
+    Content(#[from] ContentError),
     #[error("doctor failed: {0}")]
     Doctor(String),
 }
@@ -199,6 +202,69 @@ impl Harness {
     ) -> Result<RunResult, HarnessError> {
         self.run_with_events_and_checkpoint_digest(request, extra, None)
             .await
+    }
+
+    /// Execute one additive bounded content run.
+    pub async fn run_content(
+        &self,
+        request: ContentRunRequestV1,
+    ) -> Result<ContentRunResultV1, HarnessError> {
+        self.run_content_with_events(request, None).await
+    }
+
+    /// Execute a bounded content run with an optional metadata-only event sink.
+    pub async fn run_content_with_events(
+        &self,
+        request: ContentRunRequestV1,
+        extra: Option<Arc<dyn EventSink>>,
+    ) -> Result<ContentRunResultV1, HarnessError> {
+        let report = self.doctor_async().await;
+        if !report.ok {
+            return Err(HarnessError::Doctor(report.lines.join("; ")));
+        }
+        let events = match extra {
+            Some(extra) => Arc::new(FanoutSink::new(vec![Arc::clone(&self.events), extra]))
+                as Arc<dyn EventSink>,
+            None => Arc::clone(&self.events),
+        };
+        let engine = Engine::new(
+            self.config.clone(),
+            Arc::clone(&self.governance),
+            Arc::clone(&self.workspace),
+            Arc::clone(&self.model),
+            events,
+            self.state.runs_dir(),
+            Arc::clone(&self.registry),
+        );
+        match engine.run_content(request).await {
+            Ok(run) => {
+                self.metrics.record_run(
+                    run.success,
+                    run.termination == RunTermination::Parked,
+                    run.turns,
+                    run.usage.input_tokens,
+                    run.usage.output_tokens,
+                );
+                let checkpoint =
+                    crate::checkpoint::Checkpoint::load(&self.state.runs_dir(), &run.run_id)
+                        .map_err(ContentError::from)?;
+                let binding = checkpoint.content.as_ref().ok_or_else(|| {
+                    HarnessError::Content(ContentError::Invalid(
+                        "completed content run has no sidecar binding".into(),
+                    ))
+                })?;
+                let sidecar =
+                    crate::content::load_sidecar(&self.state.runs_dir(), &run.run_id, binding)?;
+                Ok(ContentRunResultV1 {
+                    run,
+                    messages: sidecar.messages,
+                })
+            }
+            Err(error) => {
+                self.metrics.record_run(false, false, 0, 0, 0);
+                Err(error.into())
+            }
+        }
     }
 
     /// Execute a content-bound replay as a new isolated attempt.

@@ -172,6 +172,9 @@ fn format_event(event: &HarnessEvent) -> String {
         HarnessEvent::ToolStart { name, .. } => format!("tool_start={name}"),
         HarnessEvent::ToolEnd { name, ok, .. } => format!("tool_end={name} ok={ok}"),
         HarnessEvent::ModelTurn { turn, .. } => format!("model_turn={turn}"),
+        HarnessEvent::ContentTurn {
+            turn, part_count, ..
+        } => format!("content_turn={turn} parts={part_count}"),
         HarnessEvent::RunFinished {
             run_id,
             success,

@@ -10,10 +10,13 @@ use crate::checkpoint::{
     GovernanceCheckpoint, GovernanceEvidenceReference, StagedToolExecution, StagedToolReport,
 };
 use crate::config::Config;
+use crate::content::ContentModelTurnV1;
 use crate::model::{ChatMessage, ModelTurn};
 use crate::tools::ToolDef;
 
-use super::{AvailableModel, GovernanceError, GovernancePort, RunHandle, RunOutcome};
+use super::{
+    AvailableModel, ContentTurnContext, GovernanceError, GovernancePort, RunHandle, RunOutcome,
+};
 
 pub use sekai_client::protocol as proto;
 use sha2::{Digest, Sha256};
@@ -21,6 +24,7 @@ use sha2::{Digest, Sha256};
 use proto::chisei::GetEffectivePolicySummaryRequest;
 
 mod claim_acquisition;
+mod governed_content_turn;
 mod governed_model_turn;
 mod governed_run_admission;
 mod governed_run_completion;
@@ -460,6 +464,24 @@ impl GovernancePort for SekaiChiseiGovernance {
         _local_model: &dyn crate::model::ModelPort,
     ) -> Result<ModelTurn, GovernanceError> {
         governed_model_turn::execute(self, handle, system, messages, tools).await
+    }
+
+    async fn plan_content_turn(
+        &self,
+        handle: &RunHandle,
+        system: &str,
+        context: ContentTurnContext<'_>,
+    ) -> Result<ContentModelTurnV1, GovernanceError> {
+        governed_content_turn::execute(
+            self,
+            handle,
+            system,
+            context.messages,
+            context.tools,
+            context.capabilities,
+            context.resolver,
+        )
+        .await
     }
 
     async fn authorize_tool(

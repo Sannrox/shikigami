@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::checkpoint::{Checkpoint, GovernanceCheckpoint};
+use crate::content::{ContentCheckpointBinding, initial_messages_match};
 use crate::events::HarnessEvent;
 use crate::governance::{GovernanceError, RunHandle};
 use crate::hooks::{self, HookEvent};
@@ -21,8 +22,8 @@ use crate::workspace::{
 };
 
 use super::resume::{configured_workspace_adapter, validate_resumed_workspace};
-use super::session::RunSession;
-use super::{Engine, RunError, RunRequest, SYSTEM_PROMPT};
+use super::session::{ContentResumeState, RunSession};
+use super::{ContentExecution, Engine, RunError, RunRequest, SYSTEM_PROMPT};
 
 pub(super) struct PreparedRun {
     pub(super) session: RunSession,
@@ -41,7 +42,18 @@ pub(super) async fn prepare(
     fresh_run_id: String,
     resume_checkpoint: Option<Checkpoint>,
     replay: Option<&ReplayExecution>,
+    content: Option<&ContentExecution>,
 ) -> Result<PreparedRun, RunError> {
+    if content.is_some()
+        && let Some(checkpoint) = resume_checkpoint.as_ref()
+        && !request.task.is_empty()
+        && request.task != checkpoint.task
+    {
+        return Err(RunError::Message(format!(
+            "content task changed across resume for run {}",
+            checkpoint.run_id
+        )));
+    }
     let (
         run_id,
         messages,
@@ -52,6 +64,7 @@ pub(super) async fn prepare(
         todos,
         governance_checkpoint,
         replay_checkpoint,
+        content_binding,
     ) = initial_state(engine, request, fresh_run_id, resume_checkpoint, replay)?;
 
     engine
@@ -98,6 +111,48 @@ pub(super) async fn prepare(
         turns,
     );
     session.set_replay(replay_checkpoint);
+    if let Some(content) = content {
+        let (messages, capabilities, initial_message_count, terminal, usage) =
+            if let Some(binding) = content_binding.as_ref() {
+                let sidecar =
+                    RunSession::load_content_sidecar(&engine.state_runs, &session.run_id, binding)?;
+                if !initial_messages_match(&sidecar, &content.messages)
+                    || sidecar.capabilities != content.capabilities
+                {
+                    return Err(RunError::Message(format!(
+                        "content request changed across resume for run {}",
+                        session.run_id
+                    )));
+                }
+                (
+                    sidecar.messages,
+                    sidecar.capabilities,
+                    sidecar.initial_message_count,
+                    sidecar.terminal,
+                    sidecar.usage,
+                )
+            } else {
+                (
+                    content.messages.clone(),
+                    content.capabilities.clone(),
+                    content.messages.len() as u32,
+                    None,
+                    crate::model::TokenUsage::default(),
+                )
+            };
+        session.set_content(
+            Arc::clone(&content.resolver),
+            capabilities,
+            messages,
+            ContentResumeState {
+                initial_message_count,
+                binding: content_binding,
+                terminal,
+                usage,
+            },
+        )?;
+        session.revalidate_content().await?;
+    }
     let handle = engine
         .governance
         .begin_run_with_checkpoint(
@@ -109,7 +164,7 @@ pub(super) async fn prepare(
         .await?;
     persist_initial_state(
         engine,
-        &session,
+        &mut session,
         tools.as_ref(),
         &handle,
         governance_checkpoint.as_ref(),
@@ -147,6 +202,7 @@ fn initial_state(
         Vec<crate::tools::TodoItem>,
         Option<GovernanceCheckpoint>,
         Option<ReplayCheckpoint>,
+        Option<ContentCheckpointBinding>,
     ),
     RunError,
 > {
@@ -209,6 +265,7 @@ fn initial_state(
             checkpoint.todos,
             checkpoint.governance,
             checkpoint.replay,
+            checkpoint.content,
         ));
     }
 
@@ -243,6 +300,7 @@ fn initial_state(
         Vec::new(),
         None,
         replay_checkpoint,
+        None,
     ))
 }
 
@@ -326,7 +384,7 @@ fn compose_context(
 
 async fn persist_initial_state(
     engine: &Engine,
-    session: &RunSession,
+    session: &mut RunSession,
     tools: &ToolRegistry,
     handle: &RunHandle,
     checkpoint: Option<&GovernanceCheckpoint>,
@@ -419,6 +477,7 @@ mod tests {
                 ..RunRequest::new("")
             },
             run_id.into(),
+            None,
             None,
             None,
         )

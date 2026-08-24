@@ -122,6 +122,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | Path | Responsibility |
 | --- | --- |
 | `src/harness.rs`, `src/harness/diagnosis.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep module |
+| `src/content.rs` | Additive bounded content descriptors, host resolver contract, metadata-only sidecar checkpoints, and content transcript projection |
 | `src/run/` | Thin `Engine` interface over deep run admission and supervision (including cancel/timeout bounds), host-local Run preparation, the Run artifact lifecycle, the durable run transaction, durable model turns (including compaction), durable tool batches (including call identity), resume validation, and `RunSession` checkpoints |
 | `src/replay.rs` | Versioned replay manifest/evidence admission, canonical bindings, observation-only authority, and ordered comparison results |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |

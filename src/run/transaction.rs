@@ -18,7 +18,7 @@ use crate::replay::{ReplayExecution, ReplayTerminalCheckpoint};
 
 use super::model_turn::DurableModelTurn;
 use super::tool_batch::{DurableToolBatch, ToolBatchOutcome};
-use super::{Engine, ParkInfo, RunError, RunRequest, RunResult, RunTermination};
+use super::{ContentExecution, Engine, ParkInfo, RunError, RunRequest, RunResult, RunTermination};
 
 pub(super) struct RunTransaction<'a> {
     engine: &'a Engine,
@@ -35,6 +35,7 @@ impl<'a> RunTransaction<'a> {
         fresh_run_id: String,
         resume_checkpoint: Option<Checkpoint>,
         replay: Option<ReplayExecution>,
+        content: Option<ContentExecution>,
     ) -> Result<RunResult, RunError> {
         let started = tokio::time::Instant::now();
         let timeout = request
@@ -56,9 +57,10 @@ impl<'a> RunTransaction<'a> {
             fresh_run_id,
             resume_checkpoint,
             replay.as_ref(),
+            content.as_ref(),
         )
         .await?;
-        if replay.is_some() && request.resume_run_id.is_some() {
+        if (replay.is_some() || content.is_some()) && request.resume_run_id.is_some() {
             self.engine.model.restore_replay_cursor(session.turns)?;
         }
 
@@ -82,72 +84,94 @@ impl<'a> RunTransaction<'a> {
             &session,
             replay.is_some(),
         );
+        let recovered_content_terminal = session.recover_content_terminal().await?;
+        let recovered_usage = recovered_content_terminal
+            .as_ref()
+            .map(|(terminal, _)| terminal.usage);
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
-        let result: Result<Option<ParkInfo>, RunError> = async {
-            loop {
-                let turn = model_turns.next(&mut session).await?;
+        let result: Result<Option<ParkInfo>, RunError> =
+            if let Some((terminal, summary)) = recovered_content_terminal {
+                final_summary = summary;
+                success = terminal.success;
+                termination = terminal.termination;
+                Ok(None)
+            } else {
+                async {
+                    loop {
+                        let turn = model_turns.next(&mut session).await?;
 
-                if turn.tool_calls.is_empty() {
-                    if replay.is_some() {
-                        return Err(RunError::Message(
-                            "replay requires the terminal `report` tool".into(),
-                        ));
-                    }
-                    final_summary = if turn.content.is_empty() {
-                        "model finished without tools".into()
-                    } else {
-                        turn.content
-                    };
-                    success = true;
-                    termination = RunTermination::Completed;
-                    break;
-                }
+                        if turn.tool_calls.is_empty() {
+                            if replay.is_some() {
+                                return Err(RunError::Message(
+                                    "replay requires the terminal `report` tool".into(),
+                                ));
+                            }
+                            final_summary = if turn.content.is_empty() {
+                                "model finished without tools".into()
+                            } else {
+                                turn.content
+                            };
+                            success = true;
+                            termination = RunTermination::Completed;
+                            if session.is_content() {
+                                session.mark_content_terminal(
+                                    success,
+                                    termination,
+                                    &final_summary,
+                                    model_turns.usage(),
+                                )?;
+                                session.save(tools.as_ref())?;
+                            }
+                            break;
+                        }
 
-                let outcome = DurableToolBatch::new(
-                    self.engine,
-                    &request,
-                    started,
-                    timeout,
-                    &handle,
-                    Arc::clone(&tools),
-                    replay.is_some(),
-                )
-                .execute(&turn, &mut session, &mut pending_park)
-                .await?;
-                match outcome {
-                    ToolBatchOutcome::Continue => continue,
-                    ToolBatchOutcome::Completed {
-                        summary,
-                        success: report_success,
-                    } => {
-                        final_summary = summary;
-                        success = report_success;
-                        termination = RunTermination::Completed;
-                        return Ok(None);
+                        let outcome = DurableToolBatch::new(
+                            self.engine,
+                            &request,
+                            started,
+                            timeout,
+                            &handle,
+                            Arc::clone(&tools),
+                            replay.is_some(),
+                        )
+                        .execute(&turn, &mut session, &mut pending_park, model_turns.usage())
+                        .await?;
+                        match outcome {
+                            ToolBatchOutcome::Continue => continue,
+                            ToolBatchOutcome::Completed {
+                                summary,
+                                success: report_success,
+                            } => {
+                                final_summary = summary;
+                                success = report_success;
+                                termination = RunTermination::Completed;
+                                return Ok(None);
+                            }
+                            ToolBatchOutcome::Parked { info, summary } => {
+                                final_summary = summary;
+                                success = false;
+                                termination = RunTermination::Parked;
+                                return Ok(Some(info));
+                            }
+                        }
                     }
-                    ToolBatchOutcome::Parked { info, summary } => {
-                        final_summary = summary;
-                        success = false;
-                        termination = RunTermination::Parked;
-                        return Ok(Some(info));
-                    }
+                    Ok(None)
                 }
-            }
-            Ok(None)
-        }
-        .await;
+                .await
+            };
 
         let park_info = match &result {
             Ok(park) => park.clone(),
             Err(_) => None,
         };
-        let usage = model_turns.usage();
+        let usage = recovered_usage.unwrap_or_else(|| model_turns.usage());
 
         let (success, final_summary, termination) = match result {
             Ok(_) => (success, final_summary, termination),
             Err(e) => {
                 let summary = e.to_string();
+                let projected_summary = projected_summary(session.is_content(), &summary);
                 tools.kill_background_jobs().await;
                 // The complete batch was staged before reporting, so this
                 // checkpoint cannot replay an already executed host tool.
@@ -161,7 +185,7 @@ impl<'a> RunTransaction<'a> {
                             &handle,
                             RunOutcome {
                                 success: false,
-                                summary: summary.clone(),
+                                summary: projected_summary.clone(),
                                 turns: session.turns,
                                 termination: e.termination().as_str().into(),
                                 workspace: ws.path.display().to_string(),
@@ -183,7 +207,7 @@ impl<'a> RunTransaction<'a> {
                     HarnessEvent::RunFinished {
                         run_id: session.run_id.clone(),
                         success: false,
-                        summary: summary.clone(),
+                        summary: projected_summary,
                     },
                 );
                 // Reap after all error-path bookkeeping and immediately
@@ -200,8 +224,13 @@ impl<'a> RunTransaction<'a> {
             self.engine.config.model.input_usd_micros_per_mtok,
             self.engine.config.model.output_usd_micros_per_mtok,
         );
+        if session.is_content() && termination != RunTermination::Parked {
+            session.mark_content_terminal(success, termination, &final_summary, usage)?;
+            session.save(tools.as_ref())?;
+        }
 
         if termination != RunTermination::Parked {
+            let governance_summary = projected_summary(session.is_content(), &final_summary);
             let completion = self
                 .engine
                 .governance
@@ -209,7 +238,7 @@ impl<'a> RunTransaction<'a> {
                     &handle,
                     RunOutcome {
                         success,
-                        summary: final_summary.clone(),
+                        summary: governance_summary,
                         turns: session.turns,
                         termination: termination.as_str().into(),
                         workspace: ws.path.display().to_string(),
@@ -259,11 +288,12 @@ impl<'a> RunTransaction<'a> {
             HarnessEvent::RunFinished {
                 run_id: session.run_id.clone(),
                 success,
-                summary: final_summary.clone(),
+                summary: projected_summary(session.is_content(), &final_summary),
             },
         );
         if termination != RunTermination::Parked {
             session.mark_replay_finalized(artifact_dir.as_deref());
+            session.mark_content_finalized(artifact_dir.as_deref());
             session.save(tools.as_ref())?;
         }
 
@@ -274,7 +304,7 @@ impl<'a> RunTransaction<'a> {
                 "run_id": session.run_id,
                 "success": success,
                 "termination": termination.as_str(),
-                "summary": final_summary,
+                "summary": projected_summary(session.is_content(), &final_summary),
             }),
         )
         .await;
@@ -293,6 +323,18 @@ impl<'a> RunTransaction<'a> {
             cost,
             todos: tools.todos(),
         })
+    }
+}
+
+fn projected_summary(content_run: bool, summary: &str) -> String {
+    if content_run {
+        format!(
+            "bounded_content_result bytes={} digest={}",
+            summary.len(),
+            crate::content::sha256_digest(summary.as_bytes())
+        )
+    } else {
+        summary.to_string()
     }
 }
 
@@ -337,6 +379,7 @@ mod tests {
                     ..RunRequest::new("")
                 },
                 run_id.into(),
+                None,
                 None,
                 None,
             )

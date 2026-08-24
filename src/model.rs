@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::content::{
+    ContentCapabilitiesV1, ContentMessageV1, ContentModelTurnV1, ResolvedContentPart,
+    validate_messages,
+};
 use crate::tools::ToolDef;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +113,22 @@ pub trait ModelPort: Send + Sync {
         messages: &[ChatMessage],
         tools: &[ToolDef],
     ) -> Result<ModelTurn, ModelError>;
+
+    /// Produce one bounded content turn. Adapters deny by default so content
+    /// can never be silently coerced through the text interface.
+    async fn next_content_turn(
+        &self,
+        _system: &str,
+        _messages: &[ContentMessageV1],
+        _tools: &[ToolDef],
+        _capabilities: &ContentCapabilitiesV1,
+        _resolved_parts: &[ResolvedContentPart],
+    ) -> Result<ContentModelTurnV1, ModelError> {
+        Err(ModelError::Message(format!(
+            "model adapter `{}` does not support bounded content",
+            self.id()
+        )))
+    }
 }
 
 pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
@@ -234,6 +254,25 @@ impl ModelPort for ScriptedModel {
             .ok_or(ModelError::ScriptExhausted)?;
         *cursor += 1;
         Ok(turn)
+    }
+
+    async fn next_content_turn(
+        &self,
+        system: &str,
+        messages: &[ContentMessageV1],
+        tools: &[ToolDef],
+        capabilities: &ContentCapabilitiesV1,
+        _resolved_parts: &[ResolvedContentPart],
+    ) -> Result<ContentModelTurnV1, ModelError> {
+        validate_messages(messages, capabilities)
+            .map_err(|error| ModelError::Message(error.to_string()))?;
+        let turn = self.next_turn(system, &[], tools).await?;
+        Ok(ContentModelTurnV1 {
+            text: turn.content,
+            output_parts: Vec::new(),
+            tool_calls: turn.tool_calls,
+            usage: turn.usage,
+        })
     }
 }
 

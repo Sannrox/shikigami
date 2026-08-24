@@ -29,6 +29,13 @@ pub enum HarnessEvent {
         turn: u32,
         content_preview: String,
     },
+    /// Metadata-only projection for a bounded content model turn.
+    ContentTurn {
+        turn: u32,
+        part_count: usize,
+        kinds: Vec<String>,
+        digests: Vec<String>,
+    },
     Message {
         level: String,
         text: String,
