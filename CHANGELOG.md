@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   evidence is disabled (the default). Queued envelopes copy grant lease, fence,
   and policy identities instead of host-minted values, and reconnect
   reconciliation submits the original envelope to receipt authority rather than
-  locally minting `accepted`. Worker lifecycle snapshots copy delayed-evidence
-  depth, age, and failure class from the governance port.
+  locally minting `accepted`. After process restart, reconciliation uses the
+  persisted reconnect grant (signature, lease, fence) when in-memory harvest
+  is gone. Worker lifecycle snapshots copy delayed-evidence depth, age, and
+  failure class from the governance port.
 - Omit plane `artifact_json` when the classified retained inventory is bound
   to a different run id or the compact JSON exceeds the sekai-chisei #646
   64 KiB ack limit, so a completed acknowledgement still lands.
