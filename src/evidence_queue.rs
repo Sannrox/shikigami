@@ -110,8 +110,14 @@ pub struct DelayedEnvelope {
     pub lease_valid_until_ms: i64,
     pub fencing_token: String,
     pub generation: u64,
+    /// Causal parent of the original harvest event. Empty means `{operation}:budget`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_event_id: String,
     /// Redacted, credential-free metadata for later verification.
     pub redacted_attributes: Vec<(String, String)>,
+    /// Original harvest attributes replayed to receipt authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub report_attributes: Vec<(String, String)>,
     pub signature_algorithm: String,
     pub binding_digest: String,
     pub signature: String,
@@ -129,7 +135,9 @@ impl DelayedEnvelope {
             "lease_valid_until_ms": self.lease_valid_until_ms,
             "fencing_token": self.fencing_token,
             "generation": self.generation,
+            "parent_event_id": self.parent_event_id,
             "redacted_attributes": self.redacted_attributes,
+            "report_attributes": self.report_attributes,
         });
         serde_json::to_vec(&payload).map_err(|_| QueueDenial::Unverifiable)
     }
@@ -196,6 +204,9 @@ pub struct QueueEntry {
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub failure_class: String,
+    /// Verified grant snapshot used as live fence/policy after restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect_grant: Option<crate::fallback::FallbackCheckpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,6 +364,7 @@ pub fn enqueue(
         queued_at_ms: now_ms,
         attempts: 0,
         failure_class: String::new(),
+        reconnect_grant: None,
     });
     Ok(())
 }
@@ -366,6 +378,51 @@ pub enum AuthorityDisposition {
     Unavailable,
 }
 
+/// Fail closed on integrity, lease, fence, and policy before contacting
+/// receipt authority. Returns `Some` when the entry is already resolved locally.
+pub fn apply_local_gate(
+    entry: &mut QueueEntry,
+    now_ms: i64,
+    limits: QueueLimits,
+    live_fencing_token: &str,
+    live_generation: u64,
+    current_policy_revision: &str,
+    check_live_fence: bool,
+) -> Option<EvidenceState> {
+    if now_ms.saturating_sub(entry.queued_at_ms) > limits.retention_ms {
+        entry.state = EvidenceState::Expired;
+        entry.failure_class = QueueDenial::RetentionExpired.to_string();
+        return Some(entry.state);
+    }
+    if entry
+        .envelope
+        .verify_signature(limits.allow_test_signatures)
+        .is_err()
+    {
+        entry.state = EvidenceState::Rejected;
+        entry.failure_class = QueueDenial::Unverifiable.to_string();
+        return Some(entry.state);
+    }
+    if now_ms >= entry.envelope.lease_valid_until_ms
+        || (check_live_fence
+            && !live_fence_ok(&entry.envelope, live_fencing_token, live_generation))
+    {
+        entry.state = EvidenceState::Expired;
+        entry.failure_class = if now_ms >= entry.envelope.lease_valid_until_ms {
+            QueueDenial::Expired.to_string()
+        } else {
+            QueueDenial::FenceLost.to_string()
+        };
+        return Some(entry.state);
+    }
+    if current_policy_revision != entry.envelope.policy_revision {
+        entry.state = EvidenceState::Rejected;
+        entry.failure_class = QueueDenial::PolicyChanged.to_string();
+        return Some(entry.state);
+    }
+    None
+}
+
 /// Reconcile one queued envelope with an external authority. Never mints
 /// `accepted` locally.
 pub fn submit(
@@ -377,35 +434,39 @@ pub fn submit(
     current_policy_revision: &str,
     disposition: AuthorityDisposition,
 ) -> EvidenceState {
-    if now_ms.saturating_sub(entry.queued_at_ms) > limits.retention_ms {
-        entry.state = EvidenceState::Expired;
-        entry.failure_class = QueueDenial::RetentionExpired.to_string();
-        return entry.state;
-    }
-    if entry
-        .envelope
-        .verify_signature(limits.allow_test_signatures)
-        .is_err()
-    {
-        entry.state = EvidenceState::Rejected;
-        entry.failure_class = QueueDenial::Unverifiable.to_string();
-        return entry.state;
-    }
-    if now_ms >= entry.envelope.lease_valid_until_ms
-        || !live_fence_ok(&entry.envelope, live_fencing_token, live_generation)
-    {
-        entry.state = EvidenceState::Expired;
-        entry.failure_class = if now_ms >= entry.envelope.lease_valid_until_ms {
-            QueueDenial::Expired.to_string()
-        } else {
-            QueueDenial::FenceLost.to_string()
-        };
-        return entry.state;
-    }
-    if current_policy_revision != entry.envelope.policy_revision {
-        entry.state = EvidenceState::Rejected;
-        entry.failure_class = QueueDenial::PolicyChanged.to_string();
-        return entry.state;
+    submit_with_live_check(
+        entry,
+        now_ms,
+        limits,
+        live_fencing_token,
+        live_generation,
+        current_policy_revision,
+        disposition,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn submit_with_live_check(
+    entry: &mut QueueEntry,
+    now_ms: i64,
+    limits: QueueLimits,
+    live_fencing_token: &str,
+    live_generation: u64,
+    current_policy_revision: &str,
+    disposition: AuthorityDisposition,
+    check_live_fence: bool,
+) -> EvidenceState {
+    if let Some(state) = apply_local_gate(
+        entry,
+        now_ms,
+        limits,
+        live_fencing_token,
+        live_generation,
+        current_policy_revision,
+        check_live_fence,
+    ) {
+        return state;
     }
     entry.attempts = entry.attempts.saturating_add(1);
     entry.state = match disposition {
@@ -498,7 +559,9 @@ mod tests {
             lease_valid_until_ms: NOW + 60_000,
             fencing_token: "fence-1".into(),
             generation: 1,
+            parent_event_id: "op-1:budget".into(),
             redacted_attributes: vec![("termination".into(), "completed".into())],
+            report_attributes: vec![("termination".into(), "completed".into())],
             signature_algorithm: String::new(),
             binding_digest: String::new(),
             signature: String::new(),

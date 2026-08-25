@@ -129,6 +129,9 @@ struct Inner {
     terminal_failed: u64,
     terminal_parked: u64,
     last_error_kind: Option<String>,
+    delayed_evidence_depth: u32,
+    delayed_evidence_oldest_age_ms: i64,
+    delayed_evidence_failure_class: String,
 }
 
 impl Inner {
@@ -165,9 +168,9 @@ impl Inner {
             terminal_failed: self.terminal_failed,
             terminal_parked: self.terminal_parked,
             last_error_kind: self.last_error_kind.clone(),
-            delayed_evidence_depth: 0,
-            delayed_evidence_oldest_age_ms: 0,
-            delayed_evidence_failure_class: String::new(),
+            delayed_evidence_depth: self.delayed_evidence_depth,
+            delayed_evidence_oldest_age_ms: self.delayed_evidence_oldest_age_ms,
+            delayed_evidence_failure_class: self.delayed_evidence_failure_class.clone(),
         }
     }
 
@@ -289,6 +292,9 @@ impl WorkerLifecycle {
                 terminal_failed: 0,
                 terminal_parked: 0,
                 last_error_kind: Some("starting".into()),
+                delayed_evidence_depth: 0,
+                delayed_evidence_oldest_age_ms: 0,
+                delayed_evidence_failure_class: String::new(),
             })),
         };
         lc.publish()?;
@@ -357,6 +363,27 @@ impl WorkerLifecycle {
         g.last_error_kind = Some(kind.into());
         g.write_snapshot()?;
         Ok(())
+    }
+
+    /// Copy redacted delayed-evidence observability into the next snapshot.
+    pub fn set_delayed_evidence(
+        &self,
+        snapshot: Option<crate::evidence_queue::QueueSnapshot>,
+    ) -> Result<WorkerLifecycleSnapshot, WorkerLifecycleError> {
+        let mut g = self.inner.lock().expect("lifecycle lock");
+        match snapshot {
+            Some(queue) => {
+                g.delayed_evidence_depth = u32::try_from(queue.depth).unwrap_or(u32::MAX);
+                g.delayed_evidence_oldest_age_ms = queue.oldest_age_ms;
+                g.delayed_evidence_failure_class = queue.failure_class;
+            }
+            None => {
+                g.delayed_evidence_depth = 0;
+                g.delayed_evidence_oldest_age_ms = 0;
+                g.delayed_evidence_failure_class = String::new();
+            }
+        }
+        g.write_snapshot()
     }
 
     pub fn begin_claim(&self, claim_id: impl Into<String>) -> Result<(), WorkerLifecycleError> {
@@ -508,5 +535,31 @@ mod tests {
         lc.set_unhealthy("doctor_failed").unwrap();
         assert_eq!(lc.snapshot().state, WorkerLifecycleState::Unhealthy);
         assert!(!lc.accepting_claims());
+    }
+
+    #[test]
+    fn delayed_evidence_fields_copy_into_snapshot() {
+        let dir = tempdir().unwrap();
+        let lc = WorkerLifecycle::open(dir.path(), identity()).unwrap();
+        lc.mark_serving().unwrap();
+        assert_eq!(lc.snapshot().delayed_evidence_depth, 0);
+        lc.set_delayed_evidence(Some(crate::evidence_queue::QueueSnapshot {
+            depth: 2,
+            oldest_age_ms: 1_500,
+            failure_class: "fence_lost".into(),
+            unresolved: 2,
+        }))
+        .unwrap();
+        let s = lc.snapshot();
+        assert_eq!(s.delayed_evidence_depth, 2);
+        assert_eq!(s.delayed_evidence_oldest_age_ms, 1_500);
+        assert_eq!(s.delayed_evidence_failure_class, "fence_lost");
+        lc.set_governance_ok(true).unwrap();
+        let s = lc.snapshot();
+        assert_eq!(s.delayed_evidence_depth, 2);
+        assert_eq!(s.delayed_evidence_failure_class, "fence_lost");
+        let raw = std::fs::read_to_string(lc.path()).unwrap();
+        assert!(raw.contains("\"delayed_evidence_depth\": 2"));
+        assert!(!raw.contains("task"));
     }
 }

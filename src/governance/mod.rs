@@ -397,6 +397,14 @@ pub trait GovernancePort: Send + Sync {
     fn delayed_evidence_snapshot(&self) -> Option<crate::evidence_queue::QueueSnapshot> {
         None
     }
+
+    /// Submit each queued envelope to receipt authority and record the
+    /// authority's disposition. Never mints `accepted` locally.
+    async fn reconcile_delayed_evidence(
+        &self,
+    ) -> Result<Option<crate::evidence_queue::QueueSnapshot>, GovernanceError> {
+        Ok(None)
+    }
 }
 
 pub(crate) async fn plan_local_content_turn(

@@ -47,7 +47,12 @@ execution records the terminal `outcome_recorded` event in its own
 `action_performed`, and closes the host receipt with its own
 `outcome_recorded` event. Fail-closed profiles treat plane unavailability,
 permission failures, and incomplete receipts as errors; offline adapters never
-call the plane.
+call the plane. When `[governance.delayed_evidence]` is enabled and
+`complete_run` hits plane `Unavailable`, the adapter may persist one signed
+terminal envelope bound to the current grant's lease, fence, and policy.
+Reconnect submits that same envelope to receipt authority; the host never
+mints `accepted`. Disabled queueing (the default) preserves the original
+`Unavailable`.
 
 The causal host sequence is:
 

@@ -18,12 +18,18 @@ pub(super) async fn run_until_shutdown(
     options: &PlaneServeOptions,
     shutdown: watch::Receiver<bool>,
 ) -> Result<u64, PlaneIntakeError> {
+    if harness.reconcile_delayed_evidence().await.is_err()
+        && let Some(lc) = &options.lifecycle
+    {
+        let _ = lc.set_governance_ok(false);
+    }
     if let Some(lc) = &options.lifecycle {
         // Demote only: never auto-clear a runtime governance failure from a
         // static adapter health check alone.
         if !harness.governance_ok() {
             let _ = lc.set_governance_ok(false);
         }
+        super::lifecycle_copy_delayed_evidence(lc, harness);
         let _ = lc.publish();
     }
 
@@ -42,10 +48,16 @@ pub(super) async fn run_until_shutdown(
             return Ok(completed);
         }
 
+        if harness.reconcile_delayed_evidence().await.is_err()
+            && let Some(lc) = &options.lifecycle
+        {
+            let _ = lc.set_governance_ok(false);
+        }
         if let Some(lc) = &options.lifecycle {
             if !harness.governance_ok() {
                 let _ = lc.set_governance_ok(false);
             }
+            super::lifecycle_copy_delayed_evidence(lc, harness);
             if !lc.accepting_claims() {
                 // Drain or governance/fence/unhealthy: do not start new claims.
                 if lc.snapshot().state == crate::worker_lifecycle::WorkerLifecycleState::Draining
@@ -99,7 +111,11 @@ pub(super) async fn run_until_shutdown(
         }
         completed += 1;
         match claimed_run::execute(harness, intake, claim, options, &shutdown).await? {
-            claimed_run::Execution::Continue => {}
+            claimed_run::Execution::Continue => {
+                if let Some(lc) = &options.lifecycle {
+                    super::lifecycle_copy_delayed_evidence(lc, harness);
+                }
+            }
             claimed_run::Execution::Shutdown => return Ok(completed),
             claimed_run::Execution::GovernanceUnavailable => {
                 return Err(PlaneIntakeError::Source(
