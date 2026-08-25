@@ -3,6 +3,13 @@
 This glossary complements the architecture and product definitions in
 [`DESIGN.md`](DESIGN.md).
 
+## Delayed evidence queue
+
+Bounded host-local spool for signed already-executed outcomes that cannot
+reach receipt authority during an outage. Duplicate identities are
+idempotent; conflicting payloads stay conflicted; capacity and retention
+fail closed without silent eviction. The queue never admits new work.
+
 ## Governed local-model fallback
 
 Fail-closed admission for one authorized disconnected model interval. Governance

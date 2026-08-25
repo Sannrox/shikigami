@@ -93,6 +93,12 @@ pub struct WorkerLifecycleSnapshot {
     pub terminal_parked: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_kind: Option<String>,
+    #[serde(default)]
+    pub delayed_evidence_depth: u32,
+    #[serde(default)]
+    pub delayed_evidence_oldest_age_ms: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub delayed_evidence_failure_class: String,
 }
 
 #[derive(Debug, Error)]
@@ -159,6 +165,9 @@ impl Inner {
             terminal_failed: self.terminal_failed,
             terminal_parked: self.terminal_parked,
             last_error_kind: self.last_error_kind.clone(),
+            delayed_evidence_depth: 0,
+            delayed_evidence_oldest_age_ms: 0,
+            delayed_evidence_failure_class: String::new(),
         }
     }
 

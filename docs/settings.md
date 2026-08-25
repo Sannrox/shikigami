@@ -67,6 +67,18 @@ Top-level `version` is required and must be `1`.
 | `fail_closed` | `false` | Fail doctor/run when governance is unhealthy |
 | `token_env` | unset | Env var name holding a Bearer token for the plane |
 
+#### `[governance.delayed_evidence]`
+
+Bounded spool for signed already-executed outcomes. Disabled by default.
+Unresolved entries are never silently discarded.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Persist and reconcile delayed envelopes |
+| `max_entries` | `32` | Fail closed when unresolved capacity is exhausted |
+| `retention_ms` | 7 days | Mark older unresolved entries expired; do not evict them |
+| `allow_test_signatures` | `false` | Accept fixture `test-hmac-sha256` envelopes |
+
 ### `[model]`
 
 Used for ungoverned planning (`none` / `local` governance). When governance is

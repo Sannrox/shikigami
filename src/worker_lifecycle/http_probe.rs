@@ -232,6 +232,9 @@ mod tests {
             terminal_failed: 0,
             terminal_parked: 0,
             last_error_kind: None,
+            delayed_evidence_depth: 0,
+            delayed_evidence_oldest_age_ms: 0,
+            delayed_evidence_failure_class: String::new(),
         }
     }
 

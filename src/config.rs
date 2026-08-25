@@ -98,6 +98,40 @@ pub struct GovernanceSettings {
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    #[serde(default)]
+    pub delayed_evidence: DelayedEvidenceSettings,
+}
+
+/// Bounded delayed-evidence spool. Disabled by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelayedEvidenceSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_delayed_max_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_delayed_retention_ms")]
+    pub retention_ms: u64,
+    #[serde(default)]
+    pub allow_test_signatures: bool,
+}
+
+fn default_delayed_max_entries() -> usize {
+    crate::evidence_queue::DEFAULT_MAX_ENTRIES
+}
+fn default_delayed_retention_ms() -> u64 {
+    u64::try_from(crate::evidence_queue::DEFAULT_RETENTION_MS).unwrap_or(u64::MAX)
+}
+
+impl Default for DelayedEvidenceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_entries: default_delayed_max_entries(),
+            retention_ms: default_delayed_retention_ms(),
+            allow_test_signatures: false,
+        }
+    }
 }
 
 fn default_governance_adapter() -> String {
@@ -119,6 +153,7 @@ impl Default for GovernanceSettings {
             fail_closed: false,
             namespace: default_namespace(),
             token_env: None,
+            delayed_evidence: DelayedEvidenceSettings::default(),
         }
     }
 }
@@ -866,6 +901,16 @@ impl Config {
             ));
         }
         self.validate_governed_bash_controls()?;
+        if self.governance.delayed_evidence.max_entries == 0 {
+            return Err(ConfigError::Invalid(
+                "governance.delayed_evidence.max_entries must be greater than zero".into(),
+            ));
+        }
+        if self.governance.delayed_evidence.retention_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "governance.delayed_evidence.retention_ms must be greater than zero".into(),
+            ));
+        }
         Ok(())
     }
 

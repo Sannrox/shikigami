@@ -65,6 +65,13 @@ pub struct SekaiChiseiGovernance {
     harvest: HarvestTransaction,
     fallback_enabled: bool,
     fallback_allow_test_signatures: bool,
+    delayed: std::sync::Mutex<DelayedEvidenceRuntime>,
+}
+
+struct DelayedEvidenceRuntime {
+    enabled: bool,
+    limits: crate::evidence_queue::QueueLimits,
+    root: Option<std::path::PathBuf>,
 }
 
 /// Runtime-claim client used by the explicit plane intake mode of `serve`.
@@ -144,7 +151,131 @@ impl SekaiChiseiGovernance {
             harvest: HarvestTransaction::default(),
             fallback_enabled: config.model.fallback.enabled,
             fallback_allow_test_signatures: config.model.fallback.allow_test_signatures,
+            delayed: std::sync::Mutex::new(DelayedEvidenceRuntime {
+                enabled: config.governance.delayed_evidence.enabled,
+                limits: crate::evidence_queue::QueueLimits {
+                    max_entries: config.governance.delayed_evidence.max_entries,
+                    retention_ms: i64::try_from(config.governance.delayed_evidence.retention_ms)
+                        .unwrap_or(i64::MAX),
+                    allow_test_signatures: config.governance.delayed_evidence.allow_test_signatures,
+                },
+                root: None,
+            }),
         })
+    }
+
+    pub fn persist_delayed_envelope(
+        &self,
+        envelope: crate::evidence_queue::DelayedEnvelope,
+        now_ms: i64,
+        fencing_token: &str,
+        generation: u64,
+    ) -> Result<(), GovernanceError> {
+        let runtime = self
+            .delayed
+            .lock()
+            .map_err(|_| GovernanceError::Message("delayed evidence lock poisoned".into()))?;
+        if !runtime.enabled {
+            return Err(GovernanceError::Denied("delayed_evidence:disabled".into()));
+        }
+        let root = runtime.root.clone().ok_or_else(|| {
+            GovernanceError::Message("delayed evidence state root unbound".into())
+        })?;
+        let path = crate::evidence_queue::path_in(root);
+        let mut store = crate::evidence_queue::load(&path)?;
+        let result = crate::evidence_queue::enqueue(
+            &mut store,
+            envelope,
+            now_ms,
+            runtime.limits,
+            fencing_token,
+            generation,
+        );
+        crate::evidence_queue::save(&path, &store)?;
+        result.map_err(Into::into)
+    }
+
+    fn queue_terminal_outcome(
+        &self,
+        handle: &RunHandle,
+        outcome: &RunOutcome,
+    ) -> Result<(), GovernanceError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+            .unwrap_or(0);
+        let payload = serde_json::json!({
+            "success": outcome.success,
+            "summary": outcome.summary,
+            "turns": outcome.turns,
+            "termination": outcome.termination,
+        });
+        let payload = serde_json::to_string(&payload).unwrap_or_else(|_| outcome.summary.clone());
+        let mut envelope = crate::evidence_queue::DelayedEnvelope {
+            schema_version: crate::evidence_queue::EVIDENCE_QUEUE_SCHEMA_VERSION,
+            kind: crate::evidence_queue::EvidenceKind::Terminal,
+            identity: crate::evidence_queue::EvidenceIdentity {
+                run_id: handle.run_id.clone(),
+                operation_id: handle.operation_id.clone(),
+                attempt_id: handle.run_id.clone(),
+                claim_id: None,
+                event_id: format!("complete:{}", handle.run_id),
+                payload_digest: crate::evidence_queue::sha256_hex(payload.as_bytes()),
+            },
+            issuer: self.principal.clone(),
+            signer_ref: "sekai-chisei".into(),
+            policy_revision: "local-integrity".into(),
+            lease_valid_until_ms: now_ms.saturating_add(i64::from(u32::MAX)),
+            fencing_token: "queued".into(),
+            generation: 1,
+            redacted_attributes: vec![
+                ("termination".into(), outcome.termination.clone()),
+                ("success".into(), outcome.success.to_string()),
+            ],
+            signature_algorithm: String::new(),
+            binding_digest: String::new(),
+            signature: String::new(),
+        };
+        envelope.seal_sha256_binding()?;
+        self.persist_delayed_envelope(envelope, now_ms, "queued", 1)
+    }
+
+    fn mark_queued_accepted(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
+        let runtime = self
+            .delayed
+            .lock()
+            .map_err(|_| GovernanceError::Message("delayed evidence lock poisoned".into()))?;
+        if !runtime.enabled {
+            return Ok(());
+        }
+        let root = match runtime.root.clone() {
+            Some(root) => root,
+            None => return Ok(()),
+        };
+        let path = crate::evidence_queue::path_in(root);
+        let mut store = crate::evidence_queue::load(&path)?;
+        for entry in &mut store.entries {
+            if entry.envelope.identity.run_id == handle.run_id
+                && entry.envelope.identity.operation_id == handle.operation_id
+                && matches!(
+                    entry.state,
+                    crate::evidence_queue::EvidenceState::Pending
+                        | crate::evidence_queue::EvidenceState::Retryable
+                )
+            {
+                crate::evidence_queue::submit(
+                    entry,
+                    entry.queued_at_ms,
+                    runtime.limits,
+                    &entry.envelope.fencing_token.clone(),
+                    entry.envelope.generation,
+                    &entry.envelope.policy_revision.clone(),
+                    crate::evidence_queue::AuthorityDisposition::Accept,
+                );
+            }
+        }
+        crate::evidence_queue::save(&path, &store)
     }
 
     /// Store a governance-issued fallback grant for later fail-closed admission.
@@ -638,7 +769,37 @@ impl GovernancePort for SekaiChiseiGovernance {
         handle: &RunHandle,
         outcome: RunOutcome,
     ) -> Result<(), GovernanceError> {
-        governed_run_completion::complete(self, handle, outcome).await
+        match governed_run_completion::complete(self, handle, outcome.clone()).await {
+            Ok(()) => {
+                let _ = self.mark_queued_accepted(handle);
+                Ok(())
+            }
+            Err(GovernanceError::Unavailable(_)) => {
+                self.queue_terminal_outcome(handle, &outcome)?;
+                Err(GovernanceError::Unavailable(
+                    "delayed evidence queued; receipt authority unavailable".into(),
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn bind_state_root(&self, root: &std::path::Path) {
+        if let Ok(mut runtime) = self.delayed.lock() {
+            runtime.root = Some(root.to_path_buf());
+        }
+    }
+
+    fn delayed_evidence_snapshot(&self) -> Option<crate::evidence_queue::QueueSnapshot> {
+        let runtime = self.delayed.lock().ok()?;
+        let root = runtime.root.clone()?;
+        let store = crate::evidence_queue::load(crate::evidence_queue::path_in(root)).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+            .unwrap_or(0);
+        Some(crate::evidence_queue::snapshot(&store, now))
     }
 }
 
@@ -1010,6 +1171,11 @@ mod tests {
             harvest: HarvestTransaction::default(),
             fallback_enabled: false,
             fallback_allow_test_signatures: false,
+            delayed: std::sync::Mutex::new(DelayedEvidenceRuntime {
+                enabled: false,
+                limits: crate::evidence_queue::QueueLimits::default(),
+                root: None,
+            }),
         };
         let handle = RunHandle {
             run_id: "run-authz-fail".into(),
@@ -1327,5 +1493,53 @@ mod tests {
             }
             other => panic!("expected tool-surface denial, got {other}"),
         }
+    }
+
+    #[test]
+    fn delayed_envelope_survives_bind_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "sekai-chisei".into();
+        config.governance.endpoint = Some("http://127.0.0.1:1".into());
+        config.governance.delayed_evidence.enabled = true;
+        config.governance.delayed_evidence.allow_test_signatures = true;
+        let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
+        governance.bind_state_root(dir.path());
+        let mut envelope = crate::evidence_queue::DelayedEnvelope {
+            schema_version: crate::evidence_queue::EVIDENCE_QUEUE_SCHEMA_VERSION,
+            kind: crate::evidence_queue::EvidenceKind::Terminal,
+            identity: crate::evidence_queue::EvidenceIdentity {
+                run_id: "run-q".into(),
+                operation_id: "op-q".into(),
+                attempt_id: "run-q".into(),
+                claim_id: None,
+                event_id: "complete".into(),
+                payload_digest: crate::evidence_queue::sha256_hex(b"done"),
+            },
+            issuer: "governance".into(),
+            signer_ref: "signer-1".into(),
+            policy_revision: "policy-1".into(),
+            lease_valid_until_ms: 4_000_000_000_000,
+            fencing_token: "fence-1".into(),
+            generation: 1,
+            redacted_attributes: vec![("termination".into(), "completed".into())],
+            signature_algorithm: String::new(),
+            binding_digest: String::new(),
+            signature: String::new(),
+        };
+        envelope.seal_test_hmac().unwrap();
+        governance
+            .persist_delayed_envelope(envelope, 1_700_000_000_000, "fence-1", 1)
+            .unwrap();
+        let snap = governance.delayed_evidence_snapshot().unwrap();
+        assert_eq!(snap.depth, 1);
+        assert!(snap.failure_class.is_empty());
+        let store =
+            crate::evidence_queue::load(crate::evidence_queue::path_in(dir.path())).unwrap();
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(
+            store.entries[0].state,
+            crate::evidence_queue::EvidenceState::Pending
+        );
     }
 }
