@@ -133,7 +133,10 @@ Primary `state` (precedence highest first): `unhealthy` →
 
 Drain: **SIGINT / SIGTERM** sets draining and **stops new claims**. Active work
 is cancelled without a terminal ack so the plane can reclaim via lease expiry.
-The snapshot never includes task text, prompts, or credentials.
+The snapshot never includes task text, prompts, or credentials. Delayed-evidence
+fields (`delayed_evidence_depth`, `delayed_evidence_oldest_age_ms`,
+`delayed_evidence_failure_class`) are copied from the governance port's redacted
+queue snapshot on each publish.
 
 Optional probe HTTP (plane intake only):
 

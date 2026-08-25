@@ -75,7 +75,10 @@ When `fail_closed` or profile `governed` is set:
   `[model.fallback].enabled` is true (see [ADR 0007](decisions/0007-governed-local-fallback.md))
 
 When not fail-closed, some reporting steps may best-effort skip if the plane is
-down (see implementation of `complete_run` / `report_tool`).
+down (see implementation of `complete_run` / `report_tool`). Delayed-evidence
+queueing is opt-in and never replaces receipt authority: disabled
+`complete_run` preserves `Unavailable`, and reconnect submits the original
+queued envelope instead of minting `accepted`.
 
 ### Credentials
 

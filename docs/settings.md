@@ -70,7 +70,10 @@ Top-level `version` is required and must be `1`.
 #### `[governance.delayed_evidence]`
 
 Bounded spool for signed already-executed outcomes. Disabled by default.
-Unresolved entries are never silently discarded.
+Unresolved entries are never silently discarded. Queueing copies lease, fence,
+and policy identities from a current grant; Shikigami never mints those fields
+or an `accepted` disposition. When `enabled` is false, plane `Unavailable` on
+`complete_run` is preserved and nothing is written.
 
 | Field | Default | Description |
 | --- | --- | --- |

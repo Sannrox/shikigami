@@ -159,6 +159,18 @@ impl Harness {
         self.governance.health_ok()
     }
 
+    /// Redacted delayed-evidence observability from the governance adapter.
+    pub fn delayed_evidence_snapshot(&self) -> Option<crate::evidence_queue::QueueSnapshot> {
+        self.governance.delayed_evidence_snapshot()
+    }
+
+    /// Submit queued delayed-evidence envelopes to receipt authority.
+    pub async fn reconcile_delayed_evidence(
+        &self,
+    ) -> Result<Option<crate::evidence_queue::QueueSnapshot>, GovernanceError> {
+        self.governance.reconcile_delayed_evidence().await
+    }
+
     /// Return the model name selected by the configured adapter.
     pub fn effective_model_name(&self) -> String {
         model::effective_model_name(&self.config)

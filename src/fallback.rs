@@ -327,7 +327,7 @@ impl FallbackAuthorization {
             && self.lease.generation > 0
     }
 
-    fn verify_signature(&self, allow_test: bool) -> Result<(), FallbackDenial> {
+    pub(crate) fn verify_signature(&self, allow_test: bool) -> Result<(), FallbackDenial> {
         if !self.required_ids_present()
             || self.binding_digest.is_empty()
             || self.signature.is_empty()

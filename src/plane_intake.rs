@@ -299,6 +299,13 @@ pub(super) fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecyc
     }
 }
 
+pub(super) fn lifecycle_copy_delayed_evidence(
+    lc: &crate::worker_lifecycle::WorkerLifecycle,
+    harness: &Harness,
+) {
+    let _ = lc.set_delayed_evidence(harness.delayed_evidence_snapshot());
+}
+
 /// Map a fenced, already-claimed plane effect into the stable harness request.
 ///
 /// Unknown payload and Action parameter fields are ignored: they cannot alter
