@@ -95,7 +95,9 @@ impl Harness {
         config_source: ConfigSource,
         state: StateRoot,
     ) -> Result<Self, HarnessError> {
-        let governance = Arc::from(governance::from_config(&config)?);
+        let governance: Arc<dyn governance::GovernancePort> =
+            Arc::from(governance::from_config(&config)?);
+        governance.bind_state_root(state.path());
         let workspace = Arc::from(workspace::from_config(&config)?);
         let model = Arc::from(model::from_config(&config)?);
         state.ensure_ready_for_runs()?;

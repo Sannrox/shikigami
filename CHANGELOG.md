@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded delayed-evidence queue (`[governance.delayed_evidence]`, default
+  disabled) persists signed terminal envelopes across restart, reconciles
+  them idempotently, fail-closes on conflict, expiry, fence loss, invalid
+  signatures, rejection, capacity, and retention, and never silently evicts
+  unresolved outcomes or re-executes completed work.
 - Opt-in governed local-model fallback (`[model.fallback]`, default deny)
   consumes a signed content-bound grant, selects exactly the authorized local
   digest during a simulated outage, fail-closes every denial class, and

@@ -397,6 +397,7 @@ mod tests {
                 fail_closed: true,
                 namespace: "default".into(),
                 token_env: None,
+                delayed_evidence: crate::config::DelayedEvidenceSettings::default(),
             },
             tools: ToolsSettings {
                 enabled: vec!["read_file".into(), "write_file".into(), "bash".into()],

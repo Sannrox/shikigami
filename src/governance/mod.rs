@@ -389,6 +389,14 @@ pub trait GovernancePort: Send + Sync {
         handle: &RunHandle,
         outcome: RunOutcome,
     ) -> Result<(), GovernanceError>;
+
+    /// Bind host state root so delayed evidence can persist across restarts.
+    fn bind_state_root(&self, _root: &std::path::Path) {}
+
+    /// Redacted delayed-evidence observability. Default is empty.
+    fn delayed_evidence_snapshot(&self) -> Option<crate::evidence_queue::QueueSnapshot> {
+        None
+    }
 }
 
 pub(crate) async fn plan_local_content_turn(
