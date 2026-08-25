@@ -348,7 +348,7 @@ impl FallbackAuthorization {
     }
 }
 
-fn fence_matches(lease: &FallbackLease, fence: &LiveFence) -> bool {
+pub(crate) fn fence_matches(lease: &FallbackLease, fence: &LiveFence) -> bool {
     lease.effect_id == fence.effect_id
         && lease.owner == fence.owner
         && lease.fencing_token == fence.fencing_token

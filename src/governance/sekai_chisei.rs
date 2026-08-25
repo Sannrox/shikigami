@@ -454,9 +454,21 @@ impl SekaiChiseiGovernance {
             .harvest
             .fallback(&entry.envelope.identity.run_id)
             .ok()
-            .flatten()?;
+            .flatten()
+            .or_else(|| entry.reconnect_grant.clone())?;
         fallback.authorization.verify_signature(allow_test).ok()?;
-        if fallback.held_fence.fencing_token.is_empty() || fallback.held_fence.generation == 0 {
+        // Envelope identity.operation_id is the receipt PlanExecution id;
+        // the grant's operation_id is the logical handle. Do not equate them.
+        if fallback.authorization.revoked
+            || !crate::fallback::fence_matches(&fallback.authorization.lease, &fallback.held_fence)
+            || fallback.authorization.run_id != entry.envelope.identity.run_id
+            || fallback.authorization.attempt_id != entry.envelope.identity.attempt_id
+            || fallback.authorization.claim_id != entry.envelope.identity.claim_id
+            || fallback.authorization.operation_id.is_empty()
+            || fallback.held_fence.fencing_token != entry.envelope.fencing_token
+            || fallback.held_fence.generation != entry.envelope.generation
+            || fallback.authorization.policy_revision != entry.envelope.policy_revision
+        {
             return None;
         }
         Some((
@@ -2020,6 +2032,13 @@ mod tests {
 
         let reloaded = SekaiChiseiGovernance::from_config(&config).unwrap();
         reloaded.bind_state_root(dir.path());
+        assert!(
+            reloaded
+                .harvest_checkpoint_state(&handle.run_id)
+                .and_then(|checkpoint| checkpoint.fallback)
+                .is_none(),
+            "reload must not restore harvest; persist reconnect_grant only"
+        );
         let snap = reloaded.delayed_evidence_snapshot().unwrap();
         assert_eq!(snap.depth, 1);
         assert!(
@@ -2027,23 +2046,6 @@ mod tests {
                 .reconnect_grant
                 .is_some()
         );
-        let without_harvest = reloaded
-            .reconcile_delayed_evidence()
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(without_harvest.depth, 1);
-        assert_eq!(
-            crate::evidence_queue::load(&path).unwrap().entries[0].state,
-            crate::evidence_queue::EvidenceState::Pending
-        );
-
-        let restored_model = crate::model::from_config(&config).unwrap();
-        let (restored_auth, restored_fence) =
-            matching_grant(restored_model.as_ref(), &handle, "system", &[]);
-        reloaded
-            .install_fallback_grant(&handle.run_id, restored_auth, restored_fence)
-            .unwrap();
         let after = reloaded
             .reconcile_delayed_evidence()
             .await
@@ -2054,6 +2056,10 @@ mod tests {
         assert_eq!(
             retried.entries[0].state,
             crate::evidence_queue::EvidenceState::Retryable
+        );
+        assert!(
+            retried.entries[0].attempts >= 1,
+            "reload must submit using persisted reconnect_grant"
         );
         assert_ne!(
             retried.entries[0].state,
