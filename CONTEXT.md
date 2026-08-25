@@ -3,6 +3,14 @@
 This glossary complements the architecture and product definitions in
 [`DESIGN.md`](DESIGN.md).
 
+## Governed local-model fallback
+
+Fail-closed admission for one authorized disconnected model interval. Governance
+issues the grant, lease, fence, and receipt; Shikigami verifies identities and
+digests then executes; delivery placing bytes is not a grant. The connected
+plane path is unchanged. Selection scratch lives on the governance checkpoint
+and is never a receipt.
+
 ## Effective settings resolution
 
 The host-side protocol that selects the settings source and applies defaults,

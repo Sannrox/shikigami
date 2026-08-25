@@ -10,6 +10,7 @@ Accepted decisions that must outlive a single PR.
 | [0004](0004-v1-contract.md) | v1.0 contract and bright-future sequencing | Accepted |
 | [0005](0005-governed-run-replay.md) | Governed run replay | Accepted |
 | [0006](0006-bounded-content-parts.md) | Bounded multimodal content | Accepted |
+| [0007](0007-governed-local-fallback.md) | Governed local-model fallback | Accepted |
 
 ## When to write an ADR
 

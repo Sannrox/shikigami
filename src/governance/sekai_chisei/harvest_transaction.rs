@@ -11,6 +11,7 @@ use crate::checkpoint::{
     GovernanceCheckpoint, PendingGovernanceEvent, StagedToolExecution, StagedToolReport,
     ToolExecutionStatus,
 };
+use crate::fallback::FallbackCheckpoint;
 use crate::governance::{GovernanceError, RunHandle};
 
 #[derive(Default)]
@@ -23,6 +24,8 @@ struct HarvestState {
     pending_event: Option<PendingGovernanceEvent>,
     pending_tool_reports: Vec<StagedToolReport>,
     pending_tool_executions: Vec<StagedToolExecution>,
+    fallback: Option<FallbackCheckpoint>,
+    fallback_active: bool,
 }
 
 #[derive(Clone, Default)]
@@ -74,6 +77,8 @@ impl HarvestTransaction {
                 pending_event: checkpoint.pending_event.clone(),
                 pending_tool_reports: checkpoint.pending_tool_reports.clone(),
                 pending_tool_executions: checkpoint.pending_tool_executions.clone(),
+                fallback: checkpoint.fallback.clone(),
+                fallback_active: false,
             },
         );
         Ok(())
@@ -89,7 +94,8 @@ impl HarvestTransaction {
             || state.last_event_id.is_some()
             || state.pending_event.is_some()
             || !state.pending_tool_reports.is_empty()
-            || !state.pending_tool_executions.is_empty();
+            || !state.pending_tool_executions.is_empty()
+            || state.fallback.is_some();
         has_state.then(|| GovernanceCheckpoint {
             operation_id: state.host_operation_id.clone().unwrap_or_default(),
             logical_operation_id: state.logical_operation_id.clone().unwrap_or_default(),
@@ -99,6 +105,7 @@ impl HarvestTransaction {
             pending_event: state.pending_event.clone(),
             pending_tool_reports: state.pending_tool_reports.clone(),
             pending_tool_executions: state.pending_tool_executions.clone(),
+            fallback: state.fallback.clone(),
         })
     }
 
@@ -238,6 +245,45 @@ impl HarvestTransaction {
         {
             state.model_reported = true;
         }
+    }
+
+    pub(super) fn fallback(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<FallbackCheckpoint>, GovernanceError> {
+        Ok(self
+            .lock()?
+            .get(run_id)
+            .and_then(|state| state.fallback.clone()))
+    }
+
+    pub(super) fn set_fallback(
+        &self,
+        run_id: &str,
+        fallback: FallbackCheckpoint,
+    ) -> Result<(), GovernanceError> {
+        let mut runs = self.lock()?;
+        let state = runs.entry(run_id.into()).or_default();
+        state.fallback = Some(fallback);
+        Ok(())
+    }
+
+    pub(super) fn set_fallback_active(
+        &self,
+        run_id: &str,
+        active: bool,
+    ) -> Result<(), GovernanceError> {
+        let mut runs = self.lock()?;
+        let state = runs.entry(run_id.into()).or_default();
+        state.fallback_active = active;
+        Ok(())
+    }
+
+    pub(super) fn fallback_active(&self, run_id: &str) -> Result<bool, GovernanceError> {
+        Ok(self
+            .lock()?
+            .get(run_id)
+            .is_some_and(|state| state.fallback_active))
     }
 
     pub(super) fn stage_tool_reports(

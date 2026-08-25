@@ -107,6 +107,11 @@ pub trait ModelPort: Send + Sync {
     fn restore_replay_cursor(&self, _completed_turns: u32) -> Result<(), ModelError> {
         Ok(())
     }
+    /// Content identity of this adapter instance. Fallback admission compares
+    /// this to the authorized digest; it is not itself a grant.
+    fn content_digest(&self) -> String {
+        crate::fallback::sha256_hex(self.id().as_bytes())
+    }
     async fn next_turn(
         &self,
         system: &str,
@@ -144,7 +149,29 @@ pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
                 Err(ModelError::HttpUnavailable)
             }
         }
-        "plane" => Ok(Box::new(PlaneModelPlaceholder)),
+        "plane" => {
+            if config.model.fallback.enabled {
+                match config.model.fallback.adapter.as_deref() {
+                    Some("scripted") => Ok(Box::new(ScriptedModel::from_fallback_config(config)?)),
+                    Some("http") => {
+                        #[cfg(feature = "model-http")]
+                        {
+                            Ok(Box::new(HttpModel::from_config(config)?))
+                        }
+                        #[cfg(not(feature = "model-http"))]
+                        {
+                            Err(ModelError::HttpUnavailable)
+                        }
+                    }
+                    Some(other) => Err(ModelError::Message(format!(
+                        "unknown model.fallback.adapter `{other}`"
+                    ))),
+                    None => Ok(Box::new(PlaneModelPlaceholder)),
+                }
+            } else {
+                Ok(Box::new(PlaneModelPlaceholder))
+            }
+        }
         other => Err(ModelError::Message(format!(
             "unknown model adapter `{other}`"
         ))),
@@ -155,6 +182,7 @@ pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
 pub struct ScriptedModel {
     turns: Vec<ModelTurn>,
     cursor: std::sync::Mutex<usize>,
+    content_digest: String,
 }
 
 impl ScriptedModel {
@@ -164,7 +192,22 @@ impl ScriptedModel {
             .script_json
             .clone()
             .unwrap_or_else(default_script_json);
-        let wire: Vec<ScriptedTurn> = serde_json::from_str(&raw)?;
+        Self::from_script_json(&raw, config)
+    }
+
+    pub fn from_fallback_config(config: &Config) -> Result<Self, ModelError> {
+        let raw = config
+            .model
+            .fallback
+            .script_json
+            .clone()
+            .or_else(|| config.model.script_json.clone())
+            .unwrap_or_else(default_script_json);
+        Self::from_script_json(&raw, config)
+    }
+
+    fn from_script_json(raw: &str, config: &Config) -> Result<Self, ModelError> {
+        let wire: Vec<ScriptedTurn> = serde_json::from_str(raw)?;
         let turns = wire
             .into_iter()
             .map(|t| ModelTurn {
@@ -185,15 +228,31 @@ impl ScriptedModel {
         Ok(Self {
             turns,
             cursor: std::sync::Mutex::new(0),
+            content_digest: artifact_or_script_digest(config, raw)?,
         })
     }
 
     pub fn from_turns(turns: Vec<ModelTurn>) -> Self {
+        let payload = turns
+            .iter()
+            .map(|turn| turn.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         Self {
             turns,
             cursor: std::sync::Mutex::new(0),
+            content_digest: crate::fallback::sha256_hex(payload.as_bytes()),
         }
     }
+}
+
+fn artifact_or_script_digest(config: &Config, script: &str) -> Result<String, ModelError> {
+    let mut payload = script.as_bytes().to_vec();
+    if let Some(path) = config.model.fallback.artifact_path.as_ref() {
+        payload.push(0xff);
+        payload.extend(std::fs::read(path)?);
+    }
+    Ok(crate::fallback::sha256_hex(&payload))
 }
 
 fn default_script_json() -> String {
@@ -238,6 +297,10 @@ impl ModelPort for ScriptedModel {
             .lock()
             .map_err(|_| ModelError::Message("script cursor lock poisoned".into()))? = cursor;
         Ok(())
+    }
+
+    fn content_digest(&self) -> String {
+        self.content_digest.clone()
     }
 
     async fn next_turn(
@@ -302,6 +365,7 @@ pub struct HttpModel {
     base_url: String,
     model: String,
     api_key: String,
+    content_digest: String,
 }
 
 const DEFAULT_HTTP_MODEL: &str = "gpt-4.1-mini";
@@ -331,14 +395,21 @@ impl HttpModel {
         let api_key = std::env::var(&config.model.api_key_env).map_err(|_| {
             ModelError::Message(format!("missing API key env {}", config.model.api_key_env))
         })?;
+        let model = effective_model_name(config);
+        let mut digest_payload = format!("http\n{base_url}\n{model}").into_bytes();
+        if let Some(path) = config.model.fallback.artifact_path.as_ref() {
+            digest_payload.push(0xff);
+            digest_payload.extend(std::fs::read(path)?);
+        }
         Ok(Self {
             client: reqwest::Client::new(),
             base_url,
             // `auto` is the governed routing default. Preserve a useful
             // direct HTTP default when users switch adapters without adding a
             // model field to their local config.
-            model: effective_model_name(config),
+            model,
             api_key,
+            content_digest: crate::fallback::sha256_hex(&digest_payload),
         })
     }
 }
@@ -348,6 +419,10 @@ impl HttpModel {
 impl ModelPort for HttpModel {
     fn id(&self) -> &'static str {
         "http"
+    }
+
+    fn content_digest(&self) -> String {
+        self.content_digest.clone()
     }
 
     async fn next_turn(

@@ -29,6 +29,7 @@ pub mod content;
 pub mod context;
 pub mod eval;
 pub mod events;
+pub mod fallback;
 pub mod governance;
 pub mod harness;
 pub mod hooks;

@@ -48,6 +48,9 @@ pub struct GovernanceCheckpoint {
     pub pending_tool_reports: Vec<StagedToolReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tool_executions: Vec<StagedToolExecution>,
+    /// Bounded fallback grant/selection scratch. Not a governance receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<crate::fallback::FallbackCheckpoint>,
 }
 
 /// Host-side tool outcome staged before authenticated reporting. The host may
@@ -307,6 +310,7 @@ mod tests {
                 }),
                 pending_tool_reports: vec![],
                 pending_tool_executions: vec![],
+                fallback: None,
             }),
             replay: None,
             content: None,

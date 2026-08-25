@@ -466,6 +466,31 @@ pub struct ModelSettings {
     /// Optional cost rate: USD microdollars per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_usd_micros_per_mtok: Option<u64>,
+    /// Opt-in governed local-model fallback. Denied by default.
+    #[serde(default)]
+    pub fallback: ModelFallbackSettings,
+}
+
+/// Additive local-model fallback settings. Delivery systems are not a key here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFallbackSettings {
+    /// Permit attempting fallback when a current signed grant exists.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Local adapter used only after fail-closed admission (`scripted` | `http`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// When set, the local digest is SHA-256 of these bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    /// Optional scripted turns for the fallback adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_json: Option<String>,
+    /// Accept fixture `test-hmac-sha256` envelopes. Default false; production
+    /// unknown algorithms remain unverifiable.
+    #[serde(default)]
+    pub allow_test_signatures: bool,
 }
 
 fn default_model_adapter() -> String {
@@ -488,6 +513,7 @@ impl Default for ModelSettings {
             script_json: None,
             input_usd_micros_per_mtok: None,
             output_usd_micros_per_mtok: None,
+            fallback: ModelFallbackSettings::default(),
         }
     }
 }
@@ -797,6 +823,29 @@ impl Config {
         match self.model.adapter.as_str() {
             "scripted" | "http" | "plane" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
+        }
+        if let Some(adapter) = self.model.fallback.adapter.as_deref() {
+            match adapter {
+                "scripted" | "http" => {}
+                other => {
+                    return Err(ConfigError::Invalid(format!(
+                        "unknown model.fallback.adapter `{other}`"
+                    )));
+                }
+            }
+            if adapter == "http"
+                && self
+                    .model
+                    .fallback
+                    .artifact_path
+                    .as_ref()
+                    .map(|path| path.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                return Err(ConfigError::Invalid(
+                    "model.fallback.adapter `http` requires model.fallback.artifact_path so the local digest binds immutable bytes".into(),
+                ));
+            }
         }
         for (name, value) in [
             ("sandbox.cpu_time_secs", self.sandbox.cpu_time_secs),

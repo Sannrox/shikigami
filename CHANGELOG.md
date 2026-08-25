@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in governed local-model fallback (`[model.fallback]`, default deny)
+  consumes a signed content-bound grant, selects exactly the authorized local
+  digest during a simulated outage, fail-closes every denial class, and
+  records degraded selection plus idempotent evidence identities on the
+  existing governance checkpoint. Delivery is not a runtime setting.
 - Add schema-v1, content-bound run replay through additive
   `Harness::{replay,replay_with_events}` APIs. Replay creates a new isolated
   attempt, permits only observation tools, compares ordered digest evidence,

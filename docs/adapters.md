@@ -71,6 +71,8 @@ When `fail_closed` or profile `governed` is set:
 
 - missing endpoint → doctor fail, run fail
 - unreachable plane (async probe) → doctor fail; run fails at begin/plan
+  unless a current signed fallback grant is already checkpointed and
+  `[model.fallback].enabled` is true (see [ADR 0007](decisions/0007-governed-local-fallback.md))
 
 When not fail-closed, some reporting steps may best-effort skip if the plane is
 down (see implementation of `complete_run` / `report_tool`).
