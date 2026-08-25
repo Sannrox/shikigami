@@ -19,6 +19,23 @@ pub(super) async fn authorize(
     if !requires_external_action(name) {
         return Ok(());
     }
+    if governance.harvest.fallback_active(&handle.run_id)?
+        && let Some(checkpoint) = governance.harvest.fallback(&handle.run_id)?
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0);
+        let view = crate::fallback::view_from_checkpoint(
+            &checkpoint,
+            now_ms,
+            governance.fallback_enabled,
+            None,
+            governance.fallback_allow_test_signatures,
+        );
+        crate::fallback::tool_permitted(&checkpoint, &view, name)?;
+        return Ok(());
+    }
     // Mid-run external-action authz is always fail-closed for the sekai-chisei
     // adapter: transport/build/RPC errors must never permit tool execution
     // (including destructive bash), regardless of governance.fail_closed.

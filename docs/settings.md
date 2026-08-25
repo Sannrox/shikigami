@@ -82,6 +82,23 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
 
+#### `[model.fallback]`
+
+Opt-in governed local-model fallback ([ADR 0007](decisions/0007-governed-local-fallback.md)).
+Denied by default. Presence of a model artifact is not authorization.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Permit attempting fallback when a current signed grant exists |
+| `adapter` | unset | Local adapter after admission: `scripted` \| `http` |
+| `artifact_path` | unset | Extra bytes bound into the local digest; required for `http` fallback |
+| `script_json` | unset | Optional scripted turns for the fallback adapter |
+| `allow_test_signatures` | `false` | Accept fixture `test-hmac-sha256` envelopes; production unknown algorithms stay unverifiable |
+
+No delivery-system keys. Unknown fields deny at parse time. Existing governed
+and local profiles are unchanged. Production enablement still requires a
+verifiable governance-issued envelope whose model digest matches.
+
 When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
 
 #### Scripted turn JSON

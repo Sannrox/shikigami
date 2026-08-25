@@ -1,5 +1,7 @@
 //! One sekai-chisei governed model turn's planning and execution protocol.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use futures_util::StreamExt;
 
 use super::proto::chisei::{
@@ -7,11 +9,44 @@ use super::proto::chisei::{
     ToolDef as ProtoToolDef,
 };
 use super::{GovernanceError, RunHandle, SekaiChiseiGovernance, plane_session};
-use crate::model::{ChatMessage, ModelTurn, ToolCall};
+use crate::fallback::{
+    self, FallbackDenial, FallbackView, ModelSource, evidence_identity, prompt_context_digest,
+    tool_names, tool_surface_digest,
+};
+use crate::model::{ChatMessage, ModelPort, ModelTurn, ToolCall};
 use crate::tools::ToolDef;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
 
 /// Plan and execute one governed model turn, including durable failure reporting.
 pub(super) async fn execute(
+    governance: &SekaiChiseiGovernance,
+    handle: &RunHandle,
+    system: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+    local_model: &dyn ModelPort,
+) -> Result<ModelTurn, GovernanceError> {
+    match execute_plane(governance, handle, system, messages, tools).await {
+        Ok(turn) => {
+            let _ = governance
+                .harvest
+                .set_fallback_active(&handle.run_id, false);
+            Ok(turn)
+        }
+        Err(GovernanceError::Unavailable(_)) => {
+            execute_fallback(governance, handle, system, messages, tools, local_model).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn execute_plane(
     governance: &SekaiChiseiGovernance,
     handle: &RunHandle,
     system: &str,
@@ -103,6 +138,107 @@ pub(super) async fn execute(
             .collect(),
         usage: None, // plane usage surfaces via harvest when available
     })
+}
+
+async fn execute_fallback(
+    governance: &SekaiChiseiGovernance,
+    handle: &RunHandle,
+    system: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+    local_model: &dyn ModelPort,
+) -> Result<ModelTurn, GovernanceError> {
+    let stored = governance.harvest.fallback(&handle.run_id)?;
+    let view = match stored.as_ref() {
+        Some(checkpoint) => FallbackView {
+            now_ms: now_ms(),
+            fallback_enabled: governance.fallback_enabled,
+            run_id: handle.run_id.clone(),
+            operation_id: handle.operation_id.clone(),
+            attempt_id: handle.run_id.clone(),
+            claim_id: checkpoint.authorization.claim_id.clone(),
+            local_model_digest: local_model.content_digest(),
+            prompt_context_digest: prompt_context_digest(system, messages),
+            tool_surface_digest: tool_surface_digest(tools),
+            tool_names: tool_names(tools),
+            live_fence: Some(checkpoint.held_fence.clone()),
+            allow_test_signatures: governance.fallback_allow_test_signatures,
+        },
+        None => FallbackView {
+            now_ms: now_ms(),
+            fallback_enabled: governance.fallback_enabled,
+            run_id: handle.run_id.clone(),
+            operation_id: handle.operation_id.clone(),
+            attempt_id: handle.run_id.clone(),
+            claim_id: None,
+            local_model_digest: local_model.content_digest(),
+            prompt_context_digest: prompt_context_digest(system, messages),
+            tool_surface_digest: tool_surface_digest(tools),
+            tool_names: tool_names(tools),
+            live_fence: None,
+            allow_test_signatures: governance.fallback_allow_test_signatures,
+        },
+    };
+    let authorization = stored.as_ref().map(|checkpoint| &checkpoint.authorization);
+    let (source, selection) = fallback::select_model_source(false, authorization, &view)?;
+    if source != ModelSource::Local {
+        return Err(GovernanceError::Unavailable(
+            "fallback selected plane source while the plane is unavailable".into(),
+        ));
+    }
+    let selection = selection
+        .ok_or_else(|| GovernanceError::Denied("fallback:missing_authorization".into()))?;
+    let Some(mut checkpoint) = stored else {
+        return Err(FallbackDenial::MissingAuthorization.into());
+    };
+    checkpoint.selection = selection;
+    let turn = local_model
+        .next_turn(system, messages, tools)
+        .await
+        .map_err(|error| GovernanceError::Message(error.to_string()))?;
+    let mut view = view;
+    view.now_ms = now_ms();
+    fallback::still_valid(&checkpoint, &view)?;
+    let payload = serde_json::json!({
+        "content": turn.content,
+        "tool_calls": turn.tool_calls.iter().map(|call| {
+            serde_json::json!({
+                "id": call.id,
+                "name": call.name,
+                "args_json": call.args_json,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    let payload = serde_json::to_string(&payload).unwrap_or_else(|_| turn.content.clone());
+    let payload_digest = fallback::sha256_hex(payload.as_bytes());
+    let incoming = evidence_identity(
+        &checkpoint.authorization,
+        &format!("fallback-model:{}:{payload_digest}", handle.run_id),
+        &payload,
+    );
+    checkpoint.reconciliation = fallback::reconcile(Some(&checkpoint), &incoming);
+    if let Some(existing) = checkpoint.evidence.iter_mut().find(|evidence| {
+        evidence.run_id == incoming.run_id
+            && evidence.operation_id == incoming.operation_id
+            && evidence.attempt_id == incoming.attempt_id
+            && evidence.claim_id == incoming.claim_id
+            && evidence.authorization_id == incoming.authorization_id
+            && evidence.model_event_id == incoming.model_event_id
+    }) {
+        *existing = incoming;
+    } else {
+        checkpoint.evidence.push(incoming);
+    }
+    governance
+        .harvest
+        .set_fallback(&handle.run_id, checkpoint)?;
+    governance
+        .harvest
+        .set_fallback_active(&handle.run_id, true)?;
+    let _ = governance
+        .harvest
+        .set_model_operation(&handle.run_id, format!("fallback-model:{}", handle.run_id));
+    Ok(turn)
 }
 
 fn execution_input(

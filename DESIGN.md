@@ -59,7 +59,10 @@ adapters. `sekai-chisei` is the first-party production governance adapter.
 
 When governance is `sekai-chisei`, model turns use the plane
 (`PlanExecution` / `ExecutePlanStream`). Direct model adapters apply to
-ungoverned profiles only.
+ungoverned profiles only. An opt-in, default-deny local-model fallback may
+use one authorized digest only after fail-closed grant verification
+([ADR 0007](docs/decisions/0007-governed-local-fallback.md)); the configured
+governance adapter is not replaced.
 
 **Tenkai** (or any installer) may ship the binary. It is not a runtime port and
 must not appear in harness process settings.
@@ -127,6 +130,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/replay.rs` | Versioned replay manifest/evidence admission, canonical bindings, observation-only authority, and ordered comparison results |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |
 | `src/plane_intake.rs`, `src/plane_intake/` | Claimed-work mapping plus thin `run_plane_serve` over private deep plane serve loop and claimed-run transaction (including one lease-safe fenced RPC retry protocol) |
+| `src/fallback.rs` | Fail-closed local-model fallback admission: typed grant, fence, selection, evidence identity, and reconciliation (not a new port) |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates plane session, governed Run admission, governed model turns, run completion, tool authorization, harvest durability and event reporting, and plane claim acquisition plus lease RPCs to private deep modules |
 | `src/tools/`, `src/mcp/`, `src/mcp_server/` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, and shared bounded framing behind the stdio adapter seams |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |

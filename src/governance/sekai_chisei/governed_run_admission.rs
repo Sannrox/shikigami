@@ -83,7 +83,24 @@ pub(super) async fn admit(
             "sekai-chisei endpoint not set".into(),
         ));
     }
-    if let Err(error) = plane_session::probe(governance).await
+    let can_resume_fallback = governance.fallback_enabled
+        && checkpoint
+            .and_then(|state| state.fallback.as_ref())
+            .is_some_and(|fallback| {
+                let view = crate::fallback::view_from_checkpoint(
+                    fallback,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(0))
+                        .unwrap_or(0),
+                    true,
+                    None,
+                    governance.fallback_allow_test_signatures,
+                );
+                crate::fallback::resume(fallback, &view).is_ok()
+            });
+    if !can_resume_fallback
+        && let Err(error) = plane_session::probe(governance).await
         && governance.fail_closed
     {
         return Err(error);
@@ -111,20 +128,22 @@ pub(super) async fn admit(
         governance
             .harvest
             .restore(run_id, checkpoint, handle.operation_id.clone())?;
-        reconcile_resume(governance, &handle, checkpoint).await?;
+        if !can_resume_fallback {
+            reconcile_resume(governance, &handle, checkpoint).await?;
+        }
     } else {
         governance
             .harvest
             .start(run_id, handle.operation_id.clone())?;
     }
-    if !governance.harvest.has_host_operation(run_id)? {
+    if !can_resume_fallback && !governance.harvest.has_host_operation(run_id)? {
         match create_host_receipt(governance, run_id, task, &handle.operation_id).await {
             Ok(operation_id) => governance.update_host_plan(run_id, operation_id)?,
             Err(error) if governance.fail_closed => return Err(error),
             Err(_) => {}
         }
     }
-    if governance.harvest.needs_attempt(run_id)? {
+    if !can_resume_fallback && governance.harvest.needs_attempt(run_id)? {
         let attributes = harvest::attempt_attributes(run_id, &handle.operation_id);
         if let Err(error) = governance
             .report_harvest_event(&handle, harvest::KIND_ATTEMPT, attributes, vec![])

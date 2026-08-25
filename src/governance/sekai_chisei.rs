@@ -63,6 +63,8 @@ pub struct SekaiChiseiGovernance {
     max_tokens: i32,
     preferred_model: String,
     harvest: HarvestTransaction,
+    fallback_enabled: bool,
+    fallback_allow_test_signatures: bool,
 }
 
 /// Runtime-claim client used by the explicit plane intake mode of `serve`.
@@ -140,7 +142,29 @@ impl SekaiChiseiGovernance {
             max_tokens: 4096,
             preferred_model: config.model.model.clone(),
             harvest: HarvestTransaction::default(),
+            fallback_enabled: config.model.fallback.enabled,
+            fallback_allow_test_signatures: config.model.fallback.allow_test_signatures,
         })
+    }
+
+    /// Store a governance-issued fallback grant for later fail-closed admission.
+    /// This does not issue the grant.
+    pub fn install_fallback_grant(
+        &self,
+        run_id: &str,
+        authorization: crate::fallback::FallbackAuthorization,
+        fence: crate::fallback::LiveFence,
+    ) -> Result<(), GovernanceError> {
+        let selection = crate::fallback::FallbackSelection {
+            authorization_id: authorization.authorization_id.clone(),
+            model_content_digest: authorization.model_content_digest.clone(),
+            degraded_guarantees: true,
+            selected_at_ms: 0,
+        };
+        self.harvest.set_fallback(
+            run_id,
+            crate::fallback::checkpoint_after_admit(authorization, selection, fence),
+        )
     }
 
     fn update_host_plan(&self, run_id: &str, operation_id: String) -> Result<(), GovernanceError> {
@@ -461,9 +485,9 @@ impl GovernancePort for SekaiChiseiGovernance {
         system: &str,
         messages: &[ChatMessage],
         tools: &[ToolDef],
-        _local_model: &dyn crate::model::ModelPort,
+        local_model: &dyn crate::model::ModelPort,
     ) -> Result<ModelTurn, GovernanceError> {
-        governed_model_turn::execute(self, handle, system, messages, tools).await
+        governed_model_turn::execute(self, handle, system, messages, tools, local_model).await
     }
 
     async fn plan_content_turn(
@@ -512,10 +536,18 @@ impl GovernancePort for SekaiChiseiGovernance {
         ok: bool,
         detail: &str,
     ) -> Result<(), GovernanceError> {
+        if self.harvest.fallback_active(&handle.run_id)? {
+            return Ok(());
+        }
         self.report_tool_event(handle, None, name, ok, detail).await
     }
 
     async fn report_model_turn(&self, handle: &RunHandle, ok: bool) -> Result<(), GovernanceError> {
+        if self.harvest.fallback_active(&handle.run_id)? {
+            let _ = ok;
+            self.harvest.mark_model_reported(&handle.run_id);
+            return Ok(());
+        }
         self.report_model_event(handle, ok).await
     }
 
@@ -976,6 +1008,8 @@ mod tests {
             max_tokens: 4096,
             preferred_model: "auto".into(),
             harvest: HarvestTransaction::default(),
+            fallback_enabled: false,
+            fallback_allow_test_signatures: false,
         };
         let handle = RunHandle {
             run_id: "run-authz-fail".into(),
@@ -1096,5 +1130,202 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
+    }
+
+    fn fallback_config() -> Config {
+        let mut config = Config::default();
+        config.governance.adapter = "sekai-chisei".into();
+        config.governance.endpoint = Some("http://127.0.0.1:1".into());
+        config.governance.fail_closed = true;
+        config.model.adapter = "plane".into();
+        config.model.fallback.enabled = true;
+        config.model.fallback.allow_test_signatures = true;
+        config.model.fallback.adapter = Some("scripted".into());
+        config.model.fallback.script_json = Some(r#"[{"content":"fallback-ok"}]"#.into());
+        config
+    }
+
+    fn matching_grant(
+        model: &dyn crate::model::ModelPort,
+        handle: &RunHandle,
+        system: &str,
+        tools: &[ToolDef],
+    ) -> (
+        crate::fallback::FallbackAuthorization,
+        crate::fallback::LiveFence,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(0))
+            .unwrap_or(0);
+        let fence = crate::fallback::LiveFence {
+            effect_id: "effect-1".into(),
+            owner: "runtime-1".into(),
+            fencing_token: "fence-1".into(),
+            generation: 1,
+            valid_until_ms: now + 3_600_000,
+        };
+        let allowed = crate::fallback::tool_names(tools);
+        let mut auth = crate::fallback::FallbackAuthorization {
+            schema_version: crate::fallback::FALLBACK_SCHEMA_VERSION,
+            authorization_id: "auth-1".into(),
+            issuer: "governance".into(),
+            signer_ref: "signer-1".into(),
+            run_id: handle.run_id.clone(),
+            operation_id: handle.operation_id.clone(),
+            attempt_id: handle.run_id.clone(),
+            claim_id: Some("claim-1".into()),
+            lease: crate::fallback::FallbackLease {
+                effect_id: fence.effect_id.clone(),
+                owner: fence.owner.clone(),
+                fencing_token: fence.fencing_token.clone(),
+                generation: fence.generation,
+                valid_until_ms: fence.valid_until_ms,
+            },
+            policy_revision: "policy-1".into(),
+            model_content_digest: model.content_digest(),
+            prompt_context_digest: crate::fallback::prompt_context_digest(system, &[]),
+            tool_surface_digest: crate::fallback::tool_surface_digest(tools),
+            allowed_tools: allowed,
+            valid_from_ms: now - 1,
+            valid_until_ms: fence.valid_until_ms,
+            revoked: false,
+            reduced_guarantees: true,
+            signature_algorithm: String::new(),
+            binding_digest: String::new(),
+            signature: String::new(),
+        };
+        auth.seal_test_hmac().unwrap();
+        (auth, fence)
+    }
+
+    #[tokio::test]
+    async fn fallback_plan_turn_uses_local_model_when_plane_unavailable() {
+        let config = fallback_config();
+        let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
+        let model = crate::model::from_config(&config).unwrap();
+        let handle = RunHandle {
+            run_id: "run-fb".into(),
+            operation_id: "op-fb".into(),
+            namespace: "default".into(),
+        };
+        let tools = vec![ToolDef {
+            name: "report".into(),
+            description: "done".into(),
+            schema: "{}".into(),
+        }];
+        let (auth, fence) = matching_grant(model.as_ref(), &handle, "system", &tools);
+        governance
+            .install_fallback_grant(&handle.run_id, auth, fence)
+            .unwrap();
+        let turn = governance
+            .plan_turn(&handle, "system", &[], &tools, model.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(turn.content, "fallback-ok");
+        let checkpoint = governance.harvest_checkpoint_state(&handle.run_id).unwrap();
+        let fallback = checkpoint.fallback.expect("fallback scratch");
+        assert_eq!(
+            fallback.selection.model_content_digest,
+            model.content_digest()
+        );
+        assert!(fallback.selection.degraded_guarantees);
+        assert!(!fallback.evidence.is_empty());
+        assert_eq!(
+            fallback.reconciliation,
+            crate::fallback::FallbackReconciliation::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_denial_does_not_invoke_exhausted_script() {
+        let mut config = fallback_config();
+        config.model.fallback.script_json = Some(r#"[]"#.into());
+        let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
+        let model = crate::model::from_config(&config).unwrap();
+        let handle = RunHandle {
+            run_id: "run-deny".into(),
+            operation_id: "op-deny".into(),
+            namespace: "default".into(),
+        };
+        let err = governance
+            .plan_turn(&handle, "system", &[], &[], model.as_ref())
+            .await
+            .unwrap_err();
+        match err {
+            GovernanceError::Denied(message) => {
+                assert!(message.contains("fallback:"), "{message}");
+            }
+            other => panic!("expected fallback denial, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_grant_does_not_bypass_connected_tool_authorization() {
+        let config = fallback_config();
+        let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
+        let model = crate::model::from_config(&config).unwrap();
+        let handle = RunHandle {
+            run_id: "run-online".into(),
+            operation_id: "op-online".into(),
+            namespace: "default".into(),
+        };
+        let tools = vec![ToolDef {
+            name: "read_file".into(),
+            description: "read".into(),
+            schema: "{}".into(),
+        }];
+        let (auth, fence) = matching_grant(model.as_ref(), &handle, "system", &tools);
+        governance
+            .install_fallback_grant(&handle.run_id, auth, fence)
+            .unwrap();
+        let err = governance
+            .authorize_tool(&handle, "bash", r#"{"command":"true"}"#)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GovernanceError::Unavailable(_)),
+            "expected plane authz, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_tool_authz_uses_bound_surface() {
+        let config = fallback_config();
+        let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
+        let model = crate::model::from_config(&config).unwrap();
+        let handle = RunHandle {
+            run_id: "run-tool".into(),
+            operation_id: "op-tool".into(),
+            namespace: "default".into(),
+        };
+        let tools = vec![ToolDef {
+            name: "read_file".into(),
+            description: "read".into(),
+            schema: "{}".into(),
+        }];
+        let (auth, fence) = matching_grant(model.as_ref(), &handle, "system", &tools);
+        governance
+            .install_fallback_grant(&handle.run_id, auth, fence)
+            .unwrap();
+        let turn = governance
+            .plan_turn(&handle, "system", &[], &tools, model.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(turn.content, "fallback-ok");
+        governance
+            .authorize_tool(&handle, "read_file", "{}")
+            .await
+            .unwrap();
+        let err = governance
+            .authorize_tool(&handle, "bash", r#"{"command":"true"}"#)
+            .await
+            .unwrap_err();
+        match err {
+            GovernanceError::Denied(message) => {
+                assert!(message.contains("mismatched_tool_surface"), "{message}");
+            }
+            other => panic!("expected tool-surface denial, got {other}"),
+        }
     }
 }

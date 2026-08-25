@@ -67,7 +67,12 @@ cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml \
   run "say hello via tools" --keep-workspace --timeout-secs 120
 ```
 
-If the plane is down under `fail_closed`, doctor and run refuse to start.
+If the plane is down under `fail_closed`, doctor and run refuse to start
+unless a current signed local-model fallback grant is already checkpointed
+and `[model.fallback].enabled` is true
+([ADR 0007](decisions/0007-governed-local-fallback.md)). Fallback never
+replaces the governance adapter and never reports governed success from
+local scratch.
 
 ## Replay evidence
 
