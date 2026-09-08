@@ -74,15 +74,14 @@ impl<'a> DurableModelTurn<'a> {
         system_prompt: &'a str,
         tool_defs: &'a [ToolDef],
         tools: Arc<ToolRegistry>,
-        governance_checkpoint: Option<&GovernanceCheckpoint>,
+        _governance_checkpoint: Option<&GovernanceCheckpoint>,
         session: &RunSession,
         replay: bool,
     ) -> Self {
-        let governed_model_checkpoint = request.resume_run_id.is_some()
-            && (replay
-                || governance_checkpoint
-                    .is_some_and(|checkpoint| !checkpoint.model_operation_id.is_empty()));
-        let staged_turn = staged_model_turn(governed_model_checkpoint, &session.messages);
+        // A stopped run resumes from the durable assistant message. Local
+        // checkpoints are not plane receipts; they still prevent repeating a
+        // paid or already-planned model turn after abrupt termination.
+        let staged_turn = staged_model_turn(request.resume_run_id.is_some(), &session.messages);
         let staged_content_checkpoint =
             request.resume_run_id.is_some() && session.has_staged_content_model_turn();
         let staged_content_turn = session
@@ -390,6 +389,24 @@ fn staged_content_model_turn(
 mod tests {
     use super::*;
     use crate::model::ToolCall;
+
+    #[test]
+    fn resume_reuses_a_checkpointed_assistant_turn_without_a_plane_model_id() {
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "write_file".into(),
+                args_json: r#"{"path":"once.txt","content":"once"}"#.into(),
+            }],
+        }];
+
+        let turn = staged_model_turn(true, &messages).unwrap();
+        assert_eq!(turn.tool_calls, messages[0].tool_calls);
+        assert!(staged_model_turn(false, &messages).is_none());
+    }
 
     #[test]
     fn staged_replay_reconstructs_the_durable_assistant_turn() {

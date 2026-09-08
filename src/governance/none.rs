@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::checkpoint::{GovernanceCheckpoint, StagedToolExecution, ToolExecutionStatus};
+use crate::checkpoint::{
+    GovernanceCheckpoint, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
+};
 use crate::config::Config;
 use crate::content::ContentModelTurnV1;
 use crate::model::{ChatMessage, ModelTurn};
@@ -107,6 +109,41 @@ impl GovernancePort for NoneGovernance {
         handle: &RunHandle,
     ) -> Result<(), GovernanceError> {
         self.durability.recover(&handle.run_id)
+    }
+
+    async fn stage_tool_reports(
+        &self,
+        handle: &RunHandle,
+        reports: Vec<StagedToolReport>,
+    ) -> Result<(), GovernanceError> {
+        self.durability.stage_reports(&handle.run_id, reports)
+    }
+
+    async fn replay_staged_tool_reports(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
+        let reports = self.durability.pending_reports(&handle.run_id)?;
+        for report in reports {
+            self.report_tool_with_id(
+                handle,
+                &report.call_id,
+                &report.name,
+                report.ok,
+                &report.detail,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn report_tool_with_id(
+        &self,
+        handle: &RunHandle,
+        call_id: &str,
+        name: &str,
+        ok: bool,
+        detail: &str,
+    ) -> Result<(), GovernanceError> {
+        self.durability.commit_report(&handle.run_id, call_id)?;
+        self.report_tool(handle, name, ok, detail).await
     }
 
     async fn plan_turn(

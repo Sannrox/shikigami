@@ -160,6 +160,33 @@ impl LocalDurability {
         })
     }
 
+    fn stage_reports(
+        &self,
+        run_id: &str,
+        reports: Vec<StagedToolReport>,
+    ) -> Result<(), GovernanceError> {
+        self.with_checkpoint(run_id, |checkpoint| {
+            checkpoint.pending_tool_reports.extend(reports);
+            Ok(())
+        })
+    }
+
+    fn pending_reports(&self, run_id: &str) -> Result<Vec<StagedToolReport>, GovernanceError> {
+        Ok(self
+            .checkpoint(run_id)
+            .map(|checkpoint| checkpoint.pending_tool_reports)
+            .unwrap_or_default())
+    }
+
+    fn commit_report(&self, run_id: &str, call_id: &str) -> Result<(), GovernanceError> {
+        self.with_checkpoint(run_id, |checkpoint| {
+            checkpoint
+                .pending_tool_reports
+                .retain(|report| report.call_id != call_id);
+            Ok(())
+        })
+    }
+
     fn with_checkpoint(
         &self,
         run_id: &str,
@@ -522,6 +549,42 @@ mod tests {
                 .checkpoint(&handle.run_id)
                 .unwrap()
                 .pending_tool_executions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn local_durability_replays_staged_reports_without_requeueing_effects() {
+        let durability = LocalDurability::default();
+        let handle = handle();
+        durability.begin(&handle, None).unwrap();
+        durability
+            .stage_reports(
+                &handle.run_id,
+                vec![StagedToolReport {
+                    call_id: "tool-1-0-call-1".into(),
+                    name: "write_file".into(),
+                    ok: true,
+                    detail: "wrote".into(),
+                }],
+            )
+            .unwrap();
+
+        let restored = LocalDurability::default();
+        restored
+            .begin(&handle, durability.checkpoint(&handle.run_id).as_ref())
+            .unwrap();
+        let pending = restored.pending_reports(&handle.run_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].call_id, "tool-1-0-call-1");
+        restored
+            .commit_report(&handle.run_id, "tool-1-0-call-1")
+            .unwrap();
+        assert!(
+            restored
+                .checkpoint(&handle.run_id)
+                .unwrap()
+                .pending_tool_reports
                 .is_empty()
         );
     }
