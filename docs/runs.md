@@ -36,7 +36,10 @@ governance plane remains authoritative when used. See [replay.md](replay.md).
 
 ~~~
 shikigami runs
+shikigami runs <run-id>
 shikigami runs <run-id> --json
+shikigami runs <run-id> --diagnose
+shikigami runs <run-id> --diagnose --json
 shikigami logs <run-id>
 shikigami cancel <run-id>
 shikigami cleanup <run-id>
@@ -44,6 +47,8 @@ shikigami cleanup <run-id> --force
 shikigami artifacts <run-id>
 shikigami artifacts <run-id> --patch
 ~~~
+
+Inspecting one run also prints a read-only recovery diagnosis ([ADR 0008](decisions/0008-recovery-diagnosis.md)): `safe_resume`, `report_only`, `uncertain_tool`, `invalid_checkpoint`, or `terminal`, plus allowed next-step categories. `--diagnose --json` emits the same `RecoveryDiagnosis` object as `Harness::diagnose_run`. Diagnosis does not call the model, dispatch tools, redeem permits, or mutate state, and it does not grant execution authority. `runs <id> --json` without `--diagnose` remains the existing `RunRecord` document.
 
 cleanup removes the run record, event journal, checkpoint, and retained
 artifact directory. Active runs are never deleted in place: --force requests

@@ -88,6 +88,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | `RunRequest` / `RunResult` | Run I/O (incl. park, usage, optional `cost`) |
 | `Harness::{replay, replay_with_events}` / replay types | Additive content-bound comparison API; not part of the original 1.0 freeze core |
 | `DoctorReport` / `HarnessError` | Diagnostics and errors |
+| `Harness::diagnose_run` / `RecoveryDiagnosis` | Additive read-only recovery diagnosis (schema v1); not an execution permit |
 | `export_run_transcript` / `ExportOptions` | Offline JSONL from checkpoints |
 | `governance::GovernancePort` | Trait for custom governance (may still grow; not freeze-core) |
 | CLI subcommands | `version`, `doctor`, `run`, `serve` freeze-core; `mcp`, `export` host-adjacent — flags may grow |

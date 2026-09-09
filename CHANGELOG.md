@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive read-only recovery diagnosis (`Harness::diagnose_run`, CLI
+  `runs <id> --diagnose`) classifies a retained run as `safe_resume`,
+  `report_only`, `uncertain_tool`, `invalid_checkpoint`, or `terminal`
+  without executing. Next-step categories are labels, not permits. See
+  [ADR 0008](docs/decisions/0008-recovery-diagnosis.md).
 - Bounded delayed-evidence queue (`[governance.delayed_evidence]`, default
   disabled) persists signed terminal envelopes across restart, reconciles
   them idempotently, fail-closes on conflict, expiry, fence loss, invalid

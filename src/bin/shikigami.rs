@@ -6,8 +6,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
-    ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest, ServeOptions,
-    ServeRuntimeOptions, StateRoot, VERSION,
+    Config, ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest,
+    ServeOptions, ServeRuntimeOptions, StateRoot, VERSION, diagnose_run,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -82,6 +82,9 @@ enum Command {
         run_id: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Print the read-only recovery diagnosis for one run (no execution).
+        #[arg(long)]
+        diagnose: bool,
     },
     /// Request cancellation through the durable local run marker.
     Cancel { run_id: String },
@@ -327,36 +330,81 @@ async fn run() -> anyhow::Result<()> {
                 anyhow::bail!("run reported failure");
             }
         }
-        Command::Runs { run_id, json } => {
-            let registry = shikigami::RunRegistry::new(state.path())?;
-            if let Some(run_id) = run_id {
-                let record = registry.load(&run_id)?;
+        Command::Runs {
+            run_id,
+            json,
+            diagnose,
+        } => {
+            if diagnose {
+                let Some(run_id) = run_id else {
+                    anyhow::bail!("--diagnose requires a run id");
+                };
+                let (config, _) =
+                    Config::resolve_search(cli.config.as_deref(), state.path(), &cwd)?;
+                let diagnosis = diagnose_run(&state, &run_id, &config)?;
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&record)?);
+                    println!("{}", serde_json::to_string_pretty(&diagnosis)?);
                 } else {
+                    let steps = diagnosis
+                        .allowed_next_steps
+                        .iter()
+                        .map(|step| step.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     println!(
-                        "run {} status={} success={:?} turns={} termination={} artifacts={}",
-                        record.run_id,
-                        record.status,
-                        record.success,
-                        record.turns,
-                        record.termination.as_deref().unwrap_or("-"),
-                        record.artifact_dir.as_deref().unwrap_or("-"),
+                        "run {} class={} next=[{}] reason={}",
+                        diagnosis.run_id,
+                        diagnosis.class.as_str(),
+                        steps,
+                        diagnosis.reason
                     );
                 }
             } else {
-                let records = registry.list()?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&records)?);
-                } else {
-                    for record in records {
+                let registry = shikigami::RunRegistry::new(state.path())?;
+                if let Some(run_id) = run_id {
+                    let record = registry.load(&run_id)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&record)?);
+                    } else {
                         println!(
-                            "{}\t{}\t{}\t{}",
+                            "run {} status={} success={:?} turns={} termination={} artifacts={}",
                             record.run_id,
                             record.status,
+                            record.success,
                             record.turns,
-                            record.summary.replace(['\n', '\t'], " ")
+                            record.termination.as_deref().unwrap_or("-"),
+                            record.artifact_dir.as_deref().unwrap_or("-"),
                         );
+                        let (config, _) =
+                            Config::resolve_search(cli.config.as_deref(), state.path(), &cwd)?;
+                        let diagnosis = diagnose_run(&state, &run_id, &config)?;
+                        let steps = diagnosis
+                            .allowed_next_steps
+                            .iter()
+                            .map(|step| step.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!(
+                            "diagnosis class={} next=[{}] reason={}",
+                            diagnosis.class.as_str(),
+                            steps,
+                            diagnosis.reason
+                        );
+                    }
+                } else {
+                    let records = registry.list()?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&records)?);
+                    } else {
+                        for record in records {
+                            println!(
+                                "{}\t{}\t{}\t{}",
+                                record.run_id,
+                                record.status,
+                                record.turns,
+                                record.summary.replace(['\n', '\t'], " ")
+                            );
+                        }
                     }
                 }
             }
