@@ -191,6 +191,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Reconstruct a replay package from a retained run, or report missing bindings.
+    ReplayExport {
+        run_id: String,
+        #[arg(long)]
+        json: bool,
+        /// Write complete `evidence.json` and `manifest.json` into this directory.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
     /// Observation-only content-bound replay through `Harness::replay`.
     Replay {
         /// Schema-v1 `ReplayManifest` JSON file.
@@ -723,6 +732,38 @@ async fn run() -> anyhow::Result<()> {
                 );
             } else {
                 print!("{jsonl}");
+            }
+        }
+        Command::ReplayExport {
+            run_id,
+            json,
+            output,
+        } => {
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let report = harness.export_replay_inputs(&run_id)?;
+            if let Some(dir) = output
+                && report.complete
+            {
+                std::fs::create_dir_all(&dir)?;
+                if let (Some(manifest), Some(evidence)) = (&report.manifest, &report.evidence) {
+                    std::fs::write(
+                        dir.join("manifest.json"),
+                        serde_json::to_vec_pretty(manifest)?,
+                    )?;
+                    std::fs::write(
+                        dir.join("evidence.json"),
+                        serde_json::to_vec_pretty(evidence)?,
+                    )?;
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let missing = report.missing.join(",");
+                println!(
+                    "replay-export {} complete={} missing=[{}] reason={}",
+                    report.run_id, report.complete, missing, report.reason
+                );
             }
         }
         Command::Replay {

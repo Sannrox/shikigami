@@ -4,7 +4,8 @@
 descriptors without changing the stable text-only run contract. The canonical
 intake is the Rust embedding API. The CLI adds a thin process host
 (`shikigami run-content`); MCP, serve, and plane intake remain text-only.
-Content replay is still unsupported.
+Content replay is still unsupported. `replay-export` reports content runs as
+incomplete (`missing: ["content"]`).
 
 ## Before you start
 

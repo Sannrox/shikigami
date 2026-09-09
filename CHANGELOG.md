@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive CLI `replay-export <run_id>` and `Harness::export_replay_inputs`
+  reconstruct a schema-v1 replay package from retained artifacts, or return a
+  typed incomplete report. Original inputs come only from
+  `snapshots/initial`. `-o DIR` writes `manifest.json` and `evidence.json`
+  only when complete. See
+  [ADR 0012](docs/decisions/0012-replay-export.md).
 - Additive CLI `run-content --request/--payloads` host over
   `Harness::run_content`. The versioned request carries descriptors and opaque
   payload filenames; bytes stay in a host-owned directory. MCP, serve, and
@@ -49,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RPC when configured, checkpoints metadata in a crash-safe two-slot sidecar,
   and keeps existing text run, host, transcript, and replay contracts
   unchanged.
+
+### Changed
+
+- `workspace.snapshot` captures `snapshots/initial` only on the first
+  materialize and keeps that copy across resume. Resume does not create the
+  directory from a mutated workspace. `replay-export` binds that original
+  directory, not the live workspace.
 
 ### Fixed
 

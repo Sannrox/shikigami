@@ -15,6 +15,7 @@ Accepted decisions that must outlive a single PR.
 | [0009](0009-tool-call-correlation.md) | Stable tool-call correlation in progress events | Accepted |
 | [0010](0010-cli-run-replay.md) | CLI observation-only run replay | Accepted |
 | [0011](0011-cli-content-intake.md) | CLI bounded-content process-host request | Accepted |
+| [0012](0012-replay-export.md) | Export validated replay inputs from a retained run | Accepted |
 
 ## When to write an ADR
 

@@ -92,11 +92,12 @@ pub use plane_intake::{
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use registry::{RunEventRecord, RunRecord, RunRegistry};
 pub use replay::{
-    MAX_REPLAY_BUNDLE_BYTES, MAX_REPLAY_STEPS, REPLAY_REPORT_SCHEMA_VERSION, REPLAY_SCHEMA_VERSION,
-    ReplayBindings, ReplayComparisonStatus, ReplayError, ReplayEvidenceBundle, ReplayManifest,
-    ReplayReport, ReplayRequest, ReplayResult, ReplayStepComparison, ReplayStepEvidence,
-    ReplayStepKind, ReplayTerminalComparison, ReplayTerminalEvidence, digest_bytes,
-    empty_workspace_digest, steps_from_messages, text_digest, workspace_digest,
+    MAX_REPLAY_BUNDLE_BYTES, MAX_REPLAY_STEPS, REPLAY_EXPORT_SCHEMA_VERSION,
+    REPLAY_REPORT_SCHEMA_VERSION, REPLAY_SCHEMA_VERSION, ReplayBindings, ReplayComparisonStatus,
+    ReplayError, ReplayEvidenceBundle, ReplayExportReport, ReplayManifest, ReplayReport,
+    ReplayRequest, ReplayResult, ReplayStepComparison, ReplayStepEvidence, ReplayStepKind,
+    ReplayTerminalComparison, ReplayTerminalEvidence, digest_bytes, empty_workspace_digest,
+    export_replay_inputs, steps_from_messages, text_digest, workspace_digest,
 };
 pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{

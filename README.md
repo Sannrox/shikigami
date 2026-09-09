@@ -120,6 +120,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([docs/mcp.md](docs/mcp.md)) |
 | `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([docs/embedding.md](docs/embedding.md)) |
 | `replay --manifest FILE --evidence FILE [--resume ID] [--json]` | Observation-only content-bound replay ([docs/replay.md](docs/replay.md)) |
+| `replay-export <run_id> [--json] [-o DIR]` | Reconstruct a replay package from retained artifacts, or report missing bindings ([docs/replay.md](docs/replay.md)) |
 | `run-content --request FILE --payloads DIR [--json]` | Bounded content run through a versioned process request ([docs/content.md](docs/content.md)) |
 
 | Flag / env | Purpose |

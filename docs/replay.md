@@ -98,6 +98,39 @@ Each comparison is `equal`, `changed`, `missing`, or `unsupported`. Natural
 language differences are comparative evidence; they do not by themselves mean
 that the replay failed or that governance accepted the outcome.
 
+## Export
+
+`Harness::export_replay_inputs` and CLI `replay-export` reconstruct the same
+schema-v1 package from retained artifacts, or return `ReplayExportReport`
+schema v1 with `complete: false` and a `missing` list. Export is read-only and
+does not execute replay.
+
+Original inputs come only from `state/runs/<id>/snapshots/initial`, which is
+captured once after first materialize when the source run had
+`workspace.snapshot = true`. Resume never creates or recaptures that
+directory, even if snapshotting is enabled later.
+The live workspace, transcript export, and reconstructed files are not
+original-input proof. Content runs, compacted history, non-terminal runs, and unmatched
+prompt ids are incomplete. The prompt digest is the current
+`SYSTEM_PROMPT` composed with project rules and skills loaded from
+`snapshots/initial`. Configured skill packs that live outside that snapshot
+make the prompt binding incomplete. Snapshot copies skip symbolic links;
+`workspace_digest` also rejects them, so exported inputs are the retained
+regular-file tree. Model, policy, and the observation-only tool
+catalog come from the exporting process configuration. A complete package is
+validated with `ReplayManifest::for_evidence` before it is returned; digests
+are never guessed. Checkpoints remain local scratch, not receipts. The
+package is digest-only and is never uploaded.
+
+```
+shikigami replay-export <run_id> [--json] [-o DIR]
+```
+
+`--json` prints `ReplayExportReport`. `-o DIR` writes `manifest.json` and
+`evidence.json` only when complete. Exit `0` is a well-formed report
+(complete or incomplete). Exit `1` means the run cannot be inspected. See
+[ADR 0012](decisions/0012-replay-export.md).
+
 ## CLI
 
 ```
@@ -156,6 +189,7 @@ testable without a live service.
 
 - [ADR 0005](decisions/0005-governed-run-replay.md) — accepted architecture
 - [ADR 0010](decisions/0010-cli-run-replay.md) — CLI host contract
+- [ADR 0012](decisions/0012-replay-export.md) — export from retained artifacts
 - [Embedding](embedding.md) — additive `Harness` API
 - [Identity](identity.md) — source, replay, and resume identities
 - [Runs](runs.md) — local state and cleanup

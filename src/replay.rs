@@ -15,12 +15,15 @@ use crate::checkpoint::{Checkpoint, CheckpointError};
 use crate::config::{Config, EgressMode, PermissionMode};
 use crate::model::{ChatMessage, CostEstimate, TokenUsage};
 use crate::registry::{RegistryError, RunRegistry};
-use crate::run::{RunError, RunResult, RunTermination};
+use crate::run::{RunError, RunResult, RunTermination, SYSTEM_PROMPT};
+use crate::state::StateRoot;
 use crate::tools::ToolDef;
 
 pub const REPLAY_SCHEMA_VERSION: u32 = 1;
 /// CLI/library JSON projection for one completed replay (`schema_version` = 1).
 pub const REPLAY_REPORT_SCHEMA_VERSION: u32 = 1;
+/// CLI/library JSON projection for replay-input export (`schema_version` = 1).
+pub const REPLAY_EXPORT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_REPLAY_BUNDLE_BYTES: usize = 1024 * 1024;
 pub const MAX_REPLAY_STEPS: usize = 1024;
 const MAX_REPLAY_TASK_BYTES: usize = 256 * 1024;
@@ -186,6 +189,217 @@ pub struct ReplayReport {
     pub manifest_digest: String,
     pub steps: Vec<ReplayStepComparison>,
     pub terminal: ReplayTerminalComparison,
+}
+
+/// Read-only export of a replay package from retained local artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayExportReport {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub complete: bool,
+    pub missing: Vec<String>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ReplayManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ReplayEvidenceBundle>,
+}
+
+fn incomplete_export(
+    run_id: impl Into<String>,
+    missing: Vec<String>,
+    reason: impl Into<String>,
+) -> ReplayExportReport {
+    ReplayExportReport {
+        schema_version: REPLAY_EXPORT_SCHEMA_VERSION,
+        run_id: run_id.into(),
+        complete: false,
+        missing,
+        reason: reason.into(),
+        manifest: None,
+        evidence: None,
+    }
+}
+
+/// Reconstruct a replay package from retained artifacts, or report what is missing.
+///
+/// Does not mutate run state. Current workspace is never treated as original inputs.
+pub fn export_replay_inputs(
+    state: &StateRoot,
+    run_id: &str,
+    config: &Config,
+) -> Result<ReplayExportReport, ReplayError> {
+    let registry = RunRegistry::inspect(state.path());
+    let record = registry.load(run_id)?;
+    let checkpoint = match Checkpoint::load(&state.runs_dir(), run_id) {
+        Ok(checkpoint) => checkpoint,
+        Err(CheckpointError::Missing(_)) => {
+            return Ok(incomplete_export(
+                run_id,
+                vec!["checkpoint".into()],
+                "checkpoint is not retained",
+            ));
+        }
+        Err(error) => {
+            return Ok(incomplete_export(
+                run_id,
+                vec!["checkpoint".into()],
+                error.to_string(),
+            ));
+        }
+    };
+    if checkpoint.content.is_some() {
+        return Ok(incomplete_export(
+            run_id,
+            vec!["content".into()],
+            "content runs are not replay-exportable in v1",
+        ));
+    }
+    let mut missing = Vec::new();
+    if checkpoint
+        .messages
+        .iter()
+        .any(|message| message.content.contains("[context compacted:"))
+    {
+        missing.push("steps".into());
+    }
+    if !matches!(
+        record.status.as_str(),
+        "completed" | "failed" | "cancelled" | "timed_out" | "max_turns"
+    ) {
+        missing.push("terminal".into());
+    }
+    let prompt_base = if checkpoint.prompt_id == crate::checkpoint::prompt_id(SYSTEM_PROMPT) {
+        Some(SYSTEM_PROMPT)
+    } else {
+        missing.push("prompt".into());
+        None
+    };
+    let snapshot = match initial_snapshot_dir(&state.runs_dir(), run_id) {
+        Some(path) => match workspace_digest(&path) {
+            Ok(digest) => Some((path, digest)),
+            Err(_) => {
+                missing.push("inputs".into());
+                None
+            }
+        },
+        None => {
+            missing.push("inputs".into());
+            None
+        }
+    };
+    if !missing.is_empty() {
+        return Ok(incomplete_export(
+            run_id,
+            missing,
+            "original replay bindings are not fully retained",
+        ));
+    }
+    let (snapshot, inputs_digest) = snapshot.expect("inputs retained");
+    let prompt_body = {
+        if !skill_sources_are_retained(&snapshot, &config.context) {
+            return Ok(incomplete_export(
+                run_id,
+                vec!["prompt".into()],
+                "configured skill packs are not retained in snapshots/initial",
+            ));
+        }
+        let rules = crate::context::load_project_rules(&snapshot, &config.context);
+        let skills = crate::context::load_skills(&snapshot, &config.context);
+        crate::context::compose_system_prompt(
+            prompt_base.expect("prompt retained"),
+            rules.as_ref(),
+            &skills,
+        )
+    };
+    let checkpoint_path = crate::checkpoint::path_for(&state.runs_dir(), run_id);
+    let checkpoint_bytes = std::fs::read(&checkpoint_path)?;
+    let bindings = ReplayBindings::for_replay(
+        config,
+        &checkpoint.task,
+        &prompt_body,
+        inputs_digest,
+        digest_bytes(&checkpoint_bytes),
+    )?;
+    let evidence = ReplayEvidenceBundle {
+        schema_version: REPLAY_SCHEMA_VERSION,
+        source_run_id: checkpoint.run_id.clone(),
+        source_logical_operation_id: record.logical_operation_id.clone(),
+        task: checkpoint.task.clone(),
+        bindings,
+        expected_steps: steps_from_messages(&checkpoint.messages)?,
+        expected_terminal: ReplayTerminalEvidence {
+            success: record.success.unwrap_or(false),
+            termination: record
+                .termination
+                .clone()
+                .unwrap_or_else(|| record.status.clone()),
+            summary_digest: text_digest(&record.summary),
+        },
+    };
+    let manifest = ReplayManifest::for_evidence(&evidence)?;
+    let request = ReplayRequest::new(manifest.clone(), evidence.clone());
+    request.admit()?;
+    Ok(ReplayExportReport {
+        schema_version: REPLAY_EXPORT_SCHEMA_VERSION,
+        run_id: run_id.into(),
+        complete: true,
+        missing: Vec::new(),
+        reason: "retained artifacts recompute a valid replay package".into(),
+        manifest: Some(manifest),
+        evidence: Some(evidence),
+    })
+}
+
+fn skill_sources_are_retained(snapshot: &Path, settings: &crate::config::ContextSettings) -> bool {
+    if settings.skills.is_empty() {
+        return true;
+    }
+    let root = match &settings.skills_root {
+        Some(root) if !root.is_empty() => {
+            let path = std::path::PathBuf::from(root);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return false;
+            }
+            snapshot.join(path)
+        }
+        _ => snapshot.join(".shikigami/skills"),
+    };
+    let Ok(snapshot) = snapshot.canonicalize() else {
+        return false;
+    };
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    if !root.starts_with(&snapshot) {
+        return false;
+    }
+    settings.skills.iter().all(|id| {
+        if id.contains("..") || id.contains('/') || id.contains('\\') {
+            return false;
+        }
+        let path = root.join(id).join("SKILL.md");
+        std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file())
+            && path
+                .canonicalize()
+                .is_ok_and(|canonical| canonical.starts_with(&root))
+    })
+}
+
+fn initial_snapshot_dir(runs_dir: &Path, run_id: &str) -> Option<std::path::PathBuf> {
+    if !crate::checkpoint::is_safe_run_id(run_id) {
+        return None;
+    }
+    let path = runs_dir.join(run_id).join("snapshots").join("initial");
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    Some(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1167,5 +1381,275 @@ mod tests {
         let mut config = Config::default();
         config.run.compact_after_messages = Some(4);
         assert_eq!(replay_config(&config).run.compact_after_messages, None);
+    }
+
+    fn seed_export_run(
+        run_id: &str,
+        prompt_id: String,
+        messages: Vec<ChatMessage>,
+        content: Option<crate::content::ContentCheckpointBinding>,
+        finish: bool,
+    ) -> (tempfile::TempDir, StateRoot, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateRoot::new(directory.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let registry = RunRegistry::new(state.path()).unwrap();
+        registry.start(run_id, "task", None, None).unwrap();
+        let workspace = state.runs_dir().join(run_id).join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("mutated.txt"), "after").unwrap();
+        let checkpoint = crate::checkpoint::Checkpoint {
+            version: crate::checkpoint::CHECKPOINT_VERSION,
+            run_id: run_id.into(),
+            task: "task".into(),
+            prompt_id,
+            messages,
+            completed_turns: 1,
+            workspace: workspace.clone(),
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: None,
+            todos: vec![],
+            governance: None,
+            replay: None,
+            content,
+        };
+        checkpoint.save(&state.runs_dir()).unwrap();
+        if finish {
+            registry
+                .finish_result(&crate::run::RunResult {
+                    run_id: run_id.into(),
+                    success: true,
+                    summary: "done".into(),
+                    turns: 1,
+                    workspace: workspace.clone(),
+                    artifact_dir: None,
+                    termination: crate::run::RunTermination::Completed,
+                    park: None,
+                    prompt_id: checkpoint.prompt_id.clone(),
+                    usage: TokenUsage::default(),
+                    cost: None,
+                    todos: vec![],
+                })
+                .unwrap();
+        }
+        (directory, state, workspace)
+    }
+
+    fn write_initial_snapshot(state: &StateRoot, run_id: &str, bytes: &[u8]) {
+        let snapshot = state
+            .runs_dir()
+            .join(run_id)
+            .join("snapshots")
+            .join("initial");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("input.txt"), bytes).unwrap();
+    }
+
+    #[test]
+    fn export_without_initial_snapshot_is_incomplete_even_if_workspace_exists() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            None,
+            true,
+        );
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(!report.complete);
+        assert!(report.missing.iter().any(|item| item == "inputs"));
+        assert!(report.manifest.is_none());
+        assert!(report.evidence.is_none());
+    }
+
+    #[test]
+    fn export_complete_package_admits_and_binds_snapshot_not_workspace() {
+        let (_directory, state, workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "report-1".into(),
+                        name: "report".into(),
+                        args_json: r#"{"summary":"done","success":true}"#.into(),
+                    }],
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    content: "report: done".into(),
+                    tool_call_id: "report-1".into(),
+                    tool_calls: vec![],
+                },
+            ],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(report.complete, "{:?}", report.missing);
+        let evidence = report.evidence.expect("complete evidence");
+        let snapshot = state.runs_dir().join("run-1/snapshots/initial");
+        assert_eq!(
+            evidence.bindings.inputs_digest,
+            workspace_digest(&snapshot).unwrap()
+        );
+        assert_ne!(
+            evidence.bindings.inputs_digest,
+            workspace_digest(&workspace).unwrap()
+        );
+        let checkpoint_bytes =
+            std::fs::read(crate::checkpoint::path_for(&state.runs_dir(), "run-1")).unwrap();
+        assert_eq!(
+            evidence.bindings.retained_evidence_digest,
+            digest_bytes(&checkpoint_bytes)
+        );
+        let request = ReplayRequest::new(report.manifest.expect("complete manifest"), evidence);
+        request.admit().unwrap();
+    }
+
+    #[test]
+    fn export_prompt_digest_includes_snapshot_project_rules() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let snapshot = state.runs_dir().join("run-1/snapshots/initial");
+        std::fs::write(snapshot.join("AGENTS.md"), "must follow the house rules").unwrap();
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(report.complete, "{:?}", report.missing);
+        let evidence = report.evidence.expect("complete evidence");
+        let rules = crate::context::load_project_rules(&snapshot, &Config::default().context);
+        let composed = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &[]);
+        assert_eq!(evidence.bindings.prompt_digest, text_digest(&composed));
+        assert_ne!(evidence.bindings.prompt_digest, text_digest(SYSTEM_PROMPT));
+    }
+
+    #[test]
+    fn export_external_skill_root_is_incomplete_prompt() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let mut config = Config::default();
+        config.context.skills = vec!["pack".into()];
+        config.context.skills_root = Some("/tmp/not-retained-skills".into());
+        let report = export_replay_inputs(&state, "run-1", &config).unwrap();
+        assert!(!report.complete);
+        assert!(report.missing.iter().any(|item| item == "prompt"));
+    }
+
+    #[test]
+    fn export_parent_skill_root_is_incomplete_prompt() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let mut config = Config::default();
+        config.context.skills = vec!["pack".into()];
+        config.context.skills_root = Some("../packs".into());
+        let report = export_replay_inputs(&state, "run-1", &config).unwrap();
+        assert!(!report.complete);
+        assert!(report.missing.iter().any(|item| item == "prompt"));
+    }
+
+    #[test]
+    fn export_content_run_is_incomplete() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            Some(crate::content::ContentCheckpointBinding {
+                schema_version: crate::content::CONTENT_SCHEMA_VERSION,
+                generation: 1,
+                slot: "a".into(),
+                sha256_digest: digest_bytes(b"sidecar"),
+                resolver_id: "cli-file-v1".into(),
+            }),
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(!report.complete);
+        assert_eq!(report.missing, vec!["content"]);
+    }
+
+    #[test]
+    fn export_compacted_history_is_incomplete() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![ChatMessage {
+                role: "user".into(),
+                content:
+                    "[context compacted: 8 earlier messages omitted; continue the original task]"
+                        .into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            }],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(!report.complete);
+        assert!(report.missing.iter().any(|item| item == "steps"));
+    }
+
+    #[test]
+    fn export_prompt_mismatch_and_non_terminal_are_incomplete() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            "custom:not-the-current-system-prompt".into(),
+            vec![],
+            None,
+            false,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(!report.complete);
+        assert!(report.missing.iter().any(|item| item == "prompt"));
+        assert!(report.missing.iter().any(|item| item == "terminal"));
+    }
+
+    #[test]
+    fn export_unreadable_initial_snapshot_is_incomplete() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let snapshot = state.runs_dir().join("run-1/snapshots/initial");
+        std::os::unix::fs::symlink("/tmp/outside", snapshot.join("link")).unwrap();
+        let report = export_replay_inputs(&state, "run-1", &Config::default()).unwrap();
+        assert!(!report.complete);
+        assert!(report.missing.iter().any(|item| item == "inputs"));
+    }
+
+    #[test]
+    fn export_missing_run_fails_explicitly() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = StateRoot::new(directory.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let error = export_replay_inputs(&state, "missing", &Config::default()).unwrap_err();
+        assert!(error.to_string().contains("not found"), "{error}");
     }
 }

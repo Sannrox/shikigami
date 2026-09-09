@@ -449,6 +449,159 @@ fn replay_rejects_digest_mismatch_before_execution() {
         .stderr(predicate::str::contains("digest"));
 }
 
+fn listed_run_id(state: &std::path::Path, config: &std::path::Path) -> String {
+    let listed = cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "runs",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(listed)
+        .expect("runs utf8")
+        .lines()
+        .next()
+        .and_then(|line| line.split('\t').next())
+        .expect("run id")
+        .to_string()
+}
+
+#[test]
+fn replay_export_missing_run_fails() {
+    let dir = tempdir().expect("tempdir");
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            dir.path().join("state").to_str().unwrap(),
+            "replay-export",
+            "missing-run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn replay_export_without_snapshot_is_incomplete_and_does_not_write_package() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let (_config, config_path, _manifest_path, _evidence_path) = replay_fixture(dir.path());
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "run",
+            "export source",
+            "--keep-workspace",
+        ])
+        .assert()
+        .success();
+    let run_id = listed_run_id(&state, &config_path);
+    let output = dir.path().join("package");
+    let stdout = cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "replay-export",
+            &run_id,
+            "--json",
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: shikigami::ReplayExportReport =
+        serde_json::from_slice(&stdout).expect("export json");
+    assert!(!report.complete);
+    assert!(report.missing.iter().any(|item| item == "inputs"));
+    assert!(!output.join("manifest.json").exists());
+    assert!(!output.join("evidence.json").exists());
+}
+
+#[tokio::test]
+async fn replay_export_complete_package_matches_library_and_replays() {
+    use shikigami::{Harness, StateRoot};
+
+    let dir = tempdir().expect("tempdir");
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "directory".into();
+    config.workspace.root = dir.path().join("workspaces").to_string_lossy().into();
+    config.workspace.snapshot = true;
+    config.model.adapter = "scripted".into();
+    config.model.model = "deterministic-replay-model".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+            .into(),
+    );
+    let config_path = dir.path().join("export.toml");
+    config.save(&config_path).expect("save config");
+    let state = dir.path().join("state");
+    let harness = Harness::from_config(config.clone(), StateRoot::new(&state)).expect("harness");
+    let mut request = shikigami::RunRequest::new("export source");
+    request.keep_workspace = true;
+    let run = harness.run(request).await.expect("source run");
+    let library = harness
+        .export_replay_inputs(&run.run_id)
+        .expect("library export");
+    assert!(library.complete, "{:?}", library.missing);
+
+    let output = dir.path().join("package");
+    let stdout = cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "replay-export",
+            &run.run_id,
+            "--json",
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli: shikigami::ReplayExportReport = serde_json::from_slice(&stdout).expect("cli json");
+    assert_eq!(cli, library);
+    assert!(output.join("manifest.json").is_file());
+    assert!(output.join("evidence.json").is_file());
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "replay",
+            "--manifest",
+            output.join("manifest.json").to_str().unwrap(),
+            "--evidence",
+            output.join("evidence.json").to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schema_version\": 1"))
+        .stdout(predicate::str::contains("\"status\": \"equal\""));
+}
+
 #[tokio::test]
 async fn run_content_json_matches_library_and_omits_payloads() {
     use shikigami::{
