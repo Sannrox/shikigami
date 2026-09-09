@@ -1,8 +1,9 @@
 # Content-bound run replay
 
 Run replay executes one new isolated attempt and compares it with retained
-evidence. It is an additive library API; it does not change checkpoint resume,
-transcript export, serve intake, MCP, or plane-claim behavior.
+evidence. It is an additive library API with a thin CLI host
+(`shikigami replay`); it does not change checkpoint resume, transcript export,
+serve intake, MCP, or plane-claim behavior.
 
 Use replay when a host needs to answer: “Given the same bound task, prompt,
 model, tools, policy context, and inputs, which ordered model, tool, and
@@ -97,6 +98,19 @@ Each comparison is `equal`, `changed`, `missing`, or `unsupported`. Natural
 language differences are comparative evidence; they do not by themselves mean
 that the replay failed or that governance accepted the outcome.
 
+## CLI
+
+```
+shikigami replay --manifest FILE --evidence FILE [--resume ID] [--json]
+```
+
+`--manifest` and `--evidence` are schema-v1 JSON documents. Reads are bounded
+by `MAX_REPLAY_BUNDLE_BYTES`. `--json` prints `ReplayReport` schema v1, whose
+`steps` and `terminal` fields match `ReplayResult`. Exit `0` means a comparison
+completed (including `changed` evidence). Exit `1` means admission or execution
+failed. `--resume` is a replay-attempt id, never the source run. See
+[ADR 0010](decisions/0010-cli-run-replay.md).
+
 Model-step digests normalize JSON arguments and omit provider-generated tool
 call IDs. Those IDs are used only to associate tool responses inside their own
 execution.
@@ -141,6 +155,7 @@ testable without a live service.
 ## Related boundaries
 
 - [ADR 0005](decisions/0005-governed-run-replay.md) — accepted architecture
+- [ADR 0010](decisions/0010-cli-run-replay.md) — CLI host contract
 - [Embedding](embedding.md) — additive `Harness` API
 - [Identity](identity.md) — source, replay, and resume identities
 - [Runs](runs.md) — local state and cleanup

@@ -13,6 +13,7 @@ Accepted decisions that must outlive a single PR.
 | [0007](0007-governed-local-fallback.md) | Governed local-model fallback | Accepted |
 | [0008](0008-recovery-diagnosis.md) | Read-only recovery diagnosis | Accepted |
 | [0009](0009-tool-call-correlation.md) | Stable tool-call correlation in progress events | Accepted |
+| [0010](0010-cli-run-replay.md) | CLI observation-only run replay | Accepted |
 
 ## When to write an ADR
 
