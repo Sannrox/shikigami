@@ -91,7 +91,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | `Harness::diagnose_run` / `RecoveryDiagnosis` | Additive read-only recovery diagnosis (schema v1); not an execution permit |
 | `export_run_transcript` / `ExportOptions` | Offline JSONL from checkpoints |
 | `governance::GovernancePort` | Trait for custom governance (may still grow; not freeze-core) |
-| CLI subcommands | `version`, `doctor`, `run`, `serve` freeze-core; `mcp`, `export`, `replay` host-adjacent — flags may grow |
+| CLI subcommands | `version`, `doctor`, `run`, `serve` freeze-core; `mcp`, `export`, `replay`, `run-content` host-adjacent — flags may grow |
 
 Prefer depending on freeze-core surfaces below and
 [ADR 0004](decisions/0004-v1-contract.md).

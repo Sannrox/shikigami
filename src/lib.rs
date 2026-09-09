@@ -58,12 +58,15 @@ pub use config::{
     SandboxBackend, SandboxSettings,
 };
 pub use content::{
-    CONTENT_CONTRACT_VERSION, CONTENT_SCHEMA_VERSION, CONTENT_TRANSCRIPT_SCHEMA_VERSION,
-    ContentCapabilitiesV1, ContentDisclosureState, ContentError, ContentMessageV1,
-    ContentModelTurnV1, ContentPartDescriptor, ContentPartKind, ContentProvenanceV1,
-    ContentResolver, ContentRunRequestV1, ContentRunResultV1, ContentToStore,
-    MAX_CONTENT_AGGREGATE_BYTES, MAX_CONTENT_PART_BYTES, MAX_CONTENT_PARTS, ResolvedContent,
-    ResolvedContentPart, export_content_transcript,
+    CLI_FILE_RESOLVER_ID, CONTENT_CONTRACT_VERSION, CONTENT_PROCESS_REQUEST_SCHEMA_VERSION,
+    CONTENT_PROCESS_RESULT_SCHEMA_VERSION, CONTENT_SCHEMA_VERSION,
+    CONTENT_TRANSCRIPT_SCHEMA_VERSION, ContentCapabilitiesV1, ContentDisclosureState, ContentError,
+    ContentMessageV1, ContentModelTurnV1, ContentPartDescriptor, ContentPartKind,
+    ContentProcessRequestV1, ContentProcessResultV1, ContentProvenanceV1, ContentResolver,
+    ContentRunRequestV1, ContentRunResultV1, ContentToStore, FileContentResolver,
+    MAX_CONTENT_AGGREGATE_BYTES, MAX_CONTENT_PART_BYTES, MAX_CONTENT_PARTS,
+    MAX_CONTENT_PROCESS_REQUEST_BYTES, ResolvedContent, ResolvedContentPart,
+    export_content_transcript,
 };
 pub use eval::{EVAL_SCHEMA_VERSION, EvalCaseResult, EvalError, EvalSuiteResult, run_fixture};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};

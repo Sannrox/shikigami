@@ -3,11 +3,12 @@
 //! Payloads are transient values owned by a host-supplied resolver. Durable
 //! harness state stores only validated descriptors and resolver bindings.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::fs;
-use std::path::Path;
-use std::sync::Arc;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,10 +23,14 @@ use crate::run::{RunResult, RunTermination};
 
 pub const CONTENT_SCHEMA_VERSION: u32 = 1;
 pub const CONTENT_TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
+pub const CONTENT_PROCESS_REQUEST_SCHEMA_VERSION: u32 = 1;
+pub const CONTENT_PROCESS_RESULT_SCHEMA_VERSION: u32 = 1;
 pub const CONTENT_CONTRACT_VERSION: &str = "chisei.content-execution/v1";
+pub const CLI_FILE_RESOLVER_ID: &str = "cli-file-v1";
 pub const MAX_CONTENT_PARTS: usize = 32;
 pub const MAX_CONTENT_PART_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_CONTENT_AGGREGATE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_CONTENT_PROCESS_REQUEST_BYTES: usize = 1024 * 1024;
 
 const SIDECAR_SLOT_A: &str = "content-checkpoint-a.json";
 const SIDECAR_SLOT_B: &str = "content-checkpoint-b.json";
@@ -367,6 +372,266 @@ impl fmt::Debug for ContentModelTurnV1 {
 pub struct ContentRunResultV1 {
     pub run: RunResult,
     pub messages: Vec<ContentMessageV1>,
+}
+
+impl ContentRunResultV1 {
+    pub fn report(&self) -> ContentProcessResultV1 {
+        ContentProcessResultV1 {
+            schema_version: CONTENT_PROCESS_RESULT_SCHEMA_VERSION,
+            run_id: self.run.run_id.clone(),
+            success: self.run.success,
+            summary: self.run.summary.clone(),
+            turns: self.run.turns,
+            workspace: self.run.workspace.display().to_string(),
+            termination: self.run.termination.as_str().into(),
+            messages: self.messages.clone(),
+        }
+    }
+}
+
+/// Versioned CLI/process-host content request. Payloads stay in a host directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentProcessRequestV1 {
+    pub schema_version: u32,
+    pub task: String,
+    pub messages: Vec<ContentMessageV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ContentCapabilitiesV1>,
+    #[serde(default)]
+    pub keep_workspace: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_run_id: Option<String>,
+    /// Opaque descriptor reference → relative filename under the payload directory.
+    pub payloads: BTreeMap<String, String>,
+}
+
+impl ContentProcessRequestV1 {
+    pub fn into_run_request(
+        self,
+        payloads_root: impl AsRef<Path>,
+    ) -> Result<ContentRunRequestV1, ContentError> {
+        if self.schema_version != CONTENT_PROCESS_REQUEST_SCHEMA_VERSION {
+            return Err(ContentError::Invalid(format!(
+                "unsupported content process request schema version {}; expected {}",
+                self.schema_version, CONTENT_PROCESS_REQUEST_SCHEMA_VERSION
+            )));
+        }
+        let resolver = Arc::new(FileContentResolver::new(payloads_root, &self.payloads)?);
+        let capabilities = self
+            .capabilities
+            .unwrap_or_else(|| ContentCapabilitiesV1::bounded_for(&self.messages));
+        Ok(ContentRunRequestV1 {
+            task: self.task,
+            messages: self.messages,
+            capabilities,
+            resolver,
+            keep_workspace: self.keep_workspace,
+            timeout: None,
+            cancel: None,
+            resume_run_id: self.resume_run_id,
+            logical_operation_id: None,
+            restore_snapshot: None,
+        })
+    }
+}
+
+/// Credential-free JSON projection for one completed content process run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentProcessResultV1 {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub success: bool,
+    pub summary: String,
+    pub turns: u32,
+    pub workspace: String,
+    pub termination: String,
+    pub messages: Vec<ContentMessageV1>,
+}
+
+/// Host-owned directory store for CLI content intake. References are opaque ids.
+#[derive(Debug)]
+pub struct FileContentResolver {
+    root: PathBuf,
+    files: Mutex<HashMap<String, PathBuf>>,
+}
+
+impl FileContentResolver {
+    pub fn new(
+        root: impl AsRef<Path>,
+        payloads: &BTreeMap<String, String>,
+    ) -> Result<Self, ContentError> {
+        let root = root.as_ref();
+        if !root.is_dir() {
+            return Err(ContentError::Resolver(format!(
+                "payload directory is not a directory: {}",
+                root.display()
+            )));
+        }
+        let mut files = HashMap::new();
+        for (reference, filename) in payloads {
+            if !valid_opaque_reference(reference) {
+                return Err(ContentError::Invalid(
+                    "content reference must be credential-free and opaque".into(),
+                ));
+            }
+            let relative = relative_payload_filename(filename)?;
+            let path = root.join(&relative);
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                ContentError::Resolver(format!("payload `{reference}` cannot be read: {error}"))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ContentError::Resolver(format!(
+                    "payload `{reference}` must be a regular file"
+                )));
+            }
+            files.insert(reference.clone(), relative);
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            files: Mutex::new(files),
+        })
+    }
+
+    fn path_for(&self, relative: &Path) -> Result<PathBuf, ContentError> {
+        let candidate = self.root.join(relative);
+        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+            ContentError::Resolver(format!(
+                "payload {} cannot be inspected: {error}",
+                candidate.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ContentError::Resolver(
+                "payload path must be a regular file".into(),
+            ));
+        }
+        Ok(candidate)
+    }
+}
+
+fn relative_payload_filename(name: &str) -> Result<PathBuf, ContentError> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || path.is_absolute()
+        || path.components().count() != 1
+        || name.contains(['/', '\\', '\0'])
+    {
+        return Err(ContentError::Invalid(
+            "payload filename must be a single relative path component".into(),
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+#[async_trait]
+impl ContentResolver for FileContentResolver {
+    fn id(&self) -> &str {
+        CLI_FILE_RESOLVER_ID
+    }
+
+    async fn resolve(
+        &self,
+        descriptor: &ContentPartDescriptor,
+    ) -> Result<ResolvedContent, ContentError> {
+        let relative = {
+            let files = self
+                .files
+                .lock()
+                .map_err(|_| ContentError::Resolver("payload map lock poisoned".into()))?;
+            files
+                .get(&descriptor.reference)
+                .cloned()
+                .or_else(|| relative_payload_filename(&descriptor.reference).ok())
+        };
+        let Some(relative) = relative else {
+            return Err(ContentError::Resolver(
+                "payload reference is not mapped".into(),
+            ));
+        };
+        let path = self.path_for(&relative)?;
+        let file = fs::File::open(&path).map_err(|error| {
+            ContentError::Resolver(format!(
+                "payload {} cannot be opened: {error}",
+                path.display()
+            ))
+        })?;
+        let mut limited = file.take(MAX_CONTENT_PART_BYTES.saturating_add(1));
+        let mut bytes = Vec::new();
+        limited
+            .read_to_end(&mut bytes)
+            .map_err(|error| ContentError::Resolver(error.to_string()))?;
+        if bytes.len() as u64 > MAX_CONTENT_PART_BYTES {
+            return Err(ContentError::Invalid(
+                "payload exceeds the content part byte limit".into(),
+            ));
+        }
+        if descriptor.kind == ContentPartKind::Text {
+            let text = String::from_utf8(bytes)
+                .map_err(|_| ContentError::Resolver("text payload is not valid UTF-8".into()))?;
+            Ok(ResolvedContent::Text(text))
+        } else {
+            Ok(ResolvedContent::Bytes(bytes))
+        }
+    }
+
+    async fn store(&self, content: ContentToStore) -> Result<ContentPartDescriptor, ContentError> {
+        let bytes = content.payload.as_bytes();
+        if bytes.len() as u64 > MAX_CONTENT_PART_BYTES {
+            return Err(ContentError::Invalid(
+                "stored payload exceeds the content part byte limit".into(),
+            ));
+        }
+        let mut last_exists = None;
+        for _ in 0..8 {
+            let reference = format!(
+                "cliout-{}-{}",
+                content.part_id,
+                uuid::Uuid::new_v4().simple()
+            );
+            if !valid_opaque_reference(&reference) {
+                return Err(ContentError::Invalid(
+                    "stored content reference must be credential-free and opaque".into(),
+                ));
+            }
+            let relative = relative_payload_filename(&reference)?;
+            let path = self.root.join(&relative);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(bytes)?;
+                    file.sync_all()?;
+                    self.files
+                        .lock()
+                        .map_err(|_| ContentError::Resolver("payload map lock poisoned".into()))?
+                        .insert(reference.clone(), relative);
+                    return Ok(ContentPartDescriptor {
+                        part_id: content.part_id,
+                        kind: content.kind,
+                        media_type: content.media_type,
+                        byte_length: bytes.len() as u64,
+                        sha256_digest: sha256_digest(bytes),
+                        reference,
+                        provenance: content.provenance,
+                        disclosure_state: ContentDisclosureState::Accepted,
+                        disclosure_reason: String::new(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_exists = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(ContentError::Io(error)),
+            }
+        }
+        Err(ContentError::Resolver(format!(
+            "could not allocate a unique payload file: {}",
+            last_exists
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "already exists".into())
+        )))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1604,5 +1869,162 @@ mod tests {
                 .to_string()
                 .contains("externalized part pointer")
         );
+    }
+
+    #[test]
+    fn file_resolver_rejects_path_escape_and_missing_payload() {
+        let directory = tempdir().unwrap();
+        let payloads = directory.path().join("payloads");
+        fs::create_dir_all(&payloads).unwrap();
+        fs::write(payloads.join("payload-text-1"), b"hello").unwrap();
+        let mut map = BTreeMap::new();
+        map.insert("payload-text-1".into(), "../secret".into());
+        assert!(
+            FileContentResolver::new(&payloads, &map)
+                .unwrap_err()
+                .to_string()
+                .contains("filename")
+        );
+        map.insert("payload-text-1".into(), "payload-text-1".into());
+        map.insert("missing-payload-ref".into(), "missing-payload-ref".into());
+        assert!(
+            FileContentResolver::new(&payloads, &map)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be read")
+        );
+    }
+
+    #[tokio::test]
+    async fn file_resolver_runs_content_without_embedding_payloads_in_result() {
+        let directory = tempdir().unwrap();
+        let payloads = directory.path().join("payloads");
+        fs::create_dir_all(&payloads).unwrap();
+        fs::write(payloads.join("payload-text-1"), b"hello from file").unwrap();
+        let mut files = BTreeMap::new();
+        files.insert("payload-text-1".into(), "payload-text-1".into());
+        let messages = vec![ContentMessageV1 {
+            role: "user".into(),
+            parts: vec![ContentPartDescriptor {
+                part_id: "text-1".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: 15,
+                sha256_digest: sha256_digest(b"hello from file"),
+                reference: "payload-text-1".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "cli".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            }],
+            tool_call_id: String::new(),
+            tool_calls: Vec::new(),
+        }];
+        let request = ContentProcessRequestV1 {
+            schema_version: 1,
+            task: "inspect bounded content".into(),
+            messages,
+            capabilities: None,
+            keep_workspace: true,
+            resume_run_id: None,
+            payloads: files,
+        };
+        let run_request = request.into_run_request(&payloads).unwrap();
+        let config = local_config(
+            &directory,
+            r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"ok\",\"success\":true}"}]}]"#,
+        );
+        let harness =
+            Harness::from_config(config, StateRoot::new(directory.path().join("state"))).unwrap();
+        let result = harness.run_content(run_request).await.unwrap();
+        assert!(result.run.success);
+        let report = result.report();
+        assert_eq!(report.schema_version, 1);
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("hello from file")
+        );
+        assert_eq!(report.messages[0].parts[0].reference, "payload-text-1");
+    }
+
+    #[tokio::test]
+    async fn file_resolver_store_uses_unique_exclusive_filenames() {
+        let directory = tempdir().unwrap();
+        let payloads = directory.path().join("payloads");
+        fs::create_dir_all(&payloads).unwrap();
+        let resolver = FileContentResolver::new(&payloads, &BTreeMap::new()).unwrap();
+        let first = resolver
+            .store(ContentToStore {
+                part_id: "shikigami-model-1-text".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                payload: ResolvedContent::Text("one".into()),
+                provenance: ContentProvenanceV1 {
+                    source: "model".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+            })
+            .await
+            .unwrap();
+        let second = resolver
+            .store(ContentToStore {
+                part_id: "shikigami-model-1-text".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                payload: ResolvedContent::Text("two".into()),
+                provenance: ContentProvenanceV1 {
+                    source: "model".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 2,
+                },
+            })
+            .await
+            .unwrap();
+        assert_ne!(first.reference, second.reference);
+        assert_eq!(
+            fs::read_to_string(payloads.join(&first.reference)).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(payloads.join(&second.reference)).unwrap(),
+            "two"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_resolver_rejects_non_regular_fallback_payloads() {
+        let directory = tempdir().unwrap();
+        let payloads = directory.path().join("payloads");
+        fs::create_dir_all(&payloads).unwrap();
+        fs::create_dir_all(payloads.join("payload-dir")).unwrap();
+        let resolver = FileContentResolver::new(&payloads, &BTreeMap::new()).unwrap();
+        let error = resolver
+            .resolve(&ContentPartDescriptor {
+                part_id: "text-1".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: 1,
+                sha256_digest: sha256_digest(b"x"),
+                reference: "payload-dir".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "cli".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("regular file"), "{error}");
     }
 }
