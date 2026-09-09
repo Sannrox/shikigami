@@ -11,7 +11,7 @@ use crate::checkpoint::{ParkedState, StagedToolExecution, StagedToolReport, Tool
 use crate::events::HarnessEvent;
 use crate::governance::RunHandle;
 use crate::hooks::{self, HookEvent};
-use crate::model::{ChatMessage, ModelTurn, TokenUsage, ToolCall};
+use crate::model::{ChatMessage, ModelTurn, TokenUsage, ToolCall, stable_tool_call_id};
 use crate::tools::{self, ToolOutput, ToolRegistry};
 
 use super::session::RunSession;
@@ -144,12 +144,15 @@ impl<'a> DurableToolBatch<'a> {
             });
 
         // Ordered ToolStart for stable live streams.
-        for call in &turn.tool_calls {
+        for (index, call) in turn.tool_calls.iter().enumerate() {
             self.engine.emit(
                 &session.run_id,
                 HarnessEvent::ToolStart {
                     name: call.name.clone(),
                     args_json: projected_detail(session.is_content(), &call.args_json),
+                    run_id: session.run_id.clone(),
+                    turn: session.turns,
+                    call_id: stable_tool_call_id(call, session.turns, index),
                 },
             );
         }
@@ -438,6 +441,9 @@ impl<'a> DurableToolBatch<'a> {
                             name: call.name.clone(),
                             ok: true,
                             detail: detail.chars().take(500).collect(),
+                            run_id: session.run_id.clone(),
+                            turn: session.turns,
+                            call_id: report_call_id.clone(),
                         },
                     );
                     let _ = hooks::run_hooks(
@@ -468,6 +474,9 @@ impl<'a> DurableToolBatch<'a> {
                             name: "report".into(),
                             ok: report.success,
                             detail,
+                            run_id: session.run_id.clone(),
+                            turn: session.turns,
+                            call_id: report_call_id.clone(),
                         },
                     );
                     terminal_report = Some((report.summary, report.success));
@@ -506,6 +515,9 @@ impl<'a> DurableToolBatch<'a> {
                             name: "escalate".into(),
                             ok: false,
                             detail: detail.clone(),
+                            run_id: session.run_id.clone(),
+                            turn: session.turns,
+                            call_id: report_call_id.clone(),
                         },
                     );
                     let _ = hooks::run_hooks(
@@ -540,6 +552,9 @@ impl<'a> DurableToolBatch<'a> {
                             name: call.name.clone(),
                             ok: false,
                             detail: reported_detail,
+                            run_id: session.run_id.clone(),
+                            turn: session.turns,
+                            call_id: report_call_id.clone(),
                         },
                     );
                     let _ = hooks::run_hooks(
@@ -561,14 +576,6 @@ impl<'a> DurableToolBatch<'a> {
             Some((summary, success)) => Ok(ToolBatchOutcome::Completed { summary, success }),
             None => Ok(ToolBatchOutcome::Continue),
         }
-    }
-}
-
-fn stable_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
-    if call.id.is_empty() {
-        format!("tool-{turn}-{index}")
-    } else {
-        format!("tool-{turn}-{index}-{}", call.id)
     }
 }
 

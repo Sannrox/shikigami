@@ -15,6 +15,7 @@ How shikigami identifiers map to sekai-chisei plane fields. Authority:
 | resume `resume_run_id` | continues same attempt | Loads checkpoint for that `run_id` |
 | replay `source_run_id` | retained comparison evidence | Never reused as the replay attempt id |
 | `ReplayResult.run.run_id` | replay attempt id | New UUID, or the same replay id when restarting that attempt |
+| `HarnessEvent` `call_id` | durable tool-call identity | `tool-{turn}-{index}[-{model_id}]`; same string as staged executions/reports |
 
 ### Governed path population
 

@@ -5,12 +5,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HarnessEvent {
     Status {
@@ -19,11 +19,23 @@ pub enum HarnessEvent {
     ToolStart {
         name: String,
         args_json: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        turn: u32,
+        #[serde(default)]
+        call_id: String,
     },
     ToolEnd {
         name: String,
         ok: bool,
         detail: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        turn: u32,
+        #[serde(default)]
+        call_id: String,
     },
     ModelTurn {
         turn: u32,
@@ -194,5 +206,49 @@ impl EventSink for JsonlSink {
     }
     fn health_detail(&self) -> String {
         format!("append {}", self.path.display())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_start_json_is_additive_and_unknown_type_fails() {
+        let event = HarnessEvent::ToolStart {
+            name: "bash".into(),
+            args_json: "{}".into(),
+            run_id: "run-1".into(),
+            turn: 2,
+            call_id: "tool-2-0".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "tool_start");
+        assert_eq!(json["call_id"], "tool-2-0");
+        assert_eq!(json["turn"], 2);
+        assert_eq!(json["run_id"], "run-1");
+
+        let legacy = serde_json::from_str::<HarnessEvent>(
+            r#"{"type":"tool_start","name":"bash","args_json":"{}"}"#,
+        )
+        .unwrap();
+        match legacy {
+            HarnessEvent::ToolStart {
+                name,
+                call_id,
+                turn,
+                run_id,
+                ..
+            } => {
+                assert_eq!(name, "bash");
+                assert!(call_id.is_empty());
+                assert_eq!(turn, 0);
+                assert!(run_id.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let err = serde_json::from_str::<HarnessEvent>(r#"{"type":"tool_start_v2"}"#);
+        assert!(err.is_err(), "{err:?}");
     }
 }

@@ -28,6 +28,39 @@ pub struct ToolCall {
     pub args_json: String,
 }
 
+/// Durable tool-call identity for authorize, staged execution/reports, and events.
+///
+/// Qualifies a (possibly missing or reused) model id with turn and batch index so
+/// two same-named calls in one turn stay distinct across restart.
+pub fn stable_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
+    if call.id.is_empty() {
+        format!("tool-{turn}-{index}")
+    } else {
+        format!("tool-{turn}-{index}-{}", call.id)
+    }
+}
+
+#[cfg(test)]
+mod stable_id_tests {
+    use super::*;
+
+    #[test]
+    fn same_named_calls_in_one_turn_are_distinct_and_stable() {
+        let first = ToolCall {
+            id: String::new(),
+            name: "bash".into(),
+            args_json: "{}".into(),
+        };
+        let second = first.clone();
+        let a = stable_tool_call_id(&first, 1, 0);
+        let b = stable_tool_call_id(&second, 1, 1);
+        assert_eq!(a, "tool-1-0");
+        assert_eq!(b, "tool-1-1");
+        assert_ne!(a, b);
+        assert_eq!(a, stable_tool_call_id(&first, 1, 0));
+    }
+}
+
 /// Token counts when the provider (or script) reports them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {

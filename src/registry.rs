@@ -83,6 +83,8 @@ pub struct RunEventRecord {
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -385,6 +387,7 @@ impl RunRegistry {
             timestamp_ms: now_ms(),
             event: event_name(event).into(),
             detail: event_detail(event),
+            call_id: event_call_id(event),
         };
         let Ok(mut line) = serde_json::to_string(&record) else {
             return;
@@ -555,8 +558,22 @@ fn event_name(event: &HarnessEvent) -> &'static str {
 fn event_detail(event: &HarnessEvent) -> Option<String> {
     let detail = match event {
         HarnessEvent::Status { status } => status.clone(),
-        HarnessEvent::ToolStart { name, .. } => name.clone(),
-        HarnessEvent::ToolEnd { name, ok, .. } => format!("{name} ok={ok}"),
+        HarnessEvent::ToolStart { name, call_id, .. } => {
+            if call_id.is_empty() {
+                name.clone()
+            } else {
+                format!("{name} call_id={call_id}")
+            }
+        }
+        HarnessEvent::ToolEnd {
+            name, ok, call_id, ..
+        } => {
+            if call_id.is_empty() {
+                format!("{name} ok={ok}")
+            } else {
+                format!("{name} ok={ok} call_id={call_id}")
+            }
+        }
         HarnessEvent::ModelTurn { turn, .. } => format!("turn={turn}"),
         HarnessEvent::ContentTurn {
             turn, part_count, ..
@@ -572,6 +589,17 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
         HarnessEvent::TodosUpdated { item_count, .. } => format!("items={item_count}"),
     };
     Some(detail)
+}
+
+fn event_call_id(event: &HarnessEvent) -> Option<String> {
+    match event {
+        HarnessEvent::ToolStart { call_id, .. } | HarnessEvent::ToolEnd { call_id, .. }
+            if !call_id.is_empty() =>
+        {
+            Some(call_id.clone())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -667,10 +695,14 @@ mod tests {
             &HarnessEvent::ToolStart {
                 name: "write_file".into(),
                 args_json: "secret-content".into(),
+                run_id: "run-1".into(),
+                turn: 1,
+                call_id: "tool-1-0".into(),
             },
         );
         let log = registry.event_log("run-1").unwrap();
         assert!(log.contains("write_file"));
+        assert!(log.contains("tool-1-0"));
         assert!(!log.contains("secret-content"));
         registry.append_event(
             "run-1",

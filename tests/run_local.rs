@@ -98,6 +98,59 @@ async fn live_event_stream_receives_scripted_sequence() {
 }
 
 #[tokio::test]
+async fn repeated_tools_in_one_turn_have_distinct_call_ids() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[
+            {"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\"}"},
+            {"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\"}"}
+        ]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"two writes\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("two writes");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let starts: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            HarnessEvent::ToolStart {
+                name,
+                call_id,
+                turn,
+                run_id,
+                ..
+            } if name == "write_file" => Some((run_id, turn, call_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert_eq!(starts[0].0, result.run_id);
+    assert_eq!(starts[0].1, starts[1].1);
+    assert_ne!(starts[0].2, starts[1].2);
+    assert!(starts[0].2.starts_with("tool-"), "{}", starts[0].2);
+    assert!(starts[1].2.starts_with("tool-"), "{}", starts[1].2);
+}
+
+#[tokio::test]
 async fn bash_tool_events_cannot_emit_configured_harness_credentials() {
     use shikigami::{ChannelSink, HarnessEvent};
     use std::sync::Arc;
@@ -144,7 +197,8 @@ async fn bash_tool_events_cannot_emit_configured_harness_credentials() {
             HarnessEvent::ToolEnd {
                 name,
                 ok: true,
-                detail
+                detail,
+                ..
             } if name == "bash" && detail == "unset"
         )),
         "missing isolated Bash ToolEnd: {events:?}"
