@@ -19,6 +19,8 @@ use crate::run::{RunError, RunResult, RunTermination};
 use crate::tools::ToolDef;
 
 pub const REPLAY_SCHEMA_VERSION: u32 = 1;
+/// CLI/library JSON projection for one completed replay (`schema_version` = 1).
+pub const REPLAY_REPORT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_REPLAY_BUNDLE_BYTES: usize = 1024 * 1024;
 pub const MAX_REPLAY_STEPS: usize = 1024;
 const MAX_REPLAY_TASK_BYTES: usize = 256 * 1024;
@@ -91,6 +93,17 @@ pub enum ReplayComparisonStatus {
     Unsupported,
 }
 
+impl ReplayComparisonStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Equal => "equal",
+            Self::Changed => "changed",
+            Self::Missing => "missing",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayStepComparison {
@@ -137,6 +150,39 @@ impl ReplayRequest {
 #[derive(Debug, Clone)]
 pub struct ReplayResult {
     pub run: RunResult,
+    pub manifest_digest: String,
+    pub steps: Vec<ReplayStepComparison>,
+    pub terminal: ReplayTerminalComparison,
+}
+
+impl ReplayResult {
+    /// Credential-free JSON projection shared by the library and CLI.
+    pub fn report(&self) -> ReplayReport {
+        ReplayReport {
+            schema_version: REPLAY_REPORT_SCHEMA_VERSION,
+            run_id: self.run.run_id.clone(),
+            success: self.run.success,
+            summary: self.run.summary.clone(),
+            turns: self.run.turns,
+            workspace: self.run.workspace.display().to_string(),
+            termination: self.run.termination.as_str().into(),
+            manifest_digest: self.manifest_digest.clone(),
+            steps: self.steps.clone(),
+            terminal: self.terminal.clone(),
+        }
+    }
+}
+
+/// Stable CLI/library replay JSON contract (`schema_version` = 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayReport {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub success: bool,
+    pub summary: String,
+    pub turns: u32,
+    pub workspace: String,
+    pub termination: String,
     pub manifest_digest: String,
     pub steps: Vec<ReplayStepComparison>,
     pub terminal: ReplayTerminalComparison,

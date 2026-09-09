@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive CLI `replay --manifest/--evidence` host over `Harness::replay`.
+  `--json` prints `ReplayReport` schema v1 with the same step/terminal
+  comparisons as the library. Exit `0` is a completed comparison; exit `1` is
+  admission or execution failure. See
+  [ADR 0010](docs/decisions/0010-cli-run-replay.md).
 - Additive `run_id` / `turn` / `call_id` on live `ToolStart` / `ToolEnd`
   events, the local event journal, and transcript `tool_calls`, using the
   same durable identity as staged executions and reports. See

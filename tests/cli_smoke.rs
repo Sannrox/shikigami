@@ -1,6 +1,8 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+use shikigami::Config;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
@@ -262,4 +264,187 @@ fn plane_intake_rejects_ungoverned_host() {
         .stderr(predicate::str::contains(
             "plane intake requires governance.adapter = \"sekai-chisei\"",
         ));
+}
+
+fn replay_fixture(dir: &std::path::Path) -> (Config, PathBuf, PathBuf, PathBuf) {
+    use shikigami::model::{ChatMessage, ToolCall};
+    use shikigami::{
+        ReplayBindings, ReplayEvidenceBundle, ReplayManifest, ReplayTerminalEvidence,
+        SYSTEM_PROMPT, empty_workspace_digest, steps_from_messages, text_digest,
+    };
+
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "directory".into();
+    config.workspace.root = dir.join("workspaces").to_string_lossy().into();
+    config.model.adapter = "scripted".into();
+    config.model.model = "deterministic-replay-model".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+            .into(),
+    );
+    let config_path = dir.join("replay.toml");
+    config.save(&config_path).expect("save config");
+
+    let expected_messages = vec![
+        ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "report-1".into(),
+                name: "report".into(),
+                args_json: r#"{"summary":"done","success":true}"#.into(),
+            }],
+        },
+        ChatMessage {
+            role: "tool".into(),
+            content: "report: done".into(),
+            tool_call_id: "report-1".into(),
+            tool_calls: vec![],
+        },
+    ];
+    let bindings = ReplayBindings::for_replay(
+        &config,
+        "replay the source",
+        SYSTEM_PROMPT,
+        empty_workspace_digest(),
+        text_digest("source checkpoint"),
+    )
+    .expect("bindings");
+    let evidence = ReplayEvidenceBundle {
+        schema_version: 1,
+        source_run_id: "source-run-1".into(),
+        source_logical_operation_id: Some("logical-operation-1".into()),
+        task: "replay the source".into(),
+        bindings,
+        expected_steps: steps_from_messages(&expected_messages).expect("steps"),
+        expected_terminal: ReplayTerminalEvidence {
+            success: true,
+            termination: "completed".into(),
+            summary_digest: text_digest("done"),
+        },
+    };
+    let manifest = ReplayManifest::for_evidence(&evidence).expect("manifest");
+    let evidence_path = dir.join("evidence.json");
+    let manifest_path = dir.join("manifest.json");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&evidence).expect("evidence json"),
+    )
+    .expect("write evidence");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+    )
+    .expect("write manifest");
+    (config, config_path, manifest_path, evidence_path)
+}
+
+#[tokio::test]
+async fn replay_json_matches_library_comparisons() {
+    use shikigami::{Harness, ReplayReport, ReplayRequest, StateRoot};
+
+    let dir = tempdir().expect("tempdir");
+    let (config, config_path, manifest_path, evidence_path) = replay_fixture(dir.path());
+    let state = dir.path().join("state");
+    let harness = Harness::from_config(config.clone(), StateRoot::new(&state)).expect("harness");
+    let evidence: shikigami::ReplayEvidenceBundle =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence")).expect("parse");
+    let manifest: shikigami::ReplayManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest")).expect("parse");
+    let library = harness
+        .replay(ReplayRequest::new(manifest, evidence))
+        .await
+        .expect("library replay");
+    let library_report = library.report();
+
+    let stdout = cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "replay",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--evidence",
+            evidence_path.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli: ReplayReport = serde_json::from_slice(&stdout).expect("cli json");
+    assert_eq!(cli.schema_version, 1);
+    assert_eq!(cli.steps, library_report.steps);
+    assert_eq!(cli.terminal, library_report.terminal);
+    assert_eq!(cli.success, library_report.success);
+    assert_ne!(cli.run_id, "source-run-1");
+}
+
+#[test]
+fn replay_rejects_unsupported_evidence_version() {
+    let dir = tempdir().expect("tempdir");
+    let (_config, config_path, manifest_path, evidence_path) = replay_fixture(dir.path());
+    let mut evidence: serde_json::Value =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("read")).expect("json");
+    evidence["schema_version"] = serde_json::json!(99);
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&evidence).expect("write"),
+    )
+    .expect("write");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            dir.path().join("state").to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "replay",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--evidence",
+            evidence_path.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unsupported evidence schema version",
+        ));
+}
+
+#[test]
+fn replay_rejects_digest_mismatch_before_execution() {
+    let dir = tempdir().expect("tempdir");
+    let (_config, config_path, manifest_path, evidence_path) = replay_fixture(dir.path());
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read")).expect("json");
+    manifest["evidence_digest"] = serde_json::json!(shikigami::text_digest("tampered-evidence"));
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("write"),
+    )
+    .expect("write");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            dir.path().join("state").to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "replay",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--evidence",
+            evidence_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("digest"));
 }

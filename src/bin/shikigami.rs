@@ -6,8 +6,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
-    Config, ControlOptions, Harness, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, RunRequest,
-    ServeOptions, ServeRuntimeOptions, StateRoot, VERSION, diagnose_run,
+    Config, ControlOptions, Harness, MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION,
+    QueueLayout, ReplayEvidenceBundle, ReplayManifest, ReplayRequest, RunRequest, ServeOptions,
+    ServeRuntimeOptions, StateRoot, VERSION, diagnose_run,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -177,6 +178,20 @@ enum Command {
         /// Write to this path instead of stdout.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+    },
+    /// Observation-only content-bound replay through `Harness::replay`.
+    Replay {
+        /// Schema-v1 `ReplayManifest` JSON file.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Schema-v1 `ReplayEvidenceBundle` JSON file.
+        #[arg(long)]
+        evidence: PathBuf,
+        /// Restart a previously admitted replay attempt (not the source run).
+        #[arg(long)]
+        resume: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -698,6 +713,58 @@ async fn run() -> anyhow::Result<()> {
                 print!("{jsonl}");
             }
         }
+        Command::Replay {
+            manifest,
+            evidence,
+            resume,
+            json,
+        } => {
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let manifest: ReplayManifest = read_bounded_json(&manifest)?;
+            let evidence: ReplayEvidenceBundle = read_bounded_json(&evidence)?;
+            let mut request = ReplayRequest::new(manifest, evidence);
+            request.resume_run_id = resume;
+            let result = harness.replay(request).await?;
+            let report = result.report();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let equal = report
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == shikigami::ReplayComparisonStatus::Equal)
+                    .count();
+                println!(
+                    "replay {} success={} termination={} terminal={} steps={} equal={} manifest={}",
+                    report.run_id,
+                    report.success,
+                    report.termination,
+                    report.terminal.status.as_str(),
+                    report.steps.len(),
+                    equal,
+                    report.manifest_digest
+                );
+                println!("workspace {}", report.workspace);
+            }
+        }
     }
     Ok(())
+}
+
+fn read_bounded_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> anyhow::Result<T> {
+    use std::io::{Read, Take};
+
+    let file = std::fs::File::open(path)?;
+    let limit = (MAX_REPLAY_BUNDLE_BYTES as u64).saturating_add(1);
+    let mut limited: Take<std::fs::File> = file.take(limit);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_REPLAY_BUNDLE_BYTES {
+        anyhow::bail!(
+            "replay input {} exceeds {MAX_REPLAY_BUNDLE_BYTES} bytes",
+            path.display()
+        );
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("replay input {}: {error}", path.display()))
 }

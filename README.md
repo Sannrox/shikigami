@@ -119,6 +119,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host; filesystem supports bounded worker/control options ([docs/serve.md](docs/serve.md)) |
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([docs/mcp.md](docs/mcp.md)) |
 | `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([docs/embedding.md](docs/embedding.md)) |
+| `replay --manifest FILE --evidence FILE [--resume ID] [--json]` | Observation-only content-bound replay ([docs/replay.md](docs/replay.md)) |
 
 | Flag / env | Purpose |
 | --- | --- |
