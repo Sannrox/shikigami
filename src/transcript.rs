@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::checkpoint::{self, Checkpoint};
 use crate::config::Config;
 use crate::harness::redact_secrets_in_line;
+use crate::model::stable_tool_call_id;
 
 /// Transcript JSONL schema version (bump on breaking field renames/removals).
 pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
@@ -73,14 +74,35 @@ fn export_checkpoint(cp: &Checkpoint, options: &ExportOptions) -> Result<String,
         todo_count: cp.todos.len(),
     })?);
 
+    let remaining_assistants = cp
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .count() as u32;
+    let mut next_turn = if remaining_assistants == 0 {
+        0
+    } else {
+        cp.completed_turns
+            .saturating_sub(remaining_assistants)
+            .saturating_add(1)
+    };
     for m in &cp.messages {
+        let turn = if m.role == "assistant" {
+            let turn = next_turn;
+            next_turn = next_turn.saturating_add(1);
+            turn
+        } else {
+            0
+        };
         let tool_calls: Vec<TranscriptToolCall> = m
             .tool_calls
             .iter()
-            .map(|c| TranscriptToolCall {
+            .enumerate()
+            .map(|(index, c)| TranscriptToolCall {
                 id: c.id.clone(),
                 name: c.name.clone(),
                 args_json: sanitize(&c.args_json, options),
+                call_id: stable_tool_call_id(c, turn, index),
             })
             .collect();
         lines.push(line(TranscriptLine::Message {
@@ -195,6 +217,8 @@ struct TranscriptToolCall {
     id: String,
     name: String,
     args_json: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    call_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,9 +293,68 @@ mod tests {
         assert!(jsonl.contains(r#""type":"todos""#));
         assert!(jsonl.contains(r#""type":"end""#));
         assert!(jsonl.contains("write_file"));
+        assert!(
+            jsonl.contains(r#""call_id":"tool-1-0-c1""#),
+            "durable call_id missing: {jsonl}"
+        );
         // One object per line
         let n = jsonl.lines().filter(|l| !l.is_empty()).count();
         assert!(n >= 5, "{jsonl}");
+    }
+
+    #[test]
+    fn export_preserves_original_turn_ids_after_compaction() {
+        let dir = tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        let cp = Checkpoint {
+            version: CHECKPOINT_VERSION,
+            run_id: "run-compact".into(),
+            task: "long".into(),
+            prompt_id: "p".into(),
+            messages: vec![
+                ChatMessage {
+                    role: "user".into(),
+                    content: "start".into(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![],
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: "[context compacted: 8 earlier messages omitted; continue the original task]".into(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![],
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![crate::model::ToolCall {
+                        id: "late".into(),
+                        name: "write_file".into(),
+                        args_json: r#"{"path":"z.txt","content":"z"}"#.into(),
+                    }],
+                },
+            ],
+            completed_turns: 10,
+            workspace: runs.join("run-compact/ws"),
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: None,
+            todos: vec![],
+            governance: None,
+            replay: None,
+            content: None,
+        };
+        cp.save(&runs).unwrap();
+        let jsonl = export_run_transcript(&runs, "run-compact", &ExportOptions::default()).unwrap();
+        assert!(
+            jsonl.contains(r#""call_id":"tool-10-0-late""#),
+            "compacted export used the wrong turn: {jsonl}"
+        );
+        assert!(
+            !jsonl.contains(r#""call_id":"tool-1-0-late""#),
+            "compacted export reused the first remaining assistant as turn 1: {jsonl}"
+        );
     }
 
     #[test]

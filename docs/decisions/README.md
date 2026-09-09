@@ -12,6 +12,7 @@ Accepted decisions that must outlive a single PR.
 | [0006](0006-bounded-content-parts.md) | Bounded multimodal content | Accepted |
 | [0007](0007-governed-local-fallback.md) | Governed local-model fallback | Accepted |
 | [0008](0008-recovery-diagnosis.md) | Read-only recovery diagnosis | Accepted |
+| [0009](0009-tool-call-correlation.md) | Stable tool-call correlation in progress events | Accepted |
 
 ## When to write an ADR
 

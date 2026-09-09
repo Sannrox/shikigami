@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive `run_id` / `turn` / `call_id` on live `ToolStart` / `ToolEnd`
+  events, the local event journal, and transcript `tool_calls`, using the
+  same durable identity as staged executions and reports. See
+  [ADR 0009](docs/decisions/0009-tool-call-correlation.md).
 - Additive read-only recovery diagnosis (`Harness::diagnose_run`, CLI
   `runs <id> --diagnose`) classifies a retained run as `safe_resume`,
   `report_only`, `uncertain_tool`, `invalid_checkpoint`, or `terminal`

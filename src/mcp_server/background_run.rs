@@ -169,8 +169,22 @@ impl BackgroundRunLifecycle {
 fn format_event(event: &HarnessEvent) -> String {
     match event {
         HarnessEvent::Status { status } => format!("status={status}"),
-        HarnessEvent::ToolStart { name, .. } => format!("tool_start={name}"),
-        HarnessEvent::ToolEnd { name, ok, .. } => format!("tool_end={name} ok={ok}"),
+        HarnessEvent::ToolStart { name, call_id, .. } => {
+            if call_id.is_empty() {
+                format!("tool_start={name}")
+            } else {
+                format!("tool_start={name} call_id={call_id}")
+            }
+        }
+        HarnessEvent::ToolEnd {
+            name, ok, call_id, ..
+        } => {
+            if call_id.is_empty() {
+                format!("tool_end={name} ok={ok}")
+            } else {
+                format!("tool_end={name} ok={ok} call_id={call_id}")
+            }
+        }
         HarnessEvent::ModelTurn { turn, .. } => format!("model_turn={turn}"),
         HarnessEvent::ContentTurn {
             turn, part_count, ..
