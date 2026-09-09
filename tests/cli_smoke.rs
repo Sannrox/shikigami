@@ -167,6 +167,82 @@ adapter = "none"
 }
 
 #[test]
+fn runs_diagnose_json_matches_library_terminal_class() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let config = dir.path().join("local.toml");
+    fs::write(
+        &config,
+        r#"
+version = 1
+[profile]
+name = "local"
+[governance]
+adapter = "local"
+[model]
+adapter = "scripted"
+[workspace]
+adapter = "directory"
+root = "."
+[events]
+adapter = "none"
+"#,
+    )
+    .expect("write");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "run",
+            "scripted demo",
+            "--keep-workspace",
+        ])
+        .assert()
+        .success();
+
+    let listed = cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "runs",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listing = String::from_utf8(listed).expect("runs utf8");
+    let run_id = listing
+        .lines()
+        .next()
+        .and_then(|line| line.split('\t').next())
+        .expect("run id")
+        .to_string();
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "runs",
+            &run_id,
+            "--diagnose",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"schema_version\": 1"))
+        .stdout(predicate::str::contains("\"class\": \"terminal\""))
+        .stdout(predicate::str::contains("\"do_not_execute\""));
+}
+
+#[test]
 fn plane_intake_rejects_ungoverned_host() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");

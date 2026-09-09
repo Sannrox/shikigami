@@ -16,6 +16,12 @@ use crate::state::{StateError, StateRoot};
 use crate::workspace::{self, WorkspaceError, WorkspacePort};
 
 mod diagnosis;
+mod recovery;
+
+pub use recovery::{
+    RECOVERY_DIAGNOSIS_SCHEMA_VERSION, RecoveryClass, RecoveryDiagnosis, RecoveryNextStep,
+    diagnose_run,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
@@ -195,6 +201,16 @@ impl Harness {
 
     pub fn doctor(&self) -> DoctorReport {
         diagnosis::doctor(self)
+    }
+
+    /// Inspect one retained run without executing.
+    pub fn diagnose_run(&self, run_id: &str) -> Result<RecoveryDiagnosis, HarnessError> {
+        recovery::diagnose_with_registry(
+            &self.registry,
+            &self.state.runs_dir(),
+            run_id,
+            &self.config,
+        )
     }
 
     /// Async doctor that live-probes sekai-chisei when configured.

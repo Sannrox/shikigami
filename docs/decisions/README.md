@@ -11,6 +11,7 @@ Accepted decisions that must outlive a single PR.
 | [0005](0005-governed-run-replay.md) | Governed run replay | Accepted |
 | [0006](0006-bounded-content-parts.md) | Bounded multimodal content | Accepted |
 | [0007](0007-governed-local-fallback.md) | Governed local-model fallback | Accepted |
+| [0008](0008-recovery-diagnosis.md) | Read-only recovery diagnosis | Accepted |
 
 ## When to write an ADR
 

@@ -42,9 +42,7 @@ mod transaction;
 use supervision::RunSupervision;
 
 pub use model_turn::compact_messages;
-
-#[cfg(test)]
-use resume::validate_resumed_workspace;
+pub(crate) use resume::validate_resumed_workspace;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;

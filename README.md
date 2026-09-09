@@ -112,7 +112,7 @@ shikigami [--state DIR] [--config FILE] <COMMAND>
 | `version [--json]` | Product identity |
 | `doctor [--json] [--models]` | Effective profile, adapters, health, and optionally available models |
 | `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
-| `runs [ID], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([docs/runs.md](docs/runs.md)) |
+| `runs [ID] [--diagnose], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([docs/runs.md](docs/runs.md)) |
 | `artifacts ID [--patch]` | Export retained artifact metadata or a captured patch |
 | `metrics [--json\|--prometheus]` | Export aggregate durable metrics ([docs/metrics.md](docs/metrics.md)) |
 | `eval FIXTURE [--json]` | Run offline scripted golden fixtures ([docs/eval.md](docs/eval.md)) |

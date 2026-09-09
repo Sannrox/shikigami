@@ -68,7 +68,10 @@ pub use content::{
 pub use eval::{EVAL_SCHEMA_VERSION, EvalCaseResult, EvalError, EvalSuiteResult, run_fixture};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use governance::AvailableModel;
-pub use harness::{DoctorReport, Harness, HarnessError};
+pub use harness::{
+    DoctorReport, Harness, HarnessError, RECOVERY_DIAGNOSIS_SCHEMA_VERSION, RecoveryClass,
+    RecoveryDiagnosis, RecoveryNextStep, diagnose_run,
+};
 pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;
 pub use metrics::{Metrics, MetricsError, MetricsSnapshot};

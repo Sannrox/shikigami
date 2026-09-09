@@ -94,15 +94,19 @@ pub struct RunRegistry {
 
 impl RunRegistry {
     pub fn new(state_root: impl AsRef<Path>) -> Result<Self, RegistryError> {
-        let runs_root = state_root.as_ref().join("runs");
-        let cancel_root = state_root.as_ref().join("run-controls");
-        fs::create_dir_all(&runs_root)?;
-        fs::create_dir_all(&cancel_root)?;
-        Ok(Self {
-            runs_root,
-            cancel_root,
+        let registry = Self::inspect(state_root);
+        fs::create_dir_all(registry.runs_root())?;
+        fs::create_dir_all(&registry.cancel_root)?;
+        Ok(registry)
+    }
+
+    /// Read-only view of existing run records. Does not create directories.
+    pub fn inspect(state_root: impl AsRef<Path>) -> Self {
+        Self {
+            runs_root: state_root.as_ref().join("runs"),
+            cancel_root: state_root.as_ref().join("run-controls"),
             run_locks: Arc::new(Mutex::new(HashMap::new())),
-        })
+        }
     }
 
     pub fn runs_root(&self) -> &Path {
