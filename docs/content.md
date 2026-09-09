@@ -1,9 +1,10 @@
 # Bounded content runs
 
 `Harness::run_content` carries ordered text, image, audio, and document
-descriptors without changing the stable text-only run contract. The first
-content intake is the Rust embedding API; CLI, MCP, serve, and plane intake
-remain text-only.
+descriptors without changing the stable text-only run contract. The canonical
+intake is the Rust embedding API. The CLI adds a thin process host
+(`shikigami run-content`); MCP, serve, and plane intake remain text-only.
+Content replay is still unsupported.
 
 ## Before you start
 
@@ -95,6 +96,19 @@ resume, and replay v1 reject content checkpoints explicitly.
   the exact transient tool arguments that the tool will execute.
 - Expect unsupported kinds or media types to fail closed. A descriptor contract
   does not imply that every configured provider supports every modality.
+
+## CLI
+
+```
+shikigami run-content --request FILE --payloads DIR [--json]
+```
+
+`--request` is schema-v1 `ContentProcessRequestV1` JSON: task, descriptor
+messages, and a `payloads` map from opaque `reference` to a single relative
+filename under `--payloads`. The JSON never contains bytes. The payload
+directory is the CLI-owned resolver (`cli-file-v1`). `--json` prints
+`ContentProcessResultV1` without payloads. See
+[ADR 0011](decisions/0011-cli-content-intake.md).
 
 See [ADR 0006](decisions/0006-bounded-content-parts.md) for authority and
 compatibility boundaries.

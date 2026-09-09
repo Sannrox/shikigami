@@ -14,6 +14,7 @@ Accepted decisions that must outlive a single PR.
 | [0008](0008-recovery-diagnosis.md) | Read-only recovery diagnosis | Accepted |
 | [0009](0009-tool-call-correlation.md) | Stable tool-call correlation in progress events | Accepted |
 | [0010](0010-cli-run-replay.md) | CLI observation-only run replay | Accepted |
+| [0011](0011-cli-content-intake.md) | CLI bounded-content process-host request | Accepted |
 
 ## When to write an ADR
 

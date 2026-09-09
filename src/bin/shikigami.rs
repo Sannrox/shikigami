@@ -6,9 +6,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use shikigami::{
-    Config, ControlOptions, Harness, MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION,
-    QueueLayout, ReplayEvidenceBundle, ReplayManifest, ReplayRequest, RunRequest, ServeOptions,
-    ServeRuntimeOptions, StateRoot, VERSION, diagnose_run,
+    Config, ContentProcessRequestV1, ControlOptions, Harness, MAX_CONTENT_PROCESS_REQUEST_BYTES,
+    MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, ReplayEvidenceBundle,
+    ReplayManifest, ReplayRequest, RunRequest, ServeOptions, ServeRuntimeOptions, StateRoot,
+    VERSION, diagnose_run,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -178,6 +179,17 @@ enum Command {
         /// Write to this path instead of stdout.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+    },
+    /// Bounded content run through `Harness::run_content`.
+    RunContent {
+        /// Schema-v1 `ContentProcessRequestV1` JSON file (descriptors only).
+        #[arg(long)]
+        request: PathBuf,
+        /// Host-owned payload directory. Filenames map from request `payloads`.
+        #[arg(long)]
+        payloads: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Observation-only content-bound replay through `Harness::replay`.
     Replay {
@@ -720,8 +732,9 @@ async fn run() -> anyhow::Result<()> {
             json,
         } => {
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
-            let manifest: ReplayManifest = read_bounded_json(&manifest)?;
-            let evidence: ReplayEvidenceBundle = read_bounded_json(&evidence)?;
+            let manifest: ReplayManifest = read_bounded_json(&manifest, MAX_REPLAY_BUNDLE_BYTES)?;
+            let evidence: ReplayEvidenceBundle =
+                read_bounded_json(&evidence, MAX_REPLAY_BUNDLE_BYTES)?;
             let mut request = ReplayRequest::new(manifest, evidence);
             request.resume_run_id = resume;
             let result = harness.replay(request).await?;
@@ -747,24 +760,45 @@ async fn run() -> anyhow::Result<()> {
                 println!("workspace {}", report.workspace);
             }
         }
+        Command::RunContent {
+            request,
+            payloads,
+            json,
+        } => {
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let request: ContentProcessRequestV1 =
+                read_bounded_json(&request, MAX_CONTENT_PROCESS_REQUEST_BYTES)?;
+            let run_request = request.into_run_request(&payloads)?;
+            let result = harness.run_content(run_request).await?;
+            let report = result.report();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "content-run {} success={} termination={} turns={}",
+                    report.run_id, report.success, report.termination, report.turns
+                );
+                println!("workspace {}", report.workspace);
+            }
+        }
     }
     Ok(())
 }
 
-fn read_bounded_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> anyhow::Result<T> {
+fn read_bounded_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> anyhow::Result<T> {
     use std::io::{Read, Take};
 
     let file = std::fs::File::open(path)?;
-    let limit = (MAX_REPLAY_BUNDLE_BYTES as u64).saturating_add(1);
+    let limit = (max_bytes as u64).saturating_add(1);
     let mut limited: Take<std::fs::File> = file.take(limit);
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_REPLAY_BUNDLE_BYTES {
-        anyhow::bail!(
-            "replay input {} exceeds {MAX_REPLAY_BUNDLE_BYTES} bytes",
-            path.display()
-        );
+    if bytes.len() > max_bytes {
+        anyhow::bail!("input {} exceeds {max_bytes} bytes", path.display());
     }
     serde_json::from_slice(&bytes)
-        .map_err(|error| anyhow::anyhow!("replay input {}: {error}", path.display()))
+        .map_err(|error| anyhow::anyhow!("input {}: {error}", path.display()))
 }

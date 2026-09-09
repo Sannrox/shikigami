@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive CLI `run-content --request/--payloads` host over
+  `Harness::run_content`. The versioned request carries descriptors and opaque
+  payload filenames; bytes stay in a host-owned directory. MCP, serve, and
+  plane intake remain text-only. See
+  [ADR 0011](docs/decisions/0011-cli-content-intake.md).
 - Additive CLI `replay --manifest/--evidence` host over `Harness::replay`.
   `--json` prints `ReplayReport` schema v1 with the same step/terminal
   comparisons as the library. Exit `0` is a completed comparison; exit `1` is

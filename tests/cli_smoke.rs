@@ -448,3 +448,136 @@ fn replay_rejects_digest_mismatch_before_execution() {
         .failure()
         .stderr(predicate::str::contains("digest"));
 }
+
+#[tokio::test]
+async fn run_content_json_matches_library_and_omits_payloads() {
+    use shikigami::{
+        ContentDisclosureState, ContentMessageV1, ContentPartDescriptor, ContentPartKind,
+        ContentProcessRequestV1, ContentProcessResultV1, ContentProvenanceV1, Harness, StateRoot,
+        digest_bytes,
+    };
+
+    let dir = tempdir().expect("tempdir");
+    let payloads = dir.path().join("payloads");
+    fs::create_dir_all(&payloads).expect("payloads");
+    let bytes = b"hello from file";
+    fs::write(payloads.join("payload-text-1"), bytes).expect("write payload");
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "directory".into();
+    config.workspace.root = dir.path().join("workspaces").to_string_lossy().into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"ok\",\"success\":true}"}]}]"#
+            .into(),
+    );
+    let config_path = dir.path().join("content.toml");
+    config.save(&config_path).expect("save config");
+
+    let request = ContentProcessRequestV1 {
+        schema_version: 1,
+        task: "inspect bounded content".into(),
+        messages: vec![ContentMessageV1 {
+            role: "user".into(),
+            parts: vec![ContentPartDescriptor {
+                part_id: "text-1".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: bytes.len() as u64,
+                sha256_digest: digest_bytes(bytes),
+                reference: "payload-text-1".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "cli".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            }],
+            tool_call_id: String::new(),
+            tool_calls: Vec::new(),
+        }],
+        capabilities: None,
+        keep_workspace: true,
+        resume_run_id: None,
+        payloads: [("payload-text-1".into(), "payload-text-1".into())]
+            .into_iter()
+            .collect(),
+    };
+    let request_path = dir.path().join("request.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&request).expect("request json"),
+    )
+    .expect("write request");
+
+    let state = dir.path().join("state");
+    let harness = Harness::from_config(config, StateRoot::new(&state)).expect("harness");
+    let library = harness
+        .run_content(
+            request
+                .clone()
+                .into_run_request(&payloads)
+                .expect("run request"),
+        )
+        .await
+        .expect("library content");
+    let library_report = library.report();
+
+    let stdout = cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "run-content",
+            "--request",
+            request_path.to_str().unwrap(),
+            "--payloads",
+            payloads.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(stdout).expect("utf8");
+    assert!(!text.contains("hello from file"), "{text}");
+    let cli: ContentProcessResultV1 = serde_json::from_str(&text).expect("cli json");
+    assert_eq!(cli.schema_version, 1);
+    assert_eq!(cli.success, library_report.success);
+    assert_eq!(cli.termination, library_report.termination);
+    assert_eq!(
+        cli.messages[0].parts[0].sha256_digest,
+        library_report.messages[0].parts[0].sha256_digest
+    );
+}
+
+#[test]
+fn run_content_rejects_unknown_request_fields() {
+    let dir = tempdir().expect("tempdir");
+    let payloads = dir.path().join("payloads");
+    fs::create_dir_all(&payloads).expect("payloads");
+    let request_path = dir.path().join("request.json");
+    fs::write(
+        &request_path,
+        br#"{"schema_version":1,"task":"x","messages":[],"payloads":{},"bytes":"nope"}"#,
+    )
+    .expect("write");
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            dir.path().join("state").to_str().unwrap(),
+            "run-content",
+            "--request",
+            request_path.to_str().unwrap(),
+            "--payloads",
+            payloads.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown field"));
+}
