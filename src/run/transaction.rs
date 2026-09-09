@@ -13,7 +13,7 @@ use crate::checkpoint::{Checkpoint, ParkedState};
 use crate::events::HarnessEvent;
 use crate::governance::RunOutcome;
 use crate::hooks::{self, HookEvent};
-use crate::model::CostEstimate;
+use crate::model::{ChatMessage, CostEstimate};
 use crate::replay::{ReplayExecution, ReplayTerminalCheckpoint};
 
 use super::model_turn::DurableModelTurn;
@@ -60,7 +60,7 @@ impl<'a> RunTransaction<'a> {
             content.as_ref(),
         )
         .await?;
-        if (replay.is_some() || content.is_some()) && request.resume_run_id.is_some() {
+        if request.resume_run_id.is_some() {
             self.engine.model.restore_replay_cursor(session.turns)?;
         }
 
@@ -88,6 +88,7 @@ impl<'a> RunTransaction<'a> {
         let recovered_usage = recovered_content_terminal
             .as_ref()
             .map(|(terminal, _)| terminal.usage);
+        let recovered_text_report = recovered_text_report(&session.messages);
 
         // Ok(Some(park)) when escalated; Ok(None) when finished normally.
         let result: Result<Option<ParkInfo>, RunError> =
@@ -95,6 +96,11 @@ impl<'a> RunTransaction<'a> {
                 final_summary = summary;
                 success = terminal.success;
                 termination = terminal.termination;
+                Ok(None)
+            } else if let Some((report_success, summary)) = recovered_text_report {
+                final_summary = summary;
+                success = report_success;
+                termination = RunTermination::Completed;
                 Ok(None)
             } else {
                 async {
@@ -326,6 +332,32 @@ impl<'a> RunTransaction<'a> {
     }
 }
 
+fn recovered_text_report(messages: &[ChatMessage]) -> Option<(bool, String)> {
+    let assistant_idx = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")?;
+    let assistant = &messages[assistant_idx];
+    if assistant.tool_calls.len() != 1 || assistant.tool_calls[0].name != "report" {
+        return None;
+    }
+    let call = &assistant.tool_calls[0];
+    if call.id.is_empty() {
+        return None;
+    }
+    let tool = messages.get(assistant_idx + 1)?;
+    if tool.role != "tool" || tool.tool_call_id != call.id || assistant_idx + 2 != messages.len() {
+        return None;
+    }
+    let report: crate::tools::Report = serde_json::from_str(&call.args_json).ok()?;
+    // A matching tool-call id is not enough: denied, hook-blocked, and failed
+    // executions also append a tool message. Successful `report` results use
+    // this prefix; anything else must resume through the normal turn loop.
+    if tool.content != format!("report: {}", report.summary) {
+        return None;
+    }
+    Some((report.success, report.summary))
+}
+
 fn projected_summary(content_run: bool, summary: &str) -> String {
     if content_run {
         format!(
@@ -399,5 +431,75 @@ mod tests {
         let checkpoint = Checkpoint::load(&state.runs_dir(), run_id).unwrap();
         assert_eq!(checkpoint.completed_turns, 1);
         assert_eq!(checkpoint.messages.last().unwrap().content, "done");
+    }
+
+    #[test]
+    fn recovered_text_report_reads_a_terminal_report_tool_result() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "task".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![crate::model::ToolCall {
+                    id: "call_0".into(),
+                    name: "report".into(),
+                    args_json: r#"{"summary":"done","success":true}"#.into(),
+                }],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "report: done".into(),
+                tool_call_id: "call_0".into(),
+                tool_calls: vec![],
+            },
+        ];
+        assert_eq!(
+            recovered_text_report(&messages),
+            Some((true, "done".into()))
+        );
+    }
+
+    #[test]
+    fn recovered_text_report_ignores_an_unfinished_report_turn() {
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: String::new(),
+            tool_calls: vec![crate::model::ToolCall {
+                id: "call_0".into(),
+                name: "report".into(),
+                args_json: r#"{"summary":"done","success":true}"#.into(),
+            }],
+        }];
+        assert_eq!(recovered_text_report(&messages), None);
+    }
+
+    #[test]
+    fn recovered_text_report_ignores_a_failed_or_denied_report_execution() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![crate::model::ToolCall {
+                    id: "call_0".into(),
+                    name: "report".into(),
+                    args_json: r#"{"summary":"done","success":true}"#.into(),
+                }],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "tool batch rejected: report/escalate must be the only call".into(),
+                tool_call_id: "call_0".into(),
+                tool_calls: vec![],
+            },
+        ];
+        assert_eq!(recovered_text_report(&messages), None);
     }
 }

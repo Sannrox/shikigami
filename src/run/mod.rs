@@ -608,18 +608,30 @@ mod tests {
             .to_string_lossy()
             .into_owned();
 
-        // Resume with report-only script and higher max_turns
+        // Resume with the original write plus the next report. Cursor restore
+        // skips the already completed write turn.
         let mut config2 = base_config(&dir);
         config2.run.max_turns = 10;
-        let model2 = ScriptedModel::from_turns(vec![ModelTurn {
-            content: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "2".into(),
-                name: "report".into(),
-                args_json: r#"{"summary":"resumed ok","success":true}"#.into(),
-            }],
-            usage: None,
-        }]);
+        let model2 = ScriptedModel::from_turns(vec![
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "1".into(),
+                    name: "write_file".into(),
+                    args_json: r#"{"path":"partial.txt","content":"hello"}"#.into(),
+                }],
+                usage: None,
+            },
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "2".into(),
+                    name: "report".into(),
+                    args_json: r#"{"summary":"resumed ok","success":true}"#.into(),
+                }],
+                usage: None,
+            },
+        ]);
         let eng2 = Engine {
             governance: Arc::from(governance::from_config(&config2).unwrap()),
             workspace: Arc::from(workspace::from_config(&config2).unwrap()),
@@ -772,6 +784,17 @@ mod tests {
             ModelTurn {
                 content: String::new(),
                 tool_calls: vec![ToolCall {
+                    id: "t1".into(),
+                    name: "todo_write".into(),
+                    args_json:
+                        r#"{"items":[{"id":"a","content":"ship feature","status":"in_progress"}]}"#
+                            .into(),
+                }],
+                usage: None,
+            },
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
                     id: "t2".into(),
                     name: "todo_write".into(),
                     args_json:
@@ -904,16 +927,28 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("parked"), "{err}");
 
-        // Resume with answer continues and can report success.
-        let model3 = ScriptedModel::from_turns(vec![ModelTurn {
-            content: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "r1".into(),
-                name: "report".into(),
-                args_json: r#"{"summary":"approved and done","success":true}"#.into(),
-            }],
-            usage: None,
-        }]);
+        // Resume with answer continues and can report success. Include the
+        // original escalate turn so cursor restore skips it.
+        let model3 = ScriptedModel::from_turns(vec![
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "esc-1".into(),
+                    name: "escalate".into(),
+                    args_json: r#"{"reason":"need human","question":"approve?"}"#.into(),
+                }],
+                usage: None,
+            },
+            ModelTurn {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "r1".into(),
+                    name: "report".into(),
+                    args_json: r#"{"summary":"approved and done","success":true}"#.into(),
+                }],
+                usage: None,
+            },
+        ]);
         let eng3 = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
             workspace: Arc::from(workspace::from_config(&config).unwrap()),

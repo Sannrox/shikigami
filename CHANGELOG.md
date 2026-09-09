@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Abrupt process death no longer redispatches a consequential local tool whose
+  result was already checkpointed. Local/none adapters now persist and replay
+  staged tool reports, resume from the durable assistant turn and scripted
+  cursor, and complete a checkpointed `report` without opening a new run.
+  Started execution markers stay in-doubt; authorizing-only markers remain
+  retryable under the original tool-call identity.
 - Governed `complete_run` no longer swallows plane `Unavailable` when delayed
   evidence is disabled (the default). Queued envelopes copy grant lease, fence,
   and policy identities instead of host-minted values, and reconnect
