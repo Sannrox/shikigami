@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -493,20 +493,47 @@ impl FileContentResolver {
         })
     }
 
-    fn path_for(&self, relative: &Path) -> Result<PathBuf, ContentError> {
+    fn open_payload(&self, relative: &Path) -> Result<File, ContentError> {
         let candidate = self.root.join(relative);
-        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(not(unix))]
+        {
+            let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+                ContentError::Resolver(format!(
+                    "payload {} cannot be inspected: {error}",
+                    candidate.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ContentError::Resolver(
+                    "payload path must be a regular file".into(),
+                ));
+            }
+        }
+        let file = options.open(&candidate).map_err(|error| {
+            ContentError::Resolver(format!(
+                "payload {} cannot be opened: {error}",
+                candidate.display()
+            ))
+        })?;
+        let metadata = file.metadata().map_err(|error| {
             ContentError::Resolver(format!(
                 "payload {} cannot be inspected: {error}",
                 candidate.display()
             ))
         })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if !metadata.is_file() {
             return Err(ContentError::Resolver(
                 "payload path must be a regular file".into(),
             ));
         }
-        Ok(candidate)
+        Ok(file)
     }
 }
 
@@ -548,13 +575,7 @@ impl ContentResolver for FileContentResolver {
                 "payload reference is not mapped".into(),
             ));
         };
-        let path = self.path_for(&relative)?;
-        let file = fs::File::open(&path).map_err(|error| {
-            ContentError::Resolver(format!(
-                "payload {} cannot be opened: {error}",
-                path.display()
-            ))
-        })?;
+        let file = self.open_payload(&relative)?;
         let mut limited = file.take(MAX_CONTENT_PART_BYTES.saturating_add(1));
         let mut bytes = Vec::new();
         limited
@@ -2023,5 +2044,87 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not mapped"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_resolver_does_not_follow_a_symlink_swapped_for_a_mapped_file() {
+        let directory = tempdir().unwrap();
+        let payloads = directory.path().join("payloads");
+        fs::create_dir_all(&payloads).unwrap();
+        fs::write(payloads.join("payload-text-1"), b"inside").unwrap();
+        let outside = directory.path().join("outside.txt");
+        fs::write(&outside, b"secret-outside").unwrap();
+        let mut map = BTreeMap::new();
+        map.insert("payload-text-1".into(), "payload-text-1".into());
+        let resolver = FileContentResolver::new(&payloads, &map).unwrap();
+        fs::remove_file(payloads.join("payload-text-1")).unwrap();
+        std::os::unix::fs::symlink(&outside, payloads.join("payload-text-1")).unwrap();
+        let error = resolver
+            .resolve(&ContentPartDescriptor {
+                part_id: "text-1".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: 6,
+                sha256_digest: sha256_digest(b"inside"),
+                reference: "payload-text-1".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "cli".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            })
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("cannot be opened") || message.contains("regular file"),
+            "{error}"
+        );
+        assert!(!message.contains("secret-outside"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_resolver_rejects_a_fifo_swapped_for_a_mapped_file() {
+        let directory = tempdir().unwrap();
+        let payloads = directory.path().join("payloads");
+        fs::create_dir_all(&payloads).unwrap();
+        let mapped = payloads.join("payload-text-1");
+        fs::write(&mapped, b"inside").unwrap();
+        let mut map = BTreeMap::new();
+        map.insert("payload-text-1".into(), "payload-text-1".into());
+        let resolver = FileContentResolver::new(&payloads, &map).unwrap();
+        fs::remove_file(&mapped).unwrap();
+        let c_path = std::ffi::CString::new(mapped.to_str().unwrap()).unwrap();
+        // SAFETY: `c_path` is a unique temp path we just removed.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let error = resolver
+            .resolve(&ContentPartDescriptor {
+                part_id: "text-1".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: 6,
+                sha256_digest: sha256_digest(b"inside"),
+                reference: "payload-text-1".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "cli".into(),
+                    source_id: "fixture".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            })
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("cannot be opened") || message.contains("regular file"),
+            "{error}"
+        );
     }
 }
