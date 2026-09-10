@@ -25,9 +25,10 @@ Both schemas reject unknown fields and unsupported versions.
 
 Use `workspace_digest` to bind the expected input tree. It hashes sorted
 relative paths, lengths, and file content, excludes `.git` administration
-state, rejects symbolic links and non-UTF-8 paths, and fails above 10,000 files
-or 64 MiB. `empty_workspace_digest` is the explicit binding for an empty
-directory workspace.
+state, opens directories and files without following symbolic links, rejects
+symbolic links and non-UTF-8 paths, and fails above 10,000 files or 64 MiB.
+`empty_workspace_digest` is the explicit binding for an empty directory
+workspace.
 
 The evidence bundle contains bounded digests rather than unrestricted model or
 tool payloads. Admission rejects common credential-shaped values in the
@@ -116,8 +117,8 @@ prompt ids are incomplete. The prompt digest is the current
 `snapshots/initial`. Configured skill packs that live outside that snapshot
 make the prompt binding incomplete. Snapshot copies skip symbolic-link
 directory entries, open directories with `O_NOFOLLOW`, and open remaining
-files without following a swapped symlink. `workspace_digest` also rejects
-symbolic links, so exported inputs
+files without following a swapped symlink. `workspace_digest` opens directories
+and files with `O_NOFOLLOW` and rejects symbolic links, so exported inputs
 are the retained regular-file tree. Model, policy, and the observation-only tool
 catalog come from the exporting process configuration. A complete package is
 validated with `ReplayManifest::for_evidence` before it is returned; digests
