@@ -2,6 +2,8 @@
 
 use std::fs::OpenOptions;
 use std::io;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -172,8 +174,72 @@ fn snapshot_path(state_runs: &Path, run_id: &str, name: &str) -> Result<PathBuf,
 /// Copy directory tree without following symlinks (workspace → snapshot).
 pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
     std::fs::create_dir_all(dst)?;
+    copy_tree_nofollow(src, dst)
+}
+
+#[cfg(unix)]
+struct DirFrame {
+    fd: OwnedFd,
+    dest: PathBuf,
+    pending: std::vec::IntoIter<DirentNofollow>,
+}
+
+#[cfg(unix)]
+fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
+    let root = open_dir_nofollow(src)?;
+    let pending = read_dir_nofollow(root.as_raw_fd())?;
+    let mut stack = vec![DirFrame {
+        fd: root,
+        dest: dst.to_path_buf(),
+        pending: pending.into_iter(),
+    }];
+    loop {
+        let item = {
+            let Some(frame) = stack.last_mut() else {
+                break;
+            };
+            frame
+                .pending
+                .next()
+                .map(|entry| (frame.fd.as_raw_fd(), frame.dest.clone(), entry))
+        };
+        let Some((dir_fd, dest_dir, entry)) = item else {
+            stack.pop();
+            continue;
+        };
+        if !dirent_name_allowed(&entry.name)? {
+            continue;
+        }
+        match entry.kind {
+            DirentKind::Symlink | DirentKind::Other => continue,
+            DirentKind::Dir => {
+                let to = dest_dir.join(&entry.name);
+                std::fs::create_dir_all(&to)?;
+                let child = openat_dir_nofollow(dir_fd, &entry.name)?;
+                let pending = read_dir_nofollow(child.as_raw_fd())?;
+                stack.push(DirFrame {
+                    fd: child,
+                    dest: to,
+                    pending: pending.into_iter(),
+                });
+            }
+            DirentKind::File => {
+                let to = dest_dir.join(&entry.name);
+                copy_file_at_nofollow(dir_fd, &entry.name, &to)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_tree_nofollow(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        let metadata = std::fs::symlink_metadata(&dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(follow_refused(&dir));
+        }
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
@@ -197,6 +263,232 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn follow_refused(path: &Path) -> WorkspaceError {
+    WorkspaceError::Io(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("snapshot copy refused to follow `{}`", path.display()),
+    ))
+}
+
+fn cannot_open(path: impl std::fmt::Display, error: io::Error) -> WorkspaceError {
+    WorkspaceError::Io(io::Error::new(
+        error.kind(),
+        format!("snapshot copy cannot open `{path}`: {error}"),
+    ))
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum DirentKind {
+    Dir,
+    File,
+    Symlink,
+    Other,
+}
+
+#[cfg(unix)]
+struct DirentNofollow {
+    name: std::ffi::OsString,
+    kind: DirentKind,
+}
+
+#[cfg(unix)]
+fn dirent_name_allowed(name: &std::ffi::OsStr) -> Result<bool, WorkspaceError> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes == b"." || bytes == b".." {
+        return Ok(false);
+    }
+    if bytes.contains(&b'/') || bytes.contains(&0) {
+        return Err(WorkspaceError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "snapshot copy refused an unsafe directory entry `{}`",
+                name.to_string_lossy()
+            ),
+        )));
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn cstring_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString, WorkspaceError> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        WorkspaceError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "snapshot copy refused an interior NUL in `{}`",
+                name.to_string_lossy()
+            ),
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn open_dir_nofollow(path: &Path) -> Result<OwnedFd, WorkspaceError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+    let file = options
+        .open(path)
+        .map_err(|error| cannot_open(path.display(), error))?;
+    Ok(OwnedFd::from(file))
+}
+
+#[cfg(unix)]
+fn openat_dir_nofollow(dir_fd: i32, name: &std::ffi::OsStr) -> Result<OwnedFd, WorkspaceError> {
+    let c_name = cstring_name(name)?;
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+    // SAFETY: `c_name` is a NUL-terminated file name; `dir_fd` is a live
+    // directory descriptor opened with O_DIRECTORY.
+    let fd = unsafe { libc::openat(dir_fd, c_name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(cannot_open(
+            name.to_string_lossy(),
+            io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor on success.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn copy_file_at_nofollow(
+    dir_fd: i32,
+    name: &std::ffi::OsStr,
+    to: &Path,
+) -> Result<(), WorkspaceError> {
+    use std::fs::File;
+    let c_name = cstring_name(name)?;
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    // SAFETY: `c_name` is a NUL-terminated file name; `dir_fd` is a live
+    // directory descriptor opened with O_DIRECTORY.
+    let fd = unsafe { libc::openat(dir_fd, c_name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(cannot_open(
+            name.to_string_lossy(),
+            io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `openat` returned a new owned descriptor on success.
+    let mut src = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let metadata = src.metadata()?;
+    if !metadata.is_file() {
+        return Err(WorkspaceError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "snapshot copy requires a regular file `{}`",
+                name.to_string_lossy()
+            ),
+        )));
+    }
+    let mut dst = OpenOptions::new().write(true).create_new(true).open(to)?;
+    io::copy(&mut src, &mut dst)?;
+    dst.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn zero_errno() {
+    // SAFETY: errno is a thread-local slot; we only write the calling thread.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            *libc::__errno_location() = 0;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            *libc::__error() = 0;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_dir_nofollow(dir_fd: i32) -> Result<Vec<DirentNofollow>, WorkspaceError> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: `dir_fd` is a live directory descriptor; `dup` clones it.
+    let dup = unsafe { libc::dup(dir_fd) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `dup` is an open directory fd; `fdopendir` takes ownership on success.
+    let dirp = unsafe { libc::fdopendir(dup) };
+    if dirp.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so we still own `dup`.
+        unsafe {
+            libc::close(dup);
+        }
+        return Err(error.into());
+    }
+    struct CloseDir(*mut libc::DIR);
+    impl Drop for CloseDir {
+        fn drop(&mut self) {
+            // SAFETY: `fdopendir` succeeded; `closedir` owns and closes the stream.
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let _dir = CloseDir(dirp);
+    let mut entries = Vec::new();
+    loop {
+        zero_errno();
+        // SAFETY: `dirp` is a live `DIR*` owned by `_dir` for this loop.
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error.into());
+        }
+        // SAFETY: `readdir` returned a dirent whose `d_name` is NUL-terminated.
+        let c_name = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+        let name = std::ffi::OsStr::from_bytes(c_name.to_bytes()).to_os_string();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let c_name = cstring_name(&name)?;
+        // SAFETY: `libc::stat` is a C POD struct; zero is a valid bit pattern
+        // before `fstatat` fills it.
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: `dir_fd` is a live directory descriptor; `c_name` is NUL-terminated.
+        let rc = unsafe {
+            libc::fstatat(
+                dir_fd,
+                c_name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(cannot_open(
+                name.to_string_lossy(),
+                io::Error::last_os_error(),
+            ));
+        }
+        let mode = stat.st_mode & libc::S_IFMT;
+        let kind = if mode == libc::S_IFLNK {
+            DirentKind::Symlink
+        } else if mode == libc::S_IFDIR {
+            DirentKind::Dir
+        } else if mode == libc::S_IFREG {
+            DirentKind::File
+        } else {
+            DirentKind::Other
+        };
+        entries.push(DirentNofollow { name, kind });
+    }
+    Ok(entries)
+}
+
+#[cfg(any(test, not(unix)))]
 fn copy_file_nofollow(from: &Path, to: &Path) -> Result<(), WorkspaceError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -209,18 +501,12 @@ fn copy_file_nofollow(from: &Path, to: &Path) -> Result<(), WorkspaceError> {
     {
         let metadata = std::fs::symlink_metadata(from)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(WorkspaceError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("snapshot copy refused to follow `{}`", from.display()),
-            )));
+            return Err(follow_refused(from));
         }
     }
-    let mut src = options.open(from).map_err(|error| {
-        WorkspaceError::Io(io::Error::new(
-            error.kind(),
-            format!("snapshot copy cannot open `{}`: {error}", from.display()),
-        ))
-    })?;
+    let mut src = options
+        .open(from)
+        .map_err(|error| cannot_open(from.display(), error))?;
     let metadata = src.metadata()?;
     if !metadata.is_file() {
         return Err(WorkspaceError::Io(io::Error::new(
@@ -709,5 +995,85 @@ mod snapshot_tests {
             "{error}"
         );
         assert!(!to.exists());
+    }
+
+    fn dest_contains_bytes(root: &Path, needle: &[u8]) -> bool {
+        let Ok(metadata) = std::fs::symlink_metadata(root) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() {
+            return false;
+        }
+        if metadata.is_file() {
+            return std::fs::read(root)
+                .is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle));
+        }
+        if !metadata.is_dir() {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .any(|entry| dest_contains_bytes(&entry.path(), needle))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_copy_does_not_follow_a_swapped_directory() {
+        use std::os::unix::fs::symlink;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        let nested = src.join("nested");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(nested.join("inside.txt"), "inside").unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret-outside").unwrap();
+        for i in 0..64 {
+            std::fs::write(src.join(format!("pad-{i}.txt")), "pad").unwrap();
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let nested_for_thread = nested.clone();
+        let outside_for_thread = outside.clone();
+        let stop_for_thread = stop.clone();
+        let swapper = thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_dir_all(&nested_for_thread);
+                let _ = std::fs::remove_file(&nested_for_thread);
+                let _ = symlink(&outside_for_thread, &nested_for_thread);
+            }
+        });
+
+        let _ = copy_tree(&src, &dst);
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        assert!(
+            !dest_contains_bytes(&dst, b"secret-outside"),
+            "copy_tree followed a directory swapped to a symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_copy_preserves_unix_backslash_filenames() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("weird\\name.txt"), "keep").unwrap();
+        copy_tree(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("weird\\name.txt")).unwrap(),
+            "keep"
+        );
     }
 }
