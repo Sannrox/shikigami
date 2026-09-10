@@ -9,7 +9,7 @@ use shikigami::{
     Config, ContentProcessRequestV1, ControlOptions, Harness, MAX_CONTENT_PROCESS_REQUEST_BYTES,
     MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, ReplayEvidenceBundle,
     ReplayManifest, ReplayRequest, RunRequest, ServeOptions, ServeRuntimeOptions, StateRoot,
-    VERSION, diagnose_run,
+    VERSION, diagnose_run, export_replay_inputs,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -739,8 +739,18 @@ async fn run() -> anyhow::Result<()> {
             json,
             output,
         } => {
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
-            let report = harness.export_replay_inputs(&run_id)?;
+            // Inspection-only: resolve settings without constructing execution
+            // adapters or creating state directories.
+            let (mut config, _) =
+                Config::resolve_search(cli.config.as_deref(), state.path(), &cwd)?;
+            if let Some(model) = model {
+                let model = model.trim();
+                if model.is_empty() {
+                    anyhow::bail!("model override must not be empty");
+                }
+                config.model.model = model.into();
+            }
+            let report = export_replay_inputs(&state, &run_id, &config)?;
             if let Some(dir) = output
                 && report.complete
             {

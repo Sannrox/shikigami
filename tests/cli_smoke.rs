@@ -475,16 +475,21 @@ fn listed_run_id(state: &std::path::Path, config: &std::path::Path) -> String {
 #[test]
 fn replay_export_missing_run_fails() {
     let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
     cargo_bin_cmd!("shikigami")
         .args([
             "--state",
-            dir.path().join("state").to_str().unwrap(),
+            state.to_str().unwrap(),
             "replay-export",
             "missing-run",
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not found"));
+    assert!(
+        !state.exists(),
+        "read-only export must not create a state directory"
+    );
 }
 
 #[test]

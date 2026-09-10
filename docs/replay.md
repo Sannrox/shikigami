@@ -127,9 +127,10 @@ shikigami replay-export <run_id> [--json] [-o DIR]
 ```
 
 `--json` prints `ReplayExportReport`. `-o DIR` writes `manifest.json` and
-`evidence.json` only when complete. Exit `0` is a well-formed report
-(complete or incomplete). Exit `1` means the run cannot be inspected. See
-[ADR 0012](decisions/0012-replay-export.md).
+`evidence.json` only when complete. The command resolves settings without
+constructing execution adapters or creating state directories. Exit `0` is a
+well-formed report (complete or incomplete). Exit `1` means the run cannot
+be inspected. See [ADR 0012](decisions/0012-replay-export.md).
 
 ## CLI
 

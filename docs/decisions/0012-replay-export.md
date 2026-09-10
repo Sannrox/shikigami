@@ -28,8 +28,10 @@ not.
    unmatched prompt ids are incomplete. The prompt digest is current
    `SYSTEM_PROMPT` composed with rules and skills from `snapshots/initial`.
    Skill packs that are not retained inside that snapshot make prompt
-   incomplete. Model, policy, and the observation-only replay catalog come from the
-   exporting process configuration, the same settings later `replay` will use.
+   incomplete. Model, policy, context flags, and the observation-only replay
+   catalog come from the exporting process configuration, the same settings
+   later `replay` will use. The CLI host resolves settings only; it does not
+   construct execution adapters or create state directories.
 3. **Validate or explain.** A complete package is admitted with
    `ReplayManifest::for_evidence` / `ReplayRequest::admit` before it is
    returned. Incomplete results list the missing binding names and omit
