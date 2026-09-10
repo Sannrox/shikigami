@@ -106,8 +106,9 @@ shikigami run-content --request FILE --payloads DIR [--json]
 
 `--request` is schema-v1 `ContentProcessRequestV1` JSON: task, descriptor
 messages, and a `payloads` map from opaque `reference` to a single relative
-filename under `--payloads`. The JSON never contains bytes. The payload
-directory is the CLI-owned resolver (`cli-file-v1`). `--json` prints
+filename under `--payloads`. Unmapped references fail closed even when a
+same-named file exists in the directory. The JSON never contains bytes. The
+payload directory is the CLI-owned resolver (`cli-file-v1`). `--json` prints
 `ContentProcessResultV1` without payloads. See
 [ADR 0011](decisions/0011-cli-content-intake.md).
 
