@@ -23,7 +23,9 @@ run without executing.
    `run_id`, `class`, `reason`, and `allowed_next_steps`. Breaking field
    changes bump `schema_version`.
 2. **Diagnosis is not authority.** `Harness::diagnose_run` and CLI inspection
-   perform no model call, tool dispatch, permit redemption, or state mutation.
+   (`runs` list/inspect, including without `--diagnose`) perform no model call,
+   tool dispatch, permit redemption, or state mutation, and they do not create
+   `runs/` or `run-controls/` when those directories are absent.
    Next-step categories (`resume`, `resume_with_answer`, `reconcile_reports`,
    `inspect`, `do_not_execute`) are labels, not permits.
 3. **Classes are exhaustive for v1.** First matching local evidence wins:

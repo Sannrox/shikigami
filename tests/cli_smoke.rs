@@ -6,6 +6,39 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
+fn runs_without_diagnose_does_not_create_state_directories() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    cargo_bin_cmd!("shikigami")
+        .args(["--state", state.to_str().unwrap(), "runs"])
+        .assert()
+        .success();
+    assert!(!state.join("runs").exists(), "list must not create runs/");
+    assert!(
+        !state.join("run-controls").exists(),
+        "list must not create run-controls/"
+    );
+}
+
+#[test]
+fn runs_inspect_without_diagnose_does_not_create_state_directories() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    cargo_bin_cmd!("shikigami")
+        .args(["--state", state.to_str().unwrap(), "runs", "missing-run"])
+        .assert()
+        .failure();
+    assert!(
+        !state.join("runs").exists(),
+        "inspect must not create runs/"
+    );
+    assert!(
+        !state.join("run-controls").exists(),
+        "inspect must not create run-controls/"
+    );
+}
+
+#[test]
 fn version_prints_product_identity() {
     cargo_bin_cmd!("shikigami")
         .arg("version")

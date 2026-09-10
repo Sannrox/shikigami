@@ -396,7 +396,7 @@ async fn run() -> anyhow::Result<()> {
                     );
                 }
             } else {
-                let registry = shikigami::RunRegistry::new(state.path())?;
+                let registry = shikigami::RunRegistry::inspect(state.path());
                 if let Some(run_id) = run_id {
                     let record = registry.load(&run_id)?;
                     if json {
