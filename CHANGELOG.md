@@ -65,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI `run-content` now exits non-zero when the content run failed or parked,
+  matching `run`.
 - CLI `FileContentResolver` requires a payloads-map hit; an unmapped
   reference no longer opens a same-named file under `--payloads`.
 - Abrupt process death no longer redispatches a consequential local tool whose
