@@ -9,7 +9,7 @@ use shikigami::{
     Config, ContentProcessRequestV1, ControlOptions, Harness, MAX_CONTENT_PROCESS_REQUEST_BYTES,
     MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, ReplayEvidenceBundle,
     ReplayManifest, ReplayRequest, RunRequest, ServeOptions, ServeRuntimeOptions, StateRoot,
-    VERSION, diagnose_run,
+    VERSION, diagnose_run, export_replay_inputs,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -190,6 +190,15 @@ enum Command {
         payloads: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+    /// Reconstruct a replay package from a retained run, or report missing bindings.
+    ReplayExport {
+        run_id: String,
+        #[arg(long)]
+        json: bool,
+        /// Write complete `evidence.json` and `manifest.json` into this directory.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
     },
     /// Observation-only content-bound replay through `Harness::replay`.
     Replay {
@@ -723,6 +732,48 @@ async fn run() -> anyhow::Result<()> {
                 );
             } else {
                 print!("{jsonl}");
+            }
+        }
+        Command::ReplayExport {
+            run_id,
+            json,
+            output,
+        } => {
+            // Inspection-only: resolve settings without constructing execution
+            // adapters or creating state directories.
+            let (mut config, _) =
+                Config::resolve_search(cli.config.as_deref(), state.path(), &cwd)?;
+            if let Some(model) = model {
+                let model = model.trim();
+                if model.is_empty() {
+                    anyhow::bail!("model override must not be empty");
+                }
+                config.model.model = model.into();
+            }
+            let report = export_replay_inputs(&state, &run_id, &config)?;
+            if let Some(dir) = output
+                && report.complete
+            {
+                std::fs::create_dir_all(&dir)?;
+                if let (Some(manifest), Some(evidence)) = (&report.manifest, &report.evidence) {
+                    std::fs::write(
+                        dir.join("manifest.json"),
+                        serde_json::to_vec_pretty(manifest)?,
+                    )?;
+                    std::fs::write(
+                        dir.join("evidence.json"),
+                        serde_json::to_vec_pretty(evidence)?,
+                    )?;
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let missing = report.missing.join(",");
+                println!(
+                    "replay-export {} complete={} missing=[{}] reason={}",
+                    report.run_id, report.complete, missing, report.reason
+                );
             }
         }
         Command::Replay {

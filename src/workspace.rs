@@ -48,6 +48,8 @@ pub enum WorkspaceError {
 pub(crate) enum SnapshotPlan<'a> {
     None,
     CaptureInitial,
+    /// Keep an existing `initial` snapshot; never capture from a resumed workspace.
+    KeepInitial,
     Restore(&'a str),
 }
 
@@ -90,11 +92,20 @@ impl<'a> WorkspaceSnapshots<'a> {
             SnapshotPlan::None => Ok(SnapshotOutcome::Unchanged),
             SnapshotPlan::CaptureInitial => {
                 let name = "initial";
-                let path = take_snapshot(&workspace.path, self.state_runs, run_id, name)?;
-                Ok(SnapshotOutcome::Captured {
-                    name: name.into(),
-                    path,
-                })
+                match existing_initial_snapshot(self.state_runs, run_id)? {
+                    Some(_) => Ok(SnapshotOutcome::Unchanged),
+                    None => {
+                        let path = take_snapshot(&workspace.path, self.state_runs, run_id, name)?;
+                        Ok(SnapshotOutcome::Captured {
+                            name: name.into(),
+                            path,
+                        })
+                    }
+                }
+            }
+            SnapshotPlan::KeepInitial => {
+                existing_initial_snapshot(self.state_runs, run_id)?;
+                Ok(SnapshotOutcome::Unchanged)
             }
             SnapshotPlan::Restore(name) => {
                 restore_snapshot(&workspace.path, self.state_runs, run_id, name)?;
@@ -118,6 +129,21 @@ fn validate_snapshot_id(field: &'static str, value: &str) -> Result<(), Workspac
             field,
             value: value.into(),
         })
+    }
+}
+
+fn existing_initial_snapshot(
+    state_runs: &Path,
+    run_id: &str,
+) -> Result<Option<PathBuf>, WorkspaceError> {
+    let dest = snapshot_path(state_runs, run_id, "initial")?;
+    match std::fs::symlink_metadata(&dest) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(WorkspaceError::UnsafeSnapshotPath)
+        }
+        Ok(_) => Ok(Some(dest)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -572,5 +598,55 @@ mod snapshot_tests {
             std::fs::read_to_string(ws.join("AGENTS.md")).unwrap(),
             "restored rules"
         );
+    }
+
+    #[test]
+    fn capture_initial_preserves_the_first_snapshot_across_later_prepares() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "original").unwrap();
+        let materialized = MaterializedWorkspace {
+            path: ws.clone(),
+            adapter: "directory".into(),
+            cleanup: WorkspaceCleanup::None,
+        };
+        let snapshots = WorkspaceSnapshots::new(&runs);
+
+        let first = snapshots
+            .prepare(&materialized, "r1", SnapshotPlan::CaptureInitial)
+            .unwrap();
+        assert!(matches!(first, SnapshotOutcome::Captured { .. }));
+        std::fs::write(ws.join("a.txt"), "mutated").unwrap();
+        let second = snapshots
+            .prepare(&materialized, "r1", SnapshotPlan::CaptureInitial)
+            .unwrap();
+        assert_eq!(second, SnapshotOutcome::Unchanged);
+        assert_eq!(
+            std::fs::read_to_string(runs.join("r1/snapshots/initial/a.txt")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn keep_initial_does_not_capture_from_a_mutated_workspace() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let runs = dir.path().join("runs");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "mutated").unwrap();
+        let materialized = MaterializedWorkspace {
+            path: ws,
+            adapter: "directory".into(),
+            cleanup: WorkspaceCleanup::None,
+        };
+
+        let outcome = WorkspaceSnapshots::new(&runs)
+            .prepare(&materialized, "r1", SnapshotPlan::KeepInitial)
+            .unwrap();
+
+        assert_eq!(outcome, SnapshotOutcome::Unchanged);
+        assert!(!runs.join("r1/snapshots/initial").exists());
     }
 }

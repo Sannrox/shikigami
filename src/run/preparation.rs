@@ -54,6 +54,7 @@ pub(super) async fn prepare(
             checkpoint.run_id
         )));
     }
+    let is_resume = resume_checkpoint.is_some();
     let (
         run_id,
         messages,
@@ -77,7 +78,7 @@ pub(super) async fn prepare(
             turns,
         )
         .map_err(|error| RunError::Message(format!("run registry update failed: {error}")))?;
-    prepare_workspace(engine, request, &run_id, &workspace)?;
+    prepare_workspace(engine, request, &run_id, &workspace, is_resume)?;
     capture_baseline(engine, &run_id, &workspace);
     let (prompt_id, system_prompt) = compose_context(engine, &run_id, &workspace);
 
@@ -309,9 +310,11 @@ fn prepare_workspace(
     request: &RunRequest,
     run_id: &str,
     workspace: &MaterializedWorkspace,
+    is_resume: bool,
 ) -> Result<(), RunError> {
     let plan = match request.restore_snapshot.as_deref() {
         Some(name) => SnapshotPlan::Restore(name),
+        None if engine.config.workspace.snapshot && is_resume => SnapshotPlan::KeepInitial,
         None if engine.config.workspace.snapshot => SnapshotPlan::CaptureInitial,
         None => SnapshotPlan::None,
     };

@@ -4,8 +4,8 @@ use shikigami::model::{ChatMessage, ToolCall};
 use shikigami::{
     Config, EventSink, Harness, HarnessEvent, ReplayBindings, ReplayComparisonStatus,
     ReplayEvidenceBundle, ReplayManifest, ReplayRequest, ReplayStepEvidence,
-    ReplayTerminalEvidence, SYSTEM_PROMPT, StateRoot, empty_workspace_digest, steps_from_messages,
-    text_digest,
+    ReplayTerminalEvidence, RunRequest, SYSTEM_PROMPT, StateRoot, empty_workspace_digest,
+    steps_from_messages, text_digest, workspace_digest,
 };
 use tempfile::tempdir;
 use tokio::sync::watch;
@@ -380,4 +380,146 @@ async fn terminal_recovery_rejects_a_workspace_outside_the_run_boundary() {
         "{error}"
     );
     assert!(marker.is_file());
+}
+
+#[tokio::test]
+async fn export_from_snapshot_enabled_run_is_admissible_and_ignores_mutated_workspace() {
+    let root = tempdir().unwrap();
+    let mut config = base_config(root.path());
+    config.workspace.snapshot = true;
+    let state = StateRoot::new(root.path().join("state"));
+    let harness = Harness::from_config(config.clone(), state.clone()).unwrap();
+    let mut request = RunRequest::new("export source");
+    request.keep_workspace = true;
+    let run = harness.run(request).await.unwrap();
+    assert!(run.success);
+    std::fs::write(run.workspace.join("later.txt"), "after").unwrap();
+
+    let report = harness.export_replay_inputs(&run.run_id).unwrap();
+    assert!(report.complete, "{:?}", report.missing);
+    let evidence = report.evidence.expect("complete evidence");
+    let manifest = report.manifest.expect("complete manifest");
+    assert_eq!(evidence.bindings.inputs_digest, empty_workspace_digest());
+    assert_ne!(
+        workspace_digest(&run.workspace).unwrap(),
+        evidence.bindings.inputs_digest
+    );
+    let reconstructed = ReplayManifest::for_evidence(&evidence).unwrap();
+    assert_eq!(reconstructed, manifest);
+
+    let replay_harness = Harness::from_config(config, state).unwrap();
+    let replayed = replay_harness
+        .replay(ReplayRequest::new(manifest, evidence))
+        .await
+        .unwrap();
+    assert_ne!(replayed.run.run_id, run.run_id);
+    assert!(
+        replayed
+            .steps
+            .iter()
+            .all(|step| step.status == ReplayComparisonStatus::Equal)
+    );
+    assert_eq!(replayed.terminal.status, ReplayComparisonStatus::Equal);
+}
+
+#[tokio::test]
+async fn export_after_resume_still_binds_the_first_snapshot() {
+    let root = tempdir().unwrap();
+    let mut config = base_config(root.path());
+    config.workspace.snapshot = true;
+    config.run.max_turns = 1;
+    config.model.script_json = Some(
+        r#"[
+            {"tool_calls":[{"id":"write-1","name":"write_file","args_json":"{\"path\":\"later.txt\",\"content\":\"after\"}"}]},
+            {"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}
+        ]"#
+        .into(),
+    );
+    let state = StateRoot::new(root.path().join("state"));
+    let first = Harness::from_config(config.clone(), state.clone()).unwrap();
+    let mut request = RunRequest::new("export after resume");
+    request.keep_workspace = true;
+    let error = first.run(request).await.unwrap_err();
+    assert!(error.to_string().contains("max turns"), "{error}");
+    let run_id = std::fs::read_dir(state.runs_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().join("checkpoint.json").is_file())
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+    let checkpoint = shikigami::checkpoint::Checkpoint::load(&state.runs_dir(), &run_id).unwrap();
+    assert!(checkpoint.workspace.join("later.txt").is_file());
+
+    config.run.max_turns = 8;
+    let resumed = Harness::from_config(config, state.clone()).unwrap();
+    let mut resume = RunRequest::new("export after resume");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(run_id.clone());
+    let run = resumed.run(resume).await.unwrap();
+    assert!(run.success);
+    assert!(run.workspace.join("later.txt").is_file());
+
+    let report = resumed.export_replay_inputs(&run.run_id).unwrap();
+    assert!(report.complete, "{:?}", report.missing);
+    let evidence = report.evidence.expect("complete evidence");
+    assert_eq!(evidence.bindings.inputs_digest, empty_workspace_digest());
+    assert!(
+        !state
+            .runs_dir()
+            .join(&run.run_id)
+            .join("snapshots/initial/later.txt")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn export_does_not_treat_a_resume_capture_as_original_inputs() {
+    let root = tempdir().unwrap();
+    let mut config = base_config(root.path());
+    config.workspace.snapshot = false;
+    config.run.max_turns = 1;
+    config.model.script_json = Some(
+        r#"[
+            {"tool_calls":[{"id":"write-1","name":"write_file","args_json":"{\"path\":\"later.txt\",\"content\":\"after\"}"}]},
+            {"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}
+        ]"#
+        .into(),
+    );
+    let state = StateRoot::new(root.path().join("state"));
+    let first = Harness::from_config(config.clone(), state.clone()).unwrap();
+    let mut request = RunRequest::new("no original snapshot");
+    request.keep_workspace = true;
+    let error = first.run(request).await.unwrap_err();
+    assert!(error.to_string().contains("max turns"), "{error}");
+    let run_id = std::fs::read_dir(state.runs_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().join("checkpoint.json").is_file())
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+
+    config.workspace.snapshot = true;
+    config.run.max_turns = 8;
+    let resumed = Harness::from_config(config, state.clone()).unwrap();
+    let mut resume = RunRequest::new("no original snapshot");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(run_id.clone());
+    let run = resumed.run(resume).await.unwrap();
+    assert!(run.success);
+    assert!(run.workspace.join("later.txt").is_file());
+
+    let report = resumed.export_replay_inputs(&run.run_id).unwrap();
+    assert!(!report.complete);
+    assert!(report.missing.iter().any(|item| item == "inputs"));
+    assert!(
+        !state
+            .runs_dir()
+            .join(&run.run_id)
+            .join("snapshots/initial")
+            .exists()
+    );
 }

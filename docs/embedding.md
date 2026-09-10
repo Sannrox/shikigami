@@ -179,8 +179,10 @@ optional config redaction applies the same secret scrubbing as doctor.
 `Harness::replay` admits a strict versioned manifest and immutable evidence
 bundle, creates a new isolated attempt, and returns ordered step and terminal
 comparisons. It is distinct from same-attempt resume and truncated transcript
-export. See [replay.md](replay.md) for binding, tool-denial, restart, and
-governance limits.
+export. `Harness::export_replay_inputs` reconstructs that package from retained
+artifacts, or reports which bindings are missing. Original inputs come only
+from `snapshots/initial`. See [replay.md](replay.md) for binding, tool-denial,
+restart, export completeness, and governance limits.
 
 ### Bounded content runs
 

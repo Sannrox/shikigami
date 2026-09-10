@@ -7,6 +7,8 @@ $SHIKIGAMI_STATE/runs/<run_id>/:
 run.json       # status, outcome, digests, usage, workspace, artifact path
 events.jsonl   # redacted event journal; tool arguments are not persisted
 checkpoint.json # resumable conversation plus optional replay binding
+snapshots/
+  initial/     # original workspace copy when workspace.snapshot is true
 cancel         # presence requests cooperative cancellation
 artifacts/
   baseline.json # hash-only workspace baseline used to scope changes
@@ -30,7 +32,10 @@ Replay attempts use the same run directory layout and registry lifecycle. Their
 checkpoint adds a manifest digest, source identity, isolated workspace binding,
 and comparison cursor. That block is recovery metadata only; the immutable
 host-supplied replay evidence bundle remains the comparison input, and the
-governance plane remains authoritative when used. See [replay.md](replay.md).
+governance plane remains authoritative when used. `replay-export` may
+recompute that bundle from retained artifacts when `snapshots/initial` and the
+other bindings are present; the live workspace is not original-input proof.
+See [replay.md](replay.md).
 
 ## CLI
 
@@ -46,6 +51,7 @@ shikigami cleanup <run-id>
 shikigami cleanup <run-id> --force
 shikigami artifacts <run-id>
 shikigami artifacts <run-id> --patch
+shikigami replay-export <run-id> [--json] [-o DIR]
 ~~~
 
 Inspecting one run also prints a read-only recovery diagnosis ([ADR 0008](decisions/0008-recovery-diagnosis.md)): `safe_resume`, `report_only`, `uncertain_tool`, `invalid_checkpoint`, or `terminal`, plus allowed next-step categories. `--diagnose --json` emits the same `RecoveryDiagnosis` object as `Harness::diagnose_run`. Diagnosis does not call the model, dispatch tools, redeem permits, or mutate state, and it does not grant execution authority. `runs <id> --json` without `--diagnose` remains the existing `RunRecord` document.

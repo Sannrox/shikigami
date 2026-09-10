@@ -203,6 +203,18 @@ impl Harness {
         diagnosis::doctor(self)
     }
 
+    /// Reconstruct a replay package from retained artifacts without executing.
+    pub fn export_replay_inputs(
+        &self,
+        run_id: &str,
+    ) -> Result<crate::replay::ReplayExportReport, HarnessError> {
+        Ok(crate::replay::export_replay_inputs(
+            &self.state,
+            run_id,
+            &self.config,
+        )?)
+    }
+
     /// Inspect one retained run without executing.
     pub fn diagnose_run(&self, run_id: &str) -> Result<RecoveryDiagnosis, HarnessError> {
         recovery::diagnose_with_registry(
