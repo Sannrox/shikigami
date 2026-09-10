@@ -114,9 +114,10 @@ original-input proof. Content runs, compacted history, non-terminal runs, and un
 prompt ids are incomplete. The prompt digest is the current
 `SYSTEM_PROMPT` composed with project rules and skills loaded from
 `snapshots/initial`. Configured skill packs that live outside that snapshot
-make the prompt binding incomplete. Snapshot copies skip symbolic links;
-`workspace_digest` also rejects them, so exported inputs are the retained
-regular-file tree. Model, policy, and the observation-only tool
+make the prompt binding incomplete. Snapshot copies skip symbolic-link
+directory entries and open remaining files without following a swapped
+symlink. `workspace_digest` also rejects symbolic links, so exported inputs
+are the retained regular-file tree. Model, policy, and the observation-only tool
 catalog come from the exporting process configuration. A complete package is
 validated with `ReplayManifest::for_evidence` before it is returned; digests
 are never guessed. Checkpoints remain local scratch, not receipts. The

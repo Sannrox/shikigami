@@ -1,5 +1,7 @@
 //! Workspace materialization ports.
 
+use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -188,10 +190,47 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), WorkspaceError> {
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::copy(&from, &to)?;
+                copy_file_nofollow(&from, &to)?;
             }
         }
     }
+    Ok(())
+}
+
+fn copy_file_nofollow(from: &Path, to: &Path) -> Result<(), WorkspaceError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    {
+        let metadata = std::fs::symlink_metadata(from)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(WorkspaceError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("snapshot copy refused to follow `{}`", from.display()),
+            )));
+        }
+    }
+    let mut src = options.open(from).map_err(|error| {
+        WorkspaceError::Io(io::Error::new(
+            error.kind(),
+            format!("snapshot copy cannot open `{}`: {error}", from.display()),
+        ))
+    })?;
+    let metadata = src.metadata()?;
+    if !metadata.is_file() {
+        return Err(WorkspaceError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("snapshot copy requires a regular file `{}`", from.display()),
+        )));
+    }
+    let mut dst = OpenOptions::new().write(true).create_new(true).open(to)?;
+    io::copy(&mut src, &mut dst)?;
+    dst.sync_all()?;
     Ok(())
 }
 
@@ -648,5 +687,27 @@ mod snapshot_tests {
 
         assert_eq!(outcome, SnapshotOutcome::Unchanged);
         assert!(!runs.join("r1/snapshots/initial").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_copy_does_not_follow_a_swapped_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let from = dir.path().join("from.txt");
+        let to = dir.path().join("to.txt");
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "secret-outside").unwrap();
+        symlink(&outside, &from).unwrap();
+
+        let error = copy_file_nofollow(&from, &to).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot open")
+                || error.to_string().contains("refused")
+                || error.to_string().contains("regular file"),
+            "{error}"
+        );
+        assert!(!to.exists());
     }
 }

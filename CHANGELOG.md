@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Workspace snapshot copy opens files with `O_NOFOLLOW` and checks the opened
+  handle, so a swapped symlink cannot become `snapshots/initial` original-input
+  evidence.
 - CLI `FileContentResolver` opens payloads with `O_NOFOLLOW` and checks the
   opened file, so a swapped symlink cannot escape `--payloads`.
 - CLI `run-content` now exits non-zero when the content run failed or parked,
