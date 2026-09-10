@@ -65,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI `runs` list and inspect use `RunRegistry::inspect` and no longer create
+  `runs/` or `run-controls/` when those directories are absent.
 - Workspace snapshot copy opens files with `O_NOFOLLOW` and checks the opened
   handle, so a swapped symlink cannot become `snapshots/initial` original-input
   evidence.

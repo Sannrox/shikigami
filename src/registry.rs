@@ -317,8 +317,15 @@ impl RunRegistry {
     }
 
     pub fn list(&self) -> Result<Vec<RunRecord>, RegistryError> {
+        let entries = match fs::read_dir(&self.runs_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut records: Vec<RunRecord> = Vec::new();
-        for entry in fs::read_dir(&self.runs_root)? {
+        for entry in entries {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
                 continue;
@@ -625,6 +632,15 @@ mod tests {
         assert!(registry.cancel_requested("run-1"));
         registry.clear_cancel("run-1").unwrap();
         assert!(!registry.cancel_requested("run-1"));
+    }
+
+    #[test]
+    fn inspect_list_is_empty_without_creating_directories() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::inspect(dir.path());
+        assert!(registry.list().unwrap().is_empty());
+        assert!(!dir.path().join("runs").exists());
+        assert!(!dir.path().join("run-controls").exists());
     }
 
     #[test]

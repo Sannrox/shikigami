@@ -54,7 +54,7 @@ shikigami artifacts <run-id> --patch
 shikigami replay-export <run-id> [--json] [-o DIR]
 ~~~
 
-Inspecting one run also prints a read-only recovery diagnosis ([ADR 0008](decisions/0008-recovery-diagnosis.md)): `safe_resume`, `report_only`, `uncertain_tool`, `invalid_checkpoint`, or `terminal`, plus allowed next-step categories. `--diagnose --json` emits the same `RecoveryDiagnosis` object as `Harness::diagnose_run`. Diagnosis does not call the model, dispatch tools, redeem permits, or mutate state, and it does not grant execution authority. `runs <id> --json` without `--diagnose` remains the existing `RunRecord` document.
+Inspecting one run also prints a read-only recovery diagnosis ([ADR 0008](decisions/0008-recovery-diagnosis.md)): `safe_resume`, `report_only`, `uncertain_tool`, `invalid_checkpoint`, or `terminal`, plus allowed next-step categories. `--diagnose --json` emits the same `RecoveryDiagnosis` object as `Harness::diagnose_run`. Diagnosis does not call the model, dispatch tools, redeem permits, or mutate state, and it does not grant execution authority. `runs` and `runs <id>` (with or without `--diagnose`) use a read-only registry view and do not create `runs/` or `run-controls/` when they are absent. `runs <id> --json` without `--diagnose` remains the existing `RunRecord` document.
 
 cleanup removes the run record, event journal, checkpoint, and retained
 artifact directory. Active runs are never deleted in place: --force requests
