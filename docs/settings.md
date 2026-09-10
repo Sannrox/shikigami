@@ -140,7 +140,7 @@ When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never
 | `adapter` | `"directory"` | `directory` \| `inplace` (`directory-inplace`) \| `git-worktree` |
 | `root` | `"."` | Parent/repo root for materialization; for `inplace`, the workspace path itself |
 | `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
-| `snapshot` | `false` | After first materialize, copy workspace to `state/runs/<id>/snapshots/initial` and keep that copy across resume. Resume never creates the directory. Not supported with `inplace`. This is the only original-input proof `replay-export` accepts. |
+| `snapshot` | `false` | After first materialize, copy workspace to `state/runs/<id>/snapshots/initial` and keep that copy across resume. Resume never creates the directory. File copies do not follow symbolic links. Not supported with `inplace`. This is the only original-input proof `replay-export` accepts. |
 
 For `inplace`, place the harness **state** root (`--state` / `SHIKIGAMI_STATE`)
 **outside** `workspace.root`. Hosts must serialize concurrent runs against the
