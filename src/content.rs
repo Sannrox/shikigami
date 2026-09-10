@@ -541,10 +541,7 @@ impl ContentResolver for FileContentResolver {
                 .files
                 .lock()
                 .map_err(|_| ContentError::Resolver("payload map lock poisoned".into()))?;
-            files
-                .get(&descriptor.reference)
-                .cloned()
-                .or_else(|| relative_payload_filename(&descriptor.reference).ok())
+            files.get(&descriptor.reference).cloned()
         };
         let Some(relative) = relative else {
             return Err(ContentError::Resolver(
@@ -2000,20 +1997,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_resolver_rejects_non_regular_fallback_payloads() {
+    async fn file_resolver_rejects_unmapped_existing_payloads() {
         let directory = tempdir().unwrap();
         let payloads = directory.path().join("payloads");
         fs::create_dir_all(&payloads).unwrap();
-        fs::create_dir_all(payloads.join("payload-dir")).unwrap();
+        fs::write(payloads.join("secret-file"), b"not allowlisted").unwrap();
         let resolver = FileContentResolver::new(&payloads, &BTreeMap::new()).unwrap();
         let error = resolver
             .resolve(&ContentPartDescriptor {
                 part_id: "text-1".into(),
                 kind: ContentPartKind::Text,
                 media_type: "text/plain".into(),
-                byte_length: 1,
-                sha256_digest: sha256_digest(b"x"),
-                reference: "payload-dir".into(),
+                byte_length: 15,
+                sha256_digest: sha256_digest(b"not allowlisted"),
+                reference: "secret-file".into(),
                 provenance: ContentProvenanceV1 {
                     source: "cli".into(),
                     source_id: "fixture".into(),
@@ -2025,6 +2022,6 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("regular file"), "{error}");
+        assert!(error.to_string().contains("not mapped"), "{error}");
     }
 }

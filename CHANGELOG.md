@@ -65,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI `FileContentResolver` requires a payloads-map hit; an unmapped
+  reference no longer opens a same-named file under `--payloads`.
 - Abrupt process death no longer redispatches a consequential local tool whose
   result was already checkpointed. Local/none adapters now persist and replay
   staged tool reports, resume from the durable assistant turn and scripted
