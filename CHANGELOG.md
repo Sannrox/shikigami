@@ -67,6 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CLI `runs` list and inspect use `RunRegistry::inspect` and no longer create
   `runs/` or `run-controls/` when those directories are absent.
+- Replay `workspace_digest` opens directories and files with `O_NOFOLLOW` and
+  reads from the opened handle, so a swapped symlink cannot enter export or
+  replay input bindings.
 - Workspace snapshot directory walks open directories with `O_NOFOLLOW` and
   copy children from the opened handle, so a swapped directory symlink cannot
   copy outside content into `snapshots/initial`.

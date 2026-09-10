@@ -4,7 +4,7 @@
 //! receipt and does not make local checkpoints authoritative.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -866,62 +866,396 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
 ///
 /// Paths are relative and sorted; `.git` administration state is excluded.
 pub fn workspace_digest(root: &Path) -> Result<String, ReplayError> {
-    if !root.is_dir() {
+    let mut entries = Vec::<(String, u64, String)>::new();
+    let mut total_bytes = 0u64;
+    collect_workspace_entries(root, &mut entries, &mut total_bytes)?;
+    entries.sort_unstable();
+    canonical_digest(&entries)
+}
+
+fn git_admin_path(relative: &Path) -> bool {
+    relative
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == ".git")
+}
+
+fn relative_inventory_path(relative: &Path) -> Result<String, ReplayError> {
+    relative
+        .to_str()
+        .ok_or_else(|| ReplayError::Invalid("replay input path is not UTF-8".into()))
+        .map(|path| path.replace('\\', "/"))
+}
+
+fn push_inventory_file(
+    entries: &mut Vec<(String, u64, String)>,
+    total_bytes: &mut u64,
+    relative: &Path,
+    bytes: &[u8],
+) -> Result<(), ReplayError> {
+    *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+    if entries.len() >= MAX_REPLAY_INPUT_FILES || *total_bytes > MAX_REPLAY_INPUT_BYTES {
         return Err(ReplayError::Invalid(format!(
-            "replay input root is not a directory: {}",
-            root.display()
+            "replay inputs exceed {MAX_REPLAY_INPUT_FILES} files or {MAX_REPLAY_INPUT_BYTES} bytes"
         )));
     }
-    let mut entries = Vec::<(String, u64, String)>::new();
+    entries.push((
+        relative_inventory_path(relative)?,
+        bytes.len() as u64,
+        digest_bytes(bytes),
+    ));
+    Ok(())
+}
+
+fn symlink_entry(relative: &Path) -> ReplayError {
+    ReplayError::Invalid(format!(
+        "replay inputs contain symbolic link `{}`",
+        relative.display()
+    ))
+}
+
+fn unsupported_entry(relative: &Path) -> ReplayError {
+    ReplayError::Invalid(format!(
+        "replay inputs contain unsupported file `{}`",
+        relative.display()
+    ))
+}
+
+fn not_a_directory(root: &Path) -> ReplayError {
+    ReplayError::Invalid(format!(
+        "replay input root is not a directory: {}",
+        root.display()
+    ))
+}
+
+fn join_relative(base: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    if base.as_os_str().is_empty() {
+        PathBuf::from(name)
+    } else {
+        base.join(name)
+    }
+}
+
+#[cfg(unix)]
+fn collect_workspace_entries(
+    root: &Path,
+    entries: &mut Vec<(String, u64, String)>,
+    total_bytes: &mut u64,
+) -> Result<(), ReplayError> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    let root_fd = open_dir_nofollow(root).map_err(|_| not_a_directory(root))?;
+    let pending = read_dir_nofollow(root_fd.as_raw_fd())?;
+    let mut stack = vec![DigestFrame {
+        fd: root_fd,
+        relative: PathBuf::new(),
+        pending: pending.into_iter(),
+    }];
+    loop {
+        let item = {
+            let Some(frame) = stack.last_mut() else {
+                break;
+            };
+            frame
+                .pending
+                .next()
+                .map(|entry| (frame.fd.as_raw_fd(), frame.relative.clone(), entry))
+        };
+        let Some((dir_fd, parent, entry)) = item else {
+            stack.pop();
+            continue;
+        };
+        if !dirent_name_allowed(&entry.name)? {
+            continue;
+        }
+        let relative = join_relative(&parent, &entry.name);
+        if git_admin_path(&relative) {
+            continue;
+        }
+        match entry.kind {
+            DirentKind::Symlink => return Err(symlink_entry(&relative)),
+            DirentKind::Other => return Err(unsupported_entry(&relative)),
+            DirentKind::Dir => {
+                let child = openat_dir_nofollow(dir_fd, &entry.name)
+                    .map_err(|error| nofollow_open_error(&relative, error))?;
+                let pending = read_dir_nofollow(child.as_raw_fd())?;
+                stack.push(DigestFrame {
+                    fd: child,
+                    relative,
+                    pending: pending.into_iter(),
+                });
+            }
+            DirentKind::File => {
+                let mut file = openat_file_nofollow(dir_fd, &entry.name)
+                    .map_err(|error| nofollow_open_error(&relative, error))?;
+                let metadata = file.metadata()?;
+                if !metadata.is_file() {
+                    return Err(unsupported_entry(&relative));
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                push_inventory_file(entries, total_bytes, &relative, &bytes)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn collect_workspace_entries(
+    root: &Path,
+    entries: &mut Vec<(String, u64, String)>,
+    total_bytes: &mut u64,
+) -> Result<(), ReplayError> {
+    let metadata = std::fs::symlink_metadata(root).map_err(|_| not_a_directory(root))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(not_a_directory(root));
+    }
     let mut stack = vec![root.to_path_buf()];
-    let mut total_bytes = 0u64;
     while let Some(directory) = stack.pop() {
+        let metadata = std::fs::symlink_metadata(&directory)?;
+        if metadata.file_type().is_symlink() {
+            let relative = directory.strip_prefix(root).unwrap_or(directory.as_path());
+            return Err(symlink_entry(relative));
+        }
+        if !metadata.is_dir() {
+            let relative = directory.strip_prefix(root).unwrap_or(directory.as_path());
+            return Err(unsupported_entry(relative));
+        }
         for entry in std::fs::read_dir(&directory)? {
             let entry = entry?;
             let path = entry.path();
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| ReplayError::Invalid("workspace path escaped input root".into()))?;
-            if relative
-                .components()
-                .next()
-                .is_some_and(|component| component.as_os_str() == ".git")
-            {
+            if git_admin_path(relative) {
                 continue;
             }
-            let file_type = entry.file_type()?;
+            let file_type = std::fs::symlink_metadata(&path)?.file_type();
             if file_type.is_symlink() {
-                return Err(ReplayError::Invalid(format!(
-                    "replay inputs contain symbolic link `{}`",
-                    relative.display()
-                )));
+                return Err(symlink_entry(relative));
             }
             if file_type.is_dir() {
                 stack.push(path);
                 continue;
             }
             if !file_type.is_file() {
-                return Err(ReplayError::Invalid(format!(
-                    "replay inputs contain unsupported file `{}`",
-                    relative.display()
-                )));
+                return Err(unsupported_entry(relative));
             }
             let bytes = std::fs::read(&path)?;
-            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-            if entries.len() >= MAX_REPLAY_INPUT_FILES || total_bytes > MAX_REPLAY_INPUT_BYTES {
-                return Err(ReplayError::Invalid(format!(
-                    "replay inputs exceed {MAX_REPLAY_INPUT_FILES} files or {MAX_REPLAY_INPUT_BYTES} bytes"
-                )));
-            }
-            let relative = relative
-                .to_str()
-                .ok_or_else(|| ReplayError::Invalid("replay input path is not UTF-8".into()))?
-                .replace('\\', "/");
-            entries.push((relative, bytes.len() as u64, digest_bytes(&bytes)));
+            push_inventory_file(entries, total_bytes, relative, &bytes)?;
         }
     }
-    entries.sort_unstable();
-    canonical_digest(&entries)
+    Ok(())
+}
+
+#[cfg(unix)]
+struct DigestFrame {
+    fd: std::os::fd::OwnedFd,
+    relative: PathBuf,
+    pending: std::vec::IntoIter<DirentNofollow>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum DirentKind {
+    Dir,
+    File,
+    Symlink,
+    Other,
+}
+
+#[cfg(unix)]
+struct DirentNofollow {
+    name: std::ffi::OsString,
+    kind: DirentKind,
+}
+
+#[cfg(unix)]
+fn dirent_name_allowed(name: &std::ffi::OsStr) -> Result<bool, ReplayError> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes == b"." || bytes == b".." {
+        return Ok(false);
+    }
+    if bytes.contains(&b'/') || bytes.contains(&0) {
+        return Err(ReplayError::Invalid(format!(
+            "replay inputs contain unsafe directory entry `{}`",
+            name.to_string_lossy()
+        )));
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn cstring_name(name: &std::ffi::OsStr) -> Result<std::ffi::CString, ReplayError> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        ReplayError::Invalid(format!(
+            "replay inputs contain unsafe directory entry `{}`",
+            name.to_string_lossy()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn nofollow_open_error(relative: &Path, error: std::io::Error) -> ReplayError {
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return symlink_entry(relative);
+    }
+    ReplayError::Io(error)
+}
+
+#[cfg(unix)]
+fn open_dir_nofollow(path: &Path) -> Result<std::os::fd::OwnedFd, std::io::Error> {
+    use std::fs::OpenOptions;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+    options.open(path).map(OwnedFd::from)
+}
+
+#[cfg(unix)]
+fn openat_dir_nofollow(
+    dir_fd: i32,
+    name: &std::ffi::OsStr,
+) -> Result<std::os::fd::OwnedFd, std::io::Error> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let c_name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "directory entry contains interior NUL",
+        )
+    })?;
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY;
+    // SAFETY: `c_name` is NUL-terminated; `dir_fd` is a live directory descriptor.
+    let fd = unsafe { libc::openat(dir_fd, c_name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `openat` returned a new owned descriptor on success.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn openat_file_nofollow(
+    dir_fd: i32,
+    name: &std::ffi::OsStr,
+) -> Result<std::fs::File, std::io::Error> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let c_name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "directory entry contains interior NUL",
+        )
+    })?;
+    let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    // SAFETY: `c_name` is NUL-terminated; `dir_fd` is a live directory descriptor.
+    let fd = unsafe { libc::openat(dir_fd, c_name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `openat` returned a new owned descriptor on success.
+    Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
+#[cfg(unix)]
+fn zero_errno() {
+    // SAFETY: errno is a thread-local slot; we only write the calling thread.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            *libc::__errno_location() = 0;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            *libc::__error() = 0;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_dir_nofollow(dir_fd: i32) -> Result<Vec<DirentNofollow>, ReplayError> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: `dir_fd` is a live directory descriptor; `dup` clones it.
+    let dup = unsafe { libc::dup(dir_fd) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: `dup` is an open directory fd; `fdopendir` takes ownership on success.
+    let dirp = unsafe { libc::fdopendir(dup) };
+    if dirp.is_null() {
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `fdopendir` failed, so we still own `dup`.
+        unsafe {
+            libc::close(dup);
+        }
+        return Err(error.into());
+    }
+    struct CloseDir(*mut libc::DIR);
+    impl Drop for CloseDir {
+        fn drop(&mut self) {
+            // SAFETY: `fdopendir` succeeded; `closedir` owns and closes the stream.
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let _dir = CloseDir(dirp);
+    let mut entries = Vec::new();
+    loop {
+        zero_errno();
+        // SAFETY: `dirp` is a live `DIR*` owned by `_dir` for this loop.
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error.into());
+        }
+        // SAFETY: `readdir` returned a dirent whose `d_name` is NUL-terminated.
+        let c_name = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+        let name = std::ffi::OsStr::from_bytes(c_name.to_bytes()).to_os_string();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let c_name = cstring_name(&name)?;
+        // SAFETY: `libc::stat` is a C POD struct; zero is a valid bit pattern
+        // before `fstatat` fills it.
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: `dir_fd` is a live directory descriptor; `c_name` is NUL-terminated.
+        let rc = unsafe {
+            libc::fstatat(
+                dir_fd,
+                c_name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mode = stat.st_mode & libc::S_IFMT;
+        let kind = if mode == libc::S_IFLNK {
+            DirentKind::Symlink
+        } else if mode == libc::S_IFDIR {
+            DirentKind::Dir
+        } else if mode == libc::S_IFREG {
+            DirentKind::File
+        } else {
+            DirentKind::Other
+        };
+        entries.push(DirentNofollow { name, kind });
+    }
+    Ok(entries)
 }
 
 /// Digest for a replay workspace with no files.
@@ -1374,6 +1708,86 @@ mod tests {
             workspace_digest(first.path()).unwrap(),
             workspace_digest(second.path()).unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_digest_rejects_symlink_file_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "secret-outside").unwrap();
+        symlink(&outside, dir.path().join("linked.txt")).unwrap();
+
+        let error = workspace_digest(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_digest_rejects_symlink_directory_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret-outside").unwrap();
+        symlink(&outside, dir.path().join("nested")).unwrap();
+
+        let error = workspace_digest(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_digest_does_not_follow_a_swapped_directory() {
+        use std::os::unix::fs::symlink;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let nested = src.join("nested");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(nested.join("inside.txt"), "inside").unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret-outside").unwrap();
+        for i in 0..64 {
+            std::fs::write(src.join(format!("pad-{i}.txt")), "pad").unwrap();
+        }
+        let leak = dir.path().join("leak");
+        std::fs::create_dir_all(leak.join("nested")).unwrap();
+        std::fs::write(leak.join("nested/secret.txt"), "secret-outside").unwrap();
+        for i in 0..64 {
+            std::fs::write(leak.join(format!("pad-{i}.txt")), "pad").unwrap();
+        }
+        let leak_digest = workspace_digest(&leak).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let nested_for_thread = nested.clone();
+        let outside_for_thread = outside.clone();
+        let stop_for_thread = stop.clone();
+        let swapper = thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_dir_all(&nested_for_thread);
+                let _ = std::fs::remove_file(&nested_for_thread);
+                let _ = symlink(&outside_for_thread, &nested_for_thread);
+            }
+        });
+
+        let raced = workspace_digest(&src);
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+
+        if let Ok(digest) = raced {
+            assert_ne!(
+                digest, leak_digest,
+                "workspace_digest followed a directory swapped to a symlink"
+            );
+        }
     }
 
     #[test]
