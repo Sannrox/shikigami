@@ -739,3 +739,71 @@ fn run_content_rejects_unknown_request_fields() {
         .failure()
         .stderr(predicate::str::contains("unknown field"));
 }
+
+#[test]
+fn run_content_fails_when_the_run_reports_failure() {
+    let dir = tempdir().expect("tempdir");
+    let payloads = dir.path().join("payloads");
+    fs::create_dir_all(&payloads).expect("payloads");
+    let bytes = b"hello from file";
+    fs::write(payloads.join("payload-text-1"), bytes).expect("write payload");
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "directory".into();
+    config.workspace.root = dir.path().join("workspaces").to_string_lossy().into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"no\",\"success\":false}"}]}]"#
+            .into(),
+    );
+    let config_path = dir.path().join("content.toml");
+    config.save(&config_path).expect("save config");
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "task": "inspect bounded content",
+        "messages": [{
+            "role": "user",
+            "parts": [{
+                "part_id": "text-1",
+                "kind": "text",
+                "media_type": "text/plain",
+                "byte_length": bytes.len(),
+                "sha256_digest": shikigami::digest_bytes(bytes),
+                "reference": "payload-text-1",
+                "provenance": {
+                    "source": "cli",
+                    "source_id": "fixture",
+                    "source_version": "v1",
+                    "observed_at_ms": 1
+                },
+                "disclosure_state": "accepted"
+            }]
+        }],
+        "payloads": {"payload-text-1": "payload-text-1"}
+    });
+    let request_path = dir.path().join("request.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&request).expect("request json"),
+    )
+    .expect("write request");
+
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            dir.path().join("state").to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "run-content",
+            "--request",
+            request_path.to_str().unwrap(),
+            "--payloads",
+            payloads.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"success\": false"))
+        .stderr(predicate::str::contains("run reported failure"));
+}

@@ -831,6 +831,14 @@ async fn run() -> anyhow::Result<()> {
                 );
                 println!("workspace {}", report.workspace);
             }
+            if result.run.park.is_some() {
+                return Err(anyhow::anyhow!(
+                    "run parked awaiting operator answer (exit semantics: non-zero)"
+                ));
+            }
+            if !result.run.success {
+                anyhow::bail!("run reported failure");
+            }
         }
     }
     Ok(())

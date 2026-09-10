@@ -27,7 +27,9 @@ separate contract.
    `Harness::run_content`. Oversized, unresolvable, unknown-field, or denied
    content fails before model or tool execution. Checkpoints stay metadata-only.
 4. **JSON result is metadata.** `--json` prints `ContentProcessResultV1` with
-   the run projection and returned descriptors. Payloads are omitted.
+   the run projection and returned descriptors. Payloads are omitted. Exit `0`
+   means the run succeeded; failed or parked runs still print the report and
+   exit `1`, matching `run`.
 
 ## Consequences
 
