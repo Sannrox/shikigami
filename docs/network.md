@@ -42,3 +42,9 @@ when you need lower network risk without OS isolation.
 ## Future
 
 MCP HTTP/SSE transports should call the same `NetworkSettings::check_http_url`.
+
+[ADR 0013](decisions/0013-os-sandbox-adapter.md) selects an in-process Linux
+sandbox tier (`linux_native`: Landlock plus a seccomp socket gate) under which
+tool children cannot create sockets at all; `[network]` keeps governing only
+the harness-owned clients above. Until that adapter lands, the residual risk
+above stands.
