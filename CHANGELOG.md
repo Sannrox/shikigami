@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Decide the OS-level sandbox for governed tool execution: an in-process
+  Linux tier (`linux_native`: Landlock filesystem rules plus a seccomp socket
+  gate, no user namespaces or helper binary) is the selected adapter,
+  containers and micro-VMs remain host-owned deployment tiers, and macOS gets a
+  documented development-only Seatbelt profile. No runtime behavior changes in
+  this entry; implementation follows in #282. See
+  [ADR 0013](docs/decisions/0013-os-sandbox-adapter.md) and
+  [research #281](docs/research/281-os-sandbox-adapter.md).
 - `workspace.snapshot` captures `snapshots/initial` only on the first
   materialize and keeps that copy across resume. Resume does not create the
   directory from a mutated workspace. `replay-export` binds that original
