@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -22,13 +23,15 @@ pub(super) struct ToolInfo {
 pub(super) struct Client<T> {
     transport: T,
     next_id: u64,
+    deadline: Duration,
 }
 
 impl<T: Transport> Client<T> {
-    pub fn new(transport: T) -> Self {
+    pub fn new(transport: T, deadline: Duration) -> Self {
         Self {
             transport,
             next_id: 1,
+            deadline,
         }
     }
 
@@ -75,6 +78,10 @@ impl<T: Transport> Client<T> {
             .collect())
     }
 
+    /// Call a remote tool. A result flagged `isError` is a failed tool call:
+    /// the projected error body is returned as the failure detail so
+    /// governance reports and events record `ok = false` instead of a
+    /// successful call whose text happens to describe a denial.
     async fn call_tool(&mut self, name: &str, args_json: &str) -> Result<String, ToolError> {
         let arguments = serde_json::from_str(args_json).unwrap_or_else(|_| json!({}));
         let result = self
@@ -87,25 +94,41 @@ impl<T: Transport> Client<T> {
             .flatten()
             .filter_map(|content| content.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        if texts.is_empty() {
-            Ok(result.to_string())
+        let body = if texts.is_empty() {
+            result.to_string()
         } else {
-            Ok(texts.join("\n"))
+            texts.join("\n")
+        };
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            return Err(ToolError::Message(format!("mcp tool error: {body}")));
         }
+        Ok(body)
     }
 
+    /// One JSON-RPC request bounded by the configured deadline. On expiry the
+    /// call fails closed; the remote side may still complete the operation, so
+    /// callers must reconcile through the server's receipt surface rather than
+    /// retry blindly.
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, ToolError> {
         let id = self.next_id;
         self.next_id += 1;
-        let response = self
-            .transport
-            .exchange(&json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": method,
-                "params": params,
-            }))
-            .await?;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        let response = match tokio::time::timeout(self.deadline, self.transport.exchange(&request))
+            .await
+        {
+            Ok(response) => response?,
+            Err(_) => {
+                return Err(ToolError::Message(format!(
+                    "mcp `{method}` deadline_exceeded after {}s; outcome unknown, reconcile through the server receipt before retrying",
+                    self.deadline.as_secs()
+                )));
+            }
+        };
         if let Some(error) = response.get("error") {
             return Err(ToolError::Message(format!("mcp error: {error}")));
         }
@@ -210,7 +233,7 @@ mod tests {
             ]),
             sent: Vec::new(),
         };
-        let mut client = Client::new(transport);
+        let mut client = Client::new(transport, Duration::from_secs(5));
         client.initialize().await;
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
@@ -231,11 +254,58 @@ mod tests {
             })]),
             sent: Vec::new(),
         };
-        let error = Client::new(transport)
+        let error = Client::new(transport, Duration::from_secs(5))
             .list_tools()
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("denied"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn tool_results_flagged_is_error_fail_the_call() {
+        let body =
+            json!({"code":"permission_denied","message":"access denied","operation_id":"op-1"});
+        let transport = ScriptedTransport {
+            responses: VecDeque::from([json!({
+                "jsonrpc":"2.0","id":1,"result":{
+                    "content":[{"type":"text","text": body.to_string()}],
+                    "structuredContent": body,
+                    "isError": true
+                }
+            })]),
+            sent: Vec::new(),
+        };
+        let error = Client::new(transport, Duration::from_secs(5))
+            .call_tool("sekai.actions.submit", "{}")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("permission_denied"), "{error}");
+        assert!(error.contains("op-1"), "{error}");
+    }
+
+    struct HangingTransport;
+
+    #[async_trait]
+    impl Transport for HangingTransport {
+        async fn exchange(&mut self, _request: &Value) -> Result<Value, ToolError> {
+            std::future::pending().await
+        }
+
+        async fn send(&mut self, _notification: &Value) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn requests_fail_closed_at_the_deadline() {
+        let error = Client::new(HangingTransport, Duration::from_millis(20))
+            .call_tool("sekai.actions.submit", "{}")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("deadline_exceeded"), "{error}");
+        assert!(error.contains("reconcile"), "{error}");
     }
 }

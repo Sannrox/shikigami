@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive `[[tools.mcp_servers]]` fields `framing` (`content-length` default,
+  or `newline` for the MCP stdio specification used by `sekai-mcp` and the
+  reference servers; responses are accepted in either framing) and
+  `timeout_secs` (default 30) bounding every `tools/list` and `tools/call`.
+  Stdio responses are decoded by a bounded dedicated reader so a deadline
+  cannot leave the stream mid-frame; a deadline that interrupts the request
+  write itself marks the attachment desynchronized, kills the server, and
+  fails every later call closed. `McpServerSettings::stdio` and
+  `McpFraming` are exported.
+- Offline proof that a scripted run reads a typed object, submits a governed
+  Action, and inspects the canonical receipt through an actual MCP stdio
+  transport shaped like `sekai-mcp` (`tests/mcp_governed_action.rs`): harness
+  and plane denials each prevent the effect; revoked discovery or admission,
+  replay, changed-parameter conflicts, deadlines, and a killed attempt with a
+  replacement never create a second effect or report unverified success; run,
+  tool, and plane operation identity stay correlated. Live recipe and example
+  in [docs/mcp.md](docs/mcp.md) and
+  [examples/governed-mcp-action.toml](examples/governed-mcp-action.toml).
 - Additive CLI `replay-export <run_id>` and `Harness::export_replay_inputs`
   reconstruct a schema-v1 replay package from retained artifacts, or return a
   typed incomplete report. Original inputs come only from
@@ -58,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- An MCP `tools/call` result flagged `isError: true` is now a failed tool call
+  (`ok = false` in governance reports and `ToolEnd` events) instead of a
+  successful call whose text happens to describe an error.
 - Decide the OS-level sandbox for governed tool execution: an in-process
   Linux tier (`linux_native`: Landlock filesystem rules plus a seccomp socket
   gate, no user namespaces or helper binary) is the selected adapter,

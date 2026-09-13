@@ -54,7 +54,7 @@ pub mod worker_lifecycle;
 pub mod workspace;
 
 pub use config::{
-    Config, ConfigSource, EgressMode, HookSettings, McpServerSettings, PermissionMode,
+    Config, ConfigSource, EgressMode, HookSettings, McpFraming, McpServerSettings, PermissionMode,
     SandboxBackend, SandboxSettings,
 };
 pub use content::{
