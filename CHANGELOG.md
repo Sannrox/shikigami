@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive `sandbox.backend = "linux_native"` (Linux only): Landlock ABI 3+
+  filesystem rules plus a seccomp `socket()` deny applied in each Bash child's
+  `pre_exec`. The workspace and a run-owned `TMPDIR` are writable; host secrets,
+  `/proc`, and sockets are not. `socketpair` is limited to Unix stream pairs.
+  Device-node creation is denied in the workspace. Landlock still cannot
+  mediate `chmod`/`chown`/`setxattr` on inaccessible inodes; signal scoping
+  needs ABI 6 (kernel 6.12) and is reported honestly below that.
+  Additive `sandbox.read_only_paths` grants extra
+  absolute read/execute paths. `doctor` reports the effective ABI, socket mode,
+  and signal scoping; a selected backend the host cannot provide fails `doctor`
+  and `run` under every profile. Linux CI job proves the three denials and the
+  ≤10 ms overhead budget. See
+  [ADR 0013](docs/decisions/0013-os-sandbox-adapter.md).
 - Additive `[[tools.mcp_servers]]` fields `framing` (`content-length` default,
   or `newline` for the MCP stdio specification used by `sekai-mcp` and the
   reference servers; responses are accepted in either framing) and
@@ -76,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Governed / fail-closed Bash now accepts `sandbox.backend = linux_native` in
+  addition to `rlimit`. `doctor` labels `rlimit` as `limits` (no OS isolation)
+  and warns on `backend=none`.
 - An MCP `tools/call` result flagged `isError: true` is now a failed tool call
   (`ok = false` in governance reports and `ToolEnd` events) instead of a
   successful call whose text happens to describe an error.

@@ -38,6 +38,20 @@ jobs:
       - name: End-to-end smoke (host proof)
         run: make test-e2e
 
+  linux-native-sandbox:
+    name: Linux native sandbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Prove linux_native denials and overhead
+        run: cargo test --locked --test linux_native_sandbox -- --nocapture
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest

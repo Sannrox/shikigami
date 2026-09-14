@@ -43,13 +43,15 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
             harness.config.network.allow_hosts.join(",")
         }
     ));
-    lines.push(format!(
-        "sandbox:   backend={:?} cpu={:?} memory_mb={:?} user_processes={:?}",
-        harness.config.sandbox.backend,
-        harness.config.sandbox.cpu_time_secs,
-        harness.config.sandbox.memory_mb,
-        harness.config.sandbox.user_processes,
-    ));
+    let mut sandbox_error = None;
+    match crate::sandbox::health(&harness.config.sandbox) {
+        crate::sandbox::SandboxHealth::Ok(line) | crate::sandbox::SandboxHealth::Warning(line) => {
+            lines.push(line);
+        }
+        crate::sandbox::SandboxHealth::Error(error) => {
+            sandbox_error = Some(error);
+        }
+    }
     lines.push(format!("max_turns: {}", harness.config.run.max_turns));
     if harness.config.hooks.is_empty() {
         lines.push("hooks:     (none)".into());
@@ -72,6 +74,10 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
     ));
 
     let mut ok = true;
+    if let Some(error) = sandbox_error {
+        ok = false;
+        lines.push(format!("error: {error}"));
+    }
     if harness.config.requires_governance() && !governance_ok {
         ok = false;
         lines.push("error: governance unhealthy under fail-closed profile".into());

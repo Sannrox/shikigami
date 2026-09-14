@@ -35,8 +35,9 @@ pub struct Config {
     pub context: ContextSettings,
     #[serde(default)]
     pub network: NetworkSettings,
-    /// OS-level limits for child processes. The default keeps the historical
-    /// behavior; `rlimit` is an explicit Unix-only hardening choice.
+    /// OS-level limits and isolation for child processes. The default keeps
+    /// the historical no-op; `rlimit` is Unix-only limits, `linux_native` is
+    /// the Linux production tier (Landlock + seccomp).
     #[serde(default)]
     pub sandbox: SandboxSettings,
     /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
@@ -441,7 +442,7 @@ pub struct RunSettings {
     pub compact_keep_tail: u32,
 }
 
-/// Child-process resource policy.
+/// Child-process resource and isolation policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSettings {
@@ -462,15 +463,19 @@ pub struct SandboxSettings {
     /// Maximum number of open file descriptors (RLIMIT_NOFILE).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_files: Option<u64>,
+    /// Extra absolute paths granted read and execute under `linux_native`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_paths: Vec<String>,
 }
 
-/// Supported local child-process limit backends.
+/// Supported local child-process limit and isolation backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxBackend {
     #[default]
     None,
     Rlimit,
+    LinuxNative,
 }
 
 impl Default for SandboxSettings {
@@ -482,6 +487,7 @@ impl Default for SandboxSettings {
             user_processes: None,
             file_size_mb: None,
             open_files: None,
+            read_only_paths: Vec::new(),
         }
     }
 }
@@ -953,6 +959,26 @@ impl Config {
                 "sandbox.backend=rlimit is supported only on Unix".into(),
             ));
         }
+        if matches!(self.sandbox.backend, SandboxBackend::LinuxNative) && !cfg!(target_os = "linux")
+        {
+            return Err(ConfigError::Invalid(
+                "sandbox.backend=linux_native is supported only on Linux".into(),
+            ));
+        }
+        for path in &self.sandbox.read_only_paths {
+            if !Path::new(path).is_absolute() {
+                return Err(ConfigError::Invalid(format!(
+                    "sandbox.read_only_paths entry `{path}` must be an absolute path"
+                )));
+            }
+        }
+        if !self.sandbox.read_only_paths.is_empty()
+            && !matches!(self.sandbox.backend, SandboxBackend::LinuxNative)
+        {
+            return Err(ConfigError::Invalid(
+                "sandbox.read_only_paths is only applied by sandbox.backend=linux_native".into(),
+            ));
+        }
         self.validate_governed_bash_controls()?;
         for server in &self.tools.mcp_servers {
             if server.timeout_secs == 0 {
@@ -986,15 +1012,15 @@ impl Config {
 
     /// Governed / fail-closed profiles that enable Bash must not run with the
     /// historical no-op sandbox or unrestricted harness egress. Bash is only
-    /// cwd-jailed; without rlimit + egress policy the host blast radius is
-    /// unbounded relative to the FS tool jail.
+    /// cwd-jailed; without rlimit or linux_native plus egress policy the host
+    /// blast radius is unbounded relative to the FS tool jail.
     fn validate_governed_bash_controls(&self) -> Result<(), ConfigError> {
         if !self.requires_governance() || !self.bash_enabled() {
             return Ok(());
         }
         if matches!(self.sandbox.backend, SandboxBackend::None) {
             return Err(ConfigError::Invalid(
-                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires sandbox.backend=rlimit; sandbox.backend=none refuses bash".into(),
+                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires sandbox.backend=rlimit or linux_native; sandbox.backend=none refuses bash".into(),
             ));
         }
         if matches!(self.network.egress, EgressMode::Unrestricted) {
@@ -1293,7 +1319,7 @@ unknown_thing = true
 
         let err = c.validate().unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid(message) if message.contains("sandbox.backend=rlimit")),
+            matches!(&err, ConfigError::Invalid(message) if message.contains("sandbox.backend=rlimit or linux_native")),
             "{err}"
         );
 
@@ -1314,6 +1340,55 @@ unknown_thing = true
                 "{err}"
             );
         }
+
+        c.sandbox.backend = SandboxBackend::LinuxNative;
+        if cfg!(target_os = "linux") {
+            c.validate().unwrap();
+        } else {
+            let err = c.validate().unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid(message) if message.contains("linux_native")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_native_and_read_only_paths_parse_and_validate() {
+        let dir = tempdir().unwrap();
+        let extra = dir.path().join("toolchain");
+        fs::create_dir_all(&extra).unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            format!(
+                r#"
+version = 1
+[sandbox]
+backend = "linux_native"
+read_only_paths = ["{}"]
+"#,
+                extra.display()
+            ),
+        )
+        .unwrap();
+        let result = Config::resolve(&path);
+        if cfg!(target_os = "linux") {
+            let (c, _) = result.unwrap();
+            assert_eq!(c.sandbox.backend, SandboxBackend::LinuxNative);
+            assert_eq!(
+                c.sandbox.read_only_paths,
+                vec![extra.to_string_lossy().into_owned()]
+            );
+        } else {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("linux_native"), "{err}");
+        }
+
+        let mut c = Config::default();
+        c.sandbox.read_only_paths = vec!["relative/path".into()];
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
     }
 
     #[test]

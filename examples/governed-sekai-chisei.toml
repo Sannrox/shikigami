@@ -17,9 +17,10 @@ adapter = "directory"
 root = "."
 
 [tools]
-# Bash omitted: under profile=governed, enabling bash requires sandbox.backend=rlimit
-# and network.egress=deny|allowlist (see docs/settings.md). Path jail alone does not
-# contain host bash -c. Add bash only with those controls configured.
+# Bash omitted: under profile=governed, enabling bash requires
+# sandbox.backend=rlimit or linux_native and network.egress=deny|allowlist
+# (see docs/settings.md). linux_native is Linux-only; macOS keeps rlimit.
+# Path jail alone does not contain host bash -c.
 enabled = ["read_file", "write_file", "edit", "report"]
 bash_timeout_secs = 60
 

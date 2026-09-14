@@ -1,0 +1,40 @@
+# Linux production sandbox: Landlock + seccomp on Bash children.
+# macOS and Windows reject `linux_native` at validate/doctor/run.
+version = 1
+
+[profile]
+name = "local"
+
+[governance]
+adapter = "local"
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[sandbox]
+backend = "linux_native"
+# Additive host toolchains (absolute, existing, canonicalized at apply time):
+# read_only_paths = ["/opt/toolchains"]
+
+[network]
+egress = "deny"
+
+[tools]
+enabled = ["bash", "read_file", "write_file", "report"]
+bash_timeout_secs = 60
+
+[run]
+max_turns = 8
+
+[events]
+adapter = "stderr"
+
+[model]
+adapter = "scripted"
+script_json = """
+[
+  {"tool_calls":[{"name":"bash","args_json":"{\\"command\\":\\"echo ok > SANDBOX_OK.txt\\"}"}]},
+  {"tool_calls":[{"name":"report","args_json":"{\\"summary\\":\\"workspace write under linux_native\\",\\"success\\":true}"}]}
+]
+"""
