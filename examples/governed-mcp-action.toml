@@ -1,0 +1,60 @@
+# Governed ontology read → Action → receipt through sekai-mcp (docs/mcp.md).
+#
+# Local integration recipe, not a CI fixture: needs a reachable sekai-chisei,
+# a `sekai-mcp` binary on PATH, and SEKAI_CREDENTIAL in the environment of the
+# shell that starts shikigami. The MCP child inherits ordinary variables but
+# never the harness plane/model token names.
+version = 1
+
+[profile]
+name = "local"
+
+[governance]
+# `local` proves the harness side only; switch to "sekai-chisei" with
+# SHIKIGAMI_CONTROL_PLANE for the fully governed path.
+adapter = "local"
+principal = "tester"
+namespace = "acme"
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[tools]
+# Exactly the three projected tools plus the terminal report. Remove
+# `mcp.sekai.sekai.actions.submit` to prove that harness denial alone prevents
+# the effect.
+enabled = [
+  "report",
+  "mcp.sekai.sekai.objects.get",
+  "mcp.sekai.sekai.actions.submit",
+  "mcp.sekai.chisei.receipt.read",
+]
+
+[[tools.mcp_servers]]
+name = "sekai"
+command = "sekai-mcp"
+framing = "newline"
+timeout_secs = 10
+# sekai-mcp reads SEKAI_MCP_PRINCIPAL, SEKAI_MCP_NAMESPACE, SEKAI_MCP_TARGET,
+# and SEKAI_CREDENTIAL from its environment; nothing is passed as arguments.
+
+[events]
+adapter = "jsonl"
+
+[model]
+adapter = "scripted"
+# Replace <op> with the logical operation id of the run. Every call binds the
+# same operation so the instance, receipt, and run record agree.
+script_json = '''
+[
+  {"tool_calls":[{"id":"read-1","name":"mcp.sekai.sekai.objects.get",
+    "args_json":"{\"operation_id\":\"<op>\",\"input\":{\"id\":\"widget-1\"}}"}]},
+  {"tool_calls":[{"id":"submit-1","name":"mcp.sekai.sekai.actions.submit",
+    "args_json":"{\"operation_id\":\"<op>\",\"input\":{\"type_id\":\"review.intake\",\"version\":\"1.0.0\",\"parameters_json\":\"{\\\"summary\\\":\\\"approve\\\"}\",\"idempotency_key\":\"<op>/review.intake\"}}"}]},
+  {"tool_calls":[{"id":"receipt-1","name":"mcp.sekai.chisei.receipt.read",
+    "args_json":"{\"operation_id\":\"<op>\",\"input\":{\"operation_id\":\"<op>\"}}"}]},
+  {"tool_calls":[{"id":"report-1","name":"report",
+    "args_json":"{\"summary\":\"read widget-1; review.intake@1.0.0 under <op>; receipt inspected\",\"success\":true}"}]}
+]
+'''

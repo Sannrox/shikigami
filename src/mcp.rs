@@ -9,14 +9,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::BufReader;
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::mpsc;
 
 pub(crate) mod framing;
 mod protocol;
 
 use protocol::{Client as McpClient, Transport, attach_tools};
 
-use crate::config::{Config, McpServerSettings};
+use crate::config::{Config, McpFraming, McpServerSettings};
 use crate::tools::{ExternalTool, ToolDef, ToolEnvironment, ToolError, ToolRegistry};
 
 /// Attach MCP tools named `mcp.<server>.<tool>` to a registry.
@@ -48,7 +49,13 @@ pub async fn attach_mcp_servers(
                 .check_http_url(url)
                 .map_err(ToolError::Message)?;
             match McpHttpTransport::connect(server, config).await {
-                Ok(client) => n += attach_tools(registry, &server.name, client).await?,
+                Ok(client) => {
+                    n += attach_tools(registry, &server.name, client)
+                        .await
+                        .map_err(|e| {
+                            ToolError::Message(format!("mcp server `{}`: {e}", server.name))
+                        })?;
+                }
                 Err(e) => {
                     return Err(ToolError::Message(format!(
                         "mcp server `{}`: {e}",
@@ -64,7 +71,13 @@ pub async fn attach_mcp_servers(
         let protected = config.protected_tool_environment_names();
         match McpStdioTransport::spawn(server, &protected).await {
             Ok(transport) => {
-                n += attach_tools(registry, &server.name, McpClient::new(transport)).await?;
+                n += attach_tools(
+                    registry,
+                    &server.name,
+                    McpClient::new(transport, server.timeout()),
+                )
+                .await
+                .map_err(|e| ToolError::Message(format!("mcp server `{}`: {e}", server.name)))?;
             }
             Err(e) => {
                 return Err(ToolError::Message(format!(
@@ -101,12 +114,27 @@ impl ExternalTool for MockEchoTool {
     }
 }
 
+/// Complete frames the reader task may hold ahead of the next exchange. Once
+/// full, the reader stops draining stdout and the pipe applies backpressure
+/// to the server, so a chatty server cannot grow harness memory without bound.
+const FRAME_QUEUE_CAPACITY: usize = 64;
+
 struct McpStdioTransport {
-    /// Kept alive for process lifetime (kill_on_drop).
-    #[allow(dead_code)]
+    /// Kept alive for process lifetime (kill_on_drop); killed explicitly once
+    /// the stdin stream is known to be desynchronized.
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Complete frames decoded by a dedicated reader task. Awaiting a channel
+    /// is cancellation-safe, so a request deadline can expire mid-response
+    /// without desynchronizing the stream; the late frame is discarded by id
+    /// on the next exchange.
+    frames: mpsc::Receiver<Result<Value, String>>,
+    framing: McpFraming,
+    /// Set for the duration of every stdin write. A deadline that fires while
+    /// the pipe is full drops the write future mid-frame and leaves this set,
+    /// which marks the stream unusable: the next write fails closed and kills
+    /// the server instead of appending a new request to a partial frame.
+    write_in_flight: bool,
 }
 
 impl McpStdioTransport {
@@ -136,27 +164,49 @@ impl McpStdioTransport {
             .stdout
             .take()
             .ok_or_else(|| ToolError::Message("mcp stdout missing".into()))?;
+        let (tx, frames) = mpsc::channel(FRAME_QUEUE_CAPACITY);
+        tokio::spawn(async move {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let frame = framing::read(&mut stdout).await;
+                let done = frame.is_err();
+                if tx.send(frame).await.is_err() || done {
+                    break;
+                }
+            }
+        });
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            frames,
+            framing: server.framing,
+            write_in_flight: false,
         })
     }
 
     async fn write_message(&mut self, msg: &Value) -> Result<(), ToolError> {
-        framing::write(&mut self.stdin, msg)
-            .await
-            .map_err(ToolError::Message)
+        if self.write_in_flight {
+            let _ = self.child.start_kill();
+            return Err(ToolError::Message(
+                "mcp stdin desynchronized: a previous request was interrupted mid-frame by its deadline; server killed, no further calls are accepted on this attachment"
+                    .into(),
+            ));
+        }
+        self.write_in_flight = true;
+        let written = match self.framing {
+            McpFraming::ContentLength => framing::write(&mut self.stdin, msg).await,
+            McpFraming::Newline => framing::write_line(&mut self.stdin, msg).await,
+        };
+        self.write_in_flight = false;
+        written.map_err(ToolError::Message)
     }
 
     async fn read_message(&mut self) -> Result<Value, ToolError> {
-        framing::read(&mut self.stdout).await.map_err(|error| {
-            ToolError::Message(if error == "eof" {
-                "mcp stdout closed".into()
-            } else {
-                error
-            })
-        })
+        match self.frames.recv().await {
+            Some(Ok(frame)) => Ok(frame),
+            Some(Err(error)) if error != "eof" => Err(ToolError::Message(error)),
+            Some(Err(_)) | None => Err(ToolError::Message("mcp stdout closed".into())),
+        }
     }
 }
 
@@ -207,10 +257,13 @@ impl McpHttpTransport {
         #[cfg(feature = "model-http")]
         {
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(server.timeout())
                 .build()
                 .map_err(|e| ToolError::Message(format!("http mcp client: {e}")))?;
-            Ok(McpClient::new(Self { url, token, client }))
+            Ok(McpClient::new(
+                Self { url, token, client },
+                server.timeout(),
+            ))
         }
         #[cfg(not(feature = "model-http"))]
         {
@@ -293,7 +346,142 @@ mod tests {
             transport: "stdio".into(),
             url: None,
             token_env: None,
+            framing: McpFraming::ContentLength,
+            timeout_secs: 30,
         }
+    }
+
+    /// Spec-compliant newline-delimited stdio server written in `sh`: it
+    /// answers `tools/list` with one tool, never answers a call whose
+    /// arguments say `hang`, and answers every other call with an unrelated
+    /// stray frame followed by an `isError` result.
+    #[cfg(unix)]
+    fn newline_sh_server(name: &str, timeout_secs: u64) -> McpServerSettings {
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"sh-mcp","version":"0"}}}\n' "$id" ;;
+    *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"probe","description":"probe","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"hang"'*) ;;
+    *'"method":"tools/call"'*)
+      printf '{"jsonrpc":"2.0","id":999,"result":{"stray":true}}\n'
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"{\\"code\\":\\"permission_denied\\"}"}],"isError":true}}\n' "$id" ;;
+  esac
+done
+"#;
+        McpServerSettings {
+            name: name.into(),
+            command: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            transport: "stdio".into(),
+            url: None,
+            token_env: None,
+            framing: McpFraming::Newline,
+            timeout_secs,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newline_stdio_server_projects_is_error_and_deadline_as_failures() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::default();
+        config.tools.mcp_servers = vec![newline_sh_server("nl", 1)];
+        let mut reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["read_file".into()],
+            30,
+            NetworkSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(attach_mcp_servers(&mut reg, &config).await.unwrap(), 1);
+        assert!(reg.definitions().iter().any(|d| d.name == "mcp.nl.probe"));
+
+        let denied = reg
+            .execute("mcp.nl.probe", r#"{"mode":"deny"}"#)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied.contains("permission_denied"), "{denied}");
+
+        let timed_out = reg
+            .execute("mcp.nl.probe", r#"{"mode":"hang"}"#)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(timed_out.contains("deadline_exceeded"), "{timed_out}");
+
+        // The stream stays usable after a deadline: the next call still gets
+        // its own response instead of the stale frame.
+        let denied_again = reg
+            .execute("mcp.nl.probe", r#"{"mode":"deny"}"#)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(denied_again.contains("permission_denied"), "{denied_again}");
+    }
+
+    /// Newline server that answers discovery and then stops reading stdin, so
+    /// a request larger than the pipe blocks until the client deadline drops
+    /// the write future mid-frame.
+    #[cfg(unix)]
+    fn stalled_sh_server(name: &str) -> McpServerSettings {
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"sh-mcp","version":"0"}}}\n' "$id" ;;
+    *'"method":"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"probe","description":"probe","inputSchema":{"type":"object"}}]}}\n' "$id"
+      exec sleep 10 ;;
+  esac
+done
+"#;
+        McpServerSettings {
+            name: name.into(),
+            command: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            transport: "stdio".into(),
+            url: None,
+            token_env: None,
+            framing: McpFraming::Newline,
+            timeout_secs: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_stdin_write_fails_closed_instead_of_desynchronizing() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::default();
+        config.tools.mcp_servers = vec![stalled_sh_server("stall")];
+        let mut reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["read_file".into()],
+            30,
+            NetworkSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(attach_mcp_servers(&mut reg, &config).await.unwrap(), 1);
+
+        // Larger than any default pipe capacity, smaller than MAX_FRAME_BYTES:
+        // the write parks on a full pipe and the deadline cancels it mid-frame.
+        let oversized = format!(r#"{{"pad":"{}"}}"#, "x".repeat(900 * 1024));
+        let timed_out = reg
+            .execute("mcp.stall.probe", &oversized)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(timed_out.contains("deadline_exceeded"), "{timed_out}");
+
+        // The partial frame must never be completed by a later request.
+        let refused = reg
+            .execute("mcp.stall.probe", r#"{"mode":"small"}"#)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("desynchronized"), "{refused}");
     }
 
     #[tokio::test]
@@ -350,6 +538,8 @@ mod tests {
             transport: "stdio".into(),
             url: None,
             token_env: None,
+            framing: McpFraming::ContentLength,
+            timeout_secs: 30,
         };
         let transport = McpStdioTransport::spawn(&server, &protected)
             .await
@@ -439,6 +629,8 @@ mod tests {
             transport: "http".into(),
             url: Some(format!("http://{addr}/mcp")),
             token_env: None,
+            framing: McpFraming::ContentLength,
+            timeout_secs: 30,
         }];
         let mut reg = ToolRegistry::with_builtins(
             dir.path(),

@@ -6,6 +6,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -267,10 +268,62 @@ pub struct McpServerSettings {
     /// Optional env var holding a Bearer token for HTTP MCP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    /// Stdio request framing written to the server: `content-length`
+    /// (default, LSP-style headers) or `newline` (MCP stdio specification,
+    /// one JSON-RPC message per line; used by `sekai-mcp` and the reference
+    /// servers). Responses are accepted in either framing.
+    #[serde(default = "default_mcp_framing")]
+    pub framing: McpFraming,
+    /// Per-request deadline for `tools/list` and `tools/call`. A call that
+    /// exceeds it fails closed with a `deadline_exceeded` tool error; the
+    /// remote effect may still have happened and must be reconciled through
+    /// the server's receipt surface.
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+/// Stdio framing an MCP client writes to a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpFraming {
+    /// `Content-Length` headers followed by the JSON body (LSP style).
+    #[default]
+    ContentLength,
+    /// One JSON-RPC message per line (MCP stdio transport).
+    Newline,
+}
+
+impl McpServerSettings {
+    /// Stdio server with newline framing and the default deadline.
+    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: command.into(),
+            args,
+            transport: default_mcp_transport(),
+            url: None,
+            token_env: None,
+            framing: McpFraming::Newline,
+            timeout_secs: default_mcp_timeout_secs(),
+        }
+    }
+
+    /// Per-request deadline as a [`Duration`].
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs.max(1))
+    }
 }
 
 fn default_mcp_transport() -> String {
     "stdio".into()
+}
+
+fn default_mcp_framing() -> McpFraming {
+    McpFraming::ContentLength
+}
+
+fn default_mcp_timeout_secs() -> u64 {
+    30
 }
 
 fn default_bash_timeout() -> u64 {
@@ -901,6 +954,14 @@ impl Config {
             ));
         }
         self.validate_governed_bash_controls()?;
+        for server in &self.tools.mcp_servers {
+            if server.timeout_secs == 0 {
+                return Err(ConfigError::Invalid(format!(
+                    "tools.mcp_servers `{}`: timeout_secs must be greater than zero",
+                    server.name
+                )));
+            }
+        }
         if self.governance.delayed_evidence.max_entries == 0 {
             return Err(ConfigError::Invalid(
                 "governance.delayed_evidence.max_entries must be greater than zero".into(),
@@ -1062,6 +1123,8 @@ script_json = "[]"
             transport: "http".into(),
             url: Some("https://mcp.example".into()),
             token_env: Some("MCP_TOKEN".into()),
+            framing: McpFraming::ContentLength,
+            timeout_secs: 30,
         });
 
         assert_eq!(
@@ -1075,6 +1138,59 @@ script_json = "[]"
                 .protected_tool_environment_names()
                 .contains(&"MODEL_KEY".into())
         );
+    }
+
+    #[test]
+    fn mcp_server_framing_and_deadline_parse_with_compatible_defaults() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+
+[[tools.mcp_servers]]
+name = "legacy"
+command = "legacy-mcp"
+
+[[tools.mcp_servers]]
+name = "sekai"
+command = "sekai-mcp"
+framing = "newline"
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let legacy = &config.tools.mcp_servers[0];
+        assert_eq!(legacy.framing, McpFraming::ContentLength);
+        assert_eq!(legacy.timeout_secs, 30);
+        let sekai = &config.tools.mcp_servers[1];
+        assert_eq!(sekai.framing, McpFraming::Newline);
+        assert_eq!(sekai.timeout(), Duration::from_secs(5));
+        assert!(config.validate().is_ok());
+
+        let mut zero = config.clone();
+        zero.tools.mcp_servers[1].timeout_secs = 0;
+        let err = zero.validate().unwrap_err().to_string();
+        assert!(err.contains("timeout_secs"), "{err}");
+
+        fs::write(
+            &path,
+            r#"
+version = 1
+
+[[tools.mcp_servers]]
+name = "bad"
+command = "x"
+framing = "sse"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(&path).unwrap_err(),
+            ConfigError::Parse { .. }
+        ));
     }
 
     #[test]

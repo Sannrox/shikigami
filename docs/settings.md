@@ -246,6 +246,23 @@ When `respect_ignore = true` (default), search tools skip heavy dirs (`node_modu
 (no negation/`!` in v1; pure matcher, no git binary). **`read_file` of an explicit
 path is never blocked by ignore** — ignore is convenience filtering, not a secret vault.
 
+### `[[tools.mcp_servers]]`
+
+Each entry attaches one MCP server whose tools join the registry as
+`mcp.<name>.<tool>`; list those names in `tools.enabled` to authorize them.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `name` | (required) | Registry prefix |
+| `command` / `args` | `""` / `[]` | Stdio server executable; `mock` registers an offline echo tool |
+| `transport` | `stdio` | `stdio` or `http` |
+| `url` / `token_env` | unset | HTTP endpoint and optional bearer-token env name |
+| `framing` | `content-length` | Stdio request framing: `content-length` (LSP-style headers) or `newline` (MCP stdio specification; `sekai-mcp`, reference servers). Responses are accepted in either framing. |
+| `timeout_secs` | `30` | Per-request deadline for `tools/list` and `tools/call`; must be > 0. On expiry the call fails closed with `deadline_exceeded` and the remote outcome must be reconciled through the server's receipt surface. |
+
+A `tools/call` result flagged `isError` is a failed tool call (`ok = false` in
+governance reports and events). See [mcp.md](mcp.md).
+
 ### `[context]`
 
 | Field | Default | Description |

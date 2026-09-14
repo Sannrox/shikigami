@@ -10,6 +10,7 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | Operator CLI | [`local-run.toml`](local-run.toml) | Offline profile for `doctor` / `run` demos |
 | Optional MCP host | [`mcp-host.example.json`](mcp-host.example.json) | Cursor/Claude Desktop-style stdio config for `shikigami mcp` |
 | Governed wiring | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Plane profile (needs reachable sekai-chisei) |
+| Governed ontology read → Action → receipt over MCP | [`governed-mcp-action.toml`](governed-mcp-action.toml) | Scripted run against `sekai-mcp`; local recipe in [docs/mcp.md](../docs/mcp.md) |
 | Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
 | Plane worker fleet sketch | [`k8s-worker-lifecycle.yaml`](k8s-worker-lifecycle.yaml) | Readiness/liveness/SIGTERM drain for managed plane workers |
 
