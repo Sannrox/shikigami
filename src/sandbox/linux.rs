@@ -591,9 +591,8 @@ mod tests {
 
     #[test]
     fn probe_reports_a_usable_abi_on_this_host() {
-        match probe_abi().and_then(require_abi) {
-            Ok(abi) => assert!(abi >= MIN_ABI, "abi={abi}"),
-            Err(_) => {}
+        if let Ok(abi) = probe_abi().and_then(require_abi) {
+            assert!(abi >= MIN_ABI, "abi={abi}");
         }
     }
 
