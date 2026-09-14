@@ -692,6 +692,64 @@ mod tests {
     }
 
     #[test]
+    fn doctor_warns_on_sandbox_none_and_refuses_unavailable_linux_native() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let harness = Harness::from_config(Config::default(), state).unwrap();
+        let report = harness.doctor();
+        assert!(report.ok);
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|line| line.contains("backend=none") && line.contains("no OS isolation")),
+            "{:?}",
+            report.lines
+        );
+
+        let state = StateRoot::new(dir.path().join("state-native"));
+        let mut config = Config::default();
+        config.governance.fail_closed = true;
+        config.sandbox.backend = crate::config::SandboxBackend::LinuxNative;
+        config.tools.enabled = vec!["bash".into(), "report".into()];
+        if cfg!(target_os = "linux") {
+            config.governance.fail_closed = false;
+            config.network.egress = crate::config::EgressMode::Deny;
+            let harness = Harness::from_config(config, state).unwrap();
+            let report = harness.doctor();
+            if report.ok {
+                assert!(
+                    report.lines.iter().any(|line| {
+                        line.contains("backend=linux_native") && line.contains("abi=")
+                    }),
+                    "{:?}",
+                    report.lines
+                );
+            } else {
+                assert!(
+                    report.lines.iter().any(|line| line.contains("Landlock")
+                        || line.contains("unavailable")
+                        || line.contains("linux_native")),
+                    "{:?}",
+                    report.lines
+                );
+            }
+        } else {
+            let harness = Harness::from_config(config, state).unwrap();
+            let report = harness.doctor();
+            assert!(!report.ok, "{:?}", report.lines);
+            assert!(
+                report
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("linux_native") && line.contains("Linux")),
+                "{:?}",
+                report.lines
+            );
+        }
+    }
+
+    #[test]
     fn doctor_fail_closed_governed_without_endpoint() {
         let dir = tempdir().unwrap();
         let state = StateRoot::new(dir.path().join("state"));

@@ -150,23 +150,37 @@ same inplace root.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| backend | "none" | none or Unix-only rlimit; the latter creates a child process group |
+| backend | "none" | `none` (no isolation), Unix-only `rlimit` (limits + process group), or Linux-only `linux_native` (Landlock + seccomp; ADR 0013) |
 | cpu_time_secs | unset | CPU seconds for Bash children |
 | memory_mb | unset | Address-space limit for Bash children |
 | user_processes | unset | Per-real-user process ceiling (RLIMIT_NPROC); not isolated per run |
 | file_size_mb | unset | Maximum child-created file size |
 | open_files | unset | Maximum open descriptors |
+| read_only_paths | `[]` | Extra absolute paths granted read/execute under `linux_native` only |
 
-rlimit is opt-in and applies to Bash foreground/background children. It is
-not a complete container or network sandbox: path jail, egress policy, and
-governance remain separate controls. Non-Unix hosts reject the backend during
-configuration validation.
+`none` is the historical default and produces a doctor warning. `rlimit` is
+opt-in limits-only (doctor label: `limits`); it is not OS isolation. Non-Unix
+hosts reject `rlimit`; non-Linux hosts reject `linux_native`. Selecting a
+backend the host cannot provide fails `doctor` and `run` under every profile.
+
+`linux_native` applies in the child's `pre_exec`: Landlock ABI 3+ (kernel 6.2)
+is required so `truncate` is mediated. ABI 6 (kernel 6.12) additionally scopes
+signals to the sandbox; below that, doctor reports `signal_scoping=none`
+(same-user `kill` of the harness remains a residual). The workspace and a
+run-owned `TMPDIR`
+are the writable trees; `/proc`, `$HOME`, and host secrets are denied; `socket()`
+fails for every address family (`socketpair` is limited to `AF_UNIX` stream
+pairs for pipelines). Landlock does not mediate `chmod`/`chown`/`setxattr` on
+inaccessible paths; that is a kernel residual, not an allowlist. Tool-child sockets
+stay denied even when `[network]` is an allowlist — that table still governs
+only harness-owned HTTP clients. See [network.md](network.md) and
+[ADR 0013](decisions/0013-os-sandbox-adapter.md).
 
 Under `profile = governed` or `governance.fail_closed = true`, enabling Bash
 (explicitly or via `tools.mode = workspace_exec`) **refuses** configuration when
 `sandbox.backend = none` or `network.egress = unrestricted`. Operators must set
-`sandbox.backend = rlimit` and `network.egress = deny` or `allowlist`. Full OS
-isolation (containers / seccomp) remains a host residual.
+`sandbox.backend = rlimit` or `linux_native`, and `network.egress = deny` or
+`allowlist`.
 
 ### `[run]` (tool concurrency)
 

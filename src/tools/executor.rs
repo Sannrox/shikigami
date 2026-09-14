@@ -53,7 +53,7 @@ impl ToolExecutor {
         } else {
             Vec::new()
         };
-        let sandbox = Sandbox::new(sandbox_settings)
+        let sandbox = Sandbox::for_workspace(sandbox_settings, Some(&workspace))
             .map_err(|error| ToolError::Message(error.to_string()))?;
         Ok(Self {
             workspace,

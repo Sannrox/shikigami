@@ -34,17 +34,16 @@ This is not an OS sandbox and does not replace container/seccomp isolation.
 
 ## Residual risk (bash)
 
-`bash` is **not** interposing network syscalls. A process with bash enabled can
-still open sockets unless an **OS sandbox** (containers, seccomp, network NS)
-is applied outside the harness. Prefer `tools.mode = "workspace"` (no bash)
-when you need lower network risk without OS isolation.
+`bash` is **not** interposing network syscalls unless `sandbox.backend =
+linux_native` is selected on Linux. That backend denies `socket()` in the
+child; `[network]` still governs only the harness-owned HTTP clients above.
+Prefer `tools.mode = "workspace"` (no bash) when you need lower network risk
+without OS isolation, or on hosts that cannot provide `linux_native`.
 
 ## Future
 
 MCP HTTP/SSE transports should call the same `NetworkSettings::check_http_url`.
 
-[ADR 0013](decisions/0013-os-sandbox-adapter.md) selects an in-process Linux
-sandbox tier (`linux_native`: Landlock plus a seccomp socket gate) under which
-tool children cannot create sockets at all; `[network]` keeps governing only
-the harness-owned clients above. Until that adapter lands, the residual risk
-above stands.
+An address-level egress allowlist for tool children is a separate decision
+([ADR 0013](decisions/0013-os-sandbox-adapter.md)); today `linux_native`
+either denies every socket or (later) can delegate sockets to the host.
