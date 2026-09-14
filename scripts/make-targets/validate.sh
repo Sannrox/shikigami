@@ -10,7 +10,7 @@ validation_count=0
 while IFS= read -r script; do
     validation_count=$((validation_count + 1))
     echo "Validating $(basename "${script}")"
-    "${script}"
+    bash "${script}"
 done < <(
     find "${ROOT_PATH}/scripts" -maxdepth 1 -type f -name 'validate-*.sh' -print \
         | LC_ALL=C sort

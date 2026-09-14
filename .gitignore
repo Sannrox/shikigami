@@ -1,6 +1,7 @@
 /target
 .state/
 .shikigami-state/
+/.worktrees/
 .DS_Store
 *.swp
 *.swo
