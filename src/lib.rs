@@ -49,13 +49,14 @@ pub mod sandbox;
 pub mod serve;
 pub mod state;
 pub mod tools;
+pub mod tracing_export;
 pub mod transcript;
 pub mod worker_lifecycle;
 pub mod workspace;
 
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpFraming, McpServerSettings, PermissionMode,
-    SandboxBackend, SandboxSettings,
+    SandboxBackend, SandboxSettings, TracingSettings,
 };
 pub use content::{
     CLI_FILE_RESOLVER_ID, CONTENT_CONTRACT_VERSION, CONTENT_PROCESS_REQUEST_SCHEMA_VERSION,

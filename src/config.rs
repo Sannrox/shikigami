@@ -29,6 +29,9 @@ pub struct Config {
     pub run: RunSettings,
     #[serde(default)]
     pub events: EventsSettings,
+    /// Optional OpenTelemetry span export. Off by default.
+    #[serde(default)]
+    pub tracing: TracingSettings,
     #[serde(default)]
     pub model: ModelSettings,
     #[serde(default)]
@@ -535,6 +538,48 @@ impl Default for EventsSettings {
     }
 }
 
+/// Optional identity-only span export (`docs/tracing.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracingSettings {
+    /// When false (default), no spans are created or exported.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `none` (default) or `otlp`.
+    #[serde(default = "default_tracing_exporter")]
+    pub exporter: String,
+    /// File path, `file://` path, or OTLP/HTTP collector URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+fn default_tracing_exporter() -> String {
+    "none".into()
+}
+
+impl Default for TracingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            exporter: default_tracing_exporter(),
+            endpoint: None,
+        }
+    }
+}
+
+impl TracingSettings {
+    pub fn doctor_line(&self) -> String {
+        if !self.enabled {
+            return "tracing:    disabled".into();
+        }
+        format!(
+            "tracing:    {} {}",
+            self.exporter,
+            self.endpoint.as_deref().unwrap_or("(missing endpoint)")
+        )
+    }
+}
+
 /// Model source for turns when governance does not own planning (none/local).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -671,6 +716,7 @@ impl Default for Config {
             tools: ToolsSettings::default(),
             run: RunSettings::default(),
             events: EventsSettings::default(),
+            tracing: TracingSettings::default(),
             model: ModelSettings::default(),
             context: ContextSettings::default(),
             network: NetworkSettings::default(),
@@ -914,6 +960,7 @@ impl Config {
             "stderr" | "jsonl" | "none" => {}
             other => return Err(ConfigError::UnknownEventsAdapter(other.into())),
         }
+        self.validate_tracing()?;
         match self.model.adapter.as_str() {
             "scripted" | "http" | "plane" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
@@ -997,6 +1044,46 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "governance.delayed_evidence.retention_ms must be greater than zero".into(),
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_tracing(&self) -> Result<(), ConfigError> {
+        match self.tracing.exporter.as_str() {
+            "none" | "otlp" => {}
+            other => {
+                return Err(ConfigError::Invalid(format!(
+                    "unknown tracing.exporter `{other}`"
+                )));
+            }
+        }
+        if !self.tracing.enabled {
+            return Ok(());
+        }
+        if self.tracing.exporter != "otlp" {
+            return Err(ConfigError::Invalid(
+                "tracing.enabled requires tracing.exporter = \"otlp\"".into(),
+            ));
+        }
+        let endpoint = self
+            .tracing
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ConfigError::Invalid("tracing.enabled requires tracing.endpoint".into())
+            })?;
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            #[cfg(not(feature = "model-http"))]
+            {
+                return Err(ConfigError::Invalid(
+                    "otlp HTTP export requires the model-http feature".into(),
+                ));
+            }
+            self.network
+                .check_http_url(endpoint)
+                .map_err(ConfigError::Invalid)?;
         }
         Ok(())
     }
@@ -1478,5 +1565,45 @@ read_only_paths = ["{}"]
             prop_assert!(c.validate().is_ok());
             prop_assert!(!c.requires_governance());
         });
+    }
+
+    #[test]
+    fn tracing_disabled_by_default() {
+        let config = Config::default();
+        assert!(!config.tracing.enabled);
+        assert_eq!(config.tracing.exporter, "none");
+        assert!(config.tracing.endpoint.is_none());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn tracing_enabled_requires_otlp_endpoint() {
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("exporter")
+        );
+        config.tracing.exporter = "otlp".into();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("endpoint")
+        );
+        config.tracing.endpoint = Some("/tmp/spans.json".into());
+        config.validate().unwrap();
+        config.tracing.exporter = "jaeger".into();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown tracing.exporter")
+        );
     }
 }

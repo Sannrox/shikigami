@@ -145,6 +145,8 @@ impl<'a> DurableToolBatch<'a> {
 
         // Ordered ToolStart for stable live streams.
         for (index, call) in turn.tool_calls.iter().enumerate() {
+            let call_id = stable_tool_call_id(call, session.turns, index);
+            session.spans.start_tool(&call_id);
             self.engine.emit(
                 &session.run_id,
                 HarnessEvent::ToolStart {
@@ -152,7 +154,7 @@ impl<'a> DurableToolBatch<'a> {
                     args_json: projected_detail(session.is_content(), &call.args_json),
                     run_id: session.run_id.clone(),
                     turn: session.turns,
-                    call_id: stable_tool_call_id(call, session.turns, index),
+                    call_id,
                 },
             );
         }
@@ -435,6 +437,7 @@ impl<'a> DurableToolBatch<'a> {
                             },
                         );
                     }
+                    session.spans.end_tool(&report_call_id, true);
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -468,6 +471,7 @@ impl<'a> DurableToolBatch<'a> {
                             &detail,
                         )
                         .await?;
+                    session.spans.end_tool(&report_call_id, report.success);
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -509,6 +513,7 @@ impl<'a> DurableToolBatch<'a> {
                     // event for retry if the report fails.
                     session.save_recoverable(Some(parked), tools.as_ref())?;
                     report_result?;
+                    session.spans.end_tool(&report_call_id, false);
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -546,6 +551,7 @@ impl<'a> DurableToolBatch<'a> {
                             &reported_detail,
                         )
                         .await?;
+                    session.spans.end_tool(&report_call_id, false);
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {

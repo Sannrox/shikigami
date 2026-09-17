@@ -26,6 +26,7 @@ Operator and contributor documentation for **shikigami**.
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
 | Run deterministic project checks | [project-verification.md](project-verification.md) |
 | Run metrics export | [metrics.md](metrics.md) |
+| Run and tool-call span export | [tracing.md](tracing.md) |
 | Network egress policy | [network.md](network.md) |
 | MCP client and server host | [mcp.md](mcp.md) |
 | Lifecycle hooks | [hooks.md](hooks.md) |

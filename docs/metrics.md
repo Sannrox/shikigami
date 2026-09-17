@@ -53,5 +53,7 @@ surface.
 
 ## Non-goals
 
-- Full observability platform / tracing backend
+- Full observability platform / tracing backend. Identity-only OTLP span
+  export is a separate, default-off settings surface; see
+  [tracing.md](tracing.md).
 - Governed accounting truth; use plane harvest for that

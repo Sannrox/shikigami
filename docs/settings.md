@@ -338,6 +338,22 @@ the current system prompt or resume fails.
 
 `jsonl` appends under the state runs directory (`events.jsonl`).
 
+### `[tracing]`
+
+Optional OpenTelemetry span export. **Off by default.** See
+[tracing.md](tracing.md).
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Create and export spans |
+| `exporter` | `"none"` | `none` \| `otlp` |
+| `endpoint` | unset | File path, `file://` path, or OTLP/HTTP collector URL |
+
+`enabled = true` requires `exporter = "otlp"` and `endpoint`. HTTP endpoints
+obey `[network]` egress. Disabled export leaves offline behavior unchanged.
+Attributes are an identity allowlist; prompts and tool payloads are never
+exported.
+
 ## Environment variables
 
 | Variable | Purpose |

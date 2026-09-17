@@ -32,6 +32,7 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
         harness.events.id(),
         events_detail
     ));
+    lines.push(harness.config.tracing.doctor_line());
     lines.push(format!("model:     {}", harness.model.id()));
     append_tool_authority(harness, &mut lines);
     lines.push(format!(

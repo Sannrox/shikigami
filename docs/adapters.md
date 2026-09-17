@@ -153,6 +153,7 @@ MCP: optional `tools.mcp_servers` — see [mcp.md](mcp.md).
 | Name | Why |
 | --- | --- |
 | **tenkai** | Installs/upgrades the `shikigami` binary. Not loaded by the process. |
+| **metrics / tracing export** | Settings-gated process telemetry, not ports. Counters stay local; optional OTLP spans are identity-only ([tracing.md](tracing.md)). |
 | Third-party agent CLIs | Not the long-term core; native loop first. |
 
 ## Implementing a custom governance adapter

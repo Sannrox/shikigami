@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Additive `[tracing]` settings (off by default) export one OTLP JSON trace per
+  run with a root span plus turn and tool-call spans. Attributes are the
+  harvest identity allowlist (`run_id`, `attempt_id`, `logical_operation_id`,
+  `plan_operation_id`, `call_id`). Prompts and tool payloads are never
+  exported. File or OTLP/HTTP endpoints; HTTP obeys `[network]` egress.
+  Disabled export leaves offline behavior unchanged. See
+  [docs/tracing.md](docs/tracing.md).
+
 - Additive `sandbox.backend = "linux_native"` (Linux only): Landlock ABI 3+
   filesystem rules plus a seccomp `socket()` deny applied in each Bash child's
   `pre_exec`. The workspace and a run-owned `TMPDIR` are writable; host secrets,

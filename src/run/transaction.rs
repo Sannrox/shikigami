@@ -15,6 +15,7 @@ use crate::governance::RunOutcome;
 use crate::hooks::{self, HookEvent};
 use crate::model::{ChatMessage, CostEstimate};
 use crate::replay::{ReplayExecution, ReplayTerminalCheckpoint};
+use crate::tracing_export::RunSpanTrace;
 
 use super::model_turn::DurableModelTurn;
 use super::tool_batch::{DurableToolBatch, ToolBatchOutcome};
@@ -60,6 +61,12 @@ impl<'a> RunTransaction<'a> {
             content.as_ref(),
         )
         .await?;
+        let plan_operation_id = governance_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.operation_id.as_str())
+            .unwrap_or("");
+        session.spans = RunSpanTrace::begin(&self.engine.config, &handle, plan_operation_id)
+            .map_err(|error| RunError::Message(error.to_string()))?;
         if request.resume_run_id.is_some() {
             self.engine.model.restore_replay_cursor(session.turns)?;
         }
@@ -222,6 +229,7 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
+                self.export_spans(&mut session, false).await;
                 return Err(e);
             }
         };
@@ -256,6 +264,7 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
+                self.export_spans(&mut session, false).await;
                 return Err(error.into());
             }
             // Successful completion clears adapter-owned receipt correlation
@@ -275,6 +284,7 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
+                self.export_spans(&mut session, false).await;
                 return Err(error);
             }
         }
@@ -300,7 +310,10 @@ impl<'a> RunTransaction<'a> {
         if termination != RunTermination::Parked {
             session.mark_replay_finalized(artifact_dir.as_deref());
             session.mark_content_finalized(artifact_dir.as_deref());
-            session.save(tools.as_ref())?;
+            if let Err(error) = session.save(tools.as_ref()) {
+                self.export_spans(&mut session, success).await;
+                return Err(error);
+            }
         }
 
         let _ = hooks::run_hooks(
@@ -314,6 +327,8 @@ impl<'a> RunTransaction<'a> {
             }),
         )
         .await;
+
+        self.export_spans(&mut session, success).await;
 
         Ok(RunResult {
             run_id: session.run_id,
@@ -329,6 +344,18 @@ impl<'a> RunTransaction<'a> {
             cost,
             todos: tools.todos(),
         })
+    }
+
+    async fn export_spans(&self, session: &mut super::session::RunSession, success: bool) {
+        if let Err(error) = session.spans.finish(success).await {
+            self.engine.emit(
+                &session.run_id,
+                HarnessEvent::Message {
+                    level: "warn".into(),
+                    text: format!("span export failed: {error}"),
+                },
+            );
+        }
     }
 }
 

@@ -19,6 +19,7 @@ use crate::governance::GovernancePort;
 use crate::model::{ChatMessage, TokenUsage};
 use crate::replay::{ReplayCheckpoint, ReplayTerminalCheckpoint};
 use crate::tools::ToolRegistry;
+use crate::tracing_export::RunSpanTrace;
 
 use super::{RunError, RunTermination, SYSTEM_PROMPT};
 
@@ -38,6 +39,7 @@ pub(super) struct RunSession {
     pub turns: u32,
     replay: Option<ReplayCheckpoint>,
     content: Option<ContentSession>,
+    pub spans: RunSpanTrace,
 }
 
 struct ContentSession {
@@ -82,6 +84,7 @@ impl RunSession {
             turns,
             replay: None,
             content: None,
+            spans: RunSpanTrace::disabled(),
         }
     }
 

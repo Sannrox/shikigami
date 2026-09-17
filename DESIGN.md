@@ -13,7 +13,8 @@ Shikigami executes agent **runs**:
 2. Drive a model turn loop (locally or through a governance plane).
 3. Execute jailed tools.
 4. Emit harness-local progress events.
-5. Complete with a structured outcome (and optional plane reporting).
+5. Optionally export identity-only run/turn/tool spans when `[tracing]` is enabled.
+6. Complete with a structured outcome (and optional plane reporting).
 
 It does **not** own:
 
@@ -114,7 +115,7 @@ create run id
         authorize + execute tools (workspace jail)
         governance.report_tool (best-effort / fail-closed)
   → governance.complete_run
-  → emit local events / exit
+  → emit local events / optional identity-only spans / exit
 ```
 
 Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
