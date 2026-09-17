@@ -146,6 +146,7 @@ impl<'a> DurableModelTurn<'a> {
                 status: "planning".into(),
             },
         );
+        session.spans.start_turn(session.turns.saturating_add(1));
 
         let turn = if let Some(turn) = self.staged_content_turn.take() {
             let resolver = session
@@ -271,6 +272,7 @@ impl<'a> DurableModelTurn<'a> {
             self.started,
             self.timeout,
         )?;
+        session.spans.end_turn();
         Ok(turn)
     }
 

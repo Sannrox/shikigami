@@ -9,7 +9,7 @@ results, cancellation, events, or metrics:
 | One-shot operator or CI execution | CLI `doctor` / `run` |
 | Long-running filesystem or plane-claim intake | `shikigami serve` |
 | IDE or tool-client integration | MCP stdio |
-| Typed results, cancellation, events, or metrics in the same process | Rust library `Harness` |
+| Typed results, cancellation, events, metrics, or optional span export in the same process | Rust library `Harness` |
 
 The CLI, `serve`, and MCP hosts all use the same `Harness`; choosing a process
 host does not fork the turn loop or weaken governance.

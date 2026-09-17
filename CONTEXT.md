@@ -3,6 +3,14 @@
 This glossary complements the architecture and product definitions in
 [`DESIGN.md`](DESIGN.md).
 
+## Identity-only span export
+
+Optional, default-off OpenTelemetry export of one run as a trace. Policy
+gates whether anything leaves the process; a fixed attribute allowlist is
+enforced at the emission boundary. Spans carry run, attempt, inbound
+operation, plane decision, and tool-call identities only. They are not
+receipts and not a tracing backend.
+
 ## Delayed evidence queue
 
 Bounded host-local spool for signed already-executed outcomes that cannot

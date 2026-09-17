@@ -16,6 +16,7 @@ How shikigami identifiers map to sekai-chisei plane fields. Authority:
 | replay `source_run_id` | retained comparison evidence | Never reused as the replay attempt id |
 | `ReplayResult.run.run_id` | replay attempt id | New UUID, or the same replay id when restarting that attempt |
 | `HarnessEvent` `call_id` | durable tool-call identity | `tool-{turn}-{index}[-{model_id}]`; same string as staged executions/reports |
+| OTLP span attributes | harvest / plane correlation | `run_id`, `attempt_id`, `logical_operation_id`, `plan_operation_id`, tool `call_id` — see [tracing.md](tracing.md) |
 
 ### Governed path population
 
