@@ -13,7 +13,7 @@ Architectural decision: [decisions/0001-ports-and-settings.md](decisions/0001-po
 | `none` | stable for v0 | No external plane; local model path; tool allow-list only |
 | `local` | stable for v0 | In-process tool allow-list for deterministic tests |
 | `http-callback` (alias `host-authz`) | stable for host brokers | POSTs tool authz to a host URL; allow/deny with timeout |
-| `sekai-chisei` | primary production path | gRPC: probe, `PlanExecution`, `ExecutePlanStream`, operation events |
+| `sekai-chisei` | primary production path | gRPC: probe, `PlanExecution`, `ExecutePlanStream`, operation events; parks on `require_approval` and re-authorizes the same request on resume |
 
 ### HTTP host callback (`http-callback`)
 

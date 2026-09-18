@@ -16,6 +16,7 @@ governed truth. Offline adapters (`none`, `local`) never write to the plane.
 | Model `PlanExecution.plan_id` | per-turn model receipt | Each governed model call has its own executed plan and terminal receipt |
 | Run start | host `PlanExecution` plus `ReportOperationEvent(attempt_started)` | The authenticated attempt event follows the host receipt's budget parent |
 | Tool authorization / execution | External-action decision, signed permit redemption, and `action_performed` | The host must redeem a permitted action before executing it; local checkpoints remain non-authoritative |
+| `require_approval` | Plane approval identity plus host park | The harness parks at the effect boundary, polls current plane state on resume, and never self-approves. See [Discussion #291](https://github.com/Sannrox/shikigami/discussions/291) |
 | Run finish | `GetOperationReceipt` plus authenticated `ReportOperationEvent(outcome_recorded)` | The host receipt is completed after the model and host-tool facts are linked |
 | Inspect | `GetOperationReceipt(host_plan_id)` | Reconstructs the host lifecycle; `model_called` attributes point to per-turn model receipts |
 

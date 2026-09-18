@@ -9,7 +9,9 @@ mod none;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::checkpoint::{GovernanceCheckpoint, StagedToolExecution, StagedToolReport};
+use crate::checkpoint::{
+    ApprovalPark, GovernanceCheckpoint, StagedToolExecution, StagedToolReport,
+};
 use crate::config::Config;
 use crate::content::{
     ContentCapabilitiesV1, ContentMessageV1, ContentModelTurnV1, ContentResolver, resolve_accepted,
@@ -187,6 +189,24 @@ impl LocalDurability {
         })
     }
 
+    fn record_approval_park(
+        &self,
+        run_id: &str,
+        park: ApprovalPark,
+    ) -> Result<(), GovernanceError> {
+        self.with_checkpoint(run_id, |checkpoint| {
+            checkpoint.approval_park = Some(park);
+            Ok(())
+        })
+    }
+
+    fn clear_approval_park(&self, run_id: &str) -> Result<(), GovernanceError> {
+        self.with_checkpoint(run_id, |checkpoint| {
+            checkpoint.approval_park = None;
+            Ok(())
+        })
+    }
+
     fn with_checkpoint(
         &self,
         run_id: &str,
@@ -211,6 +231,72 @@ pub enum GovernanceError {
     Unavailable(String),
     #[error("tool denied: {0}")]
     Denied(String),
+    #[error("approval required: {approval_id}")]
+    RequireApproval {
+        approval_id: String,
+        authorization_id: String,
+        request_digest: String,
+        expires_at_ms: i64,
+        deadline_ms: i64,
+        reason: String,
+    },
+}
+
+/// Current plane (or scripted) state for one approval identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalState {
+    Pending,
+    Approved { permit_id: String },
+    Denied { reason: String },
+    Expired,
+    Cancelled,
+    Revoked,
+}
+
+/// Host clock used to expire a local approval wait fail-closed.
+pub fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Re-validate a parked approval against current authority. Local scratch
+/// cannot approve; a passed local deadline expires a still-pending wait.
+pub fn resolve_approval_wait(
+    park: &ApprovalPark,
+    state: ApprovalState,
+    now_ms: i64,
+) -> Result<(), GovernanceError> {
+    let locally_expired = park.expires_at_ms > 0 && now_ms >= park.expires_at_ms;
+    match state {
+        ApprovalState::Approved { .. } => Ok(()),
+        ApprovalState::Pending if locally_expired => Err(GovernanceError::Denied(format!(
+            "approval `{}` expired",
+            park.approval_id
+        ))),
+        ApprovalState::Pending => Err(GovernanceError::RequireApproval {
+            approval_id: park.approval_id.clone(),
+            authorization_id: park.authorization_id.clone(),
+            request_digest: park.request_digest.clone(),
+            expires_at_ms: park.expires_at_ms,
+            deadline_ms: park.deadline_ms,
+            reason: format!("approval `{}` is still pending", park.approval_id),
+        }),
+        ApprovalState::Denied { reason } => Err(GovernanceError::Denied(reason)),
+        ApprovalState::Expired => Err(GovernanceError::Denied(format!(
+            "approval `{}` expired",
+            park.approval_id
+        ))),
+        ApprovalState::Cancelled => Err(GovernanceError::Denied(format!(
+            "approval `{}` cancelled",
+            park.approval_id
+        ))),
+        ApprovalState::Revoked => Err(GovernanceError::Denied(format!(
+            "approval `{}` revoked",
+            park.approval_id
+        ))),
+    }
 }
 
 #[async_trait]
@@ -382,6 +468,29 @@ pub trait GovernancePort: Send + Sync {
         self.authorize_tool(handle, name, args_json).await
     }
 
+    /// Poll current approval authority. Adapters that cannot observe
+    /// approvals leave the default unsupported.
+    async fn approval_state(&self, approval_id: &str) -> Result<ApprovalState, GovernanceError> {
+        let _ = approval_id;
+        Err(GovernanceError::Message(format!(
+            "approval state is not supported by governance adapter `{}`",
+            self.id()
+        )))
+    }
+
+    /// Persist approval-wait scratch on the governance checkpoint.
+    async fn record_approval_park(
+        &self,
+        _handle: &RunHandle,
+        _park: ApprovalPark,
+    ) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
+    async fn clear_approval_park(&self, _handle: &RunHandle) -> Result<(), GovernanceError> {
+        Ok(())
+    }
+
     async fn report_tool(
         &self,
         handle: &RunHandle,
@@ -550,6 +659,37 @@ mod tests {
                 .unwrap()
                 .pending_tool_executions
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_approval_wait_expires_pending_when_local_deadline_passes() {
+        let park = ApprovalPark {
+            approval_id: "appr-1".into(),
+            call_id: "tool-1-0".into(),
+            tool_name: "write_file".into(),
+            authorization_id: "auth-1".into(),
+            request_digest: "digest".into(),
+            expires_at_ms: 10,
+            parked_at_ms: 1,
+            deadline_ms: 20,
+        };
+        let err = resolve_approval_wait(&park, ApprovalState::Pending, 10).unwrap_err();
+        assert!(matches!(err, GovernanceError::Denied(message) if message.contains("expired")));
+        assert!(resolve_approval_wait(&park, ApprovalState::Pending, 9).is_err());
+        assert!(matches!(
+            resolve_approval_wait(&park, ApprovalState::Pending, 9).unwrap_err(),
+            GovernanceError::RequireApproval { .. }
+        ));
+        assert!(
+            resolve_approval_wait(
+                &park,
+                ApprovalState::Approved {
+                    permit_id: "permit-1".into()
+                },
+                10
+            )
+            .is_ok()
         );
     }
 

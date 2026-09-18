@@ -313,15 +313,17 @@ impl<'a> RunSupervision<'a> {
                 "restore_snapshot is not supported with workspace adapter `inplace`".into(),
             ));
         }
-        if checkpoint.park.is_some() && request.resume_answer.is_none() {
+        if checkpoint.is_escalate_park() && request.resume_answer.is_none() {
             return Err(RunError::Message(format!(
                 "run {resume_id} is parked; supply resume_answer / --answer to continue"
             )));
         }
-        if checkpoint.park.is_none() && request.resume_answer.is_some() {
-            return Err(RunError::Message(
-                "resume_answer provided but run is not parked".into(),
-            ));
+        if request.resume_answer.is_some() && !checkpoint.is_escalate_park() {
+            return Err(RunError::Message(if checkpoint.approval_park().is_some() {
+                "resume_answer is not used for approval parks".into()
+            } else {
+                "resume_answer provided but run is not parked".into()
+            }));
         }
         Ok(Some(checkpoint))
     }

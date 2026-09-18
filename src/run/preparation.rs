@@ -237,24 +237,33 @@ fn initial_state(
         } else {
             request.task.clone()
         };
+        let escalate_park = checkpoint.is_escalate_park();
+        let approval_wait = checkpoint.approval_park().is_some();
+        let park_tool_call_id = checkpoint
+            .park
+            .as_ref()
+            .map(|park| park.tool_call_id.clone());
+        let park_reason = checkpoint.park.as_ref().map(|park| park.reason.clone());
         let mut messages = checkpoint.messages;
-        if let Some(park) = &checkpoint.park {
+        if escalate_park {
             let answer = request.resume_answer.as_ref().ok_or_else(|| {
                 RunError::Message(format!(
                     "run {resume_id} is parked (reason: {}); supply resume_answer / --answer to continue",
-                    park.reason
+                    park_reason.as_deref().unwrap_or("escalate")
                 ))
             })?;
             messages.push(ChatMessage {
                 role: "tool".into(),
                 content: format!("operator answer: {answer}"),
-                tool_call_id: park.tool_call_id.clone(),
+                tool_call_id: park_tool_call_id.expect("escalate park"),
                 tool_calls: vec![],
             });
         } else if request.resume_answer.is_some() {
-            return Err(RunError::Message(
-                "resume_answer provided but run is not parked".into(),
-            ));
+            return Err(RunError::Message(if approval_wait {
+                "resume_answer is not used for approval parks".into()
+            } else {
+                "resume_answer provided but run is not parked".into()
+            }));
         }
         return Ok((
             checkpoint.run_id,

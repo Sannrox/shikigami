@@ -14,7 +14,9 @@ Shikigami executes agent **runs**:
 3. Execute jailed tools.
 4. Emit harness-local progress events.
 5. Optionally export identity-only run/turn/tool spans when `[tracing]` is enabled.
-6. Complete with a structured outcome (and optional plane reporting).
+6. Park on a plane `require_approval` decision and resume after re-validating
+   current authority (no host-side self-approval).
+7. Complete with a structured outcome (and optional plane reporting).
 
 It does **not** own:
 

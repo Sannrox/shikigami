@@ -893,6 +893,18 @@ impl GovernancePort for SekaiChiseiGovernance {
         tool_authorization::authorize(self, handle, call_id, name, args_json).await
     }
 
+    async fn record_approval_park(
+        &self,
+        handle: &RunHandle,
+        park: crate::checkpoint::ApprovalPark,
+    ) -> Result<(), GovernanceError> {
+        self.harvest.set_approval_park(&handle.run_id, park)
+    }
+
+    async fn clear_approval_park(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
+        self.harvest.clear_approval_park(&handle.run_id)
+    }
+
     async fn report_tool(
         &self,
         handle: &RunHandle,
@@ -1484,6 +1496,7 @@ mod tests {
             "tool-1-0-provider-call",
             "write_file",
             "{}",
+            None,
         )
         .unwrap();
         assert_eq!(request.intended_executor, "shikigami");
@@ -1500,7 +1513,8 @@ mod tests {
                 &handle,
                 "tool-1-0-provider-call",
                 "write_file",
-                "{}"
+                "{}",
+                None,
             )
             .unwrap()
             .request_id
@@ -1520,16 +1534,33 @@ mod tests {
     }
 
     #[test]
-    fn require_approval_blocks_headless() {
+    fn require_approval_parks_when_approval_id_is_present() {
+        let mut waiting = decision("require_approval", "needs human");
+        waiting.approval_id = "appr-1".into();
+        let err = tool_authorization::interpret_decision(&waiting).unwrap_err();
+        match err {
+            GovernanceError::RequireApproval {
+                approval_id,
+                reason,
+                ..
+            } => {
+                assert_eq!(approval_id, "appr-1");
+                assert!(reason.contains("needs human"), "{reason}");
+            }
+            other => panic!("expected RequireApproval, got {other}"),
+        }
+    }
+
+    #[test]
+    fn require_approval_without_id_fails_closed() {
         let err =
             tool_authorization::interpret_decision(&decision("require_approval", "needs human"))
                 .unwrap_err();
         match err {
-            GovernanceError::Denied(msg) => {
-                assert!(msg.contains("approval"), "{msg}");
-                assert!(msg.contains("needs human"), "{msg}");
+            GovernanceError::Message(msg) => {
+                assert!(msg.contains("approval_id"), "{msg}");
             }
-            other => panic!("expected Denied, got {other}"),
+            other => panic!("expected missing approval_id, got {other}"),
         }
     }
 

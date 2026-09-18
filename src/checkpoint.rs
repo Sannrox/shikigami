@@ -29,6 +29,21 @@ pub struct ParkedState {
     pub tool_call_id: String,
 }
 
+/// Local scratch for a plane `require_approval` wait. Not a permit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalPark {
+    pub approval_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub authorization_id: String,
+    pub request_digest: String,
+    pub expires_at_ms: i64,
+    pub parked_at_ms: i64,
+    /// Original external-action deadline. Required to resend the same request.
+    #[serde(default)]
+    pub deadline_ms: i64,
+}
+
 /// Governance correlation that must survive a local resume. This is a
 /// transport/retry aid only; the plane receipt remains authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -51,6 +66,9 @@ pub struct GovernanceCheckpoint {
     /// Bounded fallback grant/selection scratch. Not a governance receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<crate::fallback::FallbackCheckpoint>,
+    /// Additive approval-wait scratch. Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_park: Option<ApprovalPark>,
 }
 
 /// Host-side tool outcome staged before authenticated reporting. The host may
@@ -270,6 +288,18 @@ impl Checkpoint {
         }
         Ok(())
     }
+
+    /// Plane approval identity recorded while the attempt is parked.
+    pub fn approval_park(&self) -> Option<&ApprovalPark> {
+        self.governance
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.approval_park.as_ref())
+    }
+
+    /// Escalate parks need an operator answer; approval parks do not.
+    pub fn is_escalate_park(&self) -> bool {
+        self.park.is_some() && self.approval_park().is_none()
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +341,7 @@ mod tests {
                 pending_tool_reports: vec![],
                 pending_tool_executions: vec![],
                 fallback: None,
+                approval_park: None,
             }),
             replay: None,
             content: None,
