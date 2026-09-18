@@ -24,10 +24,7 @@ pub(super) async fn authorize(
     if governance.harvest.fallback_active(&handle.run_id)?
         && let Some(checkpoint) = governance.harvest.fallback(&handle.run_id)?
     {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-            .unwrap_or(0);
+        let now_ms = crate::digest::unix_now_ms_i64();
         let view = crate::fallback::view_from_checkpoint(
             &checkpoint,
             now_ms,
@@ -362,7 +359,7 @@ pub(super) fn build_request(
         requested_invocation_count: 1,
         deadline_ms: reuse_deadline_ms
             .filter(|deadline| *deadline > 0)
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() + 120_000),
+            .unwrap_or_else(|| crate::digest::unix_now_ms_i64() + 120_000),
         estimated_cost_micros: 0,
         estimated_volume: 0,
         affected_resource_count: 1,

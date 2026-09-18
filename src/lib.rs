@@ -27,6 +27,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod content;
 pub mod context;
+pub(crate) mod digest;
 pub mod eval;
 pub mod events;
 pub mod evidence_queue;

@@ -3,15 +3,12 @@
 //! The registry is host-local operational state. Governed operation truth still
 //! belongs to the configured governance plane.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::events::HarnessEvent;
@@ -531,20 +528,11 @@ fn remove_cancel_marker(dir: &Path) -> Result<(), RegistryError> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    crate::digest::unix_now_ms_u64()
 }
 
 fn digest(text: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(text.as_bytes());
-    format!("sha256:{}", hex_digest(&hasher.finalize()))
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::digest::sha256_prefixed(text.as_bytes())
 }
 
 fn event_name(event: &HarnessEvent) -> &'static str {

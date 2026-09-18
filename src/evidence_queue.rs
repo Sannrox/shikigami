@@ -8,7 +8,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::atomic;
@@ -21,12 +20,8 @@ const TEST_HMAC_DOMAIN: &str = "shikigami-delayed-evidence-v1";
 pub const DEFAULT_MAX_ENTRIES: usize = 32;
 pub const DEFAULT_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex_lower(Sha256::digest(bytes).as_slice()))
+    crate::digest::sha256_prefixed(bytes)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -871,14 +870,7 @@ pub fn text_digest(text: &str) -> String {
 }
 
 pub fn digest_bytes(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!(
-        "sha256:{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+    crate::digest::sha256_prefixed(bytes)
 }
 
 /// Digest a bounded workspace inventory without following symbolic links.

@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -936,7 +935,7 @@ pub(crate) async fn store_text(
                 source: source.into(),
                 source_id,
                 source_version: "v1".into(),
-                observed_at_ms: chrono::Utc::now().timestamp_millis(),
+                observed_at_ms: crate::digest::unix_now_ms_i64(),
             },
         })
         .await
@@ -1143,12 +1142,7 @@ pub fn export_content_transcript(state_runs: &Path, run_id: &str) -> Result<Stri
 }
 
 pub(crate) fn sha256_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
+    crate::digest::sha256_prefixed(bytes)
 }
 
 fn required_text(value: &str, max: usize, field: &str) -> Result<(), ContentError> {

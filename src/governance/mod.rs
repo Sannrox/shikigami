@@ -255,10 +255,7 @@ pub enum ApprovalState {
 
 /// Host clock used to expire a local approval wait fail-closed.
 pub fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    crate::digest::unix_now_ms_i64()
 }
 
 /// Re-validate a parked approval against current authority. Local scratch

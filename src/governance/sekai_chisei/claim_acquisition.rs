@@ -403,7 +403,7 @@ fn fence_lost(message: impl Into<String>) -> crate::plane_intake::PlaneIntakeErr
 }
 
 fn wall_now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    crate::digest::unix_now_ms_i64()
 }
 
 /// Heartbeat/claim generation may stay the same or advance by one renew step.

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- SHA-256 hex and Unix-ms clocks now live in one crate helper (`src/digest.rs`).
+  Public `digest_bytes`, `fallback::sha256_hex`, and `evidence_queue::sha256_hex`
+  keep the same strings; overflow of the `i64` clock saturates to `0`.
+
 - Operator docs and module comments now match shipped behavior: default coding
   tools, `run-content` CLI intake, harvest `complete_run` skip set, filesystem
   serve drain on SIGINT/SIGTERM, MCP/HTTP/`web_fetch` egress, filesystem

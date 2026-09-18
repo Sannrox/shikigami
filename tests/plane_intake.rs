@@ -13,6 +13,13 @@ use shikigami::{
 };
 use tempfile::tempdir;
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 struct MockPlaneIntake {
     claims: Mutex<VecDeque<PlaneClaim>>,
     acks: Mutex<Vec<(String, PlaneAckOutcome)>>,
@@ -102,10 +109,7 @@ impl PlaneIntakePort for ParkResumeIntake {
             resumed.lease.fencing_token = "fence-2".into();
             resumed.lease.valid_until = std::time::Instant::now() + Duration::from_secs(60);
             let input_json = json!({"answer": "approved"}).to_string();
-            let input_digest = Sha256::digest(input_json.as_bytes())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
+            let input_digest = sha256_hex(input_json.as_bytes());
             resumed.work.continuation = Some(PlaneWorkContinuation {
                 resolution_id: "resolution-1".into(),
                 park_id: "park-1".into(),
@@ -146,10 +150,7 @@ async fn claim_run_and_ack_with_mock_plane() {
     let harness = Harness::from_config(config, state).unwrap();
 
     let parameters_json = json!({"task": "complete the claimed task"}).to_string();
-    let parameters_digest = Sha256::digest(parameters_json.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let parameters_digest = sha256_hex(parameters_json.as_bytes());
     let work = ClaimedPlaneWork {
         effect_id: "effect-1".into(),
         instance_id: "instance-1".into(),
@@ -237,10 +238,7 @@ async fn park_resolve_reclaim_resumes_same_checkpoint_and_operation() {
     let harness = Harness::from_config(config, state).unwrap();
 
     let parameters_json = json!({"task": "complete governed work"}).to_string();
-    let parameters_digest = Sha256::digest(parameters_json.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let parameters_digest = sha256_hex(parameters_json.as_bytes());
     let work = ClaimedPlaneWork {
         effect_id: "effect-park".into(),
         instance_id: "instance-park".into(),
@@ -347,10 +345,7 @@ impl PlaneIntakePort for CountingIntake {
 
 fn sample_claim(effect_id: &str) -> PlaneClaim {
     let parameters_json = json!({"task": "work"}).to_string();
-    let parameters_digest = Sha256::digest(parameters_json.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let parameters_digest = sha256_hex(parameters_json.as_bytes());
     PlaneClaim {
         work: ClaimedPlaneWork {
             effect_id: effect_id.into(),
