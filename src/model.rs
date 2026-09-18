@@ -33,8 +33,9 @@ pub struct ToolCall {
 /// Qualifies a (possibly missing or reused) model id with turn and batch index so
 /// two same-named calls in one turn stay distinct across restart.
 pub fn stable_tool_call_id(call: &ToolCall, turn: u32, index: usize) -> String {
-    if call.id.is_empty() {
-        format!("tool-{turn}-{index}")
+    let synthesized = format!("tool-{turn}-{index}");
+    if call.id.is_empty() || call.id == synthesized {
+        synthesized
     } else {
         format!("tool-{turn}-{index}-{}", call.id)
     }
@@ -58,6 +59,12 @@ mod stable_id_tests {
         assert_eq!(b, "tool-1-1");
         assert_ne!(a, b);
         assert_eq!(a, stable_tool_call_id(&first, 1, 0));
+        let restored = ToolCall {
+            id: "tool-1-0".into(),
+            name: "bash".into(),
+            args_json: "{}".into(),
+        };
+        assert_eq!(stable_tool_call_id(&restored, 1, 0), "tool-1-0");
     }
 }
 

@@ -133,12 +133,25 @@ pub(crate) struct ContentExecution {
     pub resolver: Arc<dyn ContentResolver>,
 }
 
+/// Why a run is parked. Missing values deserialize as escalate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParkKind {
+    #[default]
+    Escalate,
+    Approval,
+}
+
 /// Operator-visible park payload (library + CLI).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ParkInfo {
     pub reason: String,
     pub question: String,
     pub tool_call_id: String,
+    #[serde(default)]
+    pub kind: ParkKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
 }
 
 #[derive(Debug, Error)]

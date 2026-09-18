@@ -100,7 +100,7 @@ pub use replay::{
     ReplayTerminalComparison, ReplayTerminalEvidence, digest_bytes, empty_workspace_digest,
     export_replay_inputs, steps_from_messages, text_digest, workspace_digest,
 };
-pub use run::{ParkInfo, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
+pub use run::{ParkInfo, ParkKind, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
 pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,
     run_serve_with_options,

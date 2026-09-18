@@ -169,7 +169,9 @@ impl RunSession {
         self.content
             .as_ref()?
             .messages
-            .last()?
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")?
             .tool_calls
             .get(index)
             .map(|call| call.args_json.clone())
@@ -641,11 +643,30 @@ fn has_staged_content_model_turn(
     initial_message_count: u32,
     messages: &[ContentMessageV1],
 ) -> bool {
-    turns > 0
-        && messages.len() > initial_message_count as usize
-        && messages
-            .last()
-            .is_some_and(|message| message.role == "assistant")
+    if turns == 0 || messages.len() <= initial_message_count as usize {
+        return false;
+    }
+    if messages
+        .last()
+        .is_some_and(|message| message.role == "assistant")
+    {
+        return true;
+    }
+    let Some(assistant_idx) = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return false;
+    };
+    let answered: std::collections::HashSet<&str> = messages[assistant_idx + 1..]
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.tool_call_id.as_str())
+        .collect();
+    messages[assistant_idx]
+        .tool_calls
+        .iter()
+        .any(|call| !answered.contains(call.id.as_str()))
 }
 
 fn terminal_summary_binding(

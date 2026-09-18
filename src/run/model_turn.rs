@@ -81,7 +81,11 @@ impl<'a> DurableModelTurn<'a> {
         // A stopped run resumes from the durable assistant message. Local
         // checkpoints are not plane receipts; they still prevent repeating a
         // paid or already-planned model turn after abrupt termination.
-        let staged_turn = staged_model_turn(request.resume_run_id.is_some(), &session.messages);
+        let staged_turn = staged_model_turn(
+            request.resume_run_id.is_some(),
+            &session.messages,
+            session.turns,
+        );
         let staged_content_checkpoint =
             request.resume_run_id.is_some() && session.has_staged_content_model_turn();
         let staged_content_turn = session
@@ -355,13 +359,43 @@ async fn content_to_model_turn(
 fn staged_model_turn(
     governed_model_checkpoint: bool,
     messages: &[ChatMessage],
+    turn: u32,
 ) -> Option<ModelTurn> {
     if !governed_model_checkpoint {
         return None;
     }
-    let message = messages
+    if messages
         .last()
-        .filter(|message| message.role == "assistant")?;
+        .is_some_and(|message| message.role == "assistant")
+    {
+        let message = messages.last()?;
+        return Some(ModelTurn {
+            content: message.content.clone(),
+            tool_calls: message.tool_calls.clone(),
+            usage: None,
+        });
+    }
+    let assistant_idx = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")?;
+    let message = &messages[assistant_idx];
+    let results: Vec<&str> = messages[assistant_idx + 1..]
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.tool_call_id.as_str())
+        .collect();
+    let has_unanswered = message.tool_calls.iter().enumerate().any(|(index, call)| {
+        !super::tool_batch::tool_result_answers_call(
+            &results,
+            call,
+            turn,
+            index,
+            &message.tool_calls,
+        )
+    });
+    if !has_unanswered {
+        return None;
+    }
     Some(ModelTurn {
         content: message.content.clone(),
         tool_calls: message.tool_calls.clone(),
@@ -376,9 +410,34 @@ fn staged_content_model_turn(
     if !governed_model_checkpoint {
         return None;
     }
-    let message = messages
+    if messages
         .last()
-        .filter(|message| message.role == "assistant")?;
+        .is_some_and(|message| message.role == "assistant")
+    {
+        let message = messages.last()?;
+        return Some(ContentModelTurnV1 {
+            text: String::new(),
+            output_parts: message.parts.clone(),
+            tool_calls: message.tool_calls.clone(),
+            usage: None,
+        });
+    }
+    let assistant_idx = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")?;
+    let message = &messages[assistant_idx];
+    let answered: std::collections::HashSet<&str> = messages[assistant_idx + 1..]
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.tool_call_id.as_str())
+        .collect();
+    let has_unanswered = message
+        .tool_calls
+        .iter()
+        .any(|call| !answered.contains(call.id.as_str()));
+    if !has_unanswered {
+        return None;
+    }
     Some(ContentModelTurnV1 {
         text: String::new(),
         output_parts: message.parts.clone(),
@@ -405,9 +464,9 @@ mod tests {
             }],
         }];
 
-        let turn = staged_model_turn(true, &messages).unwrap();
+        let turn = staged_model_turn(true, &messages, 1).unwrap();
         assert_eq!(turn.tool_calls, messages[0].tool_calls);
-        assert!(staged_model_turn(false, &messages).is_none());
+        assert!(staged_model_turn(false, &messages, 1).is_none());
     }
 
     #[test]
@@ -423,11 +482,143 @@ mod tests {
             }],
         }];
 
-        let turn = staged_model_turn(true, &messages).unwrap();
+        let turn = staged_model_turn(true, &messages, 1).unwrap();
 
         assert_eq!(turn.content, "continue");
         assert_eq!(turn.tool_calls, messages[0].tool_calls);
         assert_eq!(turn.usage, None);
+    }
+
+    #[test]
+    fn unfinished_batch_after_legacy_empty_ids_restages_remaining_calls() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: String::new(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"missing.txt"}"#.into(),
+                    },
+                    ToolCall {
+                        id: String::new(),
+                        name: "write_file".into(),
+                        args_json: r#"{"path":"hello.txt","content":"approved"}"#.into(),
+                    },
+                ],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "missing".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+        ];
+        let turn = staged_model_turn(true, &messages, 1).unwrap();
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[1].name, "write_file");
+    }
+
+    #[test]
+    fn completed_empty_id_batch_does_not_restage() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: String::new(),
+                    name: "read_file".into(),
+                    args_json: r#"{"path":"missing.txt"}"#.into(),
+                }],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "missing".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+        ];
+        assert!(staged_model_turn(true, &messages, 1).is_none());
+    }
+
+    #[test]
+    fn reused_provider_ids_do_not_mark_later_calls_answered() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "write-1".into(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"missing.txt"}"#.into(),
+                    },
+                    ToolCall {
+                        id: "write-1".into(),
+                        name: "write_file".into(),
+                        args_json: r#"{"path":"hello.txt","content":"approved"}"#.into(),
+                    },
+                ],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "missing".into(),
+                tool_call_id: "write-1".into(),
+                tool_calls: vec![],
+            },
+        ];
+        let turn = staged_model_turn(true, &messages, 1).unwrap();
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[1].name, "write_file");
+    }
+
+    #[test]
+    fn unfinished_batch_after_prefix_results_restages_remaining_calls() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "read-1".into(),
+                        name: "read_file".into(),
+                        args_json: r#"{"path":"missing.txt"}"#.into(),
+                    },
+                    ToolCall {
+                        id: "write-1".into(),
+                        name: "write_file".into(),
+                        args_json: r#"{"path":"hello.txt","content":"approved"}"#.into(),
+                    },
+                ],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "missing".into(),
+                tool_call_id: "read-1".into(),
+                tool_calls: vec![],
+            },
+        ];
+        let turn = staged_model_turn(true, &messages, 1).unwrap();
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[1].id, "write-1");
+    }
+
+    #[test]
+    fn last_assistant_without_tools_is_restaged() {
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: "done".into(),
+            tool_call_id: String::new(),
+            tool_calls: vec![],
+        }];
+        let turn = staged_model_turn(true, &messages, 1).unwrap();
+        assert_eq!(turn.content, "done");
+        assert!(turn.tool_calls.is_empty());
     }
 
     #[test]
@@ -439,7 +630,7 @@ mod tests {
             tool_calls: vec![],
         }];
 
-        assert!(staged_model_turn(true, &messages).is_none());
+        assert!(staged_model_turn(true, &messages, 1).is_none());
     }
 
     #[test]

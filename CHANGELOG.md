@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- On a plane `require_approval` decision the run parks at the effect
+  boundary with the approval identity on the governance checkpoint. Resume
+  polls current authority once, executes the parked tool only under a
+  current permit, and treats deny, expiry, cancel, and revoke as explicit
+  denied outcomes. CLI `run` returns instead of waiting. See
+  [Discussion #291](https://github.com/Sannrox/shikigami/discussions/291).
 - Additive `[tracing]` settings (off by default) export one OTLP JSON trace per
   run with a root span plus turn and tool-call spans. Attributes are the
   harvest identity allowlist (`run_id`, `attempt_id`, `logical_operation_id`,

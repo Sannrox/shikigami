@@ -124,7 +124,7 @@ Aligned with [ADR 0004](decisions/0004-v1-contract.md) medium 1.0 contract.
 | `Harness::{from_config, resolve, doctor, doctor_async, run, run_with_events}` | Primary entry |
 | `Config` / settings `version = 1` fields with defaults | Unknown keys rejected |
 | `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` / `logical_operation_id` / `resume_answer` | Bounds, resume, plane op correlation |
-| `RunResult` fields including `termination`, `park`, `prompt_id`, token `usage` | Structured outcomes |
+| `RunResult` fields including `termination`, `park`, `prompt_id`, token `usage` | Structured outcomes; `ParkInfo` may include `kind` and `approval_id` |
 | `RunResult.cost` when rates configured | Optional estimate only; absent ≠ zero |
 | `HarnessEvent` + `ChannelSink` / `EventSink` | Live in-process progress (additive events OK; tool events carry `call_id`) |
 | `export_run_transcript` + export `schema_version = 1` line shapes | Offline host audit path |

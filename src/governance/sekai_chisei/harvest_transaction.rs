@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::checkpoint::{
-    GovernanceCheckpoint, PendingGovernanceEvent, StagedToolExecution, StagedToolReport,
-    ToolExecutionStatus,
+    ApprovalPark, GovernanceCheckpoint, PendingGovernanceEvent, StagedToolExecution,
+    StagedToolReport, ToolExecutionStatus,
 };
 use crate::fallback::FallbackCheckpoint;
 use crate::governance::{GovernanceError, RunHandle};
@@ -26,6 +26,7 @@ struct HarvestState {
     pending_tool_executions: Vec<StagedToolExecution>,
     fallback: Option<FallbackCheckpoint>,
     fallback_active: bool,
+    approval_park: Option<ApprovalPark>,
 }
 
 #[derive(Clone, Default)]
@@ -79,6 +80,7 @@ impl HarvestTransaction {
                 pending_tool_executions: checkpoint.pending_tool_executions.clone(),
                 fallback: checkpoint.fallback.clone(),
                 fallback_active: false,
+                approval_park: checkpoint.approval_park.clone(),
             },
         );
         Ok(())
@@ -95,7 +97,8 @@ impl HarvestTransaction {
             || state.pending_event.is_some()
             || !state.pending_tool_reports.is_empty()
             || !state.pending_tool_executions.is_empty()
-            || state.fallback.is_some();
+            || state.fallback.is_some()
+            || state.approval_park.is_some();
         has_state.then(|| GovernanceCheckpoint {
             operation_id: state.host_operation_id.clone().unwrap_or_default(),
             logical_operation_id: state.logical_operation_id.clone().unwrap_or_default(),
@@ -106,6 +109,7 @@ impl HarvestTransaction {
             pending_tool_reports: state.pending_tool_reports.clone(),
             pending_tool_executions: state.pending_tool_executions.clone(),
             fallback: state.fallback.clone(),
+            approval_park: state.approval_park.clone(),
         })
     }
 
@@ -426,6 +430,36 @@ impl HarvestTransaction {
         if let Ok(mut runs) = self.runs.lock() {
             runs.remove(run_id);
         }
+    }
+
+    pub(super) fn approval_park(&self, run_id: &str) -> Option<ApprovalPark> {
+        self.runs
+            .lock()
+            .ok()?
+            .get(run_id)
+            .and_then(|state| state.approval_park.clone())
+    }
+
+    pub(super) fn set_approval_park(
+        &self,
+        run_id: &str,
+        park: ApprovalPark,
+    ) -> Result<(), GovernanceError> {
+        let mut runs = self.lock()?;
+        let state = runs.get_mut(run_id).ok_or_else(|| {
+            GovernanceError::Message(format!(
+                "approval park unavailable: run `{run_id}` has no harvest state"
+            ))
+        })?;
+        state.approval_park = Some(park);
+        Ok(())
+    }
+
+    pub(super) fn clear_approval_park(&self, run_id: &str) -> Result<(), GovernanceError> {
+        if let Some(state) = self.lock()?.get_mut(run_id) {
+            state.approval_park = None;
+        }
+        Ok(())
     }
 }
 

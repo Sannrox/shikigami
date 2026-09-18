@@ -353,6 +353,17 @@ async fn run() -> anyhow::Result<()> {
             if let Some(park) = &result.park {
                 println!("parked reason={}", park.reason);
                 println!("parked question={}", park.question);
+                if park.kind == shikigami::ParkKind::Approval {
+                    if let Some(approval_id) = &park.approval_id {
+                        println!("parked kind=approval approval_id={approval_id}");
+                    } else {
+                        println!("parked kind=approval");
+                    }
+                    println!("resume with: shikigami run --resume {}", result.run_id);
+                    return Err(anyhow::anyhow!(
+                        "run parked awaiting approval (exit semantics: non-zero)"
+                    ));
+                }
                 println!(
                     "resume with: shikigami run --resume {} --answer \"...\"",
                     result.run_id

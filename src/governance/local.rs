@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::checkpoint::{
-    GovernanceCheckpoint, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
+    ApprovalPark, GovernanceCheckpoint, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
 use crate::config::Config;
 use crate::content::ContentModelTurnV1;
@@ -114,6 +114,18 @@ impl GovernancePort for LocalGovernance {
         handle: &RunHandle,
     ) -> Result<(), GovernanceError> {
         self.durability.recover(&handle.run_id)
+    }
+
+    async fn record_approval_park(
+        &self,
+        handle: &RunHandle,
+        park: ApprovalPark,
+    ) -> Result<(), GovernanceError> {
+        self.durability.record_approval_park(&handle.run_id, park)
+    }
+
+    async fn clear_approval_park(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
+        self.durability.clear_approval_park(&handle.run_id)
     }
 
     async fn stage_tool_reports(

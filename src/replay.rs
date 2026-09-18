@@ -200,6 +200,8 @@ pub struct ReplayExportReport {
     pub missing: Vec<String>,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<ReplayManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<ReplayEvidenceBundle>,
@@ -210,12 +212,22 @@ fn incomplete_export(
     missing: Vec<String>,
     reason: impl Into<String>,
 ) -> ReplayExportReport {
+    incomplete_export_with_approval(run_id, missing, reason, None)
+}
+
+fn incomplete_export_with_approval(
+    run_id: impl Into<String>,
+    missing: Vec<String>,
+    reason: impl Into<String>,
+    approval_id: Option<String>,
+) -> ReplayExportReport {
     ReplayExportReport {
         schema_version: REPLAY_EXPORT_SCHEMA_VERSION,
         run_id: run_id.into(),
         complete: false,
         missing,
         reason: reason.into(),
+        approval_id,
         manifest: None,
         evidence: None,
     }
@@ -248,11 +260,15 @@ pub fn export_replay_inputs(
             ));
         }
     };
+    let approval_id = checkpoint
+        .approval_park()
+        .map(|park| park.approval_id.clone());
     if checkpoint.content.is_some() {
-        return Ok(incomplete_export(
+        return Ok(incomplete_export_with_approval(
             run_id,
             vec!["content".into()],
             "content runs are not replay-exportable in v1",
+            approval_id,
         ));
     }
     let mut missing = Vec::new();
@@ -289,19 +305,21 @@ pub fn export_replay_inputs(
         }
     };
     if !missing.is_empty() {
-        return Ok(incomplete_export(
+        return Ok(incomplete_export_with_approval(
             run_id,
             missing,
             "original replay bindings are not fully retained",
+            approval_id,
         ));
     }
     let (snapshot, inputs_digest) = snapshot.expect("inputs retained");
     let prompt_body = {
         if !skill_sources_are_retained(&snapshot, &config.context) {
-            return Ok(incomplete_export(
+            return Ok(incomplete_export_with_approval(
                 run_id,
                 vec!["prompt".into()],
                 "configured skill packs are not retained in snapshots/initial",
+                approval_id.clone(),
             ));
         }
         let rules = crate::context::load_project_rules(&snapshot, &config.context);
@@ -346,6 +364,7 @@ pub fn export_replay_inputs(
         complete: true,
         missing: Vec::new(),
         reason: "retained artifacts recompute a valid replay package".into(),
+        approval_id,
         manifest: Some(manifest),
         evidence: Some(evidence),
     })

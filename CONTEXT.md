@@ -3,6 +3,15 @@
 This glossary complements the architecture and product definitions in
 [`DESIGN.md`](DESIGN.md).
 
+## Approval park
+
+When authority answers a tool authorization with `require_approval`, the
+harness checkpoints and returns instead of executing. The plane owns
+approve, deny, cancel, revoke, permit, and expiry. The host parks at the
+effect boundary, records the approval identity as local scratch, and
+re-validates current authority on the next wake. CLI `run` does not block
+waiting for a human. A criteria or policy deny is not a park.
+
 ## Identity-only span export
 
 Optional, default-off OpenTelemetry export of one run as a trace. Policy

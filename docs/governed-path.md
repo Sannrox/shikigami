@@ -67,6 +67,10 @@ cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml \
   run "say hello via tools" --keep-workspace --timeout-secs 120
 ```
 
+A plane `require_approval` parks the attempt and returns. Resume with
+`shikigami run --resume <run_id>` (no `--answer`). The host re-queries the
+same authorization; it does not approve locally.
+
 If the plane is down under `fail_closed`, doctor and run refuse to start
 unless a current signed local-model fallback grant is already checkpointed
 and `[model.fallback].enabled` is true
@@ -113,7 +117,7 @@ authorized through the plane’s host-executed external-action API
 | --- | --- |
 | `permit` | Redeem the signed permit, then execute only after redemption succeeds |
 | `deny` | Do **not** execute; surface denial on the tool result / events |
-| `require_approval` | Do **not** execute (headless path cannot wait for interactive approval) |
+| `require_approval` | Park at the effect boundary with the plane `approval_id`. Resume polls the same authorization once; execute only under a current permit. Deny, expiry, cancel, and revoke resume with no effect. |
 | missing / unknown | Fail closed as denial |
 | plane unavailable / transport / build / redeem error | Fail closed (tool not executed) |
 
