@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::governance::GovernanceError;
@@ -16,12 +15,8 @@ pub const FALLBACK_SCHEMA_VERSION: u32 = 1;
 pub const TEST_HMAC_SHA256: &str = "test-hmac-sha256";
 const TEST_HMAC_DOMAIN: &str = "shikigami-fallback-v1";
 
-fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex_lower(Sha256::digest(bytes).as_slice()))
+    crate::digest::sha256_prefixed(bytes)
 }
 
 /// Bind the authorized task, not the evolving tool transcript.

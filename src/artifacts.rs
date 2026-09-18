@@ -5,15 +5,13 @@
 //! rev-parse --show-toplevel`) and remains an explicit export choice for
 //! callers.
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::checkpoint;
@@ -541,13 +539,9 @@ fn hash_file(path: &Path) -> Result<String, ArtifactError> {
         }
         hasher.update(&buffer[..read]);
     }
-    let digest = hasher.finalize();
     Ok(format!(
         "sha256:{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
+        crate::digest::hex_lower(hasher.finalize().as_slice())
     ))
 }
 
@@ -559,10 +553,7 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Artifac
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    crate::digest::unix_now_ms_u64()
 }
 
 #[cfg(test)]

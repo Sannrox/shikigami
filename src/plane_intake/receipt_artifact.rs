@@ -9,9 +9,9 @@ use std::fs;
 use std::path::Path;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::artifacts::ArtifactManifest;
+use crate::digest::sha256_prefixed;
 
 const REQUIRED_KINDS: [&str; 4] = ["application", "typed_sdk", "tests", "delivery_inputs"];
 /// Same wire limit as sekai-chisei #646 `ACK_ARTIFACT_JSON_MAX_BYTES`.
@@ -121,14 +121,7 @@ fn valid_generated_path(path: &str) -> bool {
 }
 
 fn content_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    format!(
-        "sha256:{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+    sha256_prefixed(bytes)
 }
 
 #[cfg(test)]

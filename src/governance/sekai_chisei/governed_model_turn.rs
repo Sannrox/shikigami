@@ -1,7 +1,5 @@
 //! One sekai-chisei governed model turn's planning and execution protocol.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use futures_util::StreamExt;
 
 use super::proto::chisei::{
@@ -17,10 +15,7 @@ use crate::model::{ChatMessage, ModelPort, ModelTurn, ToolCall};
 use crate::tools::ToolDef;
 
 fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    crate::digest::unix_now_ms_i64()
 }
 
 /// Plan and execute one governed model turn, including durable failure reporting.

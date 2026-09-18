@@ -8,7 +8,6 @@
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -461,12 +460,7 @@ fn artifact_refs(value: Option<&Value>) -> Result<Vec<&str>, ClaimedWorkMappingE
         .collect()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
+use crate::digest::sha256_hex;
 
 pub(super) async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     loop {
@@ -612,7 +606,7 @@ mod tests {
                 runtime_id: "shikigami".into(),
                 generation: 1,
                 fencing_token: "fence-1".into(),
-                expires_at_ms: chrono::Utc::now().timestamp_millis() + 10,
+                expires_at_ms: crate::digest::unix_now_ms_i64() + 10,
                 valid_until: Instant::now() + Duration::from_millis(10),
             },
         };

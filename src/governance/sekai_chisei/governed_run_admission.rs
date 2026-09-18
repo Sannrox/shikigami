@@ -89,10 +89,7 @@ pub(super) async fn admit(
             .is_some_and(|fallback| {
                 let view = crate::fallback::view_from_checkpoint(
                     fallback,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(0))
-                        .unwrap_or(0),
+                    crate::digest::unix_now_ms_i64(),
                     true,
                     None,
                     governance.fallback_allow_test_signatures,

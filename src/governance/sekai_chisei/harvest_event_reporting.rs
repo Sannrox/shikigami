@@ -75,7 +75,7 @@ pub(super) async fn report_with_id(
         operation_id,
         event_id,
         parent_event_id,
-        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        timestamp_ms: crate::digest::unix_now_ms_i64(),
         kind: kind.into(),
         attributes: attributes.into_iter().collect::<BTreeMap<_, _>>(),
         references: SekaiChiseiGovernance::pending_event_references(&references),

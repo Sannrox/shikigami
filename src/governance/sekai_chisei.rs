@@ -492,7 +492,7 @@ impl SekaiChiseiGovernance {
             operation_id: envelope.identity.operation_id.clone(),
             event_id: envelope.identity.event_id.clone(),
             parent_event_id,
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            timestamp_ms: crate::digest::unix_now_ms_i64(),
             kind: harvest::KIND_COMPLETE.into(),
             attributes: if envelope.report_attributes.is_empty() {
                 envelope.redacted_attributes.iter().cloned().collect()
@@ -1165,11 +1165,7 @@ impl GovernancePort for SekaiChiseiGovernance {
 }
 
 fn unix_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .unwrap_or(0)
+    crate::digest::unix_now_ms_i64()
 }
 
 fn disposition_from_authority(
@@ -1734,10 +1730,7 @@ mod tests {
         crate::fallback::FallbackAuthorization,
         crate::fallback::LiveFence,
     ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(0))
-            .unwrap_or(0);
+        let now = crate::digest::unix_now_ms_i64();
         let fence = crate::fallback::LiveFence {
             effect_id: "effect-1".into(),
             owner: "runtime-1".into(),

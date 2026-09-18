@@ -2,8 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::config::ContextSettings;
 
 const MAX_DEFAULT: usize = 32 * 1024;
@@ -107,10 +105,7 @@ fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String,
     if truncated {
         body.push_str(marker);
     }
-    let digest = Sha256::digest(body.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let digest = crate::digest::sha256_hex(body.as_bytes());
     Some((body, digest, truncated))
 }
 

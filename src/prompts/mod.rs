@@ -1,7 +1,5 @@
 //! Versioned prompt assets for attribution and evals.
 
-use sha2::{Digest, Sha256};
-
 /// A stable, versioned system prompt shipped with the binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptAsset {
@@ -22,9 +20,7 @@ pub const DEFAULT_PROMPT: PromptAsset = HARNESS_V1;
 
 /// Normalize newlines then SHA-256 hex digest of the body.
 pub fn body_digest(body: &str) -> String {
-    let normalized = body.replace("\r\n", "\n");
-    let digest = Sha256::digest(normalized.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::digest::sha256_hex(body.replace("\r\n", "\n").as_bytes())
 }
 
 /// Versioned id: `{id}:{sha256hex}` — changes when content changes.

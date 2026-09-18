@@ -5,11 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 use thiserror::Error;
 
 use crate::content::ContentCheckpointBinding;
@@ -190,8 +185,10 @@ pub fn prompt_id(prompt: &str) -> String {
     {
         return crate::prompts::versioned_id(&crate::prompts::HARNESS_V1);
     }
-    let digest = Sha256::digest(prompt.replace("\r\n", "\n").as_bytes());
-    format!("custom:{}", hex_lower(digest.as_slice()))
+    format!(
+        "custom:{}",
+        crate::digest::sha256_hex(prompt.replace("\r\n", "\n").as_bytes())
+    )
 }
 
 pub fn path_for(state_runs: &Path, run_id: &str) -> PathBuf {
@@ -253,7 +250,7 @@ impl Checkpoint {
     ) -> Result<(Self, String), CheckpointError> {
         let raw = Self::read(state_runs, run_id)?;
         let checkpoint = Self::parse(&raw, run_id)?;
-        let digest = format!("sha256:{}", hex_lower(Sha256::digest(&raw).as_slice()));
+        let digest = crate::digest::sha256_prefixed(&raw);
         Ok((checkpoint, digest))
     }
 
@@ -422,10 +419,7 @@ mod tests {
         let raw = std::fs::read(&path).unwrap();
 
         let digest = Checkpoint::load_parked_digest(&runs, "parked", "p").unwrap();
-        assert_eq!(
-            digest,
-            format!("sha256:{}", hex_lower(Sha256::digest(raw).as_slice()))
-        );
+        assert_eq!(digest, crate::digest::sha256_prefixed(&raw));
 
         cp.park = None;
         cp.save(&runs).unwrap();

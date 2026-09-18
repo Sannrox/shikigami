@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -360,10 +360,7 @@ fn write_process_identity(directory: &Path, identity: &str) -> Result<(), Metric
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    crate::digest::unix_now_ms_u64()
 }
 
 impl MetricsSnapshot {
