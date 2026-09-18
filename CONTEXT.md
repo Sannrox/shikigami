@@ -205,10 +205,12 @@ transport seam; this is not a new public port or adapter seam.
 
 ## MCP stdio framing
 
-The shared bounded `Content-Length` protocol used by both MCP stdio adapters.
-One private deep module owns message encoding, header validation, duplicate or
-invalid length rejection, and body-size enforcement before allocation; the
-client and host adapters retain process and request behavior at their seams.
+The shared bounded stdio framing used by both MCP stdio adapters. Requests
+may use `Content-Length` or newline-delimited JSON; responses are accepted in
+either framing. One private deep module owns message encoding, header
+validation, duplicate or invalid length rejection, and body-size enforcement
+before allocation; the client and host adapters retain process and request
+behavior at their seams.
 
 ## MCP background Run lifecycle
 

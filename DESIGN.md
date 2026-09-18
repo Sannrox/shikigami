@@ -60,6 +60,10 @@ adapters. `sekai-chisei` is the first-party production governance adapter.
  sekai-chisei  plane   git-worktree none
 ```
 
+Sandbox backends (`none` / `rlimit` / `linux_native`) are settings-selected
+isolation for spawned children, not a `*Port` trait. Plane intake is a
+host-side claim port (`PlaneIntakePort`), not a turn-loop port.
+
 When governance is `sekai-chisei`, model turns use the plane
 (`PlanExecution` / `ExecutePlanStream`). Direct model adapters apply to
 ungoverned profiles only. An opt-in, default-deny local-model fallback may
@@ -85,7 +89,7 @@ must not appear in harness process settings.
 | **Harness** | This product: process that executes runs |
 | **Run** | One countable unit of work (workspace + turns + outcome) |
 | **Workspace** | Run working tree selected by the host (`directory`, `inplace`, or `git-worktree`) |
-| **Port** | Versioned boundary (governance, model, workspace, events) |
+| **Port** | Versioned boundary (governance, model, workspace, events; sandbox is settings-selected isolation, not a trait) |
 | **Adapter** | Implementation of a port selected by settings |
 | **Governance plane** | Optional external system (e.g. sekai-chisei) for policy and governed model execution |
 | **Host** | CLI, embedder, MCP server, or `serve` daemon |
@@ -114,20 +118,22 @@ create run id
   → governance.begin_run
   → loop until terminal | limit:
         governance.plan_turn (plane or local model)
-        authorize + execute tools (workspace jail)
+        authorize + execute tools (workspace jail for in-process FS;
+        sandbox backend for spawned children)
         governance.report_tool (best-effort / fail-closed)
   → governance.complete_run
   → emit local events / optional identity-only spans / exit
 ```
 
 Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
-`report`. **`bash` is opt-in** via settings for safety.
+`multi_edit`, `apply_patch`, `glob`, `grep`, `todo_write`, `report`,
+`escalate`. **`bash` is opt-in** via settings for safety.
 
 ## Module map
 
 | Path | Responsibility |
 | --- | --- |
-| `src/harness.rs`, `src/harness/diagnosis.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep module |
+| `src/harness.rs`, `src/harness/diagnosis.rs`, `src/harness/recovery.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep recovery module |
 | `src/content.rs` | Additive bounded content descriptors, host resolver contract, metadata-only sidecar checkpoints, and content transcript projection |
 | `src/run/` | Thin `Engine` interface over deep run admission and supervision (including cancel/timeout bounds), host-local Run preparation, the Run artifact lifecycle, the durable run transaction, durable model turns (including compaction), durable tool batches (including call identity), resume validation, and `RunSession` checkpoints |
 | `src/replay.rs` | Versioned replay manifest/evidence admission, canonical bindings, observation-only authority, ordered comparison, and read-only export from retained artifacts |
@@ -138,6 +144,9 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates plane session, governed Run admission, governed model turns, run completion, tool authorization, harvest durability and event reporting, and plane claim acquisition plus lease RPCs to private deep modules |
 | `src/tools/`, `src/mcp/`, `src/mcp_server/` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, and shared bounded framing behind the stdio adapter seams |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
+| `src/sandbox.rs` | Settings-selected OS isolation for spawned children (`none` / `rlimit` / `linux_native`) |
+| `src/eval.rs` | Offline golden-fixture harness (`shikigami eval`) |
+| `src/hooks.rs` | Operator-trusted lifecycle hooks |
 | `src/model.rs` | Scripted / HTTP (ungoverned) |
 | `src/events.rs` | stderr / jsonl / none |
 | `src/worker_lifecycle.rs` | Canonical worker snapshot publisher plus thin `serve_lifecycle_http` over the private fleet HTTP probe protocol |
@@ -157,7 +166,8 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 - No secrets in config files; use env references (`token_env`, `api_key_env`).
 - Workspace path jail: no absolute or parent-traversing paths.
 - Bash disabled by default tool allow-list.
-- Fail-closed doctor/run when `governed` / `fail_closed` and plane unhealthy.
+- Fail-closed doctor/run when profile `governed` or `governance.fail_closed` and plane unhealthy.
+- Governed / fail-closed Bash requires `sandbox.backend` other than `none` and `network.egress` other than `unrestricted`.
 - Do not commit `.shikigami-state/`, credentials, or plane tokens.
 
 Full reporting process: [SECURITY.md](SECURITY.md).
@@ -172,13 +182,14 @@ Shipped in the **1.0** tree (medium contract; see ADR 0004):
 - Directory, in-place, and git-worktree workspaces
 - Embeddable `Harness` API + in-repo/external host proofs
 - Park/escalate resume, serve FS queue, metrics, MCP host/client (host-adjacent)
+- Offline eval golden-fixture harness (`shikigami eval`)
 
 Post-1.0 themes (not freeze-core):
 
-- Richer serve intake beyond the shipped filesystem queue and plane claim path
+- Richer serve intake beyond the shipped filesystem queue, plane claim path,
+  and filesystem `POST /runs` control surface
 - Deeper governance-native harvest objects
 - Delivery fleets and adapter ecosystem
-- Eval / quality-loop harnesses
 
 ## Naming rule
 

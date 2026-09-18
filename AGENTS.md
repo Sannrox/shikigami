@@ -5,16 +5,20 @@
 `shikigami` is a Rust 2024 crate for a local-first headless agent harness.
 Source code lives in `src/`: `src/lib.rs` exports the public API,
 `src/bin/shikigami.rs` is a thin CLI host, `src/harness.rs` wires settings to
-ports, `src/run/` owns the turn loop (resume validation + deep `RunSession`
-checkpoints), `src/governance/` holds governance adapters (`none`, `local`,
+ports, `src/run/` owns the turn loop (preparation, the durable run transaction,
+resume validation + deep `RunSession` checkpoints), `src/governance/` holds
+governance adapters (`none`, `local`, `http-callback`/`host-authz`,
 `sekai-chisei`), `src/tools/` implements workspace-jailed tools,
-`src/workspace.rs` materializes sandboxes,
-`src/model.rs` supplies ungoverned model turns, and `src/events.rs` sinks
-harness-local progress. The sekai-chisei adapter consumes the versioned
-upstream `sekai-client` Rust facade and its canonical `sekai-proto` dependency;
-Shikigami does not carry a second protocol snapshot. Integration tests live in
-`tests/`. Optional host state defaults under `.shikigami-state/`; do not commit
-local state, run workspaces, or generated runtime artifacts.
+`src/workspace.rs` materializes workspaces, `src/sandbox.rs` applies
+settings-selected OS isolation to spawned children, `src/model.rs` supplies
+ungoverned model turns, and `src/events.rs` sinks harness-local progress.
+Serve, MCP, plane intake, eval, hooks, replay, and metrics live in the matching
+`src/` modules; see [DESIGN.md](DESIGN.md) for the module map. The sekai-chisei
+adapter consumes the versioned upstream `sekai-client` Rust facade and its
+canonical `sekai-proto` dependency; Shikigami does not carry a second protocol
+snapshot. Integration tests live in `tests/`. Optional host state defaults
+under `.shikigami-state/`; do not commit local state, run workspaces, or
+generated runtime artifacts.
 
 Architecture is **ports + settings**
 ([ADR 0001](docs/decisions/0001-ports-and-settings.md)): the turn loop depends
@@ -28,8 +32,8 @@ Human documentation index: [docs/README.md](docs/README.md).
 
 - `cargo fmt` formats Rust code before review.
 - `cargo test` runs the normal unit and integration test suite (no plane required).
-- `cargo clippy --all-targets -- -D warnings` is required for ship-level local
-  gates (matches CI).
+- `cargo clippy --all-targets --locked -- -D warnings` is required for
+  ship-level local gates (matches CI / `make validate`).
 - `cargo run --bin shikigami -- doctor` prints effective settings and adapter health.
 - `cargo run --bin shikigami -- --config examples/local-run.toml run "demo" --keep-workspace`
   exercises an offline scripted run.
@@ -273,7 +277,7 @@ immediately after the correction.
 
 Never commit secrets, tokens, provider credentials, logs, or local harness
 state (`.shikigami-state/`). Do not treat delivery systems as runtime control
-dependencies. When profile `governed` or `fail_closed` is set, missing or
+dependencies. When profile `governed` or `governance.fail_closed` is set, missing or
 unhealthy governance must fail doctor and run. Report vulnerabilities through
 [SECURITY.md](SECURITY.md). Follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in
 all project spaces.

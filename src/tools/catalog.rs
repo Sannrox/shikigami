@@ -24,8 +24,10 @@ fn def(name: &str, description: &str, schema: &str) -> ToolDef {
     }
 }
 
-/// Builtin tool catalog (registration bootstrap). Dynamic plugins are out of scope;
-/// future MCP/skill tools register into [`crate::tools::ToolRegistry`] without changing the turn loop.
+/// Builtin tool catalog (registration bootstrap). Dynamic native plugins are
+/// out of scope. MCP servers register as `mcp.<name>.<tool>` into
+/// [`crate::tools::ToolRegistry`] without changing the turn loop; skills load
+/// as prompt context, not catalog tools.
 pub fn builtin_catalog() -> Vec<ToolDef> {
     vec![
         def(
@@ -111,7 +113,8 @@ pub fn must_be_exclusive_batch(name: &str) -> bool {
     matches!(name, "report" | "escalate")
 }
 
-/// Tools safe to run concurrently with each other (reads; no workspace mutation).
+/// Tools safe to run concurrently with each other (workspace reads plus
+/// `web_fetch`; no workspace mutation).
 ///
 /// Write tools, bash, todo_write, report/escalate stay serial for the whole batch.
 pub fn is_parallel_safe_tool(name: &str) -> bool {

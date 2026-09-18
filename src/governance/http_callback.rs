@@ -19,7 +19,8 @@ const REQUEST_VERSION: &str = "host-authz.request/v1";
 const MAX_ARGS_CHARS: usize = 4_096;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-/// Tools that skip the host callback (harness-internal / non-mutating defaults).
+/// Tools that skip the host callback (harness-internal: reads, job inspect,
+/// checklist, terminate, or park).
 fn tool_skips_host_authz(name: &str) -> bool {
     matches!(
         name,

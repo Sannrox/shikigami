@@ -82,7 +82,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | Item | Notes |
 | --- | --- |
 | `Harness` | Primary entry: `doctor`, `doctor_async`, `run`, `run_with_events` |
-| `Harness::{run_content, run_content_with_events}` / content v1 types | Additive bounded content API; library-only intake |
+| `Harness::{run_content, run_content_with_events}` / content v1 types | Additive bounded content API; library plus CLI `run-content` |
 | `Config` / `ConfigSource` | Versioned settings (`version = 1`, deny unknown) |
 | `StateRoot` | Local state layout |
 | `RunRequest` / `RunResult` | Run I/O (incl. park, usage, optional `cost`) |
@@ -192,9 +192,10 @@ keeping resolved payload bytes out of checkpoints, transcripts, events, and
 registry journals. Resume and export use content-specific entrypoints;
 ordinary run resume, transcript v1, and replay v1 reject content checkpoints.
 
-The initial intake is library-only. CLI, MCP, serve, and plane intake continue
-to use the stable text contract. See [content.md](content.md) for descriptor
-bounds, resolver responsibilities, fail-closed adapter behavior, and recovery.
+CLI `run-content` hosts the same library intake. MCP, serve, and plane intake
+continue to use the stable text contract. See [content.md](content.md) for
+descriptor bounds, resolver responsibilities, fail-closed adapter behavior, and
+recovery.
 
 ### Evolving / host-only (not freeze core)
 

@@ -1,7 +1,9 @@
 //! Minimal MCP client: register remote tools into [`ToolRegistry`].
 //!
-//! Protocol: JSON-RPC 2.0 over stdio (tools/list + tools/call). For offline
-//! tests, a process can speak a tiny subset without a full MCP stack.
+//! Protocol: JSON-RPC 2.0 over stdio or HTTP (`tools/list` + `tools/call`).
+//! Stdio framing is `content-length` or `newline`; HTTP uses the same JSON-RPC
+//! body when `model-http` is enabled. For offline tests, a process can speak a
+//! tiny subset without a full MCP stack.
 
 use std::process::Stdio;
 use std::sync::Arc;

@@ -4,8 +4,9 @@
 //! the preferred in-process path (ADR 0001). Not a multi-tenant control plane;
 //! tenkai stays delivery-only.
 //!
-//! Transport: JSON-RPC 2.0 with `Content-Length` framing on **stdio only**
-//! (no network bind in v1).
+//! Transport: JSON-RPC 2.0 on **stdio only** (no network bind in v1).
+//! Inbound frames accept `Content-Length` or newline-delimited JSON; outbound
+//! writes use `Content-Length`.
 
 use std::sync::Arc;
 use std::time::Duration;

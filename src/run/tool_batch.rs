@@ -164,7 +164,8 @@ impl<'a> DurableToolBatch<'a> {
             );
         }
 
-        // Parallel path only for all-read batches (no report/park/write).
+        // Parallel path only when every call is parallel-safe (reads/`web_fetch`),
+        // no execution-checkpoint tools, and no pre/post_tool or on_park hooks.
         let batch_outcomes: Vec<(usize, ToolCall, Result<ToolOutput, String>)> = if can_parallel {
             check_bounds(self.engine, &session.run_id, request, started, timeout)?;
             let sem = Arc::new(Semaphore::new(concurrency));

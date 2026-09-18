@@ -73,6 +73,13 @@ constraints.
 - Library embedding is the first Shikigami intake surface. CLI, MCP, serve, and
   plane intake may add content only through the same bounded contract and must
   reject unknown fields.
+
+## Later
+
+Library `Harness::run_content` and CLI `run-content` later shipped. MCP, serve,
+and plane intake remain text-only by design. Replay of content runs remains
+unsupported until a separately versioned content-replay contract exists. See
+[0011-cli-content-intake.md](0011-cli-content-intake.md).
 - Deterministic scripted fixtures can prove ordering, digest validation,
   capability denial, persistence, restart, redaction, and text compatibility
   without a live provider.

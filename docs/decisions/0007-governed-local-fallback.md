@@ -46,7 +46,9 @@ runtime port).
   plane or installer is required.
 - Production fallback stays denied until a verifiable governance-issued
   envelope exists and the local digest matches.
-- Delayed-evidence spooling remains Issue #234.
+- Delayed-evidence spooling later shipped as `[governance.delayed_evidence]`
+  (default disabled). See [settings.md](../settings.md) and
+  [harvest.md](../harvest.md).
 
 ## Rejected alternatives
 
