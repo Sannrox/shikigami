@@ -30,3 +30,9 @@ a second control plane.
 - Operators get a single binary for both one-shot and daemon modes.
 - Plane work-unit admission stays out of scope until identity (#13) and
   harvest (#12) contracts stabilize for multi-host fleets.
+
+## Later
+
+Filesystem `POST /runs` and `--intake plane` later shipped as additive host
+surfaces. The filesystem queue remains the offline default. See
+[serve.md](../serve.md).

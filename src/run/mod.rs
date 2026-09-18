@@ -3,10 +3,13 @@
 //! Public surface: [`Engine`], [`RunRequest`], [`RunResult`], and related types.
 //! Internals:
 //! - [`supervision`] — run admission, ownership, heartbeat, cancel/timeout bounds, and finalization
+//! - [`preparation`] — workspace materialize, governed receipt recovery, admission hooks
+//! - [`transaction`] — durable turn loop after preparation
 //! - [`model_turn`] — durable model turns and context compaction
 //! - [`tool_batch`] — durable tool batches and stable call identity
 //! - [`session::RunSession`] — owned attempt state + deep checkpoint interface
 //! - [`resume`] — checkpoint workspace boundary checks
+//! - [`artifact_lifecycle`] — retained artifact finalization
 
 use std::path::PathBuf;
 use std::sync::Arc;

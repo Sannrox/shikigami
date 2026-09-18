@@ -1,8 +1,10 @@
 //! Complete durable run transaction behind one internal interface.
 //!
-//! This module owns workspace preparation, governed receipt recovery, model/tool
-//! turn ordering, checkpoint durability, park/failure recovery, completion, and
-//! artifact finalization. Engine remains the stable public construction interface.
+//! This module owns the durable turn loop after [`super::preparation`] has
+//! materialized the workspace, recovered governed receipts, and run admission
+//! hooks: model/tool ordering, checkpoint durability, park/failure recovery,
+//! completion, and artifact finalization. Engine remains the stable public
+//! construction interface.
 
 use std::sync::Arc;
 use std::time::Duration;

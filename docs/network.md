@@ -40,10 +40,9 @@ child; `[network]` still governs only the harness-owned HTTP clients above.
 Prefer `tools.mode = "workspace"` (no bash) when you need lower network risk
 without OS isolation, or on hosts that cannot provide `linux_native`.
 
-## Future
-
-MCP HTTP/SSE transports should call the same `NetworkSettings::check_http_url`.
+MCP HTTP transports already call `NetworkSettings::check_http_url`. See
+[mcp.md](mcp.md).
 
 An address-level egress allowlist for tool children is a separate decision
 ([ADR 0013](decisions/0013-os-sandbox-adapter.md)); today `linux_native`
-either denies every socket or (later) can delegate sockets to the host.
+denies every child `socket()`.

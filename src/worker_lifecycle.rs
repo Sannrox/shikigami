@@ -262,7 +262,7 @@ impl std::fmt::Debug for WorkerLifecycle {
 }
 
 impl WorkerLifecycle {
-    /// Open under `$STATE/worker/lifecycle.json`.
+    /// Open under `$SHIKIGAMI_STATE/worker/lifecycle.json`.
     pub fn open(
         state_root: &Path,
         identity: WorkerLifecycleIdentity,

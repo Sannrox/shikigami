@@ -37,17 +37,8 @@ pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Optio
         if !path.is_file() {
             continue;
         }
-        let raw = std::fs::read(&path).ok()?;
-        let truncated = raw.len() > max;
-        let slice = if truncated { &raw[..max] } else { &raw[..] };
-        let mut body = String::from_utf8_lossy(slice).into_owned();
-        if truncated {
-            body.push_str("\n\n… [project rules truncated]\n");
-        }
-        let digest = Sha256::digest(body.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let (body, digest, truncated) =
+            load_truncated_text(&path, max, "\n\n… [project rules truncated]\n")?;
         return Some(ProjectRules {
             filename: name.clone(),
             body,
@@ -93,19 +84,11 @@ pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPac
         if !path.is_file() {
             continue;
         }
-        let Ok(raw) = std::fs::read(&path) else {
+        let Some((body, digest, truncated)) =
+            load_truncated_text(&path, max, "\n\n… [skill truncated]\n")
+        else {
             continue;
         };
-        let truncated = raw.len() > max;
-        let slice = if truncated { &raw[..max] } else { &raw[..] };
-        let mut body = String::from_utf8_lossy(slice).into_owned();
-        if truncated {
-            body.push_str("\n\n… [skill truncated]\n");
-        }
-        let digest = Sha256::digest(body.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
         out.push(SkillPack {
             id: id.clone(),
             body,
@@ -114,6 +97,21 @@ pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPac
         });
     }
     out
+}
+
+fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String, String, bool)> {
+    let raw = std::fs::read(path).ok()?;
+    let truncated = raw.len() > max;
+    let slice = if truncated { &raw[..max] } else { &raw[..] };
+    let mut body = String::from_utf8_lossy(slice).into_owned();
+    if truncated {
+        body.push_str(marker);
+    }
+    let digest = Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    Some((body, digest, truncated))
 }
 
 /// Compose system prompt with optional project rules and skill packs.

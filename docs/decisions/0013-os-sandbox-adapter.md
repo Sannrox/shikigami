@@ -119,6 +119,13 @@ cannot read a `sockaddr`.
 - The settings surface grows additively (`backend` variants,
   `read_only_paths`, `tool_sockets`); no existing field changes meaning.
 
+## Later
+
+`linux_native` (Landlock + total socket deny, `read_only_paths`, doctor ABI
+reporting) shipped. `sandbox.backend` is currently `none | rlimit |
+linux_native`. `seatbelt` and `sandbox.tool_sockets` remain subsequent
+additive deliverables as sequenced in decision item 7.
+
 ## Rejected alternatives
 
 - **User namespaces / bubblewrap-style helper as the baseline.** Blocked by

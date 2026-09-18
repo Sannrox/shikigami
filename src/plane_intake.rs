@@ -1,8 +1,9 @@
-//! Validated mapping from plane-claimed `runtime_dispatch` work to [`RunRequest`].
+//! Plane-claim intake: map claimed `runtime_dispatch` work to [`RunRequest`]
+//! and drive the sequential claim loop.
 //!
-//! This module does not call plane RPCs or admit work. A thin host intake adapter
-//! supplies a claimed effect plus its ActionInstance parameters, then invokes the
-//! shared harness with the mapped request.
+//! [`PlaneIntakePort`] owns claim / heartbeat / ack / claim-event RPCs. Mapping
+//! stays host-local: a claimed effect plus ActionInstance parameters become a
+//! shared harness request. [`run_plane_serve`] polls that port until shutdown.
 
 use std::time::{Duration, Instant};
 

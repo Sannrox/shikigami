@@ -128,7 +128,7 @@ enum Command {
         /// Work intake source. Filesystem remains the offline default.
         #[arg(long, value_enum, default_value_t = ServeIntake::Filesystem)]
         intake: ServeIntake,
-        /// Poll interval for the inbox in milliseconds.
+        /// Poll interval in milliseconds (filesystem inbox idle, or plane claim idle).
         #[arg(long, default_value_t = 200)]
         poll_ms: u64,
         /// Exit after processing this many jobs (tests / oneshot drain).
@@ -167,7 +167,7 @@ enum Command {
         #[arg(long, env = "SHIKIGAMI_LIFECYCLE_LISTEN")]
         lifecycle_listen: Option<String>,
     },
-    /// MCP server over stdio (`doctor` + `run` tools). See docs/mcp.md.
+    /// MCP server over stdio (`doctor`, `run`, `run_start`, `run_status`, `run_wait`). See docs/mcp.md.
     ///
     /// Stdio only — no network bind. Not a multi-tenant control plane;
     /// prefer library embed for in-process hosts.

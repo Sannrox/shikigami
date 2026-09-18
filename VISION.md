@@ -54,9 +54,9 @@ Freeze-core surfaces follow semver from crate `1.0.0`.
 
 - Replacing a governance control plane (e.g. sekai-chisei)
 - Replacing a delivery control plane (e.g. tenkai)
-- Multi-tenant SaaS control plane in v0
+- Multi-tenant SaaS control plane (not a 1.x product goal)
 - Shipping a desktop shell in this repository
-- Dynamic plugin marketplaces in v0 (in-tree + Cargo features first)
+- Dynamic plugin marketplaces (not a 1.x product goal; in-tree + Cargo features first)
 
 ## Success signals
 

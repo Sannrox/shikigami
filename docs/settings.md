@@ -182,6 +182,16 @@ Under `profile = governed` or `governance.fail_closed = true`, enabling Bash
 `sandbox.backend = rlimit` or `linux_native`, and `network.egress = deny` or
 `allowlist`.
 
+### `[network]`
+
+Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`). Does not
+interpose bash sockets; see [network.md](network.md).
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `egress` | `unrestricted` | `unrestricted` \| `deny` \| `allowlist` |
+| `allow_hosts` | `[]` | Exact hostnames when `egress = allowlist` (case-insensitive) |
+
 ### `[run]` (tool concurrency)
 
 | Field | Default | Description |
@@ -312,6 +322,7 @@ after each turn (version `1`). Resume:
 ```bash
 shikigami run --resume <run-id>
 # or library: RunRequest { resume_run_id: Some(id), resume_answer: Some(...), .. }
+```
 
 ### Park / escalate (headless)
 
@@ -325,7 +336,6 @@ shikigami run --resume <run_id> --answer "operator decision"
 ```
 
 Resume without an answer errors (no silent success/deny).
-```
 
 Checkpoints are harness scratch only — not plane truth. Prompt id must match
 the current system prompt or resume fails.
@@ -354,6 +364,19 @@ obey `[network]` egress. Disabled export leaves offline behavior unchanged.
 Attributes are an identity allowlist; prompts and tool payloads are never
 exported.
 
+### `[[hooks]]`
+
+Optional operator-trusted subprocess hooks. Empty list (the default) disables
+hooks. See [hooks.md](hooks.md).
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `event` | required | `pre_run` \| `post_run` \| `pre_tool` \| `post_tool` \| `on_park` |
+| `command` | required | Executable path or name on `PATH` |
+| `args` | `[]` | Extra argv |
+| `timeout_ms` | `5000` | Kill after this duration (capped at 120s) |
+| `fail_closed` | `false` | Fail the tool/run on hook failure or timeout |
+
 ## Environment variables
 
 | Variable | Purpose |
@@ -364,7 +387,13 @@ exported.
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
 | `SHIKIGAMI_CONTROL_PLANE` | sekai-chisei endpoint |
 | `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
+| `SHIKIGAMI_MODEL` | Override the configured model name; `auto` for plane routing |
 | `SHIKIGAMI_MODEL_SCRIPT` | Scripted JSON (inline) |
+| `SHIKIGAMI_RUN_TIMEOUT_SECS` | Overall run wall-clock limit |
+| `SHIKIGAMI_SERVE_LISTEN` | Filesystem-serve HTTP control bind |
+| `SHIKIGAMI_SERVE_AUTH_TOKEN_ENV` | Env var name holding the serve HTTP bearer token |
+| `SHIKIGAMI_WORKER_ID` | Worker identity written into the plane lifecycle snapshot |
+| `SHIKIGAMI_LIFECYCLE_LISTEN` | Plane-intake lifecycle probe bind |
 | `OPENAI_API_KEY` | Default HTTP model key |
 | *(value of `token_env`)* | Plane bearer token when configured |
 
@@ -384,7 +413,7 @@ To run only those cases:
 cargo test property_
 ```
 
-No separate fuzz job is required for v0.x.
+No separate fuzz job is required for 1.x.
 
 There are **no** tenkai environment variables for the harness process. Tenkai
 only installs or upgrades the binary; see

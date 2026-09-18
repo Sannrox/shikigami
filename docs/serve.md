@@ -23,8 +23,9 @@ shikigami --config examples/local-run.toml serve
 #   --listen 127.0.0.1:8080 --auth-token-env SHIKIGAMI_SERVE_TOKEN
 ```
 
-Graceful stop: **Ctrl-C** / SIGINT sets shutdown and exits after the current
-poll cycle.
+Graceful stop: **Ctrl-C** / SIGINT, and **SIGTERM** on Unix, stop new
+filesystem claims and drain already-claimed jobs before exit. Plane-claim
+intake still cancels in-flight work without a terminal ack (see below).
 
 ## Queue layout
 
@@ -244,6 +245,7 @@ for resolution, retry, dead-letter, and authorization semantics.
 - Use the same config/env as `run` / `doctor`.
 - For fleets, put the binary under process supervision (systemd, tenkai, etc.)
   and drain with SIGTERM; watch `/readyz` or the lifecycle file.
-- Plane-claim intake is shipped. Additional intake transports, including direct
-  HTTP admission, require a separate contract and must preserve the same
+- Plane-claim intake is shipped. Filesystem intake already admits work through
+  authenticated `POST /runs` (see [runs.md](runs.md)). Additional intake
+  transports still require a separate contract and must preserve the same
   `Harness` and governance boundaries.

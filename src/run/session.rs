@@ -25,8 +25,8 @@ use super::{RunError, RunTermination, SYSTEM_PROMPT};
 
 /// Owned run progress + checkpoint retention policy for one engine attempt.
 ///
-/// Deepens the earlier borrow-based `CheckpointSession` by also owning the
-/// conversation fields that every save had to restate.
+/// Callers mutate conversation fields here and persist through this session
+/// instead of restating messages, turns, todos, workspace, or retention.
 pub(super) struct RunSession {
     state_runs: PathBuf,
     governance: Arc<dyn GovernancePort>,

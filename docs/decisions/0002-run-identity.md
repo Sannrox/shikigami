@@ -30,7 +30,7 @@ plane receipts cannot be joined across shikigami and peer hosts (e.g. onmyoji).
    owns a logical operation (or work-unit correlation id that should surface as
    the plane operation), pass it; the harness still mints a distinct `run_id`
    for the attempt unless resuming.
-5. **Work units are not created by shikigami in v0.x.** Peers that use
+5. **Work units are not created by shikigami in 1.x.** Peers that use
    sekai work-unit APIs should treat `logical_operation_id` / `run_id` as the
    correlation keys documented here; shikigami does not call CreateWorkUnit.
 

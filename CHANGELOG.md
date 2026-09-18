@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- Operator docs and module comments now match shipped behavior: default coding
+  tools, `run-content` CLI intake, harvest `complete_run` skip set, filesystem
+  serve drain on SIGINT/SIGTERM, MCP/HTTP/`web_fetch` egress, filesystem
+  `POST /runs`, the settings schema for `[network]` / `[[hooks]]`, and 1.x
+  adapter/status stamps.
+
 ### Added
 
 - On a plane `require_approval` decision the run parks at the effect
@@ -113,8 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Linux tier (`linux_native`: Landlock filesystem rules plus a seccomp socket
   gate, no user namespaces or helper binary) is the selected adapter,
   containers and micro-VMs remain host-owned deployment tiers, and macOS gets a
-  documented development-only Seatbelt profile. No runtime behavior changes in
-  this entry; implementation follows in #282. See
+  documented development-only Seatbelt profile. Implemented in #282. See
   [ADR 0013](docs/decisions/0013-os-sandbox-adapter.md) and
   [research #281](docs/research/281-os-sandbox-adapter.md).
 - `workspace.snapshot` captures `snapshots/initial` only on the first

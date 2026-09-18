@@ -32,7 +32,7 @@ actionable governance errors. There is no separate reporter-preflight RPC.
 | `success` | bool string |
 | `summary` | truncated final summary / error |
 | `turns` | completed model turns |
-| `termination` | `completed` \| `cancelled` \| `timed_out` \| `max_turns` \| `failed` |
+| `termination` | `completed` \| `failed` |
 | `workspace` | host path (reference only; not plane storage) |
 | `authoritative` | always `plane` on governed harvest |
 | `harness` | `shikigami` |
@@ -41,9 +41,11 @@ Evidence references on complete include `run_id` and optional `workspace_path`.
 
 ## Success and failure
 
-Both successful and failed runs call `complete_run`. Normal governed model
-execution records the terminal `outcome_recorded` event in its own
-`ExecutePlanStream` receipt. Shikigami also reports that model receipt as a
+Successful and failed (non-resumable) runs call `complete_run`. Parked,
+cancelled, timed-out, and max-turns runs skip `complete_run` so the host
+receipt stays open for resume.
+Normal governed model execution records the terminal `outcome_recorded` event
+in its own `ExecutePlanStream` receipt. Shikigami also reports that model receipt as a
 `model_called` event on the aggregate host receipt, reports each host tool as
 `action_performed`, and closes the host receipt with its own
 `outcome_recorded` event. Fail-closed profiles treat plane unavailability,

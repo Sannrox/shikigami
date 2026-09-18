@@ -1,6 +1,7 @@
 //! Local harness state root (not the control-plane store).
 //!
-//! Created lazily when a run needs workspace storage. No install/`init` step.
+//! Created when `Harness` is constructed (`ensure_ready_for_runs`). No
+//! install/`init` step.
 
 use std::fs;
 use std::path::{Path, PathBuf};

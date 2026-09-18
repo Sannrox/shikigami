@@ -38,7 +38,7 @@ install/upgrade with governance.
 - The sekai-chisei adapter is feature-gated (`governance-sekai-chisei`); the
   port boundary is mandatory either way.
 - Out-of-tree adapters can implement the same traits without forking the turn
-  loop (dynamic plugins remain out of scope for v0).
+  loop (dynamic plugins remain out of scope for 1.x).
 - Doctor reports effective profile and adapter ids so operators can verify
   offline vs governed wiring.
 

@@ -222,7 +222,7 @@ outer boundary and must not claim it.
 ## Exit result
 
 The sandbox decision is recorded in ADR 0013 and the Design Discussion linked
-from it. [#282](https://github.com/Sannrox/shikigami/issues/282) is ready:
-implement `linux_native` behind the sandbox port with detection, doctor
-reporting, fail-closed configuration, the total socket deny for tool children,
-and a Linux CI job that proves the three denials and the overhead budget.
+from it. **Later:** [#282](https://github.com/Sannrox/shikigami/issues/282)
+shipped `linux_native` (Landlock + total socket deny, doctor ABI reporting,
+fail-closed configuration, and a Linux CI job for the three denials and the
+overhead budget). `seatbelt` and `sandbox.tool_sockets` remain unshipped.

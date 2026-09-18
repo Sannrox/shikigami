@@ -2,7 +2,7 @@
 
 Shikigami selects backends through **ports**. Built-in adapters are listed
 below. Out-of-tree adapters can implement the same traits (dynamic plugins are
-out of scope for v0; use a library dependency or fork of the adapter module).
+out of scope for 1.x; use a library dependency or fork of the adapter module).
 
 Architectural decision: [decisions/0001-ports-and-settings.md](decisions/0001-ports-and-settings.md).
 
@@ -10,8 +10,8 @@ Architectural decision: [decisions/0001-ports-and-settings.md](decisions/0001-po
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `none` | stable for v0 | No external plane; local model path; tool allow-list only |
-| `local` | stable for v0 | In-process tool allow-list for deterministic tests |
+| `none` | stable for 1.x | No external plane; local model path; tool allow-list only |
+| `local` | stable for 1.x | In-process tool allow-list for deterministic tests |
 | `http-callback` (alias `host-authz`) | stable for host brokers | POSTs tool authz to a host URL; allow/deny with timeout |
 | `sekai-chisei` | primary production path | gRPC: probe, `PlanExecution`, `ExecutePlanStream`, operation events; parks on `require_approval` and re-authorizes the same request on resume |
 
@@ -90,8 +90,8 @@ variable name (for example `SEKAI_TOKEN`) that holds a raw token or
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `scripted` | stable for v0 | Deterministic multi-turn JSON script (default offline) |
-| `http` | stable for v0 | OpenAI-compatible Chat Completions (`model-http` feature) |
+| `scripted` | stable for 1.x | Deterministic multi-turn JSON script (default offline) |
+| `http` | stable for 1.x | OpenAI-compatible Chat Completions (`model-http` feature) |
 | `plane` | with sekai-chisei | Placeholder id; actual turns are owned by governance |
 
 When governance is `sekai-chisei`, the engine uses the plane for planning even if
@@ -101,9 +101,9 @@ a local model adapter is configured for other profiles.
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `directory` | stable for v0 | Sandbox directory under state runs or configured root |
+| `directory` | stable for 1.x | Sandbox directory under state runs or configured root |
 | `inplace` (alias `directory-inplace`) | stable for host-selected workspaces | Uses `workspace.root` directly; no per-run directory or automatic cleanup |
-| `git-worktree` | stable for v0 | `git worktree add` + branch; cleaned after successful runs |
+| `git-worktree` | stable for 1.x | `git worktree add` + branch; cleaned after successful runs |
 
 `inplace` requires an existing directory, does not support snapshots, and
 requires the harness state root to be outside the workspace. Hosts must
@@ -115,9 +115,9 @@ serialize concurrent runs against the same in-place root.
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `stderr` | stable for v0 | JSON lines on stderr |
-| `jsonl` | stable for v0 | Append-only file under the state runs directory |
-| `none` | stable for v0 | Discard events |
+| `stderr` | stable for 1.x | JSON lines on stderr |
+| `jsonl` | stable for 1.x | Append-only file under the state runs directory |
+| `none` | stable for 1.x | Discard events |
 
 Harness events are **not** a substitute for plane audit records.
 
@@ -129,9 +129,12 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 
 | Builtin | Role |
 | --- | --- |
-| `read_file` / `write_file` / `edit` / `multi_edit` | Workspace-jailed file ops |
+| `read_file` / `write_file` / `edit` / `multi_edit` / `apply_patch` | Workspace-jailed file ops |
 | `glob` / `grep` | Workspace-jailed search (capped matches / output) |
+| `todo_write` | Run-scoped checklist (not a plane work-unit API) |
+| `web_fetch` | Opt-in HTTP(S) GET; not in the coding default |
 | `bash` | Opt-in shell in workspace (timeout-bounded) |
+| `bash_background` / `bash_job_status` / `bash_job_logs` | Implicit when `bash` is enabled |
 | `report` / `escalate` | Finish or park; exclusive batch |
 
 API: `ToolRegistry::from_config` → `definitions()` + `execute()`.
@@ -140,8 +143,8 @@ The registry is the only execution interface: it owns resolved tool authority
 behavior, protected child-process environment names, sandbox policy, and
 jailed builtin dispatch. Lower-level `with_builtins*` constructors remain
 available for focused adapters and tests. Dynamic native plugins remain out of
-scope; future MCP/skill tools register into the same registry without changing
-the turn loop.
+scope. Configured MCP servers register as `mcp.<name>.<tool>` into the same
+registry without changing the turn loop; skills load as prompt context.
 
 Governed runs still call `authorize_tool` before `execute` for consequential
 tools.

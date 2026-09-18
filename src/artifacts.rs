@@ -1,8 +1,9 @@
 //! Stable local run artifact manifests.
 //!
 //! Manifests contain file metadata and hashes, not file contents. A git patch
-//! is captured separately when the workspace is a git worktree and remains an
-//! explicit export choice for callers.
+//! is captured separately when the workspace is a git working tree (`git
+//! rev-parse --show-toplevel`) and remains an explicit export choice for
+//! callers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};

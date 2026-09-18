@@ -46,8 +46,8 @@ moves the next lexically sorted file to `processing/`, maps the job to
 - moves a completed harness run plus `*.result.json` to `done/` or `failed/`;
 - moves a job whose harness run returns an error to `failed/` and writes
   `*.error.txt`; but
-- currently leaves malformed JSON in `processing/`, requiring operator
-  recovery.
+- later shipped: parse failures archive to `failed/` with `*.error.txt`
+  (the research snapshot left malformed JSON in `processing/`).
 
 The version-1 job envelope is:
 
@@ -69,9 +69,9 @@ The version-1 job envelope is:
 
 The queue has no durable admission record, lease generation, heartbeat, or
 idempotent acknowledgement. Its rename is only a single-filesystem local
-claim, and malformed-job recovery is incomplete. Those limitations are
-acceptable for offline use, but make it unsuitable as the long-term plane
-placement contract.
+claim. Parse failures later archive to `failed/` with `*.error.txt`. Those
+limitations are acceptable for offline use, but make it unsuitable as the
+long-term plane placement contract.
 
 ### Current governed correlation
 

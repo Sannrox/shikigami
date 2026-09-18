@@ -205,7 +205,7 @@ pub enum PermissionMode {
     /// Use `enabled` if set, otherwise the safe coding default (no bash).
     #[default]
     Custom,
-    /// Read/search only (+ report/escalate).
+    /// Read/search only (+ `todo_write`, report, escalate).
     Read,
     /// Read + write/edit (no bash).
     Workspace,
@@ -733,7 +733,8 @@ pub enum EgressMode {
     /// No harness-level network restriction (default OSS behavior).
     #[default]
     Unrestricted,
-    /// Block harness HTTP client calls (model http adapter).
+    /// Block harness HTTP client calls (model `http` adapter, MCP HTTP, and
+    /// `web_fetch`). Bash sockets are still unrestricted.
     Deny,
     /// Only listed hosts for harness HTTP client.
     Allowlist,
@@ -1141,7 +1142,7 @@ impl Config {
     }
 
     /// Credential environment names consumed by the harness and never exposed
-    /// to agent-controlled Bash subprocesses.
+    /// to agent-controlled tool or MCP stdio subprocesses.
     pub(crate) fn protected_tool_environment_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         if let Some(name) = &self.governance.token_env {

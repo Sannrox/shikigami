@@ -105,11 +105,11 @@ authorized through the plane’s host-executed external-action API
 
 | Tool | External-action? | `risk_class` |
 | --- | --- | --- |
-| `bash` | yes | `destructive` |
-| `write_file` | yes | `write` |
-| `edit` | yes | `write` |
-| `read_file` | yes | `read` |
-| `report` | no | — (harness-internal completion signal) |
+| `bash` / `bash_background` / `bash_job_status` / `bash_job_logs` | yes | `destructive` |
+| `write_file` / `edit` / `multi_edit` / `apply_patch` | yes | `write` |
+| `read_file` / `glob` / `grep` / `web_fetch` | yes | `read` |
+| unknown / MCP names | yes | `write` (default) |
+| `report` / `escalate` / `todo_write` | no | — (harness-internal terminate, park, or checklist) |
 
 ### Decision handling (headless)
 
