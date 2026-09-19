@@ -584,7 +584,9 @@ impl TracingSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSettings {
-    /// `scripted` | `http` | `plane` (plane forces governance sekai-chisei path).
+    /// `scripted` | `http` | `plane`. Plane planning is used when governance
+    /// is `sekai-chisei` or this adapter is `plane`; it does not rewrite the
+    /// governance adapter.
     #[serde(default = "default_model_adapter")]
     pub adapter: String,
     /// OpenAI-compatible base URL (http adapter).

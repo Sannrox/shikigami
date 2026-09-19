@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::artifacts::ArtifactManifest;
-use crate::digest::sha256_prefixed;
+use crate::digest::{is_sha256_prefixed, sha256_prefixed};
 
 const REQUIRED_KINDS: [&str; 4] = ["application", "typed_sdk", "tests", "delivery_inputs"];
 /// Same wire limit as sekai-chisei #646 `ACK_ARTIFACT_JSON_MAX_BYTES`.
@@ -56,7 +56,7 @@ fn from_captured_manifest(manifest: &ArtifactManifest, run_id: &str) -> Option<S
         let Some(kind) = projection_kind(&file.path) else {
             continue;
         };
-        if !valid_generated_path(&file.path) || !file.sha256.starts_with("sha256:") {
+        if !valid_generated_path(&file.path) || !is_sha256_prefixed(&file.sha256, true) {
             return None;
         }
         files.push(ReceiptArtifactFile {
@@ -195,7 +195,7 @@ mod tests {
         assert!(
             value["tree_digest"]
                 .as_str()
-                .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+                .is_some_and(|digest| is_sha256_prefixed(digest, true))
         );
     }
 

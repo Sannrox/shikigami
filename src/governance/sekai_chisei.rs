@@ -19,7 +19,6 @@ use super::{
 };
 
 pub use sekai_client::protocol as proto;
-use sha2::{Digest, Sha256};
 
 use proto::chisei::GetEffectivePolicySummaryRequest;
 
@@ -697,13 +696,7 @@ impl SekaiChiseiGovernance {
     }
 
     pub(super) fn arguments_digest(args_json: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(args_json.as_bytes());
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        crate::digest::sha256_hex(args_json.as_bytes())
     }
 
     #[cfg(test)]
@@ -1615,6 +1608,7 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
+        assert_eq!(a, crate::digest::sha256_hex(br#"{"path":"a.txt"}"#));
     }
 
     #[test]

@@ -1362,10 +1362,7 @@ fn validate_bindings(bindings: &ReplayBindings) -> Result<(), ReplayError> {
 }
 
 fn validate_digest(name: &str, digest: &str) -> Result<(), ReplayError> {
-    let valid = digest.len() == 71
-        && digest.starts_with("sha256:")
-        && digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit());
-    if valid {
+    if crate::digest::is_sha256_prefixed(digest, false) {
         Ok(())
     } else {
         Err(ReplayError::Invalid(format!(

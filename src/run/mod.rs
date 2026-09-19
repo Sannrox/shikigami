@@ -59,7 +59,7 @@ pub enum RunTermination {
     TimedOut,
     MaxTurns,
     Failed,
-    /// Awaiting operator answer via resume (escalate tool).
+    /// Parked for an escalate answer or a plane approval decision.
     Parked,
 }
 

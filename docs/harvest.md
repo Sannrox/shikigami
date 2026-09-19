@@ -29,6 +29,8 @@ actionable governance errors. There is no separate reporter-preflight RPC.
 
 | Attribute | Meaning |
 | --- | --- |
+| `status` | `succeeded` \| `failed` |
+| `completion_reason` | same string as `termination` |
 | `success` | bool string |
 | `summary` | truncated final summary / error |
 | `turns` | completed model turns |
@@ -36,6 +38,7 @@ actionable governance errors. There is no separate reporter-preflight RPC.
 | `workspace` | host path (reference only; not plane storage) |
 | `authoritative` | always `plane` on governed harvest |
 | `harness` | `shikigami` |
+| `prompt_id` | versioned default prompt id |
 
 Evidence references on complete include `run_id` and optional `workspace_path`.
 
