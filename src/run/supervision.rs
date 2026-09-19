@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::checkpoint::Checkpoint;
 use crate::content::{
-    ContentRunRequestV1, initial_messages_match, load_sidecar, resolve_accepted,
-    resolve_terminal_summary, validate_messages,
+    ContentRunRequestV1, initial_messages_match, load_sidecar, project_bounded_text,
+    resolve_accepted, resolve_terminal_summary, validate_messages,
 };
 use crate::model::CostEstimate;
 use crate::replay::ReplayExecution;
@@ -177,11 +177,7 @@ impl<'a> RunSupervision<'a> {
             todos: checkpoint.todos,
         };
         let mut projected = result.clone();
-        projected.summary = format!(
-            "bounded_content_result bytes={} digest={}",
-            result.summary.len(),
-            crate::content::sha256_digest(result.summary.as_bytes())
-        );
+        projected.summary = project_bounded_text(true, "bounded_content_result", &result.summary);
         let _ = self.engine.registry.finish_result(&projected);
         Ok(Some(result))
     }
@@ -358,11 +354,8 @@ impl<'a> RunSupervision<'a> {
             Ok(result) => {
                 if content_run {
                     let mut projected = result.clone();
-                    projected.summary = format!(
-                        "bounded_content_result bytes={} digest={}",
-                        result.summary.len(),
-                        crate::content::sha256_digest(result.summary.as_bytes())
-                    );
+                    projected.summary =
+                        project_bounded_text(true, "bounded_content_result", &result.summary);
                     let _ = self.engine.registry.finish_result(&projected);
                 } else {
                     let _ = self.engine.registry.finish_result(result);

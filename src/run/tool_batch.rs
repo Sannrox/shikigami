@@ -609,9 +609,9 @@ impl<'a> DurableToolBatch<'a> {
                             &detail,
                         )
                         .await;
-                    // Save before reporting so a resume checkpoint
-                    // carries the park state and the exact pending
-                    // event for retry if the report fails.
+                    // Report first, then save. The checkpoint still
+                    // carries the park and the exact pending event so
+                    // resume can retry if the report failed.
                     session.save_recoverable(Some(parked), tools.as_ref())?;
                     report_result?;
                     session.spans.end_tool(&report_call_id, false);
@@ -957,15 +957,7 @@ fn batch_occurrences_before(batch: &[ToolCall], index: usize, id: &str) -> usize
 }
 
 fn projected_detail(content_run: bool, detail: &str) -> String {
-    if content_run {
-        format!(
-            "bounded_content bytes={} digest={}",
-            detail.len(),
-            crate::content::sha256_digest(detail.as_bytes())
-        )
-    } else {
-        detail.to_string()
-    }
+    crate::content::project_bounded_text(content_run, "bounded_content", detail)
 }
 
 #[cfg(test)]

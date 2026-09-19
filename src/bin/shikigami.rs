@@ -368,7 +368,6 @@ async fn run() -> anyhow::Result<()> {
                     "resume with: shikigami run --resume {} --answer \"...\"",
                     result.run_id
                 );
-                // Distinct exit code for park (not silent success).
                 return Err(anyhow::anyhow!(
                     "run parked awaiting operator answer (exit semantics: non-zero)"
                 ));

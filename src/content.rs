@@ -1145,6 +1145,19 @@ pub(crate) fn sha256_digest(bytes: &[u8]) -> String {
     crate::digest::sha256_prefixed(bytes)
 }
 
+/// Project bounded-content payloads to identity-only `bytes=` / `digest=` text.
+pub(crate) fn project_bounded_text(content_run: bool, label: &str, text: &str) -> String {
+    if content_run {
+        format!(
+            "{label} bytes={} digest={}",
+            text.len(),
+            sha256_digest(text.as_bytes())
+        )
+    } else {
+        text.to_string()
+    }
+}
+
 fn required_text(value: &str, max: usize, field: &str) -> Result<(), ContentError> {
     if value.is_empty()
         || value != value.trim()
@@ -1159,12 +1172,7 @@ fn required_text(value: &str, max: usize, field: &str) -> Result<(), ContentErro
 }
 
 fn valid_sha256_digest(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    })
+    crate::digest::is_sha256_prefixed(value, true)
 }
 
 fn valid_opaque_reference(value: &str) -> bool {
@@ -2119,6 +2127,18 @@ mod tests {
         assert!(
             message.contains("cannot be opened") || message.contains("regular file"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn project_bounded_text_is_identity_unless_content_run() {
+        assert_eq!(
+            project_bounded_text(false, "bounded_content", "hello"),
+            "hello"
+        );
+        assert_eq!(
+            project_bounded_text(true, "bounded_content", "hello"),
+            format!("bounded_content bytes=5 digest={}", sha256_digest(b"hello"))
         );
     }
 }

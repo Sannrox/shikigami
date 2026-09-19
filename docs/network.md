@@ -3,7 +3,9 @@
 Harness-level controls for **HTTP(S) clients owned by shikigami**:
 
 - `http` model adapter
+- MCP HTTP transports
 - optional `web_fetch` tool (opt-in via `tools.enabled` / mode allow-list)
+- optional OTLP/HTTP tracing export when `[tracing]` is enabled
 
 Path jail does not constrain the network.
 

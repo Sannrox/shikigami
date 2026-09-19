@@ -513,7 +513,6 @@ mod tests {
         let (_, model_reported) = transaction.model_operation("run-1").unwrap();
         assert!(!model_reported);
 
-        // Fresh report_with_id used to pass model=false even for KIND_MODEL.
         transaction.commit_event("run-1", "model-event".into(), true);
         let (_, model_reported) = transaction.model_operation("run-1").unwrap();
         assert!(model_reported);

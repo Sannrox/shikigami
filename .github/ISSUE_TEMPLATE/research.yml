@@ -20,7 +20,7 @@ body:
     id: constraints
     attributes:
       label: Constraints
-      description: Note product boundaries, compatibility, security, data, cost, or environment constraints.
+      description: Note product boundaries, compatibility, security, data, or cost constraints. No hostnames, home paths, or absolute paths.
     validations:
       required: true
   - type: input
@@ -52,6 +52,8 @@ body:
       label: Checklist
       options:
         - label: I searched existing issues, discussions, and pull requests.
+          required: true
+        - label: I omitted hostnames, home paths, and other private environment details.
           required: true
         - label: I will close this investigation with a recommendation or explicit no-action result.
           required: true

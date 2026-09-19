@@ -153,6 +153,17 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/worker_lifecycle.rs` | Canonical worker snapshot publisher plus thin `serve_lifecycle_http` over the private fleet HTTP probe protocol |
 | `src/config.rs`, `src/config/resolution.rs` | Versioned settings over the private deep effective settings resolution protocol |
 | `src/bin/shikigami.rs` | CLI host |
+| `src/plane_host.rs` | Optional in-process plane host bootstrap for embedders |
+| `src/tracing_export.rs` | Identity-only OTLP/file span export |
+| `src/metrics.rs` | Host-local run/tool counters and snapshots |
+| `src/artifacts.rs` | Retained workspace artifact manifests |
+| `src/registry.rs` | Durable run registry records |
+| `src/state.rs` | Host state-root layout |
+| `src/transcript.rs` | Run transcript export |
+| `src/checkpoint.rs` | Local run/governance checkpoint files |
+| `src/context.rs` | Compacted conversation context |
+| `src/identity.rs` | Product name and crate version |
+| `src/prompts/` | Versioned harness prompt assets |
 | `sekai-client` dependency | Versioned Rust facade over canonical sekai-chisei gRPC contracts |
 
 ## Cargo features

@@ -77,8 +77,8 @@ impl<'a> RunTransaction<'a> {
         let mut success = false;
         let mut termination = RunTermination::Completed;
 
-        // Preserve an escalation park if reporting that park fails after the
-        // park has already been durably written.
+        // Preserve a durable park (escalate or approval) if reporting that
+        // park fails after the park has already been written.
         let mut pending_park: Option<ParkedState> = None;
         let mut model_turns = DurableModelTurn::new(
             self.engine,
@@ -99,7 +99,8 @@ impl<'a> RunTransaction<'a> {
             .map(|(terminal, _)| terminal.usage);
         let recovered_text_report = recovered_text_report(&session.messages);
 
-        // Ok(Some(park)) when escalated; Ok(None) when finished normally.
+        // Ok(Some(park)) when parked (escalate or approval); Ok(None) when
+        // finished normally.
         let result: Result<Option<ParkInfo>, RunError> =
             if let Some((terminal, summary)) = recovered_content_terminal {
                 final_summary = summary;
@@ -388,15 +389,7 @@ fn recovered_text_report(messages: &[ChatMessage]) -> Option<(bool, String)> {
 }
 
 fn projected_summary(content_run: bool, summary: &str) -> String {
-    if content_run {
-        format!(
-            "bounded_content_result bytes={} digest={}",
-            summary.len(),
-            crate::content::sha256_digest(summary.as_bytes())
-        )
-    } else {
-        summary.to_string()
-    }
+    crate::content::project_bounded_text(content_run, "bounded_content_result", summary)
 }
 
 #[cfg(test)]

@@ -184,8 +184,9 @@ Under `profile = governed` or `governance.fail_closed = true`, enabling Bash
 
 ### `[network]`
 
-Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`). Does not
-interpose bash sockets; see [network.md](network.md).
+Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`, and
+OTLP/HTTP tracing export). Does not interpose bash sockets; see
+[network.md](network.md).
 
 | Field | Default | Description |
 | --- | --- | --- |

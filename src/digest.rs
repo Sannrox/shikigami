@@ -22,6 +22,19 @@ pub(crate) fn sha256_prefixed(bytes: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(bytes))
 }
 
+/// True when `value` is `sha256:` plus 64 hexadecimal characters.
+///
+/// `lowercase_hex` requires `a-f` (content and generated artifacts). Replay
+/// admits `A-F` so historically mixed-case bundles still validate.
+pub(crate) fn is_sha256_prefixed(value: &str, lowercase_hex: bool) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex.bytes().all(|byte| {
+                byte.is_ascii_hexdigit() && (!lowercase_hex || !byte.is_ascii_uppercase())
+            })
+    })
+}
+
 /// Current Unix time in milliseconds as `u64`. Before-epoch clocks become `0`.
 pub(crate) fn unix_now_ms_u64() -> u64 {
     SystemTime::now()
@@ -59,5 +72,16 @@ mod tests {
     fn clocks_are_non_negative() {
         assert!(unix_now_ms_u64() > 0);
         assert!(unix_now_ms_i64() > 0);
+    }
+
+    #[test]
+    fn prefixed_shape_accepts_known_digest_and_rejects_garbage() {
+        let empty = sha256_prefixed(b"");
+        let upper_hex = format!("sha256:{}", empty[7..].to_ascii_uppercase());
+        assert!(is_sha256_prefixed(&empty, true));
+        assert!(is_sha256_prefixed(&upper_hex, false));
+        assert!(!is_sha256_prefixed(&upper_hex, true));
+        assert!(!is_sha256_prefixed("sha256:abcd", true));
+        assert!(!is_sha256_prefixed("not-a-digest", false));
     }
 }

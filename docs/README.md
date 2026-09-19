@@ -32,14 +32,21 @@ Operator and contributor documentation for **shikigami**.
 | Lifecycle hooks | [hooks.md](hooks.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
-| 1.0 freeze audit (research closeout) | [1.0-freeze-audit.md](1.0-freeze-audit.md) |
-| External embedding product position (research #141) | [research/141-external-embedding-position.md](research/141-external-embedding-position.md) |
-| Profile and adapter configuration recommendation (research #142) | [research/142-profile-adapter-configuration.md](research/142-profile-adapter-configuration.md) |
-| Plane work intake recommendation (research #129) | [research/129-plane-work-intake.md](research/129-plane-work-intake.md) |
-| OS-level sandbox adapter decision (research #281) | [research/281-os-sandbox-adapter.md](research/281-os-sandbox-adapter.md) |
 | See accepted design decisions | [decisions/](decisions/) |
 | Contribute code | [../CONTRIBUTING.md](../CONTRIBUTING.md) |
 | Report a vulnerability | [../SECURITY.md](../SECURITY.md) |
+
+## Historical research
+
+Dated closeouts. Use the operator pages above for current behavior.
+
+| Note | Read |
+| --- | --- |
+| 1.0 freeze audit (2026-07-26 no-go) | [1.0-freeze-audit.md](1.0-freeze-audit.md) |
+| External embedding product position (research #141) | [research/141-external-embedding-position.md](research/141-external-embedding-position.md) |
+| Profile and adapter configuration recommendation (research #142) | [research/142-profile-adapter-configuration.md](research/142-profile-adapter-configuration.md) |
+| Plane work intake recommendation (research #129); shipped as [serve.md](serve.md) / [plane-action-run.md](plane-action-run.md) | [research/129-plane-work-intake.md](research/129-plane-work-intake.md) |
+| OS-level sandbox research #281; shipped backends in [settings.md](settings.md) and [ADR 0013](decisions/0013-os-sandbox-adapter.md) | [research/281-os-sandbox-adapter.md](research/281-os-sandbox-adapter.md) |
 
 ## Document roles
 

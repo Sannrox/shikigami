@@ -9,14 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Public Issues and PRs must not include hostnames or other private
+  environment inventory. Delivery skills list only branch, repo-relative
+  worktree, and SHAs on GitHub.
+
 - SHA-256 hex and Unix-ms clocks now live in one crate helper (`src/digest.rs`).
   Public `digest_bytes`, `fallback::sha256_hex`, and `evidence_queue::sha256_hex`
   keep the same strings; overflow of the `i64` clock saturates to `0`.
+  Prefixed digest shape checks and bounded-content projection also go through
+  that helper so content, replay, receipt artifacts, and harvest argument
+  digests cannot drift.
 
 - Operator docs and module comments now match shipped behavior: default coding
   tools, `run-content` CLI intake, harvest `complete_run` skip set, filesystem
-  serve drain on SIGINT/SIGTERM, MCP/HTTP/`web_fetch` egress, filesystem
-  `POST /runs`, the settings schema for `[network]` / `[[hooks]]`, and 1.x
+  serve drain on SIGINT/SIGTERM, MCP/HTTP/`web_fetch`/OTLP egress, filesystem
+  `POST /runs`, the settings schema for `[network]` / `[[hooks]]`, harvest
+  complete-event attributes, Start-here vs historical research, and 1.x
   adapter/status stamps.
 
 ### Added

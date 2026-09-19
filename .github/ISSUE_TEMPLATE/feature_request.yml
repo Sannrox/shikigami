@@ -65,5 +65,7 @@ body:
       options:
         - label: I searched existing issues and pull requests.
           required: true
+        - label: I omitted hostnames, home paths, and other private environment details.
+          required: true
         - label: This keeps the ports+settings boundary, or explains why the boundary should change.
           required: true
