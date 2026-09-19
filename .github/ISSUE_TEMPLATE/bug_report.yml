@@ -5,7 +5,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do not include credentials, private keys, tokens, or sensitive data.
+        Do not include credentials, private keys, tokens, sensitive data,
+        hostnames, home paths, or other private environment details.
         Report exploitable vulnerabilities through the private security link instead.
   - type: textarea
     id: summary
@@ -48,7 +49,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Rust version, config file, adapters, and plane endpoint if relevant.
+      description: OS, Rust version, config file, and adapters only. No hostnames, home paths, or absolute paths.
     validations:
       required: true
   - type: textarea
@@ -69,7 +70,7 @@ body:
       options:
         - label: I searched existing issues and pull requests.
           required: true
-        - label: I removed credentials, tokens, private keys, and sensitive data.
+        - label: I removed credentials, tokens, private keys, sensitive data, hostnames, and home paths.
           required: true
         - label: This is not an exploitable security vulnerability.
           required: true

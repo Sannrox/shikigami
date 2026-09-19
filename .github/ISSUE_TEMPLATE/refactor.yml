@@ -58,5 +58,7 @@ body:
       options:
         - label: I searched existing issues and pull requests.
           required: true
+        - label: I omitted hostnames, home paths, and other private environment details.
+          required: true
         - label: The proposal is motivated by concrete evidence rather than style preference alone.
           required: true

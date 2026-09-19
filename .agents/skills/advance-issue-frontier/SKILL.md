@@ -141,3 +141,6 @@ If nothing changed, say so without manufacturing work.
 - Do not assign contributors or invent priority, deadlines, or milestones.
 - Do not silently repair dependency text or choose between conflicting sources.
 - Do not exceed the active-lane limit when recommending simultaneous delivery.
+- Never put hostnames, FQDNs, home directories, absolute worktree paths, or
+  other private environment inventory on public Issues, Pull Requests, or
+  comments. Keep local checkout paths in the session report only.

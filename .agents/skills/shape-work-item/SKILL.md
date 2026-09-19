@@ -26,7 +26,9 @@ explicitly authorizes publishing to GitHub.
    Discussion before implementation.
 4. Draft with problem, observable outcome, non-goals, acceptance evidence,
    affected area (run/governance/workspace/settings/embed/ops/security), and
-   compatibility/security risks.
+   compatibility/security risks. Omit hostnames, home paths, absolute
+   worktree paths, and other private environment inventory from any text
+   that will be published to GitHub.
 5. Recommend labels (`type:*`, `area:*`, `status:ready` when ready). Do not
    invent priority, assignment, or sprint.
 

@@ -105,6 +105,8 @@ Dependabot opens weekly cargo and GitHub Actions update PRs.
    and `make test-e2e`, then include the command results in the PR description.
 4. Describe behavior, risk, and test evidence in the PR body.
 5. Link an Issue when one exists.
+6. Do not put hostnames, home paths, absolute worktree paths, or other
+   private environment details in public pull request or issue text.
 
 Commit subjects: short imperative, Conventional Commits welcome
 (`feat:`, `fix:`, `docs:`, `chore:`).
