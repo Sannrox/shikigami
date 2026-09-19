@@ -78,15 +78,17 @@ Lane brief
 - authority ceiling: <Implement | Publish | Land>
 - claim branch: <type>/<issue> (already exists on GitHub; you are assigned)
 - base SHA: <base>
-- lane worktree: <absolute path>/.worktrees/issue-<issue>, or a fresh clone
-  of the repository on the claim branch
+- lane worktree: .worktrees/issue-<issue> (repo-relative; never an absolute
+  path or hostname), or a fresh clone of the repository on the claim branch
 - reserved by sibling lanes, do not touch: <surfaces or paths, or none>
 - procedure: run deliver-ready-issue from "3. Bound the implementation"
   onward inside the worktree; readiness, claim, and isolation are done.
 - publish only to the claim branch, with
   scripts/gh-verified-push.sh --branch <type>/<issue> --sync-local; open the
-  Pull Request as a draft with "Closes #<issue>" and this brief, and mark it
-  ready when verified.
+  Pull Request as a draft with "Closes #<issue>" and public lane fields
+  (branch, repo-relative worktree, base SHA, published SHA, authority). Do
+  not paste this internal brief, hostnames, or absolute paths onto GitHub.
+  Mark the PR ready when verified.
 - on a shared machine, fetch --prune, worktree add/remove, branch delete, and
   merge are lead-only; commit and publish only your own branch from your own
   worktree. Never enter the primary checkout or another lane's worktree.
@@ -144,13 +146,14 @@ Lane brief
 
 Keep one ledger for the run and return it with the final report:
 
-| Issue | Branch | Machine / checkout | Base SHA | Owner | State | PR | Evidence | Blockers | Cleanup |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Issue | Branch | Base SHA | Owner | State | PR | Evidence | Blockers | Cleanup |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 
 States are `claimed`, `implementing`, `verified`, `published`, `landed`,
 `blocked`, `released`, and `handed over`. Report verified outcomes with links,
-not launched work. Name every lane that is still open, who owns it, on which
-machine, and what unblocks it.
+not launched work. Name every lane that is still open, who owns it, and what
+unblocks it. Keep hostnames and absolute checkout paths in the session with
+the maintainer, never on GitHub.
 
 ## Boundaries
 
@@ -164,3 +167,6 @@ machine, and what unblocks it.
   shared surface without re-verifying it.
 - Never delete a worktree or branch you do not own without the maintainer's
   confirmation.
+- Never put hostnames, FQDNs, home directories, absolute worktree paths, LAN
+  or employer network names, or other private environment inventory on public
+  Issues, Pull Requests, comments, or commit messages.

@@ -186,21 +186,27 @@ sekai-client proto pin. Lanes that would both change one of these surfaces run
 in sequence, not in parallel.
 
 A lane publishes its first Verified commit to the claim branch as a draft Pull
-Request that closes the Issue and carries the lane brief: agent, machine, base
-SHA, and authority ceiling. It marks the Pull Request ready when verification
-and review are complete. Immediately before publishing, the lane fetches and
-confirms that the default branch is an ancestor of its head; it refreshes onto
-`main` only for a conflict, a failing gate, an explicit request, or a sibling
-landing on a shared surface, not merely because `main` advanced.
+Request that closes the Issue. Public GitHub lane fields may list only: claim
+branch, repo-relative worktree (for example `.worktrees/issue-N` — never an
+absolute path), base SHA, and published SHA. Keep absolute paths and
+machine/host names in the private agent session only. Never put hostnames,
+FQDNs, home directories, LAN or employer network names, or other private
+environment inventory on the Pull Request. It marks the Pull Request ready
+when verification and review are complete. Immediately before publishing, the
+lane fetches and confirms that the default branch is an ancestor of its head;
+it refreshes onto `main` only for a conflict, a failing gate, an explicit
+request, or a sibling landing on a shared surface, not merely because `main`
+advanced.
 
 Landing is sequential. After each merge, fetch, recompute the frontier, and let
 the remaining lanes recheck `mergeable` against the new `main`. A failed or
 timed-out merge response may still have merged; reconcile the remote state
 before retrying.
 
-The lead of a parallel run keeps a ledger per lane: Issue, branch, machine and
-checkout, base SHA, owner, state, Pull Request, evidence, blockers, and
-cleanup. Report verified outcomes, not launched work. The executable lead
+The lead of a parallel run keeps a ledger per lane: Issue, branch, base SHA,
+owner, state, Pull Request, evidence, blockers, and cleanup. Keep hostnames
+and absolute checkout paths in the session with the maintainer, never on
+GitHub. Report verified outcomes, not launched work. The executable lead
 procedure is `.agents/skills/deliver-ready-issue/references/parallel-delivery.md`.
 
 ## Ontology Policy
@@ -244,7 +250,10 @@ Use short imperative subjects, often Conventional Commit style:
 describe the affected subsystem when useful. Pull requests should include a
 concise behavior summary, **tests run**, **autoreview result** (for non-trivial
 code), linked issue or context, and any configuration or security implications.
-Update [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
+Do not put hostnames, FQDNs, home directories, absolute worktree paths, LAN
+or employer network names, or other private environment inventory on public
+Issues, Pull Requests, comments, or commit messages. Update
+[CHANGELOG.md](CHANGELOG.md) for user-visible changes.
 
 ### Verified commits on GitHub
 
@@ -278,6 +287,8 @@ immediately after the correction.
 Never commit secrets, tokens, provider credentials, logs, or local harness
 state (`.shikigami-state/`). Do not treat delivery systems as runtime control
 dependencies. When profile `governed` or `governance.fail_closed` is set, missing or
-unhealthy governance must fail doctor and run. Report vulnerabilities through
-[SECURITY.md](SECURITY.md). Follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in
-all project spaces.
+unhealthy governance must fail doctor and run. Never put hostnames, FQDNs,
+home directories, absolute worktree paths, LAN or employer network names, or
+other private environment inventory on public Issues, Pull Requests, comments,
+or commit messages. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+Follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in all project spaces.
