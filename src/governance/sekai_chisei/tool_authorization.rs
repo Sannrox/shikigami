@@ -21,7 +21,11 @@ pub(super) async fn authorize(
     if !requires_external_action(name) {
         return Ok(());
     }
-    if governance.harvest.fallback_active(&handle.run_id)?
+    // A parked approval is decided by the plane, never by the local fallback
+    // allow-list: the redeem must run, so fallback cannot short-circuit it.
+    let approval_parked = governance.harvest.approval_park(&handle.run_id).is_some();
+    if !approval_parked
+        && governance.harvest.fallback_active(&handle.run_id)?
         && let Some(checkpoint) = governance.harvest.fallback(&handle.run_id)?
     {
         let now_ms = crate::digest::unix_now_ms_i64();

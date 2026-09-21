@@ -1767,6 +1767,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fallback_cannot_short_circuit_a_parked_approval() {
+        let config = fallback_config();
+        let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
+        let model = crate::model::from_config(&config).unwrap();
+        let handle = RunHandle {
+            run_id: "run-fb-park".into(),
+            operation_id: "op-fb-park".into(),
+            namespace: "default".into(),
+        };
+        let tools = vec![ToolDef {
+            name: "write_file".into(),
+            description: "write".into(),
+            schema: "{}".into(),
+        }];
+        governance
+            .harvest
+            .start(&handle.run_id, handle.operation_id.clone())
+            .unwrap();
+        let (auth, fence) = matching_grant(model.as_ref(), &handle, "system", &tools);
+        governance
+            .install_fallback_grant(&handle.run_id, auth, fence)
+            .unwrap();
+        governance
+            .harvest
+            .set_fallback_active(&handle.run_id, true)
+            .unwrap();
+        let args = r#"{"path":"a.txt","content":"x"}"#;
+
+        // Control: an allow-listed tool is permitted by the fallback grant.
+        governance
+            .authorize_tool_with_id(&handle, "tool-1-0", "write_file", args)
+            .await
+            .expect("fallback permits the allow-listed tool without a park");
+
+        governance
+            .record_approval_park(
+                &handle,
+                crate::checkpoint::ApprovalPark {
+                    approval_id: "approval-1".into(),
+                    call_id: "tool-1-0".into(),
+                    tool_name: "write_file".into(),
+                    authorization_id: "auth-1".into(),
+                    request_digest: "digest".into(),
+                    arguments_digest: SekaiChiseiGovernance::arguments_digest(args),
+                    expires_at_ms: 0,
+                    parked_at_ms: 0,
+                    deadline_ms: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let error = governance
+            .authorize_tool_with_id(&handle, "tool-1-0", "write_file", args)
+            .await
+            .expect_err("a parked approval must reach the plane, not the fallback allow-list");
+        assert!(
+            matches!(error, GovernanceError::Unavailable(_)),
+            "the unreachable plane must fail the parked call closed: {error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn fallback_plan_turn_uses_local_model_when_plane_unavailable() {
         let config = fallback_config();
         let governance = SekaiChiseiGovernance::from_config(&config).unwrap();
