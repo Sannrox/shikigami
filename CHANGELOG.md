@@ -143,6 +143,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The checkpoint park now records a durable `kind` (`escalate` or `approval`;
+  a missing value reads as `escalate`). Resume refuses a park whose kind and
+  approval identity disagree, so stripping `governance.approval_park` can no
+  longer turn an approval wait into an escalate answer that skips
+  re-authorization.
 - With a parked approval, sekai-chisei no longer lets an active model fallback
   grant authorize the parked tool locally. The call goes to the plane for
   approval replay and redeem, and fails closed when the plane is unreachable.

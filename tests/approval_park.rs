@@ -315,6 +315,11 @@ fn assert_parked(checkpoint: &Checkpoint, workspace: &std::path::Path) {
     assert_eq!(park.approval_id, APPROVAL_ID);
     assert_eq!(park.tool_name, "write_file");
     assert_eq!(
+        checkpoint.park.as_ref().map(|park| park.kind),
+        Some(shikigami::ParkKind::Approval),
+        "the park kind is recorded durably, not inferred from the approval identity"
+    );
+    assert_eq!(
         format!("sha256:{}", park.arguments_digest),
         shikigami::replay::digest_bytes(WRITE_ARGS.as_bytes()),
         "park must bind the exact parked arguments"
@@ -675,4 +680,91 @@ async fn resume_without_a_parked_arguments_digest_fails_closed() {
         !workspace.join("hello.txt").is_file(),
         "an unbound park must not execute the resumed call"
     );
+}
+
+/// Park a run, rewrite its checkpoint, approve, and resume with `answer`.
+async fn resume_after_rewriting_checkpoint(
+    rewrite: impl FnOnce(&mut Checkpoint),
+    answer: Option<&str>,
+) -> (
+    Result<shikigami::run::RunResult, shikigami::run::RunError>,
+    std::path::PathBuf,
+    tempfile::TempDir,
+) {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    state.ensure_ready_for_runs().unwrap();
+    let config = engine_config(dir.path());
+    let plane = Arc::new(Mutex::new(ApprovalState::Pending));
+    let engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+    let mut request = RunRequest::new("write after approval");
+    request.keep_workspace = true;
+    let parked = engine.run(request).await.unwrap();
+    assert_eq!(parked.termination, RunTermination::Parked);
+
+    let mut checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    rewrite(&mut checkpoint);
+    checkpoint.save(&state.runs_dir()).unwrap();
+
+    *plane.lock().unwrap() = ApprovalState::Approved {
+        permit_id: "permit-1".into(),
+    };
+    let resume_engine = build_engine(config, &state, plane);
+    let mut resume = RunRequest::new("");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(parked.run_id);
+    resume.resume_answer = answer.map(str::to_string);
+    (resume_engine.run(resume).await, parked.workspace, dir)
+}
+
+fn strip_approval_identity(checkpoint: &mut Checkpoint) {
+    checkpoint
+        .governance
+        .as_mut()
+        .expect("governance checkpoint")
+        .approval_park = None;
+}
+
+#[tokio::test]
+async fn stripping_the_approval_identity_cannot_turn_the_wait_into_an_escalate_answer() {
+    let (outcome, workspace, _dir) =
+        resume_after_rewriting_checkpoint(strip_approval_identity, Some("just run it")).await;
+    let error = outcome.expect_err("a stripped approval park must not accept an operator answer");
+    assert!(
+        error
+            .to_string()
+            .contains("disagrees with its approval identity"),
+        "{error}"
+    );
+    assert!(
+        !workspace.join("hello.txt").is_file(),
+        "the approval-parked tool must not run after the strip"
+    );
+}
+
+#[tokio::test]
+async fn stripping_the_approval_identity_without_an_answer_is_also_refused() {
+    let (outcome, workspace, _dir) =
+        resume_after_rewriting_checkpoint(strip_approval_identity, None).await;
+    assert!(outcome.is_err(), "a stripped approval park must not resume");
+    assert!(!workspace.join("hello.txt").is_file());
+}
+
+#[tokio::test]
+async fn relabelling_an_approval_park_as_escalate_is_refused() {
+    let (outcome, workspace, _dir) = resume_after_rewriting_checkpoint(
+        |checkpoint| {
+            checkpoint.park.as_mut().expect("park").kind = shikigami::ParkKind::Escalate;
+        },
+        Some("just run it"),
+    )
+    .await;
+    let error = outcome.expect_err("an approval identity with an escalate kind must not resume");
+    assert!(
+        error
+            .to_string()
+            .contains("disagrees with its approval identity"),
+        "{error}"
+    );
+    assert!(!workspace.join("hello.txt").is_file());
 }

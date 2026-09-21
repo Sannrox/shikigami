@@ -611,6 +611,7 @@ impl<'a> DurableToolBatch<'a> {
                         reason: park.reason.clone(),
                         question: park.question.clone(),
                         tool_call_id: conversation_tool_call_id(&call, session.turns, index),
+                        kind: ParkKind::Escalate,
                     };
                     let info = ParkInfo {
                         reason: park.reason.clone(),
@@ -833,6 +834,7 @@ impl<'a> DurableToolBatch<'a> {
             reason: reason.clone(),
             question: question.clone(),
             tool_call_id: tool_call_id.clone(),
+            kind: ParkKind::Approval,
         };
         let info = ParkInfo {
             reason: reason.clone(),

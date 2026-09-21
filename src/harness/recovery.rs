@@ -594,6 +594,7 @@ mod tests {
             reason: "need human".into(),
             question: "approve?".into(),
             tool_call_id: "esc-1".into(),
+            kind: Default::default(),
         });
         checkpoint.save(&state.runs_dir()).unwrap();
         stale_owner(&state, "run-1");
@@ -825,6 +826,7 @@ mod tests {
             reason: "need human".into(),
             question: "approve?".into(),
             tool_call_id: "esc-1".into(),
+            kind: Default::default(),
         });
         checkpoint.save(&state.runs_dir()).unwrap();
         registry

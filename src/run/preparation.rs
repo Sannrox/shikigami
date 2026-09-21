@@ -238,7 +238,10 @@ fn initial_state(
             request.task.clone()
         };
         let escalate_park = checkpoint.is_escalate_park();
-        let approval_wait = checkpoint.approval_park().is_some();
+        let approval_wait = checkpoint
+            .park
+            .as_ref()
+            .is_some_and(|park| park.kind == crate::checkpoint::ParkKind::Approval);
         let park_tool_call_id = checkpoint
             .park
             .as_ref()
