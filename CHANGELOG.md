@@ -143,6 +143,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With a parked approval, sekai-chisei no longer lets an active model fallback
+  grant authorize the parked tool locally. The call goes to the plane for
+  approval replay and redeem, and fails closed when the plane is unreachable.
 - An approval park now records the SHA-256 of the parked arguments. Resume
   denies a call under the parked `call_id` whose tool name or arguments differ,
   or whose park has no arguments digest, before any authorization or permit
