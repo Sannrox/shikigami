@@ -15,6 +15,15 @@ use crate::tools::TodoItem;
 pub const CHECKPOINT_VERSION: u32 = 1;
 pub const CHECKPOINT_FILENAME: &str = "checkpoint.json";
 
+/// Why a run is parked. Missing values deserialize as escalate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParkKind {
+    #[default]
+    Escalate,
+    Approval,
+}
+
 /// Structured park state when a run awaits an operator answer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParkedState {
@@ -22,6 +31,9 @@ pub struct ParkedState {
     pub question: String,
     /// Tool call id that must receive the operator answer as a tool result.
     pub tool_call_id: String,
+    /// Durable park kind; the approval identity alone must not decide it.
+    #[serde(default)]
+    pub kind: ParkKind,
 }
 
 /// Local scratch for a plane `require_approval` wait. Not a permit.
@@ -176,6 +188,8 @@ pub enum CheckpointError {
     RunIdMismatch,
     #[error("checkpoint is not parked")]
     NotParked,
+    #[error("checkpoint park kind `{kind:?}` disagrees with its approval identity")]
+    ParkKindMismatch { kind: ParkKind },
     #[error("checkpoint workspace is unavailable")]
     WorkspaceUnavailable,
 }
@@ -299,7 +313,23 @@ impl Checkpoint {
 
     /// Escalate parks need an operator answer; approval parks do not.
     pub fn is_escalate_park(&self) -> bool {
-        self.park.is_some() && self.approval_park().is_none()
+        self.park
+            .as_ref()
+            .is_some_and(|park| park.kind == ParkKind::Escalate)
+    }
+
+    /// Fail closed when the durable park kind and the approval identity
+    /// disagree, so stripping or adding the identity cannot reclassify a wait.
+    pub fn validate_park_kind(&self) -> Result<(), CheckpointError> {
+        match (self.park.as_ref(), self.approval_park()) {
+            (Some(park), None) if park.kind == ParkKind::Approval => {
+                Err(CheckpointError::ParkKindMismatch { kind: park.kind })
+            }
+            (Some(park), Some(_)) if park.kind == ParkKind::Escalate => {
+                Err(CheckpointError::ParkKindMismatch { kind: park.kind })
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -413,6 +443,7 @@ mod tests {
                 reason: "approval required".into(),
                 question: "continue?".into(),
                 tool_call_id: "tool-1".into(),
+                kind: Default::default(),
             }),
             todos: vec![],
             governance: None,
@@ -431,5 +462,73 @@ mod tests {
             Checkpoint::load_parked_digest(&runs, "parked", "p"),
             Err(CheckpointError::NotParked)
         ));
+    }
+
+    fn parked_checkpoint(kind: ParkKind, with_approval: bool) -> Checkpoint {
+        Checkpoint {
+            version: CHECKPOINT_VERSION,
+            run_id: "abc".into(),
+            task: "t".into(),
+            prompt_id: prompt_id("p"),
+            messages: vec![],
+            completed_turns: 1,
+            workspace: PathBuf::from("ws"),
+            keep_workspace: true,
+            workspace_adapter: "directory".into(),
+            park: Some(ParkedState {
+                reason: "r".into(),
+                question: "q".into(),
+                tool_call_id: "call-1".into(),
+                kind,
+            }),
+            todos: vec![],
+            governance: Some(GovernanceCheckpoint {
+                approval_park: with_approval.then(|| ApprovalPark {
+                    approval_id: "approval-1".into(),
+                    call_id: "call-1".into(),
+                    tool_name: "write_file".into(),
+                    authorization_id: "auth-1".into(),
+                    request_digest: "digest".into(),
+                    arguments_digest: "args".into(),
+                    expires_at_ms: 0,
+                    parked_at_ms: 0,
+                    deadline_ms: 0,
+                }),
+                ..Default::default()
+            }),
+            replay: None,
+            content: None,
+        }
+    }
+
+    #[test]
+    fn park_kind_is_durable_and_must_agree_with_the_approval_identity() {
+        let escalate = parked_checkpoint(ParkKind::Escalate, false);
+        assert!(escalate.is_escalate_park());
+        assert!(escalate.validate_park_kind().is_ok());
+
+        let approval = parked_checkpoint(ParkKind::Approval, true);
+        assert!(!approval.is_escalate_park());
+        assert!(approval.validate_park_kind().is_ok());
+
+        let stripped = parked_checkpoint(ParkKind::Approval, false);
+        assert!(!stripped.is_escalate_park());
+        assert!(matches!(
+            stripped.validate_park_kind(),
+            Err(CheckpointError::ParkKindMismatch { .. })
+        ));
+
+        let relabelled = parked_checkpoint(ParkKind::Escalate, true);
+        assert!(matches!(
+            relabelled.validate_park_kind(),
+            Err(CheckpointError::ParkKindMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn parked_state_without_a_kind_deserializes_as_escalate() {
+        let park: ParkedState =
+            serde_json::from_str(r#"{"reason":"r","question":"q","tool_call_id":"c"}"#).unwrap();
+        assert_eq!(park.kind, ParkKind::Escalate);
     }
 }

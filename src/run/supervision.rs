@@ -293,6 +293,7 @@ impl<'a> RunSupervision<'a> {
             _ => {}
         }
         checkpoint.validate_prompt(SYSTEM_PROMPT)?;
+        checkpoint.validate_park_kind()?;
         let _ = validate_resumed_workspace(
             &self.engine.config,
             &self.engine.state_runs,

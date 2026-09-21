@@ -136,14 +136,7 @@ pub(crate) struct ContentExecution {
     pub resolver: Arc<dyn ContentResolver>,
 }
 
-/// Why a run is parked. Missing values deserialize as escalate.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ParkKind {
-    #[default]
-    Escalate,
-    Approval,
-}
+pub use crate::checkpoint::ParkKind;
 
 /// Operator-visible park payload (library + CLI).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

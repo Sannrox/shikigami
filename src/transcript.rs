@@ -389,6 +389,7 @@ mod tests {
                 reason: "need help".into(),
                 question: "ok?".into(),
                 tool_call_id: "t".into(),
+                kind: Default::default(),
             }),
             todos: vec![],
             governance: None,
