@@ -143,6 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resuming an approval park no longer wipes the top-level checkpoint park.
+  While the approval wait is still open, every save (the initial resume save
+  and failure saves included) keeps the parked state, so a restart or a
+  transient plane error leaves the run parked and resumable.
 - The checkpoint park now records a durable `kind` (`escalate` or `approval`;
   a missing value reads as `escalate`). Resume refuses a park whose kind and
   approval identity disagree, so stripping `governance.approval_park` can no

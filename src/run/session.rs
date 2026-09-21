@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::checkpoint::{self, Checkpoint, ParkedState};
+use crate::checkpoint::{self, Checkpoint, ParkKind, ParkedState};
 use crate::content::{
     ContentCapabilitiesV1, ContentCheckpointBinding, ContentCheckpointV1, ContentDisclosureState,
     ContentError, ContentMessageV1, ContentModelTurnV1, ContentResolver, ContentTerminalCheckpoint,
@@ -39,6 +39,9 @@ pub(super) struct RunSession {
     pub turns: u32,
     replay: Option<ReplayCheckpoint>,
     content: Option<ContentSession>,
+    /// Approval park carried from the resumed checkpoint. It stays on every
+    /// save while the governance approval wait is still open.
+    resumed_approval_park: Option<ParkedState>,
     pub spans: RunSpanTrace,
 }
 
@@ -84,8 +87,23 @@ impl RunSession {
             turns,
             replay: None,
             content: None,
+            resumed_approval_park: None,
             spans: RunSpanTrace::disabled(),
         }
+    }
+
+    /// Keep the parked approval wait durable across saves after a resume.
+    pub fn set_resumed_approval_park(&mut self, park: Option<ParkedState>) {
+        self.resumed_approval_park = park.filter(|park| park.kind == ParkKind::Approval);
+    }
+
+    /// The resumed approval park, only while governance still holds the wait.
+    fn open_resumed_approval_park(&self) -> Option<ParkedState> {
+        let park = self.resumed_approval_park.as_ref()?;
+        self.governance
+            .checkpoint_state(&self.run_id)
+            .is_some_and(|checkpoint| checkpoint.approval_park.is_some())
+            .then(|| park.clone())
     }
 
     pub fn set_content(
@@ -544,6 +562,8 @@ impl RunSession {
         park: Option<ParkedState>,
         tools: &ToolRegistry,
     ) -> Result<(), RunError> {
+        let park = park.or_else(|| self.open_resumed_approval_park());
+        let keep_workspace = keep_workspace || park.is_some();
         let mut replay = self.replay.clone();
         if let Some(replay) = &mut replay {
             replay.workspace = self.workspace.display().to_string();
