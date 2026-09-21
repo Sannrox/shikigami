@@ -140,15 +140,7 @@ async fn resolve_parked_approval(
     let decision = response
         .decision
         .ok_or_else(|| GovernanceError::Message("external-action missing decision".into()))?;
-    if !park.request_digest.is_empty()
-        && !decision.request_digest.is_empty()
-        && decision.request_digest != park.request_digest
-    {
-        return Err(GovernanceError::Denied(format!(
-            "approval `{}` request digest does not match the parked authorization",
-            park.approval_id
-        )));
-    }
+    bind_parked_digest(park, &decision)?;
     resolve_approval_wait(
         park,
         approval_state_from_decision(&decision),
@@ -156,6 +148,27 @@ async fn resolve_parked_approval(
     )?;
     let permit = permit_for_decision(&decision, response.permit)?;
     redeem_permit(governance, handle, &park.call_id, request, permit, &client).await
+}
+
+/// Bind the replayed decision to the parked authorization. Fails closed: an
+/// empty digest on either side cannot vouch for the parked request.
+fn bind_parked_digest(
+    park: &crate::checkpoint::ApprovalPark,
+    decision: &ExternalActionDecision,
+) -> Result<(), GovernanceError> {
+    if park.request_digest.is_empty() || decision.request_digest.is_empty() {
+        return Err(GovernanceError::Denied(format!(
+            "approval `{}` cannot be bound: request digest is missing",
+            park.approval_id
+        )));
+    }
+    if decision.request_digest != park.request_digest {
+        return Err(GovernanceError::Denied(format!(
+            "approval `{}` request digest does not match the parked authorization",
+            park.approval_id
+        )));
+    }
+    Ok(())
 }
 
 async fn redeem_permit(
@@ -368,4 +381,53 @@ pub(super) fn build_request(
         idempotency_key: request_id,
         policy_project: handle.namespace.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::ApprovalPark;
+
+    fn park(request_digest: &str) -> ApprovalPark {
+        ApprovalPark {
+            approval_id: "approval-1".into(),
+            call_id: "call-1".into(),
+            tool_name: "write_file".into(),
+            authorization_id: "auth-1".into(),
+            request_digest: request_digest.into(),
+            expires_at_ms: 0,
+            parked_at_ms: 0,
+            deadline_ms: 0,
+        }
+    }
+
+    fn decision(request_digest: &str) -> ExternalActionDecision {
+        ExternalActionDecision {
+            decision: "permit".into(),
+            request_digest: request_digest.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parked_digest_binds_only_on_equal_non_empty_digests() {
+        assert!(bind_parked_digest(&park("sha256:a"), &decision("sha256:a")).is_ok());
+    }
+
+    #[test]
+    fn parked_digest_mismatch_is_denied() {
+        let error = bind_parked_digest(&park("sha256:a"), &decision("sha256:b")).unwrap_err();
+        assert!(matches!(error, GovernanceError::Denied(_)), "{error:?}");
+    }
+
+    #[test]
+    fn parked_digest_fails_closed_when_either_side_is_empty() {
+        for (parked, decided) in [("", "sha256:a"), ("sha256:a", ""), ("", "")] {
+            let error = bind_parked_digest(&park(parked), &decision(decided)).unwrap_err();
+            assert!(
+                matches!(&error, GovernanceError::Denied(message) if message.contains("missing")),
+                "park={parked:?} decision={decided:?}: {error:?}"
+            );
+        }
+    }
 }
