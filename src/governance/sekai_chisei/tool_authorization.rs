@@ -151,7 +151,8 @@ async fn resolve_parked_approval(
 }
 
 /// Bind the replayed decision to the parked authorization. Fails closed: an
-/// empty digest on either side cannot vouch for the parked request.
+/// empty digest on either side cannot vouch for the parked request, and the
+/// approval identity must survive the replay.
 fn bind_parked_digest(
     park: &crate::checkpoint::ApprovalPark,
     decision: &ExternalActionDecision,
@@ -165,6 +166,14 @@ fn bind_parked_digest(
     if decision.request_digest != park.request_digest {
         return Err(GovernanceError::Denied(format!(
             "approval `{}` request digest does not match the parked authorization",
+            park.approval_id
+        )));
+    }
+    // The plane clears the approval identity only on a deny, which is already
+    // terminal; every other replayed decision must carry the parked identity.
+    if decision.decision != "deny" && decision.approval_id != park.approval_id {
+        return Err(GovernanceError::Denied(format!(
+            "approval `{}` does not match the replayed authorization",
             park.approval_id
         )));
     }
@@ -395,6 +404,7 @@ mod tests {
             tool_name: "write_file".into(),
             authorization_id: "auth-1".into(),
             request_digest: request_digest.into(),
+            arguments_digest: String::new(),
             expires_at_ms: 0,
             parked_at_ms: 0,
             deadline_ms: 0,
@@ -405,6 +415,7 @@ mod tests {
         ExternalActionDecision {
             decision: "permit".into(),
             request_digest: request_digest.into(),
+            approval_id: "approval-1".into(),
             ..Default::default()
         }
     }
@@ -429,5 +440,24 @@ mod tests {
                 "park={parked:?} decision={decided:?}: {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn parked_approval_identity_must_survive_the_replay() {
+        let mut replayed = decision("sha256:a");
+        replayed.approval_id = "approval-other".into();
+        let error = bind_parked_digest(&park("sha256:a"), &replayed).unwrap_err();
+        assert!(matches!(error, GovernanceError::Denied(_)), "{error:?}");
+
+        replayed.approval_id = String::new();
+        assert!(bind_parked_digest(&park("sha256:a"), &replayed).is_err());
+    }
+
+    #[test]
+    fn denied_replay_keeps_its_own_reason_without_an_approval_identity() {
+        let mut replayed = decision("sha256:a");
+        replayed.decision = "deny".into();
+        replayed.approval_id = String::new();
+        assert!(bind_parked_digest(&park("sha256:a"), &replayed).is_ok());
     }
 }

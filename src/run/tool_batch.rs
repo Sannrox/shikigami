@@ -11,7 +11,9 @@ use crate::checkpoint::{
     ApprovalPark, ParkedState, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
 use crate::events::HarnessEvent;
-use crate::governance::{GovernanceError, RunHandle, now_unix_ms};
+use crate::governance::{
+    GovernanceError, RunHandle, bind_parked_call, now_unix_ms, park_arguments_digest,
+};
 use crate::hooks::{self, HookEvent};
 use crate::model::{ChatMessage, ModelTurn, TokenUsage, ToolCall, stable_tool_call_id};
 use crate::tools::{self, ToolOutput, ToolRegistry};
@@ -277,12 +279,30 @@ impl<'a> DurableToolBatch<'a> {
                         .await?;
                     session.save(tools.as_ref())?;
                 }
-                if let Err(e) = self
+                let parked_call_bound = self
                     .engine
                     .governance
-                    .authorize_tool_with_id(handle, &stable_call_id, &call.name, &call.args_json)
-                    .await
-                {
+                    .checkpoint_state(&session.run_id)
+                    .and_then(|checkpoint| checkpoint.approval_park)
+                    .filter(|park| park.call_id == stable_call_id)
+                    .map_or(Ok(()), |park| {
+                        bind_parked_call(&park, &call.name, &call.args_json)
+                    });
+                let authorization = match parked_call_bound {
+                    Ok(()) => {
+                        self.engine
+                            .governance
+                            .authorize_tool_with_id(
+                                handle,
+                                &stable_call_id,
+                                &call.name,
+                                &call.args_json,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(e) = authorization {
                     if let GovernanceError::RequireApproval {
                         approval_id,
                         authorization_id,
@@ -332,6 +352,7 @@ impl<'a> DurableToolBatch<'a> {
                                     tool_name: call.name.clone(),
                                     authorization_id,
                                     request_digest,
+                                    arguments_digest: park_arguments_digest(&call.args_json),
                                     expires_at_ms,
                                     parked_at_ms: now_unix_ms(),
                                     deadline_ms,

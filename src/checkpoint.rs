@@ -32,6 +32,10 @@ pub struct ApprovalPark {
     pub tool_name: String,
     pub authorization_id: String,
     pub request_digest: String,
+    /// SHA-256 of the exact arguments that were parked. Resume must present
+    /// the same tool name and arguments digest before any authorization.
+    #[serde(default)]
+    pub arguments_digest: String,
     pub expires_at_ms: i64,
     pub parked_at_ms: i64,
     /// Original external-action deadline. Required to resend the same request.

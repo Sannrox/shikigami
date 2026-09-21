@@ -143,6 +143,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An approval park now records the SHA-256 of the parked arguments. Resume
+  denies a call under the parked `call_id` whose tool name or arguments differ,
+  or whose park has no arguments digest, before any authorization or permit
+  redemption. The sekai-chisei adapter also requires the replayed decision to
+  carry the parked approval identity.
 - Governed approval resume (sekai-chisei) now fails closed when either the
   parked or the replayed decision carries an empty request digest, instead of
   skipping the digest bind.
