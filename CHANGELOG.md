@@ -143,6 +143,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Governed approval resume (sekai-chisei) now fails closed when either the
+  parked or the replayed decision carries an empty request digest, instead of
+  skipping the digest bind.
 - `Cargo.lock` moves `rustls` to 0.23.45 (and `rustls-webpki` to 0.103.15) for
   RUSTSEC-2026-0285, so `cargo audit` and `cargo deny` pass again.
 - CLI `runs` list and inspect use `RunRegistry::inspect` and no longer create
