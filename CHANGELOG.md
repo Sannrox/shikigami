@@ -143,6 +143,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Cargo.lock` moves `rustls` to 0.23.45 (and `rustls-webpki` to 0.103.15) for
+  RUSTSEC-2026-0285, so `cargo audit` and `cargo deny` pass again.
 - CLI `runs` list and inspect use `RunRegistry::inspect` and no longer create
   `runs/` or `run-controls/` when those directories are absent.
 - Replay `workspace_digest` opens directories and files with `O_NOFOLLOW` and
