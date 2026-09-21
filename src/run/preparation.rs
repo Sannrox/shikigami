@@ -55,6 +55,9 @@ pub(super) async fn prepare(
         )));
     }
     let is_resume = resume_checkpoint.is_some();
+    let resumed_park = resume_checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.park.clone());
     let (
         run_id,
         messages,
@@ -112,6 +115,7 @@ pub(super) async fn prepare(
         turns,
     );
     session.set_replay(replay_checkpoint);
+    session.set_resumed_approval_park(resumed_park);
     if let Some(content) = content {
         let (messages, capabilities, initial_message_count, terminal, usage) =
             if let Some(binding) = content_binding.as_ref() {

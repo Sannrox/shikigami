@@ -56,6 +56,22 @@ fn build_engine_with_inject(
     state_mutex: Arc<Mutex<ApprovalState>>,
     inject_authorize: Arc<Mutex<Option<GovernanceError>>>,
 ) -> Engine {
+    build_engine_with_faults(
+        config,
+        state,
+        state_mutex,
+        inject_authorize,
+        Arc::new(Mutex::new(None)),
+    )
+}
+
+fn build_engine_with_faults(
+    config: Config,
+    state: &StateRoot,
+    state_mutex: Arc<Mutex<ApprovalState>>,
+    inject_authorize: Arc<Mutex<Option<GovernanceError>>>,
+    inject_recover: Arc<Mutex<Option<GovernanceError>>>,
+) -> Engine {
     let inner = LocalGovernance::from_config(&config);
     Engine::new(
         config.clone(),
@@ -63,6 +79,7 @@ fn build_engine_with_inject(
             inner,
             state: state_mutex,
             inject_authorize,
+            inject_recover,
         }),
         Arc::from(workspace::from_config(&config).expect("workspace")),
         Arc::from(model::from_config(&config).expect("model")),
@@ -76,6 +93,8 @@ struct ScriptedApprovalGovernance {
     inner: LocalGovernance,
     state: Arc<Mutex<ApprovalState>>,
     inject_authorize: Arc<Mutex<Option<GovernanceError>>>,
+    /// Fails right after the resume's initial checkpoint save.
+    inject_recover: Arc<Mutex<Option<GovernanceError>>>,
 }
 
 impl ScriptedApprovalGovernance {
@@ -167,6 +186,9 @@ impl GovernancePort for ScriptedApprovalGovernance {
         &self,
         handle: &RunHandle,
     ) -> Result<(), GovernanceError> {
+        if let Some(error) = self.inject_recover.lock().expect("inject recover").take() {
+            return Err(error);
+        }
         self.inner.recover_staged_tool_executions(handle).await
     }
 
@@ -406,7 +428,66 @@ async fn transient_reauthorization_keeps_the_approval_wait() {
     assert!(error.to_string().contains("unavailable"), "{error}");
     let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
     assert_eq!(checkpoint.approval_park().unwrap().approval_id, APPROVAL_ID);
+    assert_eq!(
+        checkpoint.park.as_ref().map(|park| park.kind),
+        Some(ParkKind::Approval),
+        "a failed resume must not wipe the top-level park while the approval wait is open"
+    );
+    checkpoint.validate_park_kind().unwrap();
     assert!(!parked.workspace.join("hello.txt").is_file());
+    Checkpoint::load_parked_digest(
+        &state.runs_dir(),
+        &parked.run_id,
+        shikigami::run::SYSTEM_PROMPT,
+    )
+    .expect("the checkpoint is still a parked, resumable checkpoint");
+
+    let retry_engine = build_engine(
+        engine_config(dir.path()),
+        &state,
+        Arc::new(Mutex::new(ApprovalState::Approved {
+            permit_id: "permit-1".into(),
+        })),
+    );
+    let mut retry = RunRequest::new("");
+    retry.keep_workspace = true;
+    retry.resume_run_id = Some(parked.run_id.clone());
+    let completed = retry_engine.run(retry).await.unwrap();
+    assert_eq!(completed.termination, RunTermination::Completed);
+    assert_eq!(
+        std::fs::read_to_string(parked.workspace.join("hello.txt")).unwrap(),
+        "approved"
+    );
+}
+
+#[tokio::test]
+async fn resume_that_stays_pending_keeps_the_durable_park_across_restart() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    state.ensure_ready_for_runs().unwrap();
+    let config = engine_config(dir.path());
+    let plane = Arc::new(Mutex::new(ApprovalState::Pending));
+    let engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+    let mut request = RunRequest::new("write after approval");
+    request.keep_workspace = true;
+    let parked = engine.run(request).await.unwrap();
+    assert_eq!(parked.termination, RunTermination::Parked);
+
+    // Two consecutive restarts while the operator has not decided yet.
+    for _ in 0..2 {
+        let resume_engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        let again = resume_engine.run(resume).await.unwrap();
+        assert_eq!(again.termination, RunTermination::Parked);
+        let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+        assert_eq!(
+            checkpoint.park.as_ref().map(|park| park.kind),
+            Some(ParkKind::Approval)
+        );
+        checkpoint.validate_park_kind().unwrap();
+    }
 }
 
 #[tokio::test]
@@ -767,4 +848,49 @@ async fn relabelling_an_approval_park_as_escalate_is_refused() {
         "{error}"
     );
     assert!(!workspace.join("hello.txt").is_file());
+}
+
+#[tokio::test]
+async fn failure_right_after_the_resume_initial_save_keeps_the_durable_park() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    state.ensure_ready_for_runs().unwrap();
+    let config = engine_config(dir.path());
+    let plane = Arc::new(Mutex::new(ApprovalState::Pending));
+    let engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+    let mut request = RunRequest::new("write after approval");
+    request.keep_workspace = true;
+    let parked = engine.run(request).await.unwrap();
+    assert_eq!(parked.termination, RunTermination::Parked);
+
+    let resume_engine = build_engine_with_faults(
+        config,
+        &state,
+        plane,
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(Some(GovernanceError::Unavailable(
+            "crash after the initial resume save".into(),
+        )))),
+    );
+    let mut resume = RunRequest::new("");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(parked.run_id.clone());
+    resume_engine
+        .run(resume)
+        .await
+        .expect_err("the injected fault interrupts the resume");
+
+    let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    assert_eq!(checkpoint.approval_park().unwrap().approval_id, APPROVAL_ID);
+    assert_eq!(
+        checkpoint.park.as_ref().map(|park| park.kind),
+        Some(ParkKind::Approval),
+        "the initial resume save must not wipe the top-level park"
+    );
+    Checkpoint::load_parked_digest(
+        &state.runs_dir(),
+        &parked.run_id,
+        shikigami::run::SYSTEM_PROMPT,
+    )
+    .expect("still a parked, resumable checkpoint after the interrupted resume");
 }
