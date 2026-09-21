@@ -296,6 +296,33 @@ pub fn resolve_approval_wait(
     }
 }
 
+/// Digest that binds a parked approval to the exact call arguments.
+pub(crate) fn park_arguments_digest(args_json: &str) -> String {
+    crate::digest::sha256_hex(args_json.as_bytes())
+}
+
+/// Require a resumed call to match the parked one before it is authorized or
+/// redeemed. Fails closed: a park without an arguments digest binds nothing.
+pub(crate) fn bind_parked_call(
+    park: &ApprovalPark,
+    name: &str,
+    args_json: &str,
+) -> Result<(), GovernanceError> {
+    if park.arguments_digest.is_empty() {
+        return Err(GovernanceError::Denied(format!(
+            "approval `{}` cannot be bound: parked arguments digest is missing",
+            park.approval_id
+        )));
+    }
+    if name != park.tool_name || park_arguments_digest(args_json) != park.arguments_digest {
+        return Err(GovernanceError::Denied(format!(
+            "approval `{}` does not match the resumed tool call",
+            park.approval_id
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait GovernancePort: Send + Sync {
     fn id(&self) -> &'static str;
@@ -667,6 +694,7 @@ mod tests {
             tool_name: "write_file".into(),
             authorization_id: "auth-1".into(),
             request_digest: "digest".into(),
+            arguments_digest: String::new(),
             expires_at_ms: 10,
             parked_at_ms: 1,
             deadline_ms: 20,
@@ -687,6 +715,40 @@ mod tests {
                 10
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn parked_call_binds_only_the_same_tool_and_arguments() {
+        let args = r#"{"path":"a.txt"}"#;
+        let park = ApprovalPark {
+            approval_id: "appr-1".into(),
+            call_id: "tool-1-0".into(),
+            tool_name: "write_file".into(),
+            authorization_id: "auth-1".into(),
+            request_digest: "digest".into(),
+            arguments_digest: park_arguments_digest(args),
+            expires_at_ms: 0,
+            parked_at_ms: 1,
+            deadline_ms: 0,
+        };
+        assert!(bind_parked_call(&park, "write_file", args).is_ok());
+        for (name, args_json) in [
+            ("bash", args),
+            ("write_file", r#"{"path":"b.txt"}"#),
+            ("write_file", ""),
+        ] {
+            let error = bind_parked_call(&park, name, args_json).unwrap_err();
+            assert!(matches!(error, GovernanceError::Denied(_)), "{error:?}");
+        }
+        let unbound = ApprovalPark {
+            arguments_digest: String::new(),
+            ..park
+        };
+        let error = bind_parked_call(&unbound, "write_file", args).unwrap_err();
+        assert!(
+            matches!(&error, GovernanceError::Denied(message) if message.contains("missing")),
+            "{error:?}"
         );
     }
 

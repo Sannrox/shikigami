@@ -21,6 +21,7 @@ use shikigami::{events, export_replay_inputs, model, workspace};
 use tempfile::tempdir;
 
 const APPROVAL_ID: &str = "approval-scripted-1";
+const WRITE_ARGS: &str = r#"{"path":"hello.txt","content":"approved"}"#;
 
 fn write_script() -> String {
     r#"[
@@ -313,6 +314,11 @@ fn assert_parked(checkpoint: &Checkpoint, workspace: &std::path::Path) {
     let park = checkpoint.approval_park().expect("approval park identity");
     assert_eq!(park.approval_id, APPROVAL_ID);
     assert_eq!(park.tool_name, "write_file");
+    assert_eq!(
+        format!("sha256:{}", park.arguments_digest),
+        shikigami::replay::digest_bytes(WRITE_ARGS.as_bytes()),
+        "park must bind the exact parked arguments"
+    );
     assert!(
         checkpoint
             .governance
@@ -584,4 +590,89 @@ async fn parked_replay_export_includes_approval_identity() {
     assert!(report.missing.iter().any(|item| item == "terminal"));
     assert_eq!(report.approval_id.as_deref(), Some(APPROVAL_ID));
     assert!(report.evidence.is_none());
+}
+
+async fn resume_approved_after_tampering_park(
+    tamper: impl FnOnce(&mut ApprovalPark),
+) -> (
+    shikigami::run::RunResult,
+    String,
+    std::path::PathBuf,
+    tempfile::TempDir,
+) {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    state.ensure_ready_for_runs().unwrap();
+    let config = engine_config(dir.path());
+    let plane = Arc::new(Mutex::new(ApprovalState::Pending));
+    let engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+    let mut request = RunRequest::new("write after approval");
+    request.keep_workspace = true;
+    let parked = engine.run(request).await.unwrap();
+    assert_eq!(parked.termination, RunTermination::Parked);
+
+    let mut checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    let park = checkpoint
+        .governance
+        .as_mut()
+        .and_then(|governance| governance.approval_park.as_mut())
+        .expect("approval park identity");
+    tamper(park);
+    checkpoint.save(&state.runs_dir()).unwrap();
+
+    *plane.lock().unwrap() = ApprovalState::Approved {
+        permit_id: "permit-1".into(),
+    };
+    let resume_engine = build_engine(config, &state, plane);
+    let mut resume = RunRequest::new("");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(parked.run_id);
+    let finished = resume_engine.run(resume).await.unwrap();
+    let transcript = Checkpoint::load(&state.runs_dir(), &finished.run_id)
+        .map(|checkpoint| {
+            checkpoint
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    (finished, transcript, parked.workspace, dir)
+}
+
+#[tokio::test]
+async fn resume_with_a_different_tool_name_is_denied_without_effect() {
+    let (_finished, transcript, workspace, _dir) =
+        resume_approved_after_tampering_park(|park| park.tool_name = "bash".into()).await;
+    assert!(
+        !workspace.join("hello.txt").is_file(),
+        "a park bound to another tool must not execute the resumed call"
+    );
+    assert!(
+        transcript.contains("does not match the resumed tool call"),
+        "{transcript}"
+    );
+}
+
+#[tokio::test]
+async fn resume_with_different_arguments_is_denied_without_effect() {
+    let (_finished, _transcript, workspace, _dir) = resume_approved_after_tampering_park(|park| {
+        park.arguments_digest = "0".repeat(64);
+    })
+    .await;
+    assert!(
+        !workspace.join("hello.txt").is_file(),
+        "a park bound to other arguments must not execute the resumed call"
+    );
+}
+
+#[tokio::test]
+async fn resume_without_a_parked_arguments_digest_fails_closed() {
+    let (_finished, _transcript, workspace, _dir) =
+        resume_approved_after_tampering_park(|park| park.arguments_digest.clear()).await;
+    assert!(
+        !workspace.join("hello.txt").is_file(),
+        "an unbound park must not execute the resumed call"
+    );
 }
