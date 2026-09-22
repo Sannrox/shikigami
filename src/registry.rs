@@ -36,6 +36,8 @@ pub enum RegistryError {
     Active(String),
     #[error("run {0} is not active")]
     NotActive(String),
+    #[error("tool call `{1}` in run {0} is already claimed by another execution attempt")]
+    AlreadyClaimed(String, String),
     #[error("run registry lock poisoned")]
     Lock,
 }
@@ -197,6 +199,31 @@ impl RunRegistry {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Atomically claim exclusive execution of one durable-effect tool call
+    /// within a run. At most one caller's claim can ever succeed for a given
+    /// `(run_id, call_id)`: creation is `O_EXCL`, so this is race-free across
+    /// processes on the local filesystem, unlike a check-then-act read of a
+    /// heartbeat or lease. A claim is never released; a call that already
+    /// executed (by this process or a stale one that raced it) must never
+    /// execute again for the lifetime of the run.
+    pub fn claim_tool_execution(&self, run_id: &str, call_id: &str) -> Result<(), RegistryError> {
+        let dir = self.run_dir(run_id)?.join("executing");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(claim_filename(call_id));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(
+                    format!("pid={} claimed_at={}\n", std::process::id(), now_ms()).as_bytes(),
+                )?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(RegistryError::AlreadyClaimed(run_id.into(), call_id.into()))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn set_workspace(&self, run_id: &str, workspace: &Path) -> Result<(), RegistryError> {
@@ -531,6 +558,12 @@ fn now_ms() -> u64 {
     crate::digest::unix_now_ms_u64()
 }
 
+/// Untrusted `call_id` (partially model-supplied) is hashed rather than used
+/// as a path component directly.
+fn claim_filename(call_id: &str) -> String {
+    format!("{}.claim", crate::digest::sha256_hex(call_id.as_bytes()))
+}
+
 fn digest(text: &str) -> String {
     crate::digest::sha256_prefixed(text.as_bytes())
 }
@@ -677,6 +710,47 @@ mod tests {
         std::fs::remove_file(registry.run_dir("run-1").unwrap().join(RUN_OWNER_FILENAME)).unwrap();
         registry.clean("run-1", false).unwrap();
         assert!(!registry.run_dir("run-1").unwrap().exists());
+    }
+
+    #[test]
+    fn claim_tool_execution_succeeds_exactly_once_per_call_id() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.start("run-1", "task", None, None).unwrap();
+        registry.claim_tool_execution("run-1", "call-1").unwrap();
+        assert!(matches!(
+            registry.claim_tool_execution("run-1", "call-1"),
+            Err(RegistryError::AlreadyClaimed(_, _))
+        ));
+        // A different call id is unaffected.
+        registry.claim_tool_execution("run-1", "call-2").unwrap();
+    }
+
+    #[test]
+    fn claim_tool_execution_is_exclusive_across_independent_registries() {
+        let dir = tempdir().unwrap();
+        let first = RunRegistry::new(dir.path()).unwrap();
+        let second = RunRegistry::new(dir.path()).unwrap();
+        first.start("run-1", "task", None, None).unwrap();
+        first.claim_tool_execution("run-1", "call-1").unwrap();
+        assert!(matches!(
+            second.claim_tool_execution("run-1", "call-1"),
+            Err(RegistryError::AlreadyClaimed(_, _))
+        ));
+    }
+
+    #[test]
+    fn claim_tool_execution_rejects_a_call_id_used_as_a_path_traversal() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.start("run-1", "task", None, None).unwrap();
+        registry
+            .claim_tool_execution("run-1", "../../etc/passwd")
+            .unwrap();
+        assert!(
+            !dir.path().join("etc").exists(),
+            "the untrusted call id must not be used as a literal path component"
+        );
     }
 
     #[test]

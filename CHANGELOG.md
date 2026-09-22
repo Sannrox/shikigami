@@ -143,6 +143,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The run registry now atomically claims exclusive execution of each
+  durable-effect tool call (`O_EXCL` file create, race-free across
+  processes) right before that call's durable `Started` marker is written.
+  A stale-lease resume that redeemed a permit but stalled before `Started`
+  can no longer double-apply the host effect once another process has
+  already claimed and executed the same call.
 - Resuming an approval park no longer wipes the top-level checkpoint park.
   While the approval wait is still open, every save (the initial resume save
   and failure saves included) keeps the parked state, so a restart or a
