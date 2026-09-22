@@ -494,6 +494,12 @@ pub trait GovernancePort: Send + Sync {
 
     /// Poll current approval authority. Adapters that cannot observe
     /// approvals leave the default unsupported.
+    ///
+    /// `sekai-chisei` leaves this on the default and nothing calls it for
+    /// resume: the plane has no approval-stable read, so resume re-sends
+    /// `AuthorizeExternalAction` and remaps the decision instead. See
+    /// `governance::sekai_chisei::tool_authorization::approval_state_from_decision`
+    /// and [`docs/governed-path.md`](../../docs/governed-path.md).
     async fn approval_state(&self, approval_id: &str) -> Result<ApprovalState, GovernanceError> {
         let _ = approval_id;
         Err(GovernanceError::Message(format!(

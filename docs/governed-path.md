@@ -117,13 +117,44 @@ authorized through the plane’s host-executed external-action API
 | --- | --- |
 | `permit` | Redeem the signed permit, then execute only after redemption succeeds |
 | `deny` | Do **not** execute; surface denial on the tool result / events |
-| `require_approval` | Park at the effect boundary with the plane `approval_id`. Resume polls the same authorization once; execute only under a current permit. Deny, expiry, cancel, and revoke resume with no effect. |
+| `require_approval` | Park at the effect boundary with the plane `approval_id`. Resume re-validates once; execute only under a current permit. Deny, expiry, cancel, and revoke resume with no effect. |
 | missing / unknown | Fail closed as denial |
 | plane unavailable / transport / build / redeem error | Fail closed (tool not executed) |
 
 The sekai-chisei adapter never fail-opens mid-run tool authorization: plane
 connect/RPC/redeem failures deny the tool even when `governance.fail_closed`
 is false. `fail_closed` / profile `governed` still gate doctor and run start.
+
+### Approval-park observation (live behavior, not the `approval_state` poll)
+
+[Discussion #291](https://github.com/Sannrox/shikigami/discussions/291) designed
+observation as a stable `GovernancePort::approval_state(approval_id)` poll.
+`sekai-chisei` does not implement that trait method (it stays on the default,
+unsupported), and nothing in the resume path calls it. Resume instead
+re-sends the original `AuthorizeExternalAction` request (same `deadline_ms`,
+same `request_digest`) and remaps the response:
+
+| Plane `decision` | Harness `ApprovalState` |
+| --- | --- |
+| `permit` | `Approved` |
+| `require_approval` | `Pending` |
+| `deny` with `cancelled_at_ms > 0` | `Cancelled` |
+| `deny`, reason contains `expir` (case-insensitive) | `Expired` |
+| `deny`, reason contains `revok` | `Revoked` |
+| `deny`, reason contains `cancel` | `Cancelled` |
+| `deny`, none of the above | `Denied { reason }` |
+| anything else | `Denied { reason: "unexpected decision ..." }` |
+
+`ExternalActionDecision` carries no structured approval-status field, so the
+`Expired` / `Revoked` / `Cancelled` classes above depend on English substrings
+in the plane's free-text `reason`. A revoke whose reason does not contain
+`revok` (or a differently-worded expiry or cancellation) is classified as a
+plain `Denied` instead. The host effect is identical either way — the tool
+never executes — but the reported reason class and any telemetry built on it
+can be wrong. Resolving this precisely needs either a plane-exposed,
+approval-stable read or a structured status field on the decision; until
+then, this table is the adapter's actual behavior, not the Discussion #291
+design.
 
 Offline adapters (`none`, `local`) do **not** call external-action; they only
 enforce the local tool allow-list.

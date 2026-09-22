@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   complete-event attributes, Start-here vs historical research, and 1.x
   adapter/status stamps.
 
+- `docs/governed-path.md` documents the sekai-chisei approval-park observation
+  path as it actually runs: a re-`AuthorizeExternalAction` remap with
+  English-reason-substring classification, not the `GovernancePort::approval_state`
+  poll from Discussion #291, which the adapter never implements and resume
+  never calls. `GovernancePort::approval_state`'s doc comment points readers
+  at the real mechanism. No behavior change.
+
 ### Added
 
 - On a plane `require_approval` decision the run parks at the effect
