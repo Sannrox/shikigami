@@ -392,6 +392,20 @@ impl<'a> DurableToolBatch<'a> {
                     .governance
                     .tool_requires_execution_checkpoint(&call.name)
                 {
+                    // The permit may already be redeemed. Claim this call id
+                    // before marking it durably `Started`: claiming is an
+                    // atomic, cross-process `O_EXCL` file create, so a stale
+                    // process racing a takeover that already claimed (or is
+                    // about to claim) the same call id is refused here, not
+                    // merely warned by a point-in-time lease check.
+                    self.engine
+                        .registry
+                        .claim_tool_execution(&session.run_id, &stable_call_id)
+                        .map_err(|error| {
+                            RunError::Message(format!(
+                                "host effect refused, not claimed exclusively: {error}"
+                            ))
+                        })?;
                     self.engine
                         .governance
                         .mark_tool_execution_started(handle, &stable_call_id)

@@ -23,6 +23,9 @@ use tempfile::tempdir;
 const APPROVAL_ID: &str = "approval-scripted-1";
 const WRITE_ARGS: &str = r#"{"path":"hello.txt","content":"approved"}"#;
 
+/// Runs once, synchronously, from inside an authorize call.
+type TakeoverHook = Arc<Mutex<Option<Box<dyn FnOnce(&str) + Send>>>>;
+
 fn write_script() -> String {
     r#"[
         {"tool_calls":[{"id":"write-1","name":"write_file","args_json":"{\"path\":\"hello.txt\",\"content\":\"approved\"}"}]},
@@ -72,6 +75,25 @@ fn build_engine_with_faults(
     inject_authorize: Arc<Mutex<Option<GovernanceError>>>,
     inject_recover: Arc<Mutex<Option<GovernanceError>>>,
 ) -> Engine {
+    build_engine_with_takeover_hook(
+        config,
+        state,
+        state_mutex,
+        inject_authorize,
+        inject_recover,
+        Arc::new(Mutex::new(None)),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn build_engine_with_takeover_hook(
+    config: Config,
+    state: &StateRoot,
+    state_mutex: Arc<Mutex<ApprovalState>>,
+    inject_authorize: Arc<Mutex<Option<GovernanceError>>>,
+    inject_recover: Arc<Mutex<Option<GovernanceError>>>,
+    on_parked_authorize_ok: TakeoverHook,
+) -> Engine {
     let inner = LocalGovernance::from_config(&config);
     Engine::new(
         config.clone(),
@@ -80,6 +102,7 @@ fn build_engine_with_faults(
             state: state_mutex,
             inject_authorize,
             inject_recover,
+            on_parked_authorize_ok,
         }),
         Arc::from(workspace::from_config(&config).expect("workspace")),
         Arc::from(model::from_config(&config).expect("model")),
@@ -95,6 +118,11 @@ struct ScriptedApprovalGovernance {
     inject_authorize: Arc<Mutex<Option<GovernanceError>>>,
     /// Fails right after the resume's initial checkpoint save.
     inject_recover: Arc<Mutex<Option<GovernanceError>>>,
+    /// Runs once, synchronously, right after a parked authorization is about
+    /// to return Approved — the exact window between redeem and the durable
+    /// `Started` marker where a stale-lease takeover must be able to steal
+    /// ownership out from under this call.
+    on_parked_authorize_ok: TakeoverHook,
 }
 
 impl ScriptedApprovalGovernance {
@@ -266,7 +294,17 @@ impl GovernancePort for ScriptedApprovalGovernance {
             {
                 return Err(error);
             }
-            return resolve_approval_wait(&park, self.current_state(), now_unix_ms());
+            let result = resolve_approval_wait(&park, self.current_state(), now_unix_ms());
+            if result.is_ok()
+                && let Some(hook) = self
+                    .on_parked_authorize_ok
+                    .lock()
+                    .expect("takeover hook")
+                    .take()
+            {
+                hook(call_id);
+            }
+            return result;
         }
         Err(GovernanceError::RequireApproval {
             approval_id: APPROVAL_ID.into(),
@@ -893,4 +931,59 @@ async fn failure_right_after_the_resume_initial_save_keeps_the_durable_park() {
         shikigami::run::SYSTEM_PROMPT,
     )
     .expect("still a parked, resumable checkpoint after the interrupted resume");
+}
+
+#[tokio::test]
+async fn stale_lease_takeover_between_redeem_and_started_refuses_the_stale_owners_effect() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    state.ensure_ready_for_runs().unwrap();
+    let config = engine_config(dir.path());
+    let plane = Arc::new(Mutex::new(ApprovalState::Pending));
+    let engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+    let mut request = RunRequest::new("write after approval");
+    request.keep_workspace = true;
+    let parked = engine.run(request).await.unwrap();
+    assert_eq!(parked.termination, RunTermination::Parked);
+    *plane.lock().unwrap() = ApprovalState::Approved {
+        permit_id: "permit-1".into(),
+    };
+
+    let state_path = state.path().to_path_buf();
+    let run_id = parked.run_id.clone();
+    let takeover_run_id = run_id.clone();
+    let on_parked_authorize_ok: TakeoverHook =
+        Arc::new(Mutex::new(Some(Box::new(move |call_id: &str| {
+            // Simulate a second, independent process winning the race for
+            // this exact tool call right in the window between this
+            // process's redeem (which just succeeded) and its own durable
+            // `Started` write.
+            let takeover_registry = RunRegistry::new(&state_path).unwrap();
+            takeover_registry
+                .claim_tool_execution(&takeover_run_id, call_id)
+                .expect("a genuine second process can claim the call first");
+        }))));
+    let resume_engine = build_engine_with_takeover_hook(
+        config,
+        &state,
+        plane,
+        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(None)),
+        on_parked_authorize_ok,
+    );
+    let mut resume = RunRequest::new("");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(run_id);
+    let error = resume_engine
+        .run(resume)
+        .await
+        .expect_err("losing the execution claim must refuse the pending host effect");
+    assert!(
+        error.to_string().contains("already claimed"),
+        "expected an already-claimed error, got: {error}"
+    );
+    assert!(
+        !parked.workspace.join("hello.txt").is_file(),
+        "the stale owner must not apply the host effect after losing the lease"
+    );
 }
