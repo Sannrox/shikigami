@@ -150,6 +150,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A parked resume that already has an exclusive tool claim refuses after
+  bind, before the Authorizing checkpoint save and plane redeem. The
+  claim is still taken only after a permit, so a still-pending approval
+  wait does not occupy the exclusive slot.
+
 - A durable tool claim is taken while the approval park still exists, and
   the park is cleared only after the `Started` receipt is saved. An
   `AlreadyClaimed` refuse stays governance-open: it does not wipe the park

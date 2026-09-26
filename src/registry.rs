@@ -232,6 +232,15 @@ impl RunRegistry {
             .join(claim_filename(call_id)))
     }
 
+    /// True when the exclusive execution claim file already exists.
+    pub fn tool_execution_is_claimed(
+        &self,
+        run_id: &str,
+        call_id: &str,
+    ) -> Result<bool, RegistryError> {
+        Ok(self.tool_execution_claim_path(run_id, call_id)?.is_file())
+    }
+
     pub fn set_workspace(&self, run_id: &str, workspace: &Path) -> Result<(), RegistryError> {
         let run_lock = self.lock_for(run_id)?;
         let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
@@ -779,6 +788,11 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "pid=1 claimed_at=1\n").unwrap();
+        assert!(
+            registry
+                .tool_execution_is_claimed("run-1", "call-1")
+                .unwrap()
+        );
         assert!(matches!(
             registry.claim_tool_execution("run-1", "call-1"),
             Err(RegistryError::AlreadyClaimed(_, _))
