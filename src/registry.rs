@@ -202,28 +202,34 @@ impl RunRegistry {
     }
 
     /// Atomically claim exclusive execution of one durable-effect tool call
-    /// within a run. At most one caller's claim can ever succeed for a given
-    /// `(run_id, call_id)`: creation is `O_EXCL`, so this is race-free across
+    /// within a run. Creation is `O_EXCL`, so this is race-free across
     /// processes on the local filesystem, unlike a check-then-act read of a
-    /// heartbeat or lease. A claim is never released; a call that already
-    /// executed (by this process or a stale one that raced it) must never
-    /// execute again for the lifetime of the run.
+    /// heartbeat or lease. A claim is never released: process death does not
+    /// prove the host effect never ran, so the same `(run_id, call_id)` must
+    /// not execute again for the lifetime of the run.
     pub fn claim_tool_execution(&self, run_id: &str, call_id: &str) -> Result<(), RegistryError> {
         let dir = self.run_dir(run_id)?.join("executing");
         fs::create_dir_all(&dir)?;
         let path = dir.join(claim_filename(call_id));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(
-                    format!("pid={} claimed_at={}\n", std::process::id(), now_ms()).as_bytes(),
-                )?;
-                Ok(())
-            }
+        match create_exclusive_claim(&path) {
+            Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(RegistryError::AlreadyClaimed(run_id.into(), call_id.into()))
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Path of the exclusive execution claim for `call_id` under this run.
+    pub fn tool_execution_claim_path(
+        &self,
+        run_id: &str,
+        call_id: &str,
+    ) -> Result<PathBuf, RegistryError> {
+        Ok(self
+            .run_dir(run_id)?
+            .join("executing")
+            .join(claim_filename(call_id)))
     }
 
     pub fn set_workspace(&self, run_id: &str, workspace: &Path) -> Result<(), RegistryError> {
@@ -564,6 +570,16 @@ fn claim_filename(call_id: &str) -> String {
     format!("{}.claim", crate::digest::sha256_hex(call_id.as_bytes()))
 }
 
+fn claim_contents() -> String {
+    format!("pid={} claimed_at={}\n", std::process::id(), now_ms())
+}
+
+fn create_exclusive_claim(path: &Path) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(claim_contents().as_bytes())?;
+    Ok(())
+}
+
 fn digest(text: &str) -> String {
     crate::digest::sha256_prefixed(text.as_bytes())
 }
@@ -751,6 +767,22 @@ mod tests {
             !dir.path().join("etc").exists(),
             "the untrusted call id must not be used as a literal path component"
         );
+    }
+
+    #[test]
+    fn claim_tool_execution_refuses_an_existing_claim_file() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.start("run-1", "task", None, None).unwrap();
+        let path = registry
+            .tool_execution_claim_path("run-1", "call-1")
+            .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "pid=1 claimed_at=1\n").unwrap();
+        assert!(matches!(
+            registry.claim_tool_execution("run-1", "call-1"),
+            Err(RegistryError::AlreadyClaimed(_, _))
+        ));
     }
 
     #[test]

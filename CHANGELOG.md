@@ -150,6 +150,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A durable tool claim is taken while the approval park still exists, and
+  the park is cleared only after the `Started` receipt is saved. An
+  `AlreadyClaimed` refuse stays governance-open: it does not wipe the park
+  or complete the run. The exclusive claim is never released, so a crash
+  between claim and `Started` fail-closes with the park intact rather than
+  repeating a host effect.
+
 - The run registry now atomically claims exclusive execution of each
   durable-effect tool call (`O_EXCL` file create, race-free across
   processes) right before that call's durable `Started` marker is written.
