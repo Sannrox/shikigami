@@ -381,28 +381,18 @@ impl<'a> DurableToolBatch<'a> {
                 if self
                     .engine
                     .governance
-                    .checkpoint_state(&session.run_id)
-                    .and_then(|checkpoint| checkpoint.approval_park)
-                    .is_some_and(|park| park.call_id == stable_call_id)
-                {
-                    self.engine.governance.clear_approval_park(handle).await?;
-                }
-                if self
-                    .engine
-                    .governance
                     .tool_requires_execution_checkpoint(&call.name)
                 {
-                    // The permit may already be redeemed. Claim this call id
-                    // before marking it durably `Started`: claiming is an
-                    // atomic, cross-process `O_EXCL` file create, so a stale
-                    // process racing a takeover that already claimed (or is
-                    // about to claim) the same call id is refused here, not
-                    // merely warned by a point-in-time lease check.
+                    // Claim while the approval-park object still exists. An
+                    // exclusive holder is refused as a governance-open error
+                    // so the park is not wiped and `complete_run` is not
+                    // written. The claim is never released: process death
+                    // does not prove the host effect never ran.
                     self.engine
                         .registry
                         .claim_tool_execution(&session.run_id, &stable_call_id)
                         .map_err(|error| {
-                            RunError::Message(format!(
+                            GovernanceError::Message(format!(
                                 "host effect refused, not claimed exclusively: {error}"
                             ))
                         })?;
@@ -411,6 +401,18 @@ impl<'a> DurableToolBatch<'a> {
                         .mark_tool_execution_started(handle, &stable_call_id)
                         .await?;
                     session.save(tools.as_ref())?;
+                }
+                // Clear the park only after the exclusive claim (when required)
+                // and the durable `Started` save, so a crash in this window
+                // keeps the parked approval.
+                if self
+                    .engine
+                    .governance
+                    .checkpoint_state(&session.run_id)
+                    .and_then(|checkpoint| checkpoint.approval_park)
+                    .is_some_and(|park| park.call_id == stable_call_id)
+                {
+                    self.engine.governance.clear_approval_park(handle).await?;
                 }
                 match tools.execute(&call.name, &call.args_json).await {
                     Ok(o) => out.push((index, call.clone(), Ok(o))),

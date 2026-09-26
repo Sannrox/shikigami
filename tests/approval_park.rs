@@ -986,4 +986,82 @@ async fn stale_lease_takeover_between_redeem_and_started_refuses_the_stale_owner
         !parked.workspace.join("hello.txt").is_file(),
         "the stale owner must not apply the host effect after losing the lease"
     );
+    let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    assert_eq!(
+        checkpoint
+            .approval_park()
+            .map(|park| park.approval_id.as_str()),
+        Some(APPROVAL_ID),
+        "AlreadyClaimed must not wipe the durable approval park"
+    );
+    assert_eq!(
+        checkpoint.park.as_ref().map(|park| park.kind),
+        Some(ParkKind::Approval),
+        "AlreadyClaimed must leave the run parked and resumable"
+    );
+    Checkpoint::load_parked_digest(
+        &state.runs_dir(),
+        &parked.run_id,
+        shikigami::run::SYSTEM_PROMPT,
+    )
+    .expect("AlreadyClaimed must not complete the run as a terminal failed attempt");
+}
+
+#[tokio::test]
+async fn orphan_claim_without_started_fail_closes_without_wiping_the_park() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    state.ensure_ready_for_runs().unwrap();
+    let config = engine_config(dir.path());
+    let plane = Arc::new(Mutex::new(ApprovalState::Pending));
+    let engine = build_engine(config.clone(), &state, Arc::clone(&plane));
+    let mut request = RunRequest::new("write after approval");
+    request.keep_workspace = true;
+    let parked = engine.run(request).await.unwrap();
+    assert_eq!(parked.termination, RunTermination::Parked);
+
+    let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    let call_id = checkpoint
+        .approval_park()
+        .expect("parked call identity")
+        .call_id
+        .clone();
+    let registry = RunRegistry::new(state.path()).unwrap();
+    let claim_path = registry
+        .tool_execution_claim_path(&parked.run_id, &call_id)
+        .unwrap();
+    std::fs::create_dir_all(claim_path.parent().unwrap()).unwrap();
+    std::fs::write(&claim_path, "pid=1 claimed_at=1\n").unwrap();
+
+    *plane.lock().unwrap() = ApprovalState::Approved {
+        permit_id: "permit-1".into(),
+    };
+    let resume_engine = build_engine(config, &state, plane);
+    let mut resume = RunRequest::new("");
+    resume.keep_workspace = true;
+    resume.resume_run_id = Some(parked.run_id.clone());
+    let error = resume_engine
+        .run(resume)
+        .await
+        .expect_err("an existing claim must refuse the host effect");
+    assert!(
+        error.to_string().contains("already claimed"),
+        "expected an already-claimed error, got: {error}"
+    );
+    assert!(
+        !parked.workspace.join("hello.txt").is_file(),
+        "an orphan claim must not execute the host effect"
+    );
+    let after = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    assert_eq!(
+        after.approval_park().map(|park| park.approval_id.as_str()),
+        Some(APPROVAL_ID),
+        "AlreadyClaimed must not wipe the durable approval park"
+    );
+    Checkpoint::load_parked_digest(
+        &state.runs_dir(),
+        &parked.run_id,
+        shikigami::run::SYSTEM_PROMPT,
+    )
+    .expect("AlreadyClaimed must not complete the run as a terminal failed attempt");
 }
