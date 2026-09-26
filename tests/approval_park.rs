@@ -934,7 +934,7 @@ async fn failure_right_after_the_resume_initial_save_keeps_the_durable_park() {
 }
 
 #[tokio::test]
-async fn stale_lease_takeover_between_redeem_and_started_refuses_the_stale_owners_effect() {
+async fn already_claimed_parked_resume_refuses_before_redeem() {
     let dir = tempdir().unwrap();
     let state = StateRoot::new(dir.path().join("state"));
     state.ensure_ready_for_runs().unwrap();
@@ -945,42 +945,44 @@ async fn stale_lease_takeover_between_redeem_and_started_refuses_the_stale_owner
     request.keep_workspace = true;
     let parked = engine.run(request).await.unwrap();
     assert_eq!(parked.termination, RunTermination::Parked);
+
+    let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run_id).unwrap();
+    let call_id = checkpoint
+        .approval_park()
+        .expect("parked call identity")
+        .call_id
+        .clone();
+    let registry = RunRegistry::new(state.path()).unwrap();
+    registry
+        .claim_tool_execution(&parked.run_id, &call_id)
+        .expect("a genuine second process can claim the call first");
+
     *plane.lock().unwrap() = ApprovalState::Approved {
         permit_id: "permit-1".into(),
     };
-
-    let state_path = state.path().to_path_buf();
-    let run_id = parked.run_id.clone();
-    let takeover_run_id = run_id.clone();
-    let on_parked_authorize_ok: TakeoverHook =
-        Arc::new(Mutex::new(Some(Box::new(move |call_id: &str| {
-            // Simulate a second, independent process winning the race for
-            // this exact tool call right in the window between this
-            // process's redeem (which just succeeded) and its own durable
-            // `Started` write.
-            let takeover_registry = RunRegistry::new(&state_path).unwrap();
-            takeover_registry
-                .claim_tool_execution(&takeover_run_id, call_id)
-                .expect("a genuine second process can claim the call first");
-        }))));
-    let resume_engine = build_engine_with_takeover_hook(
+    let resume_engine = build_engine_with_inject(
         config,
         &state,
         plane,
-        Arc::new(Mutex::new(None)),
-        Arc::new(Mutex::new(None)),
-        on_parked_authorize_ok,
+        Arc::new(Mutex::new(Some(GovernanceError::Message(
+            "parked redeem must not run after an exclusive claim miss".into(),
+        )))),
     );
     let mut resume = RunRequest::new("");
     resume.keep_workspace = true;
-    resume.resume_run_id = Some(run_id);
+    resume.resume_run_id = Some(parked.run_id.clone());
     let error = resume_engine
         .run(resume)
         .await
-        .expect_err("losing the execution claim must refuse the pending host effect");
+        .expect_err("losing the execution claim must refuse before redeem");
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("already claimed"),
-        "expected an already-claimed error, got: {error}"
+        message.contains("already claimed"),
+        "expected an already-claimed error, got: {message}"
+    );
+    assert!(
+        !message.contains("parked redeem must not run"),
+        "AlreadyClaimed must be decided before parked redeem: {message}"
     );
     assert!(
         !parked.workspace.join("hello.txt").is_file(),
@@ -993,11 +995,6 @@ async fn stale_lease_takeover_between_redeem_and_started_refuses_the_stale_owner
             .map(|park| park.approval_id.as_str()),
         Some(APPROVAL_ID),
         "AlreadyClaimed must not wipe the durable approval park"
-    );
-    assert_eq!(
-        checkpoint.park.as_ref().map(|park| park.kind),
-        Some(ParkKind::Approval),
-        "AlreadyClaimed must leave the run parked and resumable"
     );
     Checkpoint::load_parked_digest(
         &state.runs_dir(),

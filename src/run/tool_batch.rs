@@ -249,11 +249,38 @@ impl<'a> DurableToolBatch<'a> {
                     out.push((index, call.clone(), Err(e)));
                     continue;
                 }
-                if self
+                let approval_park = self
                     .engine
                     .governance
-                    .tool_requires_execution_checkpoint(&call.name)
-                {
+                    .checkpoint_state(&session.run_id)
+                    .and_then(|checkpoint| checkpoint.approval_park)
+                    .filter(|park| park.call_id == stable_call_id);
+                let parked_call_bound = approval_park.as_ref().map_or(Ok(()), |park| {
+                    bind_parked_call(park, &call.name, &call.args_json)
+                });
+                let requires_claim = self
+                    .engine
+                    .governance
+                    .tool_requires_execution_checkpoint(&call.name);
+                if parked_call_bound.is_ok() && approval_park.is_some() && requires_claim {
+                    // Parked resume: if the exclusive claim already exists,
+                    // refuse after bind and before Authorizing save or plane
+                    // redeem. Do not take a new claim yet — authorize may
+                    // still return pending. The permit path claims below.
+                    if self
+                        .engine
+                        .registry
+                        .tool_execution_is_claimed(&session.run_id, &stable_call_id)
+                        .unwrap_or(true)
+                    {
+                        return Err(GovernanceError::Message(format!(
+                            "host effect refused, not claimed exclusively: tool call `{stable_call_id}` in run {} is already claimed by another execution attempt",
+                            session.run_id
+                        ))
+                        .into());
+                    }
+                }
+                if parked_call_bound.is_ok() && requires_claim {
                     let durable_args = if session.is_content() {
                         session
                             .durable_content_tool_arguments(index)
@@ -279,15 +306,6 @@ impl<'a> DurableToolBatch<'a> {
                         .await?;
                     session.save(tools.as_ref())?;
                 }
-                let parked_call_bound = self
-                    .engine
-                    .governance
-                    .checkpoint_state(&session.run_id)
-                    .and_then(|checkpoint| checkpoint.approval_park)
-                    .filter(|park| park.call_id == stable_call_id)
-                    .map_or(Ok(()), |park| {
-                        bind_parked_call(&park, &call.name, &call.args_json)
-                    });
                 let authorization = match parked_call_bound {
                     Ok(()) => {
                         self.engine
@@ -378,16 +396,7 @@ impl<'a> DurableToolBatch<'a> {
                     out.push((index, call.clone(), Err(e.to_string())));
                     continue;
                 }
-                if self
-                    .engine
-                    .governance
-                    .tool_requires_execution_checkpoint(&call.name)
-                {
-                    // Claim while the approval-park object still exists. An
-                    // exclusive holder is refused as a governance-open error
-                    // so the park is not wiped and `complete_run` is not
-                    // written. The claim is never released: process death
-                    // does not prove the host effect never ran.
+                if requires_claim {
                     self.engine
                         .registry
                         .claim_tool_execution(&session.run_id, &stable_call_id)
