@@ -7,42 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-### Changed
+<!-- Add changes for the next release here. -->
 
-- Public Issues and PRs must not include hostnames or other private
-  environment inventory. Delivery skills list only branch, repo-relative
-  worktree, and SHAs on GitHub.
-
-- SHA-256 hex and Unix-ms clocks now live in one crate helper (`src/digest.rs`).
-  Public `digest_bytes`, `fallback::sha256_hex`, and `evidence_queue::sha256_hex`
-  keep the same strings; overflow of the `i64` clock saturates to `0`.
-  Prefixed digest shape checks and bounded-content projection also go through
-  that helper so content, replay, receipt artifacts, and harvest argument
-  digests cannot drift.
-
-- Operator docs and module comments now match shipped behavior: default coding
-  tools, `run-content` CLI intake, harvest `complete_run` skip set, filesystem
-  serve drain on SIGINT/SIGTERM, MCP/HTTP/`web_fetch`/OTLP egress, filesystem
-  `POST /runs`, the settings schema for `[network]` / `[[hooks]]`, harvest
-  complete-event attributes, Start-here vs historical research, and 1.x
-  adapter/status stamps.
-
-- `docs/governed-path.md` documents the sekai-chisei approval-park observation
-  path as it actually runs: a re-`AuthorizeExternalAction` remap with
-  English-reason-substring classification, not the `GovernancePort::approval_state`
-  poll from Discussion #291, which the adapter never implements and resume
-  never calls. When that replay returns `PermissionDenied` because the pinned
-  plane requires current policy `Allow` to reissue an Existing permit, live
-  `sekai-chisei` fails closed without executing and does not claim
-  approve-then-resume execute-once. `GovernancePort::approval_state`'s doc
-  comment points readers at the real mechanism.
-
-### Fixed
-
-- Parked live resume that hits plane `PermissionDenied` (including Existing
-  permit replay refused while current policy is still `RequireApproval`)
-  names the refusal, does not treat it as an operator deny, preserves the
-  approval park, and does not execute the tool.
+## [1.1.0] — 2026-09-27
 
 ### Added
 
@@ -143,6 +110,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Public Issues and PRs must not include hostnames or other private
+  environment inventory. Delivery skills list only branch, repo-relative
+  worktree, and SHAs on GitHub.
+
+- SHA-256 hex and Unix-ms clocks now live in one crate helper (`src/digest.rs`).
+  Public `digest_bytes`, `fallback::sha256_hex`, and `evidence_queue::sha256_hex`
+  keep the same strings; overflow of the `i64` clock saturates to `0`.
+  Prefixed digest shape checks and bounded-content projection also go through
+  that helper so content, replay, receipt artifacts, and harvest argument
+  digests cannot drift.
+
+- Operator docs and module comments now match shipped behavior: default coding
+  tools, `run-content` CLI intake, harvest `complete_run` skip set, filesystem
+  serve drain on SIGINT/SIGTERM, MCP/HTTP/`web_fetch`/OTLP egress, filesystem
+  `POST /runs`, the settings schema for `[network]` / `[[hooks]]`, harvest
+  complete-event attributes, Start-here vs historical research, and 1.x
+  adapter/status stamps.
+
+- `docs/governed-path.md` documents the sekai-chisei approval-park observation
+  path as it actually runs: a re-`AuthorizeExternalAction` remap with
+  English-reason-substring classification, not the `GovernancePort::approval_state`
+  poll from Discussion #291, which the adapter never implements and resume
+  never calls. When that replay returns `PermissionDenied` because the pinned
+  plane requires current policy `Allow` to reissue an Existing permit, live
+  `sekai-chisei` fails closed without executing and does not claim
+  approve-then-resume execute-once. `GovernancePort::approval_state`'s doc
+  comment points readers at the real mechanism.
+
 - Governed / fail-closed Bash now accepts `sandbox.backend = linux_native` in
   addition to `rlimit`. `doctor` labels `rlimit` as `limits` (no OS isolation)
   and warns on `backend=none`.
@@ -162,6 +157,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory, not the live workspace.
 
 ### Fixed
+
+- Parked live resume that hits plane `PermissionDenied` (including Existing
+  permit replay refused while current policy is still `RequireApproval`)
+  names the refusal, does not treat it as an operator deny, preserves the
+  approval park, and does not execute the tool.
 
 - A parked resume that already has an exclusive tool claim refuses after
   bind, before the Authorizing checkpoint save and plane redeem. The
@@ -237,8 +237,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Omit plane `artifact_json` when the classified retained inventory is bound
   to a different run id or the compact JSON exceeds the sekai-chisei #646
   64 KiB ack limit, so a completed acknowledgement still lands.
-
-<!-- Add changes for the next release here. -->
 
 ## [1.0.7] — 2026-08-18
 
