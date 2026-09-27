@@ -497,7 +497,10 @@ pub trait GovernancePort: Send + Sync {
     ///
     /// `sekai-chisei` leaves this on the default and nothing calls it for
     /// resume: the plane has no approval-stable read, so resume re-sends
-    /// `AuthorizeExternalAction` and remaps the decision instead. See
+    /// `AuthorizeExternalAction` and remaps the decision instead. When that
+    /// replay returns `PermissionDenied` (Existing permit, current policy
+    /// still `RequireApproval`), the adapter fails closed without executing
+    /// and does not claim approve-then-resume execute-once. See
     /// `governance::sekai_chisei::tool_authorization::approval_state_from_decision`
     /// and [`docs/governed-path.md`](../../docs/governed-path.md).
     async fn approval_state(&self, approval_id: &str) -> Result<ApprovalState, GovernanceError> {

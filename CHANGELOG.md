@@ -31,16 +31,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path as it actually runs: a re-`AuthorizeExternalAction` remap with
   English-reason-substring classification, not the `GovernancePort::approval_state`
   poll from Discussion #291, which the adapter never implements and resume
-  never calls. `GovernancePort::approval_state`'s doc comment points readers
-  at the real mechanism. No behavior change.
+  never calls. When that replay returns `PermissionDenied` because the pinned
+  plane requires current policy `Allow` to reissue an Existing permit, live
+  `sekai-chisei` fails closed without executing and does not claim
+  approve-then-resume execute-once. `GovernancePort::approval_state`'s doc
+  comment points readers at the real mechanism.
+
+### Fixed
+
+- Parked live resume that hits plane `PermissionDenied` (including Existing
+  permit replay refused while current policy is still `RequireApproval`)
+  names the refusal, does not treat it as an operator deny, preserves the
+  approval park, and does not execute the tool.
 
 ### Added
 
 - On a plane `require_approval` decision the run parks at the effect
   boundary with the approval identity on the governance checkpoint. Resume
-  polls current authority once, executes the parked tool only under a
-  current permit, and treats deny, expiry, cancel, and revoke as explicit
-  denied outcomes. CLI `run` returns instead of waiting. See
+  re-validates current authority once. Scripted adapters that return
+  `Approved` with a permit bound to the parked digest execute that tool once.
+  Deny, expiry, cancel, and revoke resume with no effect. Live `sekai-chisei`
+  does not claim that execute-once row until the plane issues the stored
+  permit without requiring current policy `Allow`. CLI `run` returns instead
+  of waiting. See
   [Discussion #291](https://github.com/Sannrox/shikigami/discussions/291).
 - Additive `[tracing]` settings (off by default) export one OTLP JSON trace per
   run with a root span plus turn and tool-call spans. Attributes are the

@@ -120,10 +120,11 @@ async fn resolve_parked_approval(
 ) -> Result<(), GovernanceError> {
     // The plane has no separate approval-read RPC. Resume resends the original
     // AuthorizeExternalAction (same deadline, same request_digest). An existing
-    // require_approval record is returned as-is. After the operator approves,
-    // the stored decision becomes permit; issuing that permit is plane-owned.
-    // If current policy still says RequireApproval, a plane that refuses permit
-    // replay is a plane-contract defect, not a new harness authorization.
+    // require_approval record is returned as-is when the plane emits a decision.
+    // After the operator approves, the stored decision is permit; issuing that
+    // permit is plane-owned. The pinned plane refuses Existing-permit replay
+    // unless current policy is Allow, so approval-gated tools stay
+    // PermissionDenied — fail closed without executing, and keep the park.
     let response: proto::chisei::AuthorizeExternalActionResponse = client
         .raw()
         .unary(
@@ -140,7 +141,7 @@ async fn resolve_parked_approval(
             ),
         )
         .await
-        .map_err(|error| plane_session::map_error("AuthorizeExternalAction", error))?;
+        .map_err(map_parked_authorize_error)?;
     let decision = response
         .decision
         .ok_or_else(|| GovernanceError::Message("external-action missing decision".into()))?;
@@ -152,6 +153,21 @@ async fn resolve_parked_approval(
     )?;
     let permit = permit_for_decision(&decision, response.permit)?;
     redeem_permit(governance, handle, &park.call_id, request, permit, &client).await
+}
+
+/// Map a parked `AuthorizeExternalAction` RPC failure.
+///
+/// The SDK does not retain server status text, so `PermissionDenied` here
+/// covers Existing-permit replay refused by current policy and other
+/// authorization failures. None of those is an operator deny: fail closed
+/// without executing, and do not clear the approval park.
+fn map_parked_authorize_error(error: sekai_client::SdkError) -> GovernanceError {
+    if error.code == SdkErrorCode::PermissionDenied {
+        return GovernanceError::Message(format!(
+            "AuthorizeExternalAction: permission denied while replaying a parked authorization ({error}); the approval park is preserved and the tool is not executed"
+        ));
+    }
+    plane_session::map_error("AuthorizeExternalAction", error)
 }
 
 /// Bind the replayed decision to the parked authorization. Fails closed: an
@@ -463,5 +479,38 @@ mod tests {
         replayed.decision = "deny".into();
         replayed.approval_id = String::new();
         assert!(bind_parked_digest(&park("sha256:a"), &replayed).is_ok());
+    }
+
+    #[test]
+    fn parked_permit_replay_permission_denied_is_not_operator_deny() {
+        let error =
+            map_parked_authorize_error(sekai_client::SdkError::new(SdkErrorCode::PermissionDenied));
+        match error {
+            GovernanceError::Denied(_) => {
+                panic!("permit-replay PermissionDenied must not clear the approval park as Denied")
+            }
+            GovernanceError::RequireApproval { .. } => {
+                panic!("permit-replay PermissionDenied is not a still-pending wait")
+            }
+            GovernanceError::Message(message) => {
+                assert!(
+                    message.contains("permission denied")
+                        && message.contains("parked authorization")
+                        && message.contains("approval park is preserved"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parked_authorize_unavailable_stays_unavailable() {
+        let error =
+            map_parked_authorize_error(sekai_client::SdkError::new(SdkErrorCode::Unavailable));
+        assert!(
+            matches!(error, GovernanceError::Unavailable(_)),
+            "{error:?}"
+        );
     }
 }
