@@ -117,7 +117,7 @@ authorized through the plane’s host-executed external-action API
 | --- | --- |
 | `permit` | Redeem the signed permit, then execute only after redemption succeeds |
 | `deny` | Do **not** execute; surface denial on the tool result / events |
-| `require_approval` | Park at the effect boundary with the plane `approval_id`. Resume re-validates once; execute only under a current permit. Deny, expiry, cancel, and revoke resume with no effect. |
+| `require_approval` | Park at the effect boundary with the plane `approval_id`. Resume re-sends `AuthorizeExternalAction` for the parked digest. Execute only when that replay returns a current permit. Deny, expiry, cancel, and revoke resume with no effect. Live `sekai-chisei` does not claim approve-then-resume execute-once: the pinned plane refuses Existing-permit replay while current policy is still `RequireApproval`. |
 | missing / unknown | Fail closed as denial |
 | plane unavailable / transport / build / redeem error | Fail closed (tool not executed) |
 
@@ -151,10 +151,25 @@ in the plane's free-text `reason`. A revoke whose reason does not contain
 `revok` (or a differently-worded expiry or cancellation) is classified as a
 plain `Denied` instead. The host effect is identical either way — the tool
 never executes — but the reported reason class and any telemetry built on it
-can be wrong. Resolving this precisely needs either a plane-exposed,
+can be wrong.
+
+When the operator has already approved, the stored authorization is `permit`,
+but the pinned plane still re-resolves current action policy before replaying
+that permit and requires `Allow`. Approval-gated tools remain
+`RequireApproval`, so `AuthorizeExternalAction` returns `PermissionDenied`
+with no decision body. The SDK does not retain server status text. Resume
+then fails closed: the tool is not executed, the error is not an operator
+`Denied` (the approval park stays), and the live adapter does not claim
+Discussion #291 execute-once for this path. Execute-once remains the
+scripted-adapter matrix (`GovernancePort` implementations that return
+`Approved` with a permit bound to the parked digest). A plane that issues the
+stored permit without requiring current `Allow`, or that exposes an
+approval-stable read, is the remaining owner of the live execute-once row.
+
+Resolving expiry/revoke classification precisely needs either a plane-exposed,
 approval-stable read or a structured status field on the decision; until
-then, this table is the adapter's actual behavior, not the Discussion #291
-design.
+then, the table above is the adapter's actual remap when a decision body
+arrives, not the Discussion #291 design.
 
 Offline adapters (`none`, `local`) do **not** call external-action; they only
 enforce the local tool allow-list.
