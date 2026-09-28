@@ -22,6 +22,25 @@ export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
 # export SEKAI_TOKEN=...   # if token_env = "SEKAI_TOKEN"
 ```
 
+Loopback `http://127.0.0.1:…` and remote `https://` need no extra flag. A
+private compose network that can reach Chisei only as a Docker service name
+over plaintext gRPC (the public HTTPS edge is off) is supported by opting in:
+
+```toml
+[governance]
+adapter = "sekai-chisei"
+endpoint = "http://chisei:50051"
+fail_closed = true
+allow_insecure_remote = true
+```
+
+or `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE=true`. Keep the flag false
+whenever the endpoint is reachable from an untrusted network. The public HTTPS
+edge is not mandatory for Shikigami intake; internal TLS is preferred when the
+compose mesh can terminate it. Without the flag, `doctor` and connect fail
+closed on remote plaintext instead of returning an opaque invalid-argument
+error.
+
 ## Doctor
 
 ```bash

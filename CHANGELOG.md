@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-<!-- Add changes for the next release here. -->
+### Added
+
+- Additive `governance.allow_insecure_remote` (default `false`) maps to
+  `sekai-client` `ClientConfig.allow_insecure_remote` so fail-closed intake can
+  reach a private-network Chisei over plaintext `http://` (Docker/compose
+  service names) without the public HTTPS edge. Loopback `http://` and remote
+  `https://` are unchanged. `doctor` names the flag when a remote plaintext
+  endpoint is rejected. Env:
+  `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE`.
 
 ## [1.1.0] — 2026-09-27
 

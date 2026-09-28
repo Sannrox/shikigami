@@ -89,6 +89,13 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
         ok = false;
         lines.push(format!("error: {error}"));
     }
+    if harness.config.governance_blocks_remote_plaintext() {
+        ok = false;
+        lines.push(format!(
+            "error: {}",
+            crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT
+        ));
+    }
     if let Err(error) = harness.config.validate() {
         // Defense in depth for in-memory configs that skipped resolve/validate
         // (e.g. governed + bash + sandbox.backend=none).
@@ -131,6 +138,7 @@ pub(super) async fn doctor_async(harness: &Harness) -> DoctorReport {
     #[cfg(feature = "governance-sekai-chisei")]
     if harness.config.governance.adapter == "sekai-chisei"
         && harness.config.governance.endpoint.is_some()
+        && !harness.config.governance_blocks_remote_plaintext()
     {
         match crate::governance::sekai_chisei::live_probe(&harness.config).await {
             Ok(message) => report.lines.push(redact_secrets_in_line(

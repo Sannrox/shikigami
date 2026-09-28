@@ -58,6 +58,7 @@ pub struct SekaiChiseiGovernance {
     principal: String,
     namespace: String,
     fail_closed: bool,
+    allow_insecure_remote: bool,
     token_env: Option<String>,
     max_tokens: i32,
     preferred_model: String,
@@ -144,6 +145,7 @@ impl SekaiChiseiGovernance {
             principal: config.governance.principal.clone(),
             namespace: config.governance.namespace.clone(),
             fail_closed: config.requires_governance(),
+            allow_insecure_remote: config.governance.allow_insecure_remote,
             token_env: config.governance.token_env.clone(),
             max_tokens: 4096,
             preferred_model: config.model.model.clone(),
@@ -780,13 +782,21 @@ impl GovernancePort for SekaiChiseiGovernance {
             return "endpoint not set (governance.endpoint or SHIKIGAMI_CONTROL_PLANE)".into();
         }
         format!(
-            "endpoint={} principal={} namespace={} fail_closed={}",
-            self.endpoint, self.principal, self.namespace, self.fail_closed
+            "endpoint={} principal={} namespace={} fail_closed={} allow_insecure_remote={}",
+            self.endpoint,
+            self.principal,
+            self.namespace,
+            self.fail_closed,
+            self.allow_insecure_remote
         )
     }
 
     fn health_ok(&self) -> bool {
-        !self.endpoint.trim().is_empty()
+        if self.endpoint.trim().is_empty() {
+            return false;
+        }
+        self.allow_insecure_remote
+            || !crate::config::is_remote_plaintext_http_endpoint(&self.endpoint)
     }
 
     async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
@@ -1568,6 +1578,7 @@ mod tests {
             principal: "test".into(),
             namespace: "default".into(),
             fail_closed: false,
+            allow_insecure_remote: false,
             token_env: None,
             max_tokens: 4096,
             preferred_model: "auto".into(),

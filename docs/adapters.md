@@ -62,8 +62,13 @@ list/claim/lease RPCs and reconnects only after a transport error. The facade
 consumes the canonical upstream `sekai-proto`
 crate, so Shikigami does not carry a second protocol snapshot. The supported
 boundary is `sekai-client` 0.1.x with `sekai-proto` 1.x, pinned in
-`Cargo.toml`/`Cargo.lock`; the SDK permits plain HTTP only for loopback
-development endpoints, so use HTTPS for non-loopback production planes.
+`Cargo.toml`/`Cargo.lock`. The SDK permits plain HTTP for loopback development
+endpoints. Non-loopback planes should use HTTPS. Private-network compose that
+can reach Chisei only as a Docker DNS name over plaintext gRPC may set
+`governance.allow_insecure_remote = true` (default `false`); that maps to
+`ClientConfig.allow_insecure_remote`. The SDK default remains reject until the
+flag is set. `doctor` fails with a remediation line when the endpoint is
+remote `http://` and the flag is off.
 
 ### Fail-closed behavior
 

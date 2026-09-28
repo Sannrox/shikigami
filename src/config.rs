@@ -103,6 +103,11 @@ pub struct GovernanceSettings {
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    /// Opt-in for plaintext `http://` governance endpoints whose host is not
+    /// loopback. Default false; required for private-network compose names.
+    /// `sekai-client` keeps rejecting remote plaintext until this is true.
+    #[serde(default)]
+    pub allow_insecure_remote: bool,
     #[serde(default)]
     pub delayed_evidence: DelayedEvidenceSettings,
 }
@@ -158,8 +163,47 @@ impl Default for GovernanceSettings {
             fail_closed: false,
             namespace: default_namespace(),
             token_env: None,
+            allow_insecure_remote: false,
             delayed_evidence: DelayedEvidenceSettings::default(),
         }
+    }
+}
+
+/// Operator-facing hint when a sekai-chisei endpoint is remote plaintext HTTP
+/// and `governance.allow_insecure_remote` is still false.
+pub(crate) const REMOTE_PLAINTEXT_GOVERNANCE_HINT: &str = "governance.endpoint uses plaintext http on a non-loopback host; set governance.allow_insecure_remote=true only for private-network compose, or use https";
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let ip = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    ip.parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
+}
+
+/// True when `endpoint` is `http://` and the host is not loopback.
+/// Matches `sekai-client` URI policy so doctor/connect can fail closed
+/// before the SDK returns an opaque invalid-argument error.
+pub(crate) fn is_remote_plaintext_http_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    !is_loopback_host(url.host_str().unwrap_or_default())
+}
+
+fn parse_env_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -837,6 +881,8 @@ impl Config {
     pub const CONFIG_PATH_ENV: &'static str = "SHIKIGAMI_CONFIG";
     pub const CONTROL_PLANE_ENV: &'static str = "SHIKIGAMI_CONTROL_PLANE";
     pub const GOVERNANCE_ADAPTER_ENV: &'static str = "SHIKIGAMI_GOVERNANCE_ADAPTER";
+    pub const GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV: &'static str =
+        "SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE";
     pub const PROFILE_ENV: &'static str = "SHIKIGAMI_PROFILE";
     pub const MODEL_ADAPTER_ENV: &'static str = "SHIKIGAMI_MODEL_ADAPTER";
     pub const MODEL_SCRIPT_ENV: &'static str = "SHIKIGAMI_MODEL_SCRIPT";
@@ -913,6 +959,11 @@ impl Config {
             && !value.is_empty()
         {
             self.governance.endpoint = Some(value);
+        }
+        if let Ok(value) = env::var(Self::GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV)
+            && let Some(flag) = parse_env_flag(&value)
+        {
+            self.governance.allow_insecure_remote = flag;
         }
         if let Ok(value) = env::var(Self::MODEL_ADAPTER_ENV)
             && !value.is_empty()
@@ -1143,6 +1194,19 @@ impl Config {
         Ok(())
     }
 
+    /// Remote plaintext `http://` on `sekai-chisei` is unusable unless the
+    /// operator opt-in is set. Doctor and connect use this instead of the
+    /// SDK's opaque invalid-argument error.
+    pub(crate) fn governance_blocks_remote_plaintext(&self) -> bool {
+        self.governance.adapter == "sekai-chisei"
+            && !self.governance.allow_insecure_remote
+            && self
+                .governance
+                .endpoint
+                .as_deref()
+                .is_some_and(is_remote_plaintext_http_endpoint)
+    }
+
     /// Credential environment names consumed by the harness and never exposed
     /// to agent-controlled tool or MCP stdio subprocesses.
     pub(crate) fn protected_tool_environment_names(&self) -> Vec<String> {
@@ -1224,6 +1288,53 @@ script_json = "[]"
         let (c, _) = Config::resolve(&path).unwrap();
         assert_eq!(c.governance.adapter, "local");
         assert_eq!(c.model.adapter, "scripted");
+        assert!(!c.governance.allow_insecure_remote);
+    }
+
+    #[test]
+    fn allow_insecure_remote_defaults_false_and_parses_true() {
+        assert!(!Config::default().governance.allow_insecure_remote);
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[governance]
+adapter = "sekai-chisei"
+endpoint = "http://chisei:50051"
+allow_insecure_remote = true
+"#,
+        )
+        .unwrap();
+        let (c, _) = Config::resolve(&path).unwrap();
+        assert!(c.governance.allow_insecure_remote);
+        assert!(!c.governance_blocks_remote_plaintext());
+        let mut blocked = c;
+        blocked.governance.allow_insecure_remote = false;
+        assert!(blocked.governance_blocks_remote_plaintext());
+    }
+
+    #[test]
+    fn remote_plaintext_http_matches_sdk_loopback_policy() {
+        assert!(!is_remote_plaintext_http_endpoint("http://127.0.0.1:50051"));
+        assert!(!is_remote_plaintext_http_endpoint("http://localhost:50051"));
+        assert!(!is_remote_plaintext_http_endpoint("http://[::1]:50051"));
+        assert!(!is_remote_plaintext_http_endpoint(
+            "https://plane.example:443"
+        ));
+        assert!(is_remote_plaintext_http_endpoint("http://chisei:50051"));
+        assert!(is_remote_plaintext_http_endpoint("http://192.0.2.1:50051"));
+    }
+
+    #[test]
+    fn parse_env_flag_accepts_common_truthy_and_falsey() {
+        assert_eq!(parse_env_flag("true"), Some(true));
+        assert_eq!(parse_env_flag("1"), Some(true));
+        assert_eq!(parse_env_flag("YES"), Some(true));
+        assert_eq!(parse_env_flag("off"), Some(false));
+        assert_eq!(parse_env_flag("false"), Some(false));
+        assert_eq!(parse_env_flag("maybe"), None);
     }
 
     #[test]
