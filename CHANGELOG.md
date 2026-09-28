@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+<!-- Add changes for the next release here. -->
+
+## [1.1.1] — 2026-09-28
+
 ### Added
 
 - Additive `governance.allow_insecure_remote` (default `false`) maps to
@@ -16,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `https://` are unchanged. `doctor` names the flag when a remote plaintext
   endpoint is rejected. Env:
   `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE`.
+
+### Changed
+
+- Cargo.lock patch bumps: clap 4.6.6 → 4.6.7, toml 1.1.5 → 1.1.6, uuid 1.26.0 →
+  1.26.1.
 
 ## [1.1.0] — 2026-09-27
 
