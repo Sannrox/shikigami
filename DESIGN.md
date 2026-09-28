@@ -179,6 +179,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 - Workspace path jail: no absolute or parent-traversing paths.
 - Bash disabled by default tool allow-list.
 - Fail-closed doctor/run when profile `governed` or `governance.fail_closed` and plane unhealthy.
+- Remote plaintext `http://` governance requires `governance.allow_insecure_remote` (default false).
 - Governed / fail-closed Bash requires `sandbox.backend` other than `none` and `network.egress` other than `unrestricted`.
 - Do not commit `.shikigami-state/`, credentials, or plane tokens.
 

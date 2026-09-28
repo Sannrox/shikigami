@@ -52,8 +52,8 @@ Human documentation index: [docs/README.md](docs/README.md).
 Settings resolve from defaults → optional `shikigami.toml` → environment → CLI.
 Important variables include `SHIKIGAMI_STATE`, `SHIKIGAMI_CONFIG`,
 `SHIKIGAMI_PROFILE`, `SHIKIGAMI_GOVERNANCE_ADAPTER`, `SHIKIGAMI_CONTROL_PLANE`,
-and `SHIKIGAMI_MODEL_ADAPTER`. See [docs/settings.md](docs/settings.md) and
-[examples/](examples/).
+`SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE`, and `SHIKIGAMI_MODEL_ADAPTER`.
+See [docs/settings.md](docs/settings.md) and [examples/](examples/).
 
 GitHub Issues are the planning source of truth. Project-specific Skills live
 under `.agents/skills/`. Read `DESIGN.md`, `VISION.md`, and accepted ADRs under

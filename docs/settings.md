@@ -66,6 +66,13 @@ Top-level `version` is required and must be `1`.
 | `namespace` | `"default"` | Plane namespace |
 | `fail_closed` | `false` | Fail doctor/run when governance is unhealthy |
 | `token_env` | unset | Env var name holding a Bearer token for the plane |
+| `allow_insecure_remote` | `false` | Opt-in for plaintext `http://` `sekai-chisei` endpoints whose host is not loopback (private-network compose). Default stays reject. HTTPS remote and loopback `http://` do not need this flag. |
+
+`sekai-client` still rejects remote plaintext unless this flag is true. Keep it
+false on any path that can reach the public internet. Set it only when the
+plane is a private Docker/compose service name over plaintext gRPC and there
+is no internal TLS edge. `doctor` prints a clear error when the endpoint is
+remote `http://` and the flag is off.
 
 #### `[governance.delayed_evidence]`
 
@@ -387,6 +394,7 @@ hooks. See [hooks.md](hooks.md).
 | `SHIKIGAMI_PROFILE` | Profile name |
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
 | `SHIKIGAMI_CONTROL_PLANE` | sekai-chisei endpoint |
+| `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE` | Override `governance.allow_insecure_remote` (`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`) |
 | `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
 | `SHIKIGAMI_MODEL` | Override the configured model name; `auto` for plane routing |
 | `SHIKIGAMI_MODEL_SCRIPT` | Scripted JSON (inline) |

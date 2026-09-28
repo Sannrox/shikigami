@@ -11,6 +11,7 @@ principal = "shikigami"
 namespace = "default"
 fail_closed = true
 # token_env = "SEKAI_TOKEN"
+# allow_insecure_remote = true  # private-network plaintext only; default false
 
 [workspace]
 adapter = "directory"

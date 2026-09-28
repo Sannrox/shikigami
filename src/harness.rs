@@ -766,6 +766,69 @@ mod tests {
     }
 
     #[test]
+    fn doctor_rejects_remote_plaintext_without_insecure_opt_in() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.governance.adapter = "sekai-chisei".into();
+        config.governance.endpoint = Some("http://192.0.2.1:50051".into());
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert!(!report.ok);
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|line| { line.contains(crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT) }),
+            "{:?}",
+            report.lines
+        );
+    }
+
+    #[test]
+    fn doctor_accepts_loopback_plaintext_and_remote_opt_in() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "sekai-chisei".into();
+        config.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        let harness =
+            Harness::from_config(config.clone(), StateRoot::new(dir.path().join("loopback")))
+                .unwrap();
+        let report = harness.doctor();
+        assert!(report.ok, "{:?}", report.lines);
+        assert!(
+            report
+                .lines
+                .iter()
+                .all(|line| { !line.contains(crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT) }),
+            "{:?}",
+            report.lines
+        );
+
+        config.governance.endpoint = Some("http://192.0.2.1:50051".into());
+        config.governance.allow_insecure_remote = true;
+        let harness =
+            Harness::from_config(config, StateRoot::new(dir.path().join("opt-in"))).unwrap();
+        let report = harness.doctor();
+        assert!(report.ok, "{:?}", report.lines);
+        assert!(
+            report
+                .lines
+                .iter()
+                .all(|line| { !line.contains(crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT) }),
+            "{:?}",
+            report.lines
+        );
+        assert!(
+            report
+                .governance_detail
+                .contains("allow_insecure_remote=true"),
+            "{}",
+            report.governance_detail
+        );
+    }
+
+    #[test]
     fn doctor_explains_intersection_and_implicit_tool_authority() {
         let dir = tempdir().unwrap();
         let state = StateRoot::new(dir.path().join("state"));
