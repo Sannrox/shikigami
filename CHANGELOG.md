@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-<!-- Add changes for the next release here. -->
+### Changed
+
+- Shorten the README to an entry point; move the CLI summary to
+  `docs/cli.md`, consolidate embedding instructions, and move naming to
+  the domain glossary.
 
 ## [1.1.1] — 2026-09-28
 
