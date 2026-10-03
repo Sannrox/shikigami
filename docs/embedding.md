@@ -9,10 +9,13 @@ results, cancellation, events, or metrics:
 | One-shot operator or CI execution | CLI `doctor` / `run` |
 | Long-running filesystem or plane-claim intake | `shikigami serve` |
 | IDE or tool-client integration | MCP stdio |
+| Session guest (rusui / editors) | `shikigami acp` (evolving; [ADR 0014](decisions/0014-usable-guest-hosts.md)) |
+| Interactive local session | `shikigami tui` (evolving; ACP client of the in-process session) |
 | Typed results, cancellation, events, metrics, or optional span export in the same process | Rust library `Harness` |
 
-The CLI, `serve`, and MCP hosts all use the same `Harness`; choosing a process
-host does not fork the turn loop or weaken governance.
+The CLI, `serve`, MCP, ACP, and TUI hosts all use the same `Harness`; choosing
+a process host does not fork the turn loop or weaken governance. ACP and TUI
+are accepted hosts, not yet shipped commands.
 
 ## Compatibility proof
 
@@ -37,7 +40,7 @@ external consumer is maintainer-owned and exists to keep the freeze checklist
 non-circular.
 
 Positioning embedding as advanced does not weaken the 1.x compatibility
-contract. Do **not** treat MCP or a future interactive TUI as part of the
+contract. Do **not** treat MCP, ACP, or TUI as part of the
 library freeze surface.
 
 ## Minimal example
@@ -102,7 +105,7 @@ async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
 | `Harness::diagnose_run` / `RecoveryDiagnosis` | Additive read-only recovery diagnosis (schema v1); not an execution permit |
 | `export_run_transcript` / `ExportOptions` | Offline JSONL from checkpoints |
 | `governance::GovernancePort` | Trait for custom governance (may still grow; not freeze-core) |
-| CLI subcommands | `version`, `doctor`, `run`, `serve` freeze-core; `mcp`, `export`, `replay`, `run-content` host-adjacent — flags may grow |
+| CLI subcommands | `version`, `doctor`, `run`, `serve` freeze-core; `mcp`, `acp`, `tui`, `export`, `replay`, `run-content` host-adjacent — flags may grow |
 
 Prefer depending on freeze-core surfaces below and
 [ADR 0004](decisions/0004-v1-contract.md).

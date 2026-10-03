@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as
+  evolving process hosts; session wait (`end_turn`); ask=park; plan
+  write-jail. Commands are not shipped yet.
+- [ADR 0015](docs/decisions/0015-nested-child-runs.md): nested child runs
+  as first-class Runs (post-1.0; default off).
+
 ### Changed
+
+- VISION: desktop UI stays a client; a terminal process host is in-tree
+  and thin.
 
 - Document active plane-authorized runtime identity requirements and recovery
   from claim-list policy or state rejection after a producing application is
