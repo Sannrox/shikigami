@@ -21,6 +21,7 @@
 //! Ports are selected by [Config] settings. Production governance is
 //! `sekai-chisei`. Tenkai delivers the binary only — not a runtime port.
 
+pub mod acp;
 pub mod artifacts;
 pub(crate) mod atomic;
 pub mod checkpoint;
@@ -101,7 +102,9 @@ pub use replay::{
     ReplayTerminalComparison, ReplayTerminalEvidence, digest_bytes, empty_workspace_digest,
     export_replay_inputs, steps_from_messages, text_digest, workspace_digest,
 };
-pub use run::{ParkInfo, ParkKind, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT};
+pub use run::{
+    AskDecision, ParkInfo, ParkKind, RunRequest, RunResult, RunTermination, SYSTEM_PROMPT,
+};
 pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,
     run_serve_with_options,

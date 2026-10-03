@@ -16,6 +16,7 @@ pub(crate) use environment::ToolEnvironment;
 pub use catalog::{
     ToolDef, builtin_catalog, builtin_is_authorized, definitions_for_enabled,
     is_parallel_safe_tool, model_visible_builtin_definitions, must_be_exclusive_batch,
+    mutates_workspace,
 };
 pub use path::{is_unsafe_relative_path, path_is_ignored};
 pub use registry::{ExternalTool, ToolRegistry};

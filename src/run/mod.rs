@@ -59,7 +59,8 @@ pub enum RunTermination {
     TimedOut,
     MaxTurns,
     Failed,
-    /// Parked for an escalate answer or a plane approval decision.
+    /// Parked for an escalate answer, a plane approval, ask=park, or the next
+    /// session prompt (`ParkKind::PromptWait`).
     Parked,
 }
 
@@ -91,6 +92,21 @@ pub struct RunRequest {
     pub resume_answer: Option<String>,
     /// Restore workspace from this snapshot name before continuing (e.g. `"initial"`).
     pub restore_snapshot: Option<String>,
+    /// ACP/TUI session host: no-tool assistant waits; mutating tools ask=park.
+    /// Unattended `run` leaves this false.
+    pub session_wait: bool,
+    /// Follow-up user prompt when resuming a `ParkKind::PromptWait` session run.
+    pub resume_prompt: Option<String>,
+    /// Allow or deny a `ParkKind::Ask` mutating tool on resume.
+    pub resume_ask: Option<AskDecision>,
+}
+
+/// Session-host decision for an ask=park mutating tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskDecision {
+    Allow,
+    Deny,
 }
 
 impl RunRequest {
@@ -104,6 +120,9 @@ impl RunRequest {
             logical_operation_id: None,
             resume_answer: None,
             restore_snapshot: None,
+            session_wait: false,
+            resume_prompt: None,
+            resume_ask: None,
         }
     }
 }
@@ -148,6 +167,12 @@ pub struct ParkInfo {
     pub kind: ParkKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
+    /// Host-visible tool identity (stable turn-qualified id) for session permission RPCs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_call_id: Option<String>,
+    /// Tool arguments for session permission RPCs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_json: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -431,6 +456,7 @@ mod tests {
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
 
         let err =
@@ -475,6 +501,7 @@ mod tests {
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
 
         let err =
@@ -525,6 +552,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap_err();
@@ -556,6 +586,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap_err();
@@ -599,6 +632,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap_err();
@@ -658,6 +694,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap();
@@ -766,6 +805,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap_err();
@@ -839,6 +881,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap();
@@ -929,6 +974,9 @@ mod tests {
                 logical_operation_id: None,
                 resume_answer: None,
                 restore_snapshot: None,
+                session_wait: false,
+                resume_prompt: None,
+                resume_ask: None,
             })
             .await
             .unwrap_err();
@@ -974,5 +1022,375 @@ mod tests {
         assert_eq!(done.termination, RunTermination::Completed);
         assert_eq!(done.summary, "approved and done");
         assert!(done.park.is_none());
+    }
+
+    fn engine(dir: &tempfile::TempDir, config: Config) -> Engine {
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(crate::model::from_config(&config).unwrap()),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_wait_parks_prompt_wait_on_no_tool() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(r#"[{"content":"hello"}]"#.into());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("hi");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+    }
+
+    #[tokio::test]
+    async fn session_wait_report_parks_prompt_wait() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("go");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(parked.summary, "done");
+    }
+
+    #[tokio::test]
+    async fn session_wait_parks_ask_on_mutating_tool() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Ask);
+        assert!(!parked.workspace.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn session_wait_persists_allowed_prefix_before_next_ask() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[
+                {"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"},
+                {"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}
+              ]},
+              {"content":"done"}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::Ask);
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("a.txt")).unwrap(),
+            "a\n"
+        );
+        assert!(!second.workspace.join("b.txt").exists());
+        assert_ne!(
+            second.park.as_ref().unwrap().tool_call_id,
+            first.park.as_ref().unwrap().tool_call_id
+        );
+
+        let mut resume2 = RunRequest::new("");
+        resume2.keep_workspace = true;
+        resume2.session_wait = true;
+        resume2.resume_run_id = Some(second.run_id.clone());
+        resume2.resume_ask = Some(AskDecision::Allow);
+        let third = eng.run(resume2).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(third.workspace.join("a.txt")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(third.workspace.join("b.txt")).unwrap(),
+            "b\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_wait_deny_still_asks_later_mutating_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}]}
+            ]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Deny);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::Ask);
+        assert!(!second.workspace.join("a.txt").exists());
+        assert!(!second.workspace.join("b.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn session_wait_allow_does_not_reuse_across_turns() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"id":"same","name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+              {"tool_calls":[{"id":"same","name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}]}
+            ]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::Ask);
+        assert!(second.workspace.join("a.txt").exists());
+        assert!(!second.workspace.join("b.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn session_wait_follow_ups_do_not_share_unattended_max_turns() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.max_turns = 2;
+        config.model.script_json =
+            Some(r#"[{"content":"a"},{"content":"b"},{"content":"c"}]"#.into());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("go");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(first.turns, 1);
+
+        let mut second_req = RunRequest::new("");
+        second_req.keep_workspace = true;
+        second_req.session_wait = true;
+        second_req.resume_run_id = Some(first.run_id.clone());
+        second_req.resume_prompt = Some("more".into());
+        let second = eng.run(second_req).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(second.turns, 2);
+
+        let mut third_req = RunRequest::new("");
+        third_req.keep_workspace = true;
+        third_req.session_wait = true;
+        third_req.resume_run_id = Some(second.run_id.clone());
+        third_req.resume_prompt = Some("again".into());
+        let third = eng.run(third_req).await.unwrap();
+        assert_eq!(third.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(third.turns, 3);
+        assert_eq!(third.summary, "c");
+    }
+
+    #[tokio::test]
+    async fn session_wait_single_prompt_still_hits_max_turns() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.max_turns = 2;
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"name":"read_file","args_json":"{\"path\":\"missing.txt\"}"}]},
+              {"tool_calls":[{"name":"read_file","args_json":"{\"path\":\"missing.txt\"}"}]},
+              {"content":"done"}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("look");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(parked.park.as_ref().unwrap().reason, "max_turns");
+    }
+
+    #[tokio::test]
+    async fn session_wait_ask_resume_shares_prompt_max_turns() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.max_turns = 2;
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+              {"tool_calls":[{"name":"read_file","args_json":"{\"path\":\"a.txt\"}"}]},
+              {"content":"done"}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(second.park.as_ref().unwrap().reason, "max_turns");
+        assert_ne!(second.summary, "done");
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("a.txt")).unwrap(),
+            "a\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_wait_allow_keeps_ask_park_until_the_tool_runs() {
+        let dir = tempdir().unwrap();
+        let seen = dir.path().join("seen.json");
+        let hook = dir.path().join("pre_tool.sh");
+        let checkpoint = dir.path().join("state").join("runs");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ncp \"{}/\"*/checkpoint.json \"{}\"\nexit 0\n",
+                checkpoint.display(),
+                seen.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook, perms).unwrap();
+        }
+        let mut config = base_config(&dir);
+        config.hooks.push(crate::config::HookSettings {
+            event: "pre_tool".into(),
+            command: hook.to_string_lossy().into(),
+            args: vec![],
+            timeout_ms: 2_000,
+            fail_closed: true,
+        });
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+              {"content":"done"}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+        assert_eq!(snapshot["park"]["kind"], "ask");
+    }
+
+    #[tokio::test]
+    async fn session_wait_allow_is_consumed_when_hooks_reject() {
+        let dir = tempdir().unwrap();
+        let hook = dir.path().join("pre_tool.sh");
+        std::fs::write(&hook, "#!/bin/sh\ngrep -q blocked.txt && exit 1\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&hook, perms).unwrap();
+        }
+        let mut config = base_config(&dir);
+        config.hooks.push(crate::config::HookSettings {
+            event: "pre_tool".into(),
+            command: hook.to_string_lossy().into(),
+            args: vec![],
+            timeout_ms: 2_000,
+            fail_closed: true,
+        });
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"id":"same","name":"write_file","args_json":"{\"path\":\"blocked.txt\",\"content\":\"x\\n\"}"}]},
+              {"tool_calls":[{"id":"same","name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"y\\n\"}"}]}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::Ask);
+        assert!(!second.workspace.join("blocked.txt").exists());
+        assert!(!second.workspace.join("ok.txt").exists());
     }
 }

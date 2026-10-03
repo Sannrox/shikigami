@@ -22,6 +22,7 @@ shikigami [--state DIR] [--config FILE] [--model MODEL] <COMMAND>
 | `eval FIXTURE [--json]` | Run offline scripted golden fixtures ([eval.md](eval.md)) |
 | `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host; filesystem supports bounded worker/control options ([serve.md](serve.md)) |
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([mcp.md](mcp.md)) |
+| `acp` | ACP session host, newline JSON-RPC ([acp.md](acp.md)). Evolving; not freeze-core |
 | `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([embedding.md](embedding.md)) |
 | `replay --manifest FILE --evidence FILE [--resume ID] [--json]` | Observation-only content-bound replay ([replay.md](replay.md)) |
 | `replay-export <run_id> [--json] [-o DIR]` | Reconstruct a replay package from retained artifacts, or report missing bindings ([replay.md](replay.md)) |

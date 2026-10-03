@@ -318,7 +318,7 @@ Rules and skills are **untrusted text** injected into the system prompt (not exe
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `max_turns` | `50` | Hard stop for the turn loop |
+| `max_turns` | `50` | Hard stop for the turn loop. Unattended `run` applies it to the run lifetime. Session hosts (`session_wait`) apply it per prompt, including ask/escalate resumes of that prompt. |
 | `compact_after_messages` | unset | Compact middle history when message count exceeds N (off by default) |
 | `compact_keep_tail` | `8` | Messages kept after the first task message when compacting |
 | `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |

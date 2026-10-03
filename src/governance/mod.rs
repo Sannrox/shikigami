@@ -374,6 +374,12 @@ pub trait GovernancePort: Send + Sync {
         true
     }
 
+    /// Session hosts ask before ungoverned mutating tools. Brokered adapters
+    /// (`http-callback`, `sekai-chisei`) keep authorization on the plane/host.
+    fn session_asks_mutating_tools(&self) -> bool {
+        false
+    }
+
     /// Produce the next model turn. Local adapters use the provided model port
     /// callback; sekai-chisei uses PlanExecution on the plane.
     async fn plan_turn(

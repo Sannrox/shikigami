@@ -61,6 +61,9 @@ pub(super) struct DurableModelTurn<'a> {
     staged_turn: Option<ModelTurn>,
     staged_content_turn: Option<ContentModelTurnV1>,
     usage: TokenUsage,
+    /// `session.turns` when this prompt's loop started. Session hosts apply
+    /// `max_turns` to the delta; unattended runs keep the lifetime cap.
+    prompt_start_turns: u32,
 }
 
 impl<'a> DurableModelTurn<'a> {
@@ -110,6 +113,11 @@ impl<'a> DurableModelTurn<'a> {
             } else {
                 TokenUsage::default()
             },
+            prompt_start_turns: if request.session_wait {
+                session.prompt_start_turns.unwrap_or(session.turns)
+            } else {
+                0
+            },
         }
     }
 
@@ -123,11 +131,15 @@ impl<'a> DurableModelTurn<'a> {
             self.timeout,
         )?;
 
-        if self.staged_turn.is_none()
-            && self.staged_content_turn.is_none()
-            && session.turns >= self.engine.config.run.max_turns
-        {
-            return Err(RunError::MaxTurns(self.engine.config.run.max_turns));
+        if self.staged_turn.is_none() && self.staged_content_turn.is_none() {
+            let used = if self.request.session_wait {
+                session.turns.saturating_sub(self.prompt_start_turns)
+            } else {
+                session.turns
+            };
+            if used >= self.engine.config.run.max_turns {
+                return Err(RunError::MaxTurns(self.engine.config.run.max_turns));
+            }
         }
         if self.staged_turn.is_none()
             && self.staged_content_turn.is_none()

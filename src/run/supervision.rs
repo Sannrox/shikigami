@@ -104,6 +104,9 @@ impl<'a> RunSupervision<'a> {
             logical_operation_id,
             resume_answer: None,
             restore_snapshot,
+            session_wait: false,
+            resume_prompt: None,
+            resume_ask: None,
         };
         self.execute_inner(
             run_request,
@@ -321,6 +324,26 @@ impl<'a> RunSupervision<'a> {
             } else {
                 "resume_answer provided but run is not parked".into()
             }));
+        }
+        if checkpoint.is_prompt_wait() && request.resume_prompt.is_none() {
+            return Err(RunError::Message(format!(
+                "run {resume_id} is waiting for the next session prompt"
+            )));
+        }
+        if request.resume_prompt.is_some() && !checkpoint.is_prompt_wait() {
+            return Err(RunError::Message(
+                "resume_prompt is only used for session end_turn waits".into(),
+            ));
+        }
+        if checkpoint.is_ask_park() && request.resume_ask.is_none() {
+            return Err(RunError::Message(format!(
+                "run {resume_id} is parked for ask=park; supply resume_ask to continue"
+            )));
+        }
+        if request.resume_ask.is_some() && !checkpoint.is_ask_park() {
+            return Err(RunError::Message(
+                "resume_ask is only used for ask=park waits".into(),
+            ));
         }
         Ok(Some(checkpoint))
     }

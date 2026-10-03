@@ -14,8 +14,8 @@ results, cancellation, events, or metrics:
 | Typed results, cancellation, events, metrics, or optional span export in the same process | Rust library `Harness` |
 
 The CLI, `serve`, MCP, ACP, and TUI hosts all use the same `Harness`; choosing
-a process host does not fork the turn loop or weaken governance. ACP and TUI
-are accepted hosts, not yet shipped commands.
+a process host does not fork the turn loop or weaken governance. `shikigami acp`
+is the shipped ACP guest. `shikigami tui` is accepted and not yet shipped.
 
 ## Compatibility proof
 

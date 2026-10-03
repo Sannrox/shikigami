@@ -283,6 +283,7 @@ mod tests {
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
         cp.save(&runs).unwrap();
 
@@ -344,6 +345,7 @@ mod tests {
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
         cp.save(&runs).unwrap();
         let jsonl = export_run_transcript(&runs, "run-compact", &ExportOptions::default()).unwrap();
@@ -390,11 +392,13 @@ mod tests {
                 question: "ok?".into(),
                 tool_call_id: "t".into(),
                 kind: Default::default(),
+                allow_call_id: String::new(),
             }),
             todos: vec![],
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
         cp.save(&runs).unwrap();
 

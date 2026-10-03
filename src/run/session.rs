@@ -42,6 +42,12 @@ pub(super) struct RunSession {
     /// Approval park carried from the resumed checkpoint. It stays on every
     /// save while the governance approval wait is still open.
     resumed_approval_park: Option<ParkedState>,
+    /// Ask park kept durable until the one-shot allow grant is consumed.
+    resumed_ask_park: Option<ParkedState>,
+    /// Call id of an ask=park tool that this resume is allowed to execute.
+    ask_allow_call_id: Option<String>,
+    /// Turn count when the current session prompt started (`session_wait`).
+    pub prompt_start_turns: Option<u32>,
     pub spans: RunSpanTrace,
 }
 
@@ -88,6 +94,9 @@ impl RunSession {
             replay: None,
             content: None,
             resumed_approval_park: None,
+            resumed_ask_park: None,
+            ask_allow_call_id: None,
+            prompt_start_turns: None,
             spans: RunSpanTrace::disabled(),
         }
     }
@@ -95,6 +104,23 @@ impl RunSession {
     /// Keep the parked approval wait durable across saves after a resume.
     pub fn set_resumed_approval_park(&mut self, park: Option<ParkedState>) {
         self.resumed_approval_park = park.filter(|park| park.kind == ParkKind::Approval);
+    }
+
+    /// Keep the ask=park wait durable until the granted call is attempted.
+    pub fn set_resumed_ask_park(&mut self, park: Option<ParkedState>) {
+        self.resumed_ask_park = park.filter(|park| park.kind == ParkKind::Ask);
+    }
+
+    pub fn clear_resumed_ask_park(&mut self) {
+        self.resumed_ask_park = None;
+    }
+
+    pub fn set_ask_allow_call_id(&mut self, call_id: Option<String>) {
+        self.ask_allow_call_id = call_id;
+    }
+
+    pub fn ask_allow_call_id(&self) -> Option<&str> {
+        self.ask_allow_call_id.as_deref()
     }
 
     /// The resumed approval park, only while governance still holds the wait.
@@ -562,7 +588,9 @@ impl RunSession {
         park: Option<ParkedState>,
         tools: &ToolRegistry,
     ) -> Result<(), RunError> {
-        let park = park.or_else(|| self.open_resumed_approval_park());
+        let park = park
+            .or_else(|| self.open_resumed_approval_park())
+            .or_else(|| self.resumed_ask_park.clone());
         let keep_workspace = keep_workspace || park.is_some();
         let mut replay = self.replay.clone();
         if let Some(replay) = &mut replay {
@@ -611,6 +639,7 @@ impl RunSession {
             governance: self.governance.checkpoint_state(&self.run_id),
             replay,
             content: next_content_binding.clone(),
+            prompt_start_turns: self.prompt_start_turns,
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {
