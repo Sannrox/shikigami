@@ -3,6 +3,12 @@
 This glossary complements the architecture and product definitions in
 [`DESIGN.md`](DESIGN.md).
 
+## Naming
+
+- **Shikigami** — this product (the harness)
+- **Run** — one unit of agent work
+- Do not call an individual agent attempt “a shikigami”
+
 ## Approval park
 
 When authority answers a tool authorization with `require_approval`, the

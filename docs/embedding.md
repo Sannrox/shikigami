@@ -21,6 +21,17 @@ host does not fork the turn loop or weaken governance.
 | `cargo run --locked --example embed_smoke` | In-repository, CI-gated proof of the freeze-core library path |
 | [`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke) | Out-of-tree consumer pinned to tag `v1.0.0` |
 
+The in-repository proof runs without a control plane or API keys. PR and
+`main` CI run it after `cargo test`:
+
+```bash
+cargo run --locked --example embed_smoke
+```
+
+Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript
+export). The external host runs the same offline doctor + scripted run +
+export pattern under its own CI.
+
 These are compatibility proofs, not evidence of production adoption. The
 external consumer is maintainer-owned and exists to keep the freeze checklist
 non-circular.

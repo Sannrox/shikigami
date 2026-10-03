@@ -38,7 +38,7 @@ when it is not.
 
 ## Requirements
 
-- [Rust](https://rustup.rs/) toolchain with **Rust 2024** edition support
+- [Rust](https://rustup.rs/) toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) (Rust 2024)
 - macOS or Linux (primary targets today)
 - Optional: a running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) for the governed path
 - Optional: OpenAI-compatible HTTP endpoint for ungoverned `http` model turns
@@ -62,30 +62,6 @@ cargo build --release
 Expect a successful run that writes `SHIKIGAMI_OK.txt` under the run workspace
 and prints `success=true`.
 
-### Library embed smoke (contract proof)
-
-This offline check proves that an out-of-process host is not required to drive
-`Harness`. PR and `main` CI run the same command after `cargo test`:
-
-```bash
-cargo run --locked --example embed_smoke
-```
-
-Expect `embed_smoke: PASS` (doctor, scripted run with live events, transcript export).
-
-**External** host proof (out-of-tree consumer for ADR 0004):
-[`Sannrox/shikigami-embed-smoke`](https://github.com/Sannrox/shikigami-embed-smoke)
-depends on git tag `v1.0.0` and runs the same offline doctor + scripted run +
-export pattern under its own CI.
-
-Choose a process host for the common integration paths:
-
-- CLI: one-shot operator and CI use (`doctor` / `run`)
-- `serve`: long-running filesystem or plane-claim intake
-- MCP stdio: IDE and tool clients — [docs/mcp.md](docs/mcp.md)
-- Library: advanced in-process integrations that need direct results,
-  cancellation, events, or metrics — [docs/embedding.md](docs/embedding.md)
-
 ### Prebuilt binaries
 
 Tagged releases publish multi-arch archives from GitHub Actions
@@ -101,72 +77,26 @@ Tagged releases publish multi-arch archives from GitHub Actions
 Each archive includes a `sha256` checksum. Prefer building from source when
 you need a custom feature set.
 
-## CLI
+## Next steps
 
-```text
-shikigami [--state DIR] [--config FILE] <COMMAND>
-```
+Choose a process host for the common integration paths:
 
-| Command | Purpose |
-| --- | --- |
-| `version [--json]` | Product identity |
-| `doctor [--json] [--models]` | Effective profile, adapters, health, and optionally available models |
-| `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run (parked runs need `--answer`) |
-| `runs [ID] [--diagnose], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([docs/runs.md](docs/runs.md)) |
-| `artifacts ID [--patch]` | Export retained artifact metadata or a captured patch |
-| `metrics [--json\|--prometheus]` | Export aggregate durable metrics ([docs/metrics.md](docs/metrics.md)) |
-| `eval FIXTURE [--json]` | Run offline scripted golden fixtures ([docs/eval.md](docs/eval.md)) |
-| `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host; filesystem supports bounded worker/control options ([docs/serve.md](docs/serve.md)) |
-| `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([docs/mcp.md](docs/mcp.md)) |
-| `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([docs/embedding.md](docs/embedding.md)) |
-| `replay --manifest FILE --evidence FILE [--resume ID] [--json]` | Observation-only content-bound replay ([docs/replay.md](docs/replay.md)) |
-| `replay-export <run_id> [--json] [-o DIR]` | Reconstruct a replay package from retained artifacts, or report missing bindings ([docs/replay.md](docs/replay.md)) |
-| `run-content --request FILE --payloads DIR [--json]` | Bounded content run through a versioned process request ([docs/content.md](docs/content.md)) |
+- CLI: one-shot operator and CI use (`doctor` / `run`) — [CLI reference](docs/cli.md)
+- `serve`: long-running filesystem or plane-claim intake — [serve guide](docs/serve.md)
+- MCP stdio: IDE and tool clients — [MCP guide](docs/mcp.md)
+- Library: advanced in-process integrations that need direct results,
+  cancellation, events, or metrics — [embedding guide](docs/embedding.md)
 
-| Flag / env | Purpose |
-| --- | --- |
-| `--state` / `SHIKIGAMI_STATE` | State root (default: `./.shikigami-state`) |
-| `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
-| `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
-| `run --keep-workspace` | Keep the workspace after a successful run |
-
-There is **no** `init` command. Config is optional; disk state is created when a
-run needs it.
-
-## Configuration
-
-Settings are versioned TOML. Use cases change through adapters and explicit
-policy settings, not by patching the turn loop. Version-1 profiles remain
-compatible, but new configurations should specify adapters and
+Settings are versioned TOML. Select adapters and explicit policy settings for
+your use case; see the [configuration reference](docs/settings.md) for the
+schema, environment variables, resolution order, and compatible version-1
+profiles. New configurations should specify adapters and
 `governance.fail_closed` explicitly.
-
-| Profile | Intent |
-| --- | --- |
-| `local` (default) | Offline-friendly. Governance `none` or `local`. Model `scripted` or `http`. |
-| `governed` | Production path. Governance `sekai-chisei`, fail-closed, model turns via the plane. |
-
-The examples below include those explicit fields; the profile names remain for
-version-1 compatibility. See [docs/settings.md](docs/settings.md#profiles) for
-the preset and environment-resolution details.
-
-```bash
-# Inspect effective wiring
-./target/release/shikigami --config examples/local-run.toml doctor
-
-# Governed example (requires a reachable plane)
-export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
-./target/release/shikigami --config examples/governed-sekai-chisei.toml doctor
-# Include the plane-authorized model catalog (`auto` is the routing option)
-./target/release/shikigami --config examples/governed-sekai-chisei.toml doctor --models
-```
-
-Full schema, environment variables, and resolution order:
-**[docs/settings.md](docs/settings.md)**.
 
 Examples:
 
 - [`examples/local-run.toml`](examples/local-run.toml) — offline
-- [`examples/governed-sekai-chisei.toml`](examples/governed-sekai-chisei.toml) — plane-backed
+- [`examples/governed-sekai-chisei.toml`](examples/governed-sekai-chisei.toml) — plane-backed; follow the [governed guide](docs/governed-path.md)
 - [`examples/tenkai-product.toml`](examples/tenkai-product.toml) — binary delivery only
 
 ## Architecture (short)
@@ -197,63 +127,11 @@ Examples:
 Details: [DESIGN.md](DESIGN.md), [ADR 0001](docs/decisions/0001-ports-and-settings.md),
 [docs/adapters.md](docs/adapters.md).
 
-## Library embedding
+## Contributing
 
-External library embedding is an advanced integration surface. Use it when a
-process boundary through the CLI, `serve`, or MCP would lose required
-in-process behavior such as typed results, cancellation, events, or metrics:
-
-```rust
-use shikigami::{Config, Harness, RunRequest, StateRoot};
-
-async fn example() -> Result<(), shikigami::HarnessError> {
-    let state = StateRoot::default_in(".");
-    let mut config = Config::default();
-    config.governance.adapter = "local".into();
-    config.model.adapter = "scripted".into();
-
-    let harness = Harness::from_config(config, state)?;
-    let mut request = RunRequest::new("do work");
-    request.keep_workspace = true;
-    let result = harness.run(request).await?;
-    assert!(result.success);
-    Ok(())
-}
-```
-
-See [docs/embedding.md](docs/embedding.md).
-
-## Development
-
-```bash
-make update
-make validate
-make test
-make test-integration
-make test-e2e
-```
-
-The deterministic project gate is documented in
-[docs/project-verification.md](docs/project-verification.md). CI on `main` and
-pull requests calls the same Make targets (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-Those checks are required for merges to `main`.
-
-Offline tests must pass with **no** control plane. Live plane probe:
-
-```bash
-SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 \
-  cargo test --test plane_live -- --ignored --nocapture
-```
-
-Cargo features (defaults on):
-
-| Feature | Purpose |
-| --- | --- |
-| `governance-sekai-chisei` | Versioned `sekai-client` Rust facade |
-| `model-http` | OpenAI-compatible HTTP model adapter |
-
-Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Agent/repo operating rules:
-[AGENTS.md](AGENTS.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and
+[project verification](docs/project-verification.md) for the deterministic gates.
+Agent/repo operating rules: [AGENTS.md](AGENTS.md).
 
 ## Documentation map
 
@@ -262,6 +140,9 @@ Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Agent/repo operating rule
 | [VISION.md](VISION.md) | Why this product exists |
 | [DESIGN.md](DESIGN.md) | Architecture and boundaries |
 | [docs/README.md](docs/README.md) | Full documentation index |
+| [docs/cli.md](docs/cli.md) | CLI command and option reference |
+| [docs/governed-path.md](docs/governed-path.md) | Governed setup and doctor checks |
+| [CONTEXT.md](CONTEXT.md) | Domain glossary and naming |
 | [docs/settings.md](docs/settings.md) | Configuration reference |
 | [docs/adapters.md](docs/adapters.md) | Ports and built-in adapters |
 | [docs/embedding.md](docs/embedding.md) | Library integration |
@@ -269,12 +150,6 @@ Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md). Agent/repo operating rule
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting |
 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community norms |
-
-## Naming
-
-- **Shikigami** — this product (the harness)
-- **Run** — one unit of agent work
-- Do not call an individual agent attempt “a shikigami”
 
 ## License
 

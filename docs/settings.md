@@ -74,6 +74,12 @@ plane is a private Docker/compose service name over plaintext gRPC and there
 is no internal TLS edge. `doctor` prints a clear error when the endpoint is
 remote `http://` and the flag is off.
 
+For plane intake, `principal` and `namespace` must name an active,
+plane-authorized runtime identity. The default strings do not provision that
+identity or grant access. When restoring a worker after a producing application
+is retired, use an administrator-approved runtime identity independent of that
+application; see [runtime identity prerequisites](plane-action-run.md#runtime-identity-prerequisites).
+
 #### `[governance.delayed_evidence]`
 
 Bounded spool for signed already-executed outcomes. Disabled by default.

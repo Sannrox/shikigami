@@ -9,6 +9,7 @@ Operator and contributor documentation for **shikigami**.
 | Install and run offline | [../README.md](../README.md) |
 | Understand why the project exists | [../VISION.md](../VISION.md) |
 | Understand architecture | [../DESIGN.md](../DESIGN.md) |
+| Look up CLI commands and options | [cli.md](cli.md) |
 | Configure profiles and env vars | [settings.md](settings.md) |
 | Run against sekai-chisei | [governed-path.md](governed-path.md) |
 | Operate Action admit → claim → run | [plane-action-run.md](plane-action-run.md) |
