@@ -1835,6 +1835,7 @@ mod tests {
             governance: None,
             replay: None,
             content,
+            prompt_start_turns: None,
         };
         checkpoint.save(&state.runs_dir()).unwrap();
         if finish {

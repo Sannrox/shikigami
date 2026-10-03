@@ -22,6 +22,10 @@ pub enum ParkKind {
     #[default]
     Escalate,
     Approval,
+    /// Ungoverned mutating tool waiting for a session-host allow/deny (ask=park).
+    Ask,
+    /// Session host waiting for the next user prompt (`end_turn`).
+    PromptWait,
 }
 
 /// Structured park state when a run awaits an operator answer.
@@ -34,6 +38,9 @@ pub struct ParkedState {
     /// Durable park kind; the approval identity alone must not decide it.
     #[serde(default)]
     pub kind: ParkKind,
+    /// Turn-qualified identity that consumes a one-shot ask=park allow grant.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub allow_call_id: String,
 }
 
 /// Local scratch for a plane `require_approval` wait. Not a permit.
@@ -168,6 +175,10 @@ pub struct Checkpoint {
     /// Binding to the authoritative metadata-only sidecar for a content run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentCheckpointBinding>,
+    /// `completed_turns` at the start of the current session prompt.
+    /// Session hosts apply `max_turns` to the delta. Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_start_turns: Option<u32>,
 }
 
 #[derive(Debug, Error)]
@@ -318,6 +329,18 @@ impl Checkpoint {
             .is_some_and(|park| park.kind == ParkKind::Escalate)
     }
 
+    pub fn is_ask_park(&self) -> bool {
+        self.park
+            .as_ref()
+            .is_some_and(|park| park.kind == ParkKind::Ask)
+    }
+
+    pub fn is_prompt_wait(&self) -> bool {
+        self.park
+            .as_ref()
+            .is_some_and(|park| park.kind == ParkKind::PromptWait)
+    }
+
     /// Fail closed when the durable park kind and the approval identity
     /// disagree, so stripping or adding the identity cannot reclassify a wait.
     pub fn validate_park_kind(&self) -> Result<(), CheckpointError> {
@@ -325,7 +348,7 @@ impl Checkpoint {
             (Some(park), None) if park.kind == ParkKind::Approval => {
                 Err(CheckpointError::ParkKindMismatch { kind: park.kind })
             }
-            (Some(park), Some(_)) if park.kind == ParkKind::Escalate => {
+            (Some(park), Some(_)) if park.kind != ParkKind::Approval => {
                 Err(CheckpointError::ParkKindMismatch { kind: park.kind })
             }
             _ => Ok(()),
@@ -376,6 +399,7 @@ mod tests {
             }),
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -415,6 +439,7 @@ mod tests {
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -444,11 +469,13 @@ mod tests {
                 question: "continue?".into(),
                 tool_call_id: "tool-1".into(),
                 kind: Default::default(),
+                allow_call_id: String::new(),
             }),
             todos: vec![],
             governance: None,
             replay: None,
             content: None,
+            prompt_start_turns: None,
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -480,6 +507,7 @@ mod tests {
                 question: "q".into(),
                 tool_call_id: "call-1".into(),
                 kind,
+                allow_call_id: String::new(),
             }),
             todos: vec![],
             governance: Some(GovernanceCheckpoint {
@@ -498,6 +526,7 @@ mod tests {
             }),
             replay: None,
             content: None,
+            prompt_start_turns: None,
         }
     }
 
@@ -523,6 +552,19 @@ mod tests {
             relabelled.validate_park_kind(),
             Err(CheckpointError::ParkKindMismatch { .. })
         ));
+
+        let ask = parked_checkpoint(ParkKind::Ask, false);
+        assert!(ask.is_ask_park());
+        assert!(ask.validate_park_kind().is_ok());
+        let ask_with_approval = parked_checkpoint(ParkKind::Ask, true);
+        assert!(matches!(
+            ask_with_approval.validate_park_kind(),
+            Err(CheckpointError::ParkKindMismatch { .. })
+        ));
+
+        let wait = parked_checkpoint(ParkKind::PromptWait, false);
+        assert!(wait.is_prompt_wait());
+        assert!(wait.validate_park_kind().is_ok());
     }
 
     #[test]

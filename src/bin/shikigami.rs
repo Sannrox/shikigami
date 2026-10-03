@@ -172,6 +172,10 @@ enum Command {
     /// Stdio only — no network bind. Not a multi-tenant control plane;
     /// prefer library embed for in-process hosts.
     Mcp,
+    /// ACP session host over stdio (newline JSON-RPC). See docs/acp.md.
+    ///
+    /// Evolving process host, same rank as `mcp`. Not freeze-core.
+    Acp,
     /// Export a run transcript as JSONL from local checkpoint state.
     Export {
         /// Run id under the state root (`runs/<id>/checkpoint.json`).
@@ -721,6 +725,13 @@ async fn run() -> anyhow::Result<()> {
             );
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             shikigami::mcp_server::run_stdio(harness)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Command::Acp => {
+            eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            shikigami::acp::run_stdio(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }

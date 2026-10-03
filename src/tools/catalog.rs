@@ -28,6 +28,14 @@ fn def(name: &str, description: &str, schema: &str) -> ToolDef {
 /// out of scope. MCP servers register as `mcp.<name>.<tool>` into
 /// [`crate::tools::ToolRegistry`] without changing the turn loop; skills load
 /// as prompt context, not catalog tools.
+/// Workspace-mutating builtins. Session hosts park these until ask=park allow.
+pub fn mutates_workspace(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit" | "multi_edit" | "apply_patch" | "bash" | "bash_background"
+    )
+}
+
 pub fn builtin_catalog() -> Vec<ToolDef> {
     vec![
         def(

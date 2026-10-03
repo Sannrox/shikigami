@@ -11,7 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as
   evolving process hosts; session wait (`end_turn`); ask=park; plan
-  write-jail. Commands are not shipped yet.
+  write-jail.
+- `shikigami acp`: newline-delimited JSON-RPC session host over `Harness`
+  (`initialize`, `session/new`, `session/load` fail-closed, `session/prompt`,
+  `session/update`, `session/request_permission`, `session/cancel`). See
+  [docs/acp.md](docs/acp.md).
+- Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
+  `report` also waits so follow-ups keep the conversation; ungoverned
+  mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
+  `session/request_permission` and `resume_answer`. Session `max_turns` is
+  per prompt, including ask/escalate resumes. Unattended `run` is unchanged.
 - [ADR 0015](docs/decisions/0015-nested-child-runs.md): nested child runs
   as first-class Runs (post-1.0; default off).
 

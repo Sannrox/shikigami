@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::checkpoint::{Checkpoint, ParkedState};
+use crate::checkpoint::{Checkpoint, ParkKind, ParkedState};
 use crate::events::HarnessEvent;
 use crate::governance::RunOutcome;
 use crate::hooks::{self, HookEvent};
@@ -115,7 +115,32 @@ impl<'a> RunTransaction<'a> {
             } else {
                 async {
                     loop {
-                        let turn = model_turns.next(&mut session).await?;
+                        let turn = match model_turns.next(&mut session).await {
+                            Err(RunError::MaxTurns(limit)) if request.session_wait => {
+                                let parked = ParkedState {
+                                    reason: "max_turns".into(),
+                                    question: String::new(),
+                                    tool_call_id: String::new(),
+                                    kind: ParkKind::PromptWait,
+                                    allow_call_id: String::new(),
+                                };
+                                pending_park = Some(parked.clone());
+                                session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
+                                termination = RunTermination::Parked;
+                                final_summary = format!("reached max_turns ({limit})");
+                                success = false;
+                                return Ok(Some(ParkInfo {
+                                    reason: parked.reason,
+                                    question: parked.question,
+                                    tool_call_id: parked.tool_call_id,
+                                    kind: ParkKind::PromptWait,
+                                    approval_id: None,
+                                    display_call_id: None,
+                                    args_json: None,
+                                }));
+                            }
+                            result => result?,
+                        };
 
                         if turn.tool_calls.is_empty() {
                             if replay.is_some() {
@@ -129,6 +154,27 @@ impl<'a> RunTransaction<'a> {
                                 turn.content
                             };
                             success = true;
+                            if request.session_wait {
+                                let parked = ParkedState {
+                                    reason: "end_turn".into(),
+                                    question: String::new(),
+                                    tool_call_id: String::new(),
+                                    kind: ParkKind::PromptWait,
+                                    allow_call_id: String::new(),
+                                };
+                                pending_park = Some(parked.clone());
+                                session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
+                                termination = RunTermination::Parked;
+                                return Ok(Some(ParkInfo {
+                                    reason: parked.reason,
+                                    question: parked.question,
+                                    tool_call_id: parked.tool_call_id,
+                                    kind: ParkKind::PromptWait,
+                                    approval_id: None,
+                                    display_call_id: None,
+                                    args_json: None,
+                                }));
+                            }
                             termination = RunTermination::Completed;
                             if session.is_content() {
                                 session.mark_content_terminal(

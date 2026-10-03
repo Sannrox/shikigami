@@ -55,6 +55,9 @@ pub(super) async fn prepare(
         )));
     }
     let is_resume = resume_checkpoint.is_some();
+    let stored_prompt_start = resume_checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.prompt_start_turns);
     let resumed_park = resume_checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.park.clone());
@@ -115,7 +118,30 @@ pub(super) async fn prepare(
         turns,
     );
     session.set_replay(replay_checkpoint);
-    session.set_resumed_approval_park(resumed_park);
+    session.set_resumed_approval_park(resumed_park.clone());
+    if request.session_wait {
+        session.prompt_start_turns =
+            if request.resume_prompt.is_some() || request.resume_run_id.is_none() {
+                Some(session.turns)
+            } else {
+                stored_prompt_start.or(Some(session.turns))
+            };
+    }
+    if request.resume_ask == Some(super::AskDecision::Allow) {
+        session.set_ask_allow_call_id(
+            resumed_park
+                .as_ref()
+                .filter(|park| park.kind == crate::checkpoint::ParkKind::Ask)
+                .map(|park| {
+                    if park.allow_call_id.is_empty() {
+                        park.tool_call_id.clone()
+                    } else {
+                        park.allow_call_id.clone()
+                    }
+                }),
+        );
+        session.set_resumed_ask_park(resumed_park.clone());
+    }
     if let Some(content) = content {
         let (messages, capabilities, initial_message_count, terminal, usage) =
             if let Some(binding) = content_binding.as_ref() {
@@ -242,6 +268,8 @@ fn initial_state(
             request.task.clone()
         };
         let escalate_park = checkpoint.is_escalate_park();
+        let ask_park = checkpoint.is_ask_park();
+        let prompt_wait = checkpoint.is_prompt_wait();
         let approval_wait = checkpoint
             .park
             .as_ref()
@@ -263,6 +291,57 @@ fn initial_state(
                 role: "tool".into(),
                 content: format!("operator answer: {answer}"),
                 tool_call_id: park_tool_call_id.expect("escalate park"),
+                tool_calls: vec![],
+            });
+        } else if ask_park {
+            match request.resume_ask {
+                Some(super::AskDecision::Deny) => {
+                    let park = checkpoint.park.as_ref().expect("ask park");
+                    let call_id = if park.allow_call_id.is_empty() {
+                        park.tool_call_id.clone()
+                    } else {
+                        park.allow_call_id.clone()
+                    };
+                    let name = park
+                        .reason
+                        .strip_prefix("ask:")
+                        .unwrap_or("tool")
+                        .to_string();
+                    engine.emit(
+                        resume_id,
+                        HarnessEvent::ToolEnd {
+                            name,
+                            ok: false,
+                            detail: "permission denied".into(),
+                            run_id: resume_id.clone(),
+                            turn: checkpoint.completed_turns,
+                            call_id,
+                        },
+                    );
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: "permission denied".into(),
+                        tool_call_id: park_tool_call_id.expect("ask park"),
+                        tool_calls: vec![],
+                    });
+                }
+                Some(super::AskDecision::Allow) => {}
+                None => {
+                    return Err(RunError::Message(format!(
+                        "run {resume_id} is parked for ask=park; supply resume_ask to continue"
+                    )));
+                }
+            }
+        } else if prompt_wait {
+            let prompt = request.resume_prompt.as_ref().ok_or_else(|| {
+                RunError::Message(format!(
+                    "run {resume_id} is waiting for the next session prompt"
+                ))
+            })?;
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: prompt.clone(),
+                tool_call_id: String::new(),
                 tool_calls: vec![],
             });
         } else if request.resume_answer.is_some() {

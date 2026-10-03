@@ -30,6 +30,7 @@ Operator and contributor documentation for **shikigami**.
 | Run and tool-call span export | [tracing.md](tracing.md) |
 | Network egress policy | [network.md](network.md) |
 | MCP client and server host | [mcp.md](mcp.md) |
+| ACP session guest host | [acp.md](acp.md) |
 | Lifecycle hooks | [hooks.md](hooks.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |

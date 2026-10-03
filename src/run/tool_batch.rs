@@ -145,7 +145,12 @@ impl<'a> DurableToolBatch<'a> {
                     .engine
                     .governance
                     .tool_requires_execution_checkpoint(&c.name)
-            });
+            })
+            && !(request.session_wait
+                && turn
+                    .tool_calls
+                    .iter()
+                    .any(|c| tools::mutates_workspace(&c.name)));
 
         // Ordered ToolStart for stable live streams.
         for (index, call) in turn.tool_calls.iter().enumerate() {
@@ -223,6 +228,33 @@ impl<'a> DurableToolBatch<'a> {
                 }
                 check_bounds(self.engine, &session.run_id, request, started, timeout)?;
                 let stable_call_id = stable_tool_call_id(call, session.turns, index);
+                let conversation_id = conversation_tool_call_id(call, session.turns, index);
+                let ask_granted = session
+                    .ask_allow_call_id()
+                    .is_some_and(|token| token == stable_call_id || token == conversation_id);
+                if request.session_wait
+                    && tools::mutates_workspace(&call.name)
+                    && self.engine.governance.session_asks_mutating_tools()
+                    && !ask_granted
+                {
+                    let emissions = self.persist_completed_prefix(session, handle, &out).await?;
+                    return self
+                        .park_for_ask(
+                            session,
+                            pending_park,
+                            call,
+                            index,
+                            conversation_id,
+                            emissions,
+                        )
+                        .await;
+                }
+                // One-shot grant: consume when this approved call is attempted,
+                // including hook and authorization rejection paths.
+                if ask_granted {
+                    session.set_ask_allow_call_id(None);
+                    session.clear_resumed_ask_park();
+                }
                 // Pre-tool hooks are an execution-authorization boundary, not
                 // a durable projection. They must inspect the exact transient
                 // arguments that authorization and the host tool will receive.
@@ -637,6 +669,7 @@ impl<'a> DurableToolBatch<'a> {
                         question: park.question.clone(),
                         tool_call_id: conversation_tool_call_id(&call, session.turns, index),
                         kind: ParkKind::Escalate,
+                        allow_call_id: String::new(),
                     };
                     let info = ParkInfo {
                         reason: park.reason.clone(),
@@ -644,6 +677,8 @@ impl<'a> DurableToolBatch<'a> {
                         tool_call_id: conversation_tool_call_id(&call, session.turns, index),
                         kind: ParkKind::Escalate,
                         approval_id: None,
+                        display_call_id: Some(stable_tool_call_id(&call, session.turns, index)),
+                        args_json: Some(call.args_json.clone()),
                     };
                     *pending_park = Some(parked.clone());
                     let report_result = self
@@ -727,6 +762,29 @@ impl<'a> DurableToolBatch<'a> {
         }
         session.save(tools.as_ref())?;
         match terminal_report {
+            Some((summary, _success)) if request.session_wait => {
+                let parked = ParkedState {
+                    reason: "end_turn".into(),
+                    question: String::new(),
+                    tool_call_id: String::new(),
+                    kind: ParkKind::PromptWait,
+                    allow_call_id: String::new(),
+                };
+                *pending_park = Some(parked.clone());
+                session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
+                Ok(ToolBatchOutcome::Parked {
+                    info: ParkInfo {
+                        reason: parked.reason,
+                        question: parked.question,
+                        tool_call_id: parked.tool_call_id,
+                        kind: ParkKind::PromptWait,
+                        approval_id: None,
+                        display_call_id: None,
+                        args_json: None,
+                    },
+                    summary,
+                })
+            }
             Some((summary, success)) => Ok(ToolBatchOutcome::Completed { summary, success }),
             None => Ok(ToolBatchOutcome::Continue),
         }
@@ -836,6 +894,47 @@ impl<'a> DurableToolBatch<'a> {
         Ok(emissions)
     }
 
+    async fn park_for_ask(
+        &self,
+        session: &mut RunSession,
+        pending_park: &mut Option<ParkedState>,
+        call: &ToolCall,
+        index: usize,
+        conversation_id: String,
+        emissions: Vec<(String, String, bool, String)>,
+    ) -> Result<ToolBatchOutcome, RunError> {
+        let reason = format!("ask:{}", call.name);
+        let question = format!("Allow `{}`?", call.name);
+        let tool_call_id = if conversation_id.is_empty() {
+            conversation_tool_call_id(call, session.turns, index)
+        } else {
+            conversation_id
+        };
+        let parked = ParkedState {
+            reason: reason.clone(),
+            question: question.clone(),
+            tool_call_id: tool_call_id.clone(),
+            kind: ParkKind::Ask,
+            allow_call_id: stable_tool_call_id(call, session.turns, index),
+        };
+        let info = ParkInfo {
+            reason: reason.clone(),
+            question,
+            tool_call_id,
+            kind: ParkKind::Ask,
+            approval_id: None,
+            display_call_id: Some(stable_tool_call_id(call, session.turns, index)),
+            args_json: Some(call.args_json.clone()),
+        };
+        *pending_park = Some(parked.clone());
+        session.save_recoverable(Some(parked), self.tools.as_ref())?;
+        self.emit_prefix_tool_ends(session, emissions).await?;
+        Ok(ToolBatchOutcome::Parked {
+            info,
+            summary: format!("ask=park: {}", call.name),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn park_for_approval(
         &self,
@@ -860,6 +959,7 @@ impl<'a> DurableToolBatch<'a> {
             question: question.clone(),
             tool_call_id: tool_call_id.clone(),
             kind: ParkKind::Approval,
+            allow_call_id: String::new(),
         };
         let info = ParkInfo {
             reason: reason.clone(),
@@ -867,6 +967,8 @@ impl<'a> DurableToolBatch<'a> {
             tool_call_id,
             kind: ParkKind::Approval,
             approval_id: Some(park.approval_id.clone()),
+            display_call_id: None,
+            args_json: None,
         };
         self.engine
             .governance
@@ -874,6 +976,40 @@ impl<'a> DurableToolBatch<'a> {
             .await?;
         *pending_park = Some(parked.clone());
         session.save_recoverable(Some(parked), self.tools.as_ref())?;
+        self.emit_prefix_tool_ends(session, emissions).await?;
+        session.spans.end_tool(&report_call_id, false);
+        self.engine.emit(
+            &session.run_id,
+            HarnessEvent::ToolEnd {
+                name: call.name.clone(),
+                ok: false,
+                detail: format!("parked: {reason}"),
+                run_id: session.run_id.clone(),
+                turn: session.turns,
+                call_id: report_call_id,
+            },
+        );
+        let _ = hooks::run_hooks(
+            &self.engine.config.hooks,
+            HookEvent::OnPark,
+            json!({
+                "run_id": session.run_id,
+                "reason": reason,
+                "question": info.question,
+            }),
+        )
+        .await;
+        Ok(ToolBatchOutcome::Parked {
+            info,
+            summary: reason,
+        })
+    }
+
+    async fn emit_prefix_tool_ends(
+        &self,
+        session: &mut RunSession,
+        emissions: Vec<(String, String, bool, String)>,
+    ) -> Result<(), RunError> {
         for (prefix_call_id, name, ok, detail) in emissions {
             self.engine
                 .report_governance_tool_with_id(self.handle, &prefix_call_id, &name, ok, &detail)
@@ -911,32 +1047,7 @@ impl<'a> DurableToolBatch<'a> {
             )
             .await;
         }
-        session.spans.end_tool(&report_call_id, false);
-        self.engine.emit(
-            &session.run_id,
-            HarnessEvent::ToolEnd {
-                name: call.name.clone(),
-                ok: false,
-                detail: format!("parked: {reason}"),
-                run_id: session.run_id.clone(),
-                turn: session.turns,
-                call_id: report_call_id,
-            },
-        );
-        let _ = hooks::run_hooks(
-            &self.engine.config.hooks,
-            HookEvent::OnPark,
-            json!({
-                "run_id": session.run_id,
-                "reason": reason,
-                "question": info.question,
-            }),
-        )
-        .await;
-        Ok(ToolBatchOutcome::Parked {
-            info,
-            summary: reason,
-        })
+        Ok(())
     }
 }
 
