@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Document active plane-authorized runtime identity requirements and recovery
+  from claim-list policy or state rejection after a producing application is
+  retired.
 - Shorten the README to an entry point; move the CLI summary to
   `docs/cli.md`, consolidate embedding instructions, and move naming to
   the domain glossary.
