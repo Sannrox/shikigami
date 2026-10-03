@@ -55,6 +55,12 @@ Expected when the plane is up: `status: ok` and a `plane: reachable at ...`
 line. Missing endpoint or fail-closed probe failure yields `status: fail`
 (`ok: false` in JSON).
 
+For `serve --intake plane`, a successful doctor probe does not establish
+claim-list authorization. Configure an active principal and namespace approved
+by the plane administrator before restoring intake; follow the
+[runtime identity and recovery guide](plane-action-run.md#runtime-identity-prerequisites)
+if `ListClaimableActionWork` rejects the worker's policy or state.
+
 ## Live tests (ignored by default)
 
 ```bash

@@ -31,6 +31,54 @@ Run `shikigami doctor` with the same configuration first. Add
 the plane and the host state is intended to support parked-run resume. See
 [serve.md](serve.md) for checkpoint and recovery details.
 
+## Runtime identity prerequisites
+
+Before starting plane intake, obtain an active runtime principal and namespace
+from the plane administrator. Configure `governance.principal` and
+`governance.namespace` in the governed settings file, with the matching
+credential selected by `governance.token_env` when the plane requires one.
+The plane must authorize that identity to list and claim Action work for the
+selected `--runtime-id`, and to renew and report its claims. See the
+[governance settings reference](settings.md#governance).
+
+When a producing application is retired, restore the worker only with a
+plane-authorized runtime identity that is independent of the retired
+application. An old application-managed principal or namespace is not a
+runtime provisioning contract. The plane administrator must supply or approve
+the replacement identity, namespace, credentials, and policy before the
+operator changes the worker configuration. Shikigami does not create those
+plane resources or discover a replacement identity.
+
+A successful `doctor` confirms the configured connectivity and its schema
+probe; it does not prove permission to call `ListClaimableActionWork`.
+The first intake poll still has to pass the plane's current policy and state
+preconditions. Endpoint reachability and `allow_insecure_remote` only address
+transport; neither grants claim authority.
+
+## Recover from a claim-list rejection
+
+If `serve --intake plane` reports `ListClaimableActionWork` with a policy or
+state precondition error:
+
+1. Keep the worker stopped while the plane administrator checks whether the
+   configured principal and namespace are still active and authorized for the
+   selected runtime. A retired application identity requires an approved
+   independent runtime identity before restoration.
+2. Apply the approved `governance.principal`, `governance.namespace`, and
+   credential configuration. Keep the governed adapter and fail-closed policy.
+3. Run `doctor` with that same configuration, then start plane intake using
+   the command above. A successful idle poll can return no work; a claim-list
+   rejection is an error, not an idle queue.
+4. Check worker lifecycle readiness as described in [serve.md](serve.md#worker-lifecycle-contract-fleet-hosts).
+   If the plane still rejects intake, keep the worker stopped and return the
+   rejection to the plane administrator for policy or state correction.
+
+A list RPC rejection exits the plane serve loop before creating a run. When
+worker lifecycle reporting is enabled, it marks `governance_unavailable` and
+stops accepting claims. The host does not retry under a different identity or
+fall back to an offline adapter. This is the existing fail-closed behavior;
+changing an endpoint or weakening governance cannot repair a retired identity.
+
 ## Happy path
 
 1. **Produce and admit.** A producer submits an `ActionInstance` through
