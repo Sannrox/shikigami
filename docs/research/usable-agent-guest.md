@@ -1,17 +1,15 @@
 # Usable agent guest (ACP, TUI, loop copies)
 
-- Status: **Recommendation recorded**
+- Status: **Accepted**
 - Date: 2026-10-03
-- Contract authority: [VISION.md](../../VISION.md),
-  [ADR 0003](../decisions/0003-serve-daemon.md),
-  [ADR 0004](../decisions/0004-v1-contract.md)
+- Contract: [ADR 0014](../decisions/0014-usable-guest-hosts.md),
+  [ADR 0015](../decisions/0015-nested-child-runs.md)
+- Source: [PR #331](https://github.com/Sannrox/shikigami/pull/331)
 - Related: research [#90](https://github.com/Sannrox/shikigami/issues/90)
   (host-owned fan-out for 1.0),
   [#61](https://github.com/Sannrox/shikigami/issues/61) (permission modes),
   [#330](https://github.com/Sannrox/shikigami/issues/330) (skill-declared
   context boundaries)
-- Follow-up GitHub Discussions and Issues are **not filed** from this
-  closeout; drafts live in the proposed-artifacts section.
 
 ## Decision question
 
@@ -126,35 +124,8 @@ Nested-run, plan-jail, and #330 *implementation* collide on `src/run/`.
 - Do not add a TUI crate until that amendment is accepted.
 - [#330](https://github.com/Sannrox/shikigami/issues/330) scope is unchanged.
 
-## Proposed GitHub artifacts (unfiled)
+## Follow-up
 
-Publish only with maintainer authorization.
-
-### Design Discussion: ACP process host and terminal host
-
-Category: Design. Title: `Design: ACP process host and in-crate terminal host`.
-
-Decision question: add `shikigami acp` (stdio, newline JSON-RPC) as a thin
-host over `Harness`, map rusui’s session methods onto runs, and amend
-VISION so a terminal process host is allowed?
-
-Must settle: `end_turn` vs `report`; `session/load`; `request_permission`
-= ask=park; streaming vs one update per turn; content parts reuse
-`run_content`; default TUI entry (`shikigami` vs `shikigami tui`).
-
-Cites rusui ADR 0002 / 0011 / 0047, shikigami ADR 0003 / 0004.
-
-### Feature: thin TUI over ACP
-
-Blocked on that Discussion. Title: `feat: thin TUI process host over ACP`.
-
-### Design Discussion: nested child runs
-
-Title: `Design: nested child runs as first-class Runs`. Reopens the
-[#90](https://github.com/Sannrox/shikigami/issues/90) question for 1.x.
-Not rusui child sessions.
-
-### Feature: plan write-jail
-
-Title: `feat: plan write-jail run mode`. May fold into the nested-run
-Discussion.
+Accepted as [ADR 0014](../decisions/0014-usable-guest-hosts.md) and
+[ADR 0015](../decisions/0015-nested-child-runs.md). No Design Discussion.
+Implementation is feature Issues after those ADRs land.

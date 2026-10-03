@@ -17,6 +17,8 @@ Accepted decisions that must outlive a single PR.
 | [0011](0011-cli-content-intake.md) | CLI bounded-content process-host request | Accepted |
 | [0012](0012-replay-export.md) | Export validated replay inputs from a retained run | Accepted |
 | [0013](0013-os-sandbox-adapter.md) | OS-level sandbox tiers for governed tool execution | Accepted |
+| [0014](0014-usable-guest-hosts.md) | Usable guest process hosts (ACP, TUI, session wait, ask=park) | Accepted |
+| [0015](0015-nested-child-runs.md) | Nested child runs as first-class Runs | Accepted |
 
 ## When to write an ADR
 
