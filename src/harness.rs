@@ -920,6 +920,28 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_plan_jail_when_selected() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.run.plan_jail = true;
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|line| line.contains("plan_jail") && line.contains(".shikigami/plan.md")),
+            "expected plan_jail doctor line: {:?}",
+            report.lines
+        );
+        assert!(
+            report.to_json_value().get("plan_jail").is_none(),
+            "plan_jail must stay in lines, not the JSON schema"
+        );
+    }
+
+    #[test]
     fn example_tomls_have_no_inline_secrets() {
         let examples = [
             include_str!("../examples/local-run.toml"),

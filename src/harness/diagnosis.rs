@@ -54,6 +54,9 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
         }
     }
     lines.push(format!("max_turns: {}", harness.config.run.max_turns));
+    if harness.config.run.plan_jail {
+        lines.push(format!("plan_jail:  on ({})", crate::tools::PLAN_JAIL_PATH));
+    }
     if harness.config.hooks.is_empty() {
         lines.push("hooks:     (none)".into());
     } else {

@@ -99,6 +99,11 @@ pub struct RunRequest {
     pub resume_prompt: Option<String>,
     /// Allow or deny a `ParkKind::Ask` mutating tool on resume.
     pub resume_ask: Option<AskDecision>,
+    /// Restrict mutating tools to the harness-owned plan path until accept.
+    /// Fresh runs also pick this up from `run.plan_jail` settings.
+    pub plan_jail: bool,
+    /// Accept or reject a `ParkKind::Plan` park on resume.
+    pub resume_plan: Option<PlanDecision>,
 }
 
 /// Session-host decision for an ask=park mutating tool.
@@ -107,6 +112,14 @@ pub struct RunRequest {
 pub enum AskDecision {
     Allow,
     Deny,
+}
+
+/// Operator decision for a parked plan write-jail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDecision {
+    Accept,
+    Reject,
 }
 
 impl RunRequest {
@@ -123,6 +136,8 @@ impl RunRequest {
             session_wait: false,
             resume_prompt: None,
             resume_ask: None,
+            plan_jail: false,
+            resume_plan: None,
         }
     }
 }
@@ -173,6 +188,9 @@ pub struct ParkInfo {
     /// Tool arguments for session permission RPCs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args_json: Option<String>,
+    /// SHA-256 of `.shikigami/plan.md` when `kind` is `Plan`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_digest: String,
 }
 
 #[derive(Debug, Error)]
@@ -457,6 +475,7 @@ mod tests {
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         };
 
         let err =
@@ -502,6 +521,7 @@ mod tests {
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         };
 
         let err =
@@ -555,6 +575,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap_err();
@@ -589,6 +611,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap_err();
@@ -635,6 +659,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap_err();
@@ -697,6 +723,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap();
@@ -808,6 +836,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap_err();
@@ -884,6 +914,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap();
@@ -977,6 +1009,8 @@ mod tests {
                 session_wait: false,
                 resume_prompt: None,
                 resume_ask: None,
+                plan_jail: false,
+                resume_plan: None,
             })
             .await
             .unwrap_err();
@@ -1392,5 +1426,328 @@ mod tests {
         assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::Ask);
         assert!(!second.workspace.join("blocked.txt").exists());
         assert!(!second.workspace.join("ok.txt").exists());
+    }
+
+    fn plan_jail_script() -> String {
+        let write = |path: &str, content: &str| {
+            serde_json::json!({
+                "tool_calls": [{
+                    "name": "write_file",
+                    "args_json": serde_json::json!({"path": path, "content": content}).to_string()
+                }]
+            })
+        };
+        let report = |summary: &str| {
+            serde_json::json!({
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({"summary": summary, "success": true}).to_string()
+                }]
+            })
+        };
+        serde_json::json!([
+            write("ok.txt", "no\n"),
+            write(crate::tools::PLAN_JAIL_PATH, "# do it\n"),
+            report("planned"),
+            write("ok.txt", "yes\n"),
+            report("executed"),
+        ])
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn plan_jail_denies_writes_outside_the_plan_path_and_parks_on_report() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        let park = parked.park.as_ref().unwrap();
+        assert_eq!(park.kind, ParkKind::Plan);
+        assert!(!park.plan_digest.is_empty());
+        assert!(!parked.workspace.join("ok.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(parked.workspace.join(crate::tools::PLAN_JAIL_PATH)).unwrap(),
+            "# do it\n"
+        );
+
+        let mut missing = RunRequest::new("");
+        missing.keep_workspace = true;
+        missing.resume_run_id = Some(parked.run_id.clone());
+        let err = eng.run(missing).await.unwrap_err();
+        assert!(err.to_string().contains("resume_plan"), "{err}");
+        assert!(!parked.workspace.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn plan_jail_reject_completes_failed_without_execute() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        resume.resume_plan = Some(PlanDecision::Reject);
+        let rejected = eng.run(resume).await.unwrap();
+        assert_eq!(rejected.termination, RunTermination::Failed);
+        assert!(!rejected.success);
+        assert_eq!(rejected.summary, "plan rejected");
+        assert!(!parked.workspace.join("ok.txt").exists());
+        let checkpoint = Checkpoint::load(&eng.state_runs, &parked.run_id).unwrap();
+        assert!(checkpoint.plan_jail);
+        assert!(checkpoint.park.is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_jail_reject_then_resume_stays_jailed() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+
+        let mut reject = RunRequest::new("");
+        reject.keep_workspace = true;
+        reject.resume_run_id = Some(parked.run_id.clone());
+        reject.resume_plan = Some(PlanDecision::Reject);
+        let rejected = eng.run(reject).await.unwrap();
+        assert_eq!(rejected.termination, RunTermination::Failed);
+        assert_eq!(rejected.summary, "plan rejected");
+
+        let mut again = RunRequest::new("");
+        again.keep_workspace = true;
+        again.resume_run_id = Some(parked.run_id.clone());
+        let continued = eng.run(again).await.unwrap();
+        assert!(!parked.workspace.join("ok.txt").exists());
+        assert_eq!(
+            continued.park.as_ref().map(|park| park.kind),
+            Some(ParkKind::Plan)
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_jail_accept_allows_workspace_writes() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        resume.resume_plan = Some(PlanDecision::Accept);
+        let done = eng.run(resume).await.unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert!(done.success);
+        assert_eq!(
+            std::fs::read_to_string(parked.workspace.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_jail_rejects_plan_decision_on_a_fresh_run() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"no\\n\"}"}]},{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        req.resume_plan = Some(PlanDecision::Accept);
+        let err = eng.run(req).await.unwrap_err();
+        assert!(err.to_string().contains("resume_plan"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn plan_jail_from_settings_applies_to_fresh_runs() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"no\\n\"}"}]},{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"blocked\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert!(!parked.workspace.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn plan_jail_off_leaves_existing_runs_unconstrained() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(
+            std::fs::read_to_string(done.workspace.join("ok.txt")).unwrap(),
+            "hi\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_jail_report_takes_precedence_over_session_wait() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        req.session_wait = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plan_jail_denies_symlink_plan_path() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("secret.txt"), "keep\n").unwrap();
+        std::fs::create_dir_all(project.join(".shikigami")).unwrap();
+        std::os::unix::fs::symlink(
+            project.join("secret.txt"),
+            project.join(crate::tools::PLAN_JAIL_PATH),
+        )
+        .unwrap();
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        let write_plan = serde_json::json!({
+            "path": crate::tools::PLAN_JAIL_PATH,
+            "content": "pwned\n"
+        })
+        .to_string();
+        let report = serde_json::json!({"summary": "planned", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {"tool_calls":[{"name":"write_file","args_json": write_plan}]},
+                {"tool_calls":[{"name":"report","args_json": report}]}
+            ])
+            .to_string(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert_eq!(
+            std::fs::read_to_string(project.join("secret.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plan_jail_denies_hard_linked_plan_path() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("secret.txt"), "keep\n").unwrap();
+        std::fs::create_dir_all(project.join(".shikigami")).unwrap();
+        std::fs::hard_link(
+            project.join("secret.txt"),
+            project.join(crate::tools::PLAN_JAIL_PATH),
+        )
+        .unwrap();
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        let write_plan = serde_json::json!({
+            "path": crate::tools::PLAN_JAIL_PATH,
+            "content": "pwned\n"
+        })
+        .to_string();
+        let report = serde_json::json!({"summary": "planned", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {"tool_calls":[{"name":"write_file","args_json": write_plan}]},
+                {"tool_calls":[{"name":"report","args_json": report}]}
+            ])
+            .to_string(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert_eq!(
+            std::fs::read_to_string(project.join("secret.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plan_jail_report_does_not_follow_a_plan_symlink() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("secret.txt"), "host-secret\n").unwrap();
+        std::fs::create_dir_all(project.join(".shikigami")).unwrap();
+        std::os::unix::fs::symlink(
+            project.join("secret.txt"),
+            project.join(crate::tools::PLAN_JAIL_PATH),
+        )
+        .unwrap();
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        let report = serde_json::json!({"summary": "planned", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([{"tool_calls":[{"name":"report","args_json": report}]}]).to_string(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("plan");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let parked = eng.run(req).await.unwrap();
+        let park = parked.park.as_ref().unwrap();
+        assert_eq!(park.kind, ParkKind::Plan);
+        assert!(park.plan_digest.is_empty());
+        assert!(
+            !park.question.contains("host-secret"),
+            "plan review leaked symlink target: {}",
+            park.question
+        );
     }
 }

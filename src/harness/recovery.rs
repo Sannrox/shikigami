@@ -463,6 +463,7 @@ mod tests {
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         }
     }
 
@@ -597,6 +598,7 @@ mod tests {
             tool_call_id: "esc-1".into(),
             kind: Default::default(),
             allow_call_id: String::new(),
+            plan_digest: String::new(),
         });
         checkpoint.save(&state.runs_dir()).unwrap();
         stale_owner(&state, "run-1");
@@ -830,6 +832,7 @@ mod tests {
             tool_call_id: "esc-1".into(),
             kind: Default::default(),
             allow_call_id: String::new(),
+            plan_digest: String::new(),
         });
         checkpoint.save(&state.runs_dir()).unwrap();
         registry

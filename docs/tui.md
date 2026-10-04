@@ -20,7 +20,7 @@ Credentials come from the environment, same as CLI. There is no TUI login.
 | Prompt | Enter sends `session/prompt` |
 | Stream | Dense transcript of `session/update` (assistant text, tool calls) |
 | Scroll | PageUp / PageDown through the transcript; a new prompt returns to the tail |
-| Permission | Overlay on `session/request_permission`; `y` allow, `n` deny |
+| Permission | Overlay on `session/request_permission`; `y` allow, `n` deny. Plan write-jail review uses this overlay (leading wrapped rows of the question; the overlay does not page a plan taller than the terminal). |
 | Plan | Overlay when a `plan` session update arrives; Ctrl-P toggles, Esc hides |
 | Cancel | Ctrl-C while a prompt is running sends `session/cancel` |
 | Quit | Ctrl-C when idle, or Ctrl-D when idle |

@@ -23,7 +23,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed** |
 | `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error |
 | `session/update` | agent → client | One notification per completed model turn (honest streaming) until the model adapter streams |
-| `session/request_permission` | agent → client | Ask=park and freeform escalate |
+| `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |
 
 A **session** is a host id over **runs**. Unattended `shikigami run` still
@@ -44,9 +44,11 @@ Ungoverned mutating tools (`write_file`, `edit`, `multi_edit`, `apply_patch`,
 `bash`, `bash_background`) **ask=park** with the same tool identity as approval
 park. `escalate` parks use the same permission RPC; allow/deny resume with
 `resume_answer` (`approved` / `denied`, or `outcome.answer` when the client
-sends it). Governed approval parks stay fail-closed. `http-callback` and
-sekai-chisei stay brokered. Clients that cannot answer
-`session/request_permission` cannot complete a mutating prompt.
+sends it). Plan write-jail (`run.plan_jail`) parks `report` as `ParkKind::Plan`
+with the plan text in the permission question; Allow accepts execute authority
+on the same run, Deny rejects, completes failed, and keeps the jail. Governed approval parks stay
+fail-closed. `http-callback` and sekai-chisei stay brokered. Clients that cannot
+answer `session/request_permission` cannot complete a mutating prompt.
 
 Content parts reuse `run_content` bounds. This host concatenates `text` prompt
 parts; it does not add a multimodal stack.

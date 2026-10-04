@@ -112,6 +112,11 @@ impl<'a> RunTransaction<'a> {
                 success = report_success;
                 termination = RunTermination::Completed;
                 Ok(None)
+            } else if request.resume_plan == Some(super::PlanDecision::Reject) {
+                final_summary = "plan rejected".into();
+                success = false;
+                termination = RunTermination::Failed;
+                Ok(None)
             } else {
                 async {
                     loop {
@@ -123,6 +128,7 @@ impl<'a> RunTransaction<'a> {
                                     tool_call_id: String::new(),
                                     kind: ParkKind::PromptWait,
                                     allow_call_id: String::new(),
+                                    plan_digest: String::new(),
                                 };
                                 pending_park = Some(parked.clone());
                                 session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
@@ -137,6 +143,7 @@ impl<'a> RunTransaction<'a> {
                                     approval_id: None,
                                     display_call_id: None,
                                     args_json: None,
+                                    plan_digest: String::new(),
                                 }));
                             }
                             result => result?,
@@ -161,6 +168,7 @@ impl<'a> RunTransaction<'a> {
                                     tool_call_id: String::new(),
                                     kind: ParkKind::PromptWait,
                                     allow_call_id: String::new(),
+                                    plan_digest: String::new(),
                                 };
                                 pending_park = Some(parked.clone());
                                 session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
@@ -173,6 +181,7 @@ impl<'a> RunTransaction<'a> {
                                     approval_id: None,
                                     display_call_id: None,
                                     args_json: None,
+                                    plan_digest: String::new(),
                                 }));
                             }
                             termination = RunTermination::Completed;
