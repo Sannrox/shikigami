@@ -20,7 +20,9 @@ use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
 use crate::model::ChatMessage;
-use crate::run::{AskDecision, ParkInfo, ParkKind, RunError, RunRequest, RunTermination};
+use crate::run::{
+    AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
+};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -238,7 +240,11 @@ impl AcpHost {
                         request.resume_prompt = Some(prompt_text.clone());
                         request
                     }
-                    Ok(checkpoint) if checkpoint.is_ask_park() || checkpoint.is_escalate_park() => {
+                    Ok(checkpoint)
+                        if checkpoint.is_ask_park()
+                            || checkpoint.is_escalate_park()
+                            || checkpoint.is_plan_park() =>
+                    {
                         let info = park_info_from_checkpoint(&checkpoint)
                             .map_err(|e| rpc_error(-32603, e))?;
                         let (outcome, answer) =
@@ -255,6 +261,12 @@ impl AcpHost {
                             request.resume_ask = Some(match outcome {
                                 PermissionOutcome::Allow => AskDecision::Allow,
                                 PermissionOutcome::Deny => AskDecision::Deny,
+                                PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
+                            });
+                        } else if checkpoint.is_plan_park() {
+                            request.resume_plan = Some(match outcome {
+                                PermissionOutcome::Allow => PlanDecision::Accept,
+                                PermissionOutcome::Deny => PlanDecision::Reject,
                                 PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
                             });
                         } else {
@@ -342,6 +354,12 @@ impl AcpHost {
                     .await;
                 return Ok("cancelled");
             }
+            if result.termination == RunTermination::Failed && result.summary == "plan rejected" {
+                self.set_run_id(session_id, None)
+                    .await
+                    .map_err(|e| rpc_error(-32603, e))?;
+                return Ok("end_turn");
+            }
             let park = result.park.as_ref();
             match park.map(|p| p.kind) {
                 Some(ParkKind::PromptWait) => {
@@ -372,6 +390,31 @@ impl AcpHost {
                         }
                         PermissionOutcome::Deny => {
                             next.resume_ask = Some(AskDecision::Deny);
+                        }
+                    }
+                    request = next;
+                }
+                Some(ParkKind::Plan) => {
+                    let park = park.expect("park");
+                    let (outcome, _) =
+                        request_permission(session_id, park, client, request.cancel.as_ref())
+                            .await?;
+                    let mut next = RunRequest::new("");
+                    next.keep_workspace = true;
+                    next.session_wait = true;
+                    next.resume_run_id = Some(result.run_id.clone());
+                    next.cancel = request.cancel.clone();
+                    match outcome {
+                        PermissionOutcome::Cancelled => {
+                            persist_prompt_wait(&harness.state.runs_dir(), &result.run_id)
+                                .map_err(|e| rpc_error(-32603, e))?;
+                            return Ok("cancelled");
+                        }
+                        PermissionOutcome::Allow => {
+                            next.resume_plan = Some(PlanDecision::Accept);
+                        }
+                        PermissionOutcome::Deny => {
+                            next.resume_plan = Some(PlanDecision::Reject);
                         }
                     }
                     request = next;
@@ -576,6 +619,7 @@ fn park_info_from_checkpoint(checkpoint: &Checkpoint) -> Result<ParkInfo, String
         approval_id: None,
         display_call_id: (!park.allow_call_id.is_empty()).then(|| park.allow_call_id.clone()),
         args_json: Some(call.args_json.clone()),
+        plan_digest: park.plan_digest.clone(),
     })
 }
 
@@ -662,6 +706,7 @@ fn persist_prompt_wait(runs_dir: &Path, run_id: &str) -> Result<(), String> {
         tool_call_id: String::new(),
         kind: ParkKind::PromptWait,
         allow_call_id: String::new(),
+        plan_digest: String::new(),
     });
     checkpoint.save(runs_dir).map_err(|e| e.to_string())?;
     Ok(())
@@ -695,10 +740,17 @@ async fn request_permission(
             "status": "pending",
             "rawInput": json_raw_input(park.args_json.as_deref())
         },
-        "options": [
-            {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
-            {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
-        ]
+        "options": if park.kind == ParkKind::Plan {
+            json!([
+                {"optionId": "allow", "name": "Accept plan", "kind": "allow_once"},
+                {"optionId": "deny", "name": "Reject plan", "kind": "reject_once"}
+            ])
+        } else {
+            json!([
+                {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
+            ])
+        }
     });
     if cancel_requested(cancel) {
         return Ok((PermissionOutcome::Cancelled, String::new()));
@@ -2181,6 +2233,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn plan_jail_permission_accepts_execute_authority() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.model.adapter = "scripted".into();
+        config.events.adapter = "none".into();
+        config.run.plan_jail = true;
+        let write_plan = serde_json::json!({
+            "path": crate::tools::PLAN_JAIL_PATH,
+            "content": "# do it\n"
+        })
+        .to_string();
+        let write_ok = serde_json::json!({"path": "ok.txt", "content": "yes\n"}).to_string();
+        let report = serde_json::json!({"summary": "planned", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {"tool_calls":[{"name":"write_file","args_json": write_plan}]},
+                {"tool_calls":[{"name":"report","args_json": report}]},
+                {"tool_calls":[{"name":"write_file","args_json": write_ok}]},
+                {"content":"executed"}
+            ])
+            .to_string(),
+        );
+        let host = AcpHost::new(Harness::from_config(config, state).unwrap());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"plan"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
+    }
+
     struct HangIfRequestedClient;
 
     #[async_trait]
@@ -2205,6 +2312,7 @@ mod tests {
             approval_id: None,
             display_call_id: None,
             args_json: Some("{}".into()),
+            plan_digest: String::new(),
         };
         let (outcome, _) = request_permission("sess-1", &park, &HangIfRequestedClient, Some(&rx))
             .await
@@ -2297,12 +2405,14 @@ mod tests {
                 tool_call_id: "call-a".into(),
                 kind: ParkKind::Ask,
                 allow_call_id: "tool-1-0-call-a".into(),
+                plan_digest: String::new(),
             }),
             todos: vec![],
             governance: None,
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         }
     }
 

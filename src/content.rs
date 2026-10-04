@@ -1591,6 +1591,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_jail_settings_do_not_park_bounded_content_runs() {
+        let directory = tempdir().unwrap();
+        let state = StateRoot::new(directory.path().join("state"));
+        let resolver = Arc::new(MemoryResolver::new());
+        let messages = mixed_messages(resolver.as_ref());
+        let mut config = local_config(
+            &directory,
+            r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"bounded\",\"success\":true}"}]}]"#,
+        );
+        config.run.plan_jail = true;
+        let harness = Harness::from_config(config, state).unwrap();
+        let result = harness
+            .run_content(ContentRunRequestV1::new("content", messages, resolver))
+            .await
+            .unwrap();
+        assert!(result.run.success);
+        assert_eq!(result.run.summary, "bounded");
+        assert_eq!(
+            result.run.termination,
+            crate::run::RunTermination::Completed
+        );
+        assert!(result.run.park.is_none());
+    }
+
+    #[tokio::test]
     async fn generated_output_ids_do_not_collide_with_caller_owned_ids() {
         let directory = tempdir().unwrap();
         let state = StateRoot::new(directory.path().join("state"));

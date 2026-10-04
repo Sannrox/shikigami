@@ -85,11 +85,19 @@ pub(crate) struct GrepArgs {
 
 impl ToolExecutor {
     pub(crate) fn resolve(&self, relative: &Path) -> Result<PathBuf, ToolError> {
+        self.resolve_path(relative, false)
+    }
+
+    fn resolve_write(&self, relative: &Path) -> Result<PathBuf, ToolError> {
+        self.resolve_path(relative, true)
+    }
+
+    fn resolve_path(&self, relative: &Path, create_parents: bool) -> Result<PathBuf, ToolError> {
         if is_unsafe_relative_path(relative) {
             return Err(ToolError::UnsafePath(relative.to_path_buf()));
         }
         let joined = self.workspace.join(relative);
-        if let Some(parent) = joined.parent() {
+        if create_parents && let Some(parent) = joined.parent() {
             std::fs::create_dir_all(parent)?;
         }
         // For existing paths, canonicalize and ensure under workspace.
@@ -134,7 +142,7 @@ impl ToolExecutor {
         if content.len() as u64 > MAX_FILE_BYTES {
             return Err(ToolError::FileTooLarge(path.to_path_buf()));
         }
-        let path = self.resolve(path)?;
+        let path = self.resolve_write(path)?;
         std::fs::write(path, content)?;
         Ok(())
     }
@@ -223,7 +231,7 @@ impl ToolExecutor {
                 return Err(ToolError::FileTooLarge(path));
             }
             // Resolve path jail before staging write.
-            let abs = self.resolve(&path)?;
+            let abs = self.resolve_write(&path)?;
             planned.push((abs, text));
         }
         for (abs, text) in planned {

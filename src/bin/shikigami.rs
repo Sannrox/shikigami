@@ -77,6 +77,15 @@ enum Command {
         /// Read operator answer from a file (UTF-8); alternative to --answer.
         #[arg(long)]
         answer_file: Option<PathBuf>,
+        /// Restrict mutating tools to `.shikigami/plan.md` until --plan-accept.
+        #[arg(long)]
+        plan_jail: bool,
+        /// Accept a parked plan and continue with execute authority.
+        #[arg(long, conflicts_with = "plan_reject")]
+        plan_accept: bool,
+        /// Reject a parked plan and complete the run as failed.
+        #[arg(long, conflicts_with = "plan_accept")]
+        plan_reject: bool,
     },
     /// List or inspect durable local run records.
     Runs {
@@ -321,6 +330,9 @@ async fn run() -> anyhow::Result<()> {
             answer,
             answer_file,
             task_file,
+            plan_jail,
+            plan_accept,
+            plan_reject,
         } => {
             let task = match (task.is_empty(), task_file) {
                 (false, Some(_)) => {
@@ -346,6 +358,12 @@ async fn run() -> anyhow::Result<()> {
             request.timeout = timeout_secs.map(std::time::Duration::from_secs);
             request.resume_run_id = resume;
             request.resume_answer = answer;
+            request.plan_jail = plan_jail;
+            request.resume_plan = match (plan_accept, plan_reject) {
+                (true, false) => Some(shikigami::PlanDecision::Accept),
+                (false, true) => Some(shikigami::PlanDecision::Reject),
+                _ => None,
+            };
             let result = harness.run(request).await?;
             println!(
                 "run {} turns={} success={} termination={} summary={}",
@@ -371,6 +389,16 @@ async fn run() -> anyhow::Result<()> {
                     println!("resume with: shikigami run --resume {}", result.run_id);
                     return Err(anyhow::anyhow!(
                         "run parked awaiting approval (exit semantics: non-zero)"
+                    ));
+                }
+                if park.kind == shikigami::ParkKind::Plan {
+                    println!("parked kind=plan digest={}", park.plan_digest);
+                    println!(
+                        "resume with: shikigami run --resume {} --plan-accept|--plan-reject",
+                        result.run_id
+                    );
+                    return Err(anyhow::anyhow!(
+                        "run parked awaiting plan review (exit semantics: non-zero)"
                     ));
                 }
                 println!(

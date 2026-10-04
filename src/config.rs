@@ -487,6 +487,10 @@ pub struct RunSettings {
     /// Messages to retain after the initial user task when compacting (default 8).
     #[serde(default = "default_compact_keep_tail")]
     pub compact_keep_tail: u32,
+    /// Restrict mutating tools to `.shikigami/plan.md` until the parked plan
+    /// is accepted. Additive; default off.
+    #[serde(default)]
+    pub plan_jail: bool,
 }
 
 /// Child-process resource and isolation policy.
@@ -559,6 +563,7 @@ impl Default for RunSettings {
             timeout_secs: None,
             compact_after_messages: None,
             compact_keep_tail: default_compact_keep_tail(),
+            plan_jail: false,
         }
     }
 }
@@ -886,6 +891,7 @@ impl Config {
     pub const PROFILE_ENV: &'static str = "SHIKIGAMI_PROFILE";
     pub const MODEL_ADAPTER_ENV: &'static str = "SHIKIGAMI_MODEL_ADAPTER";
     pub const MODEL_SCRIPT_ENV: &'static str = "SHIKIGAMI_MODEL_SCRIPT";
+    pub const RUN_PLAN_JAIL_ENV: &'static str = "SHIKIGAMI_RUN_PLAN_JAIL";
 
     pub fn path_in(root: impl AsRef<Path>) -> PathBuf {
         root.as_ref().join(Self::FILENAME)
@@ -974,6 +980,11 @@ impl Config {
             && !value.is_empty()
         {
             self.model.script_json = Some(value);
+        }
+        if let Ok(value) = env::var(Self::RUN_PLAN_JAIL_ENV)
+            && let Some(flag) = parse_env_flag(&value)
+        {
+            self.run.plan_jail = flag;
         }
     }
 

@@ -107,6 +107,8 @@ impl<'a> RunSupervision<'a> {
             session_wait: false,
             resume_prompt: None,
             resume_ask: None,
+            plan_jail: false,
+            resume_plan: None,
         };
         self.execute_inner(
             run_request,
@@ -192,6 +194,11 @@ impl<'a> RunSupervision<'a> {
         replay: Option<ReplayExecution>,
         content: Option<ContentExecution>,
     ) -> Result<RunResult, RunError> {
+        let mut request = request;
+        if request.resume_run_id.is_none() && content.is_none() && self.engine.config.run.plan_jail
+        {
+            request.plan_jail = true;
+        }
         let resume_checkpoint = self.preflight(
             &request,
             expected_checkpoint_digest,
@@ -226,6 +233,11 @@ impl<'a> RunSupervision<'a> {
             if expected_checkpoint_digest.is_some() {
                 return Err(RunError::Message(
                     "checkpoint digest requires a resumed run".into(),
+                ));
+            }
+            if request.resume_plan.is_some() {
+                return Err(RunError::Message(
+                    "resume_plan is only used for plan write-jail waits".into(),
                 ));
             }
             return Ok(None);
@@ -343,6 +355,16 @@ impl<'a> RunSupervision<'a> {
         if request.resume_ask.is_some() && !checkpoint.is_ask_park() {
             return Err(RunError::Message(
                 "resume_ask is only used for ask=park waits".into(),
+            ));
+        }
+        if checkpoint.is_plan_park() && request.resume_plan.is_none() {
+            return Err(RunError::Message(format!(
+                "run {resume_id} is parked for plan review; supply resume_plan to continue"
+            )));
+        }
+        if request.resume_plan.is_some() && !checkpoint.is_plan_park() {
+            return Err(RunError::Message(
+                "resume_plan is only used for plan write-jail waits".into(),
             ));
         }
         Ok(Some(checkpoint))

@@ -48,6 +48,8 @@ pub(super) struct RunSession {
     ask_allow_call_id: Option<String>,
     /// Turn count when the current session prompt started (`session_wait`).
     pub prompt_start_turns: Option<u32>,
+    /// Plan write-jail is still active for this attempt.
+    pub plan_jail: bool,
     pub spans: RunSpanTrace,
 }
 
@@ -97,6 +99,7 @@ impl RunSession {
             resumed_ask_park: None,
             ask_allow_call_id: None,
             prompt_start_turns: None,
+            plan_jail: false,
             spans: RunSpanTrace::disabled(),
         }
     }
@@ -640,6 +643,7 @@ impl RunSession {
             replay,
             content: next_content_binding.clone(),
             prompt_start_turns: self.prompt_start_turns,
+            plan_jail: self.plan_jail,
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {

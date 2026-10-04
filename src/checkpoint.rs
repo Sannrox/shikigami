@@ -26,6 +26,8 @@ pub enum ParkKind {
     Ask,
     /// Session host waiting for the next user prompt (`end_turn`).
     PromptWait,
+    /// Plan write-jail finished a plan; waiting for accept before execute authority.
+    Plan,
 }
 
 /// Structured park state when a run awaits an operator answer.
@@ -41,6 +43,9 @@ pub struct ParkedState {
     /// Turn-qualified identity that consumes a one-shot ask=park allow grant.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub allow_call_id: String,
+    /// SHA-256 of the harness-owned plan file when `kind` is `Plan`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_digest: String,
 }
 
 /// Local scratch for a plane `require_approval` wait. Not a permit.
@@ -179,6 +184,9 @@ pub struct Checkpoint {
     /// Session hosts apply `max_turns` to the delta. Absent on older checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_start_turns: Option<u32>,
+    /// Plan write-jail is still active. Absent/false on older checkpoints.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_jail: bool,
 }
 
 #[derive(Debug, Error)]
@@ -341,6 +349,12 @@ impl Checkpoint {
             .is_some_and(|park| park.kind == ParkKind::PromptWait)
     }
 
+    pub fn is_plan_park(&self) -> bool {
+        self.park
+            .as_ref()
+            .is_some_and(|park| park.kind == ParkKind::Plan)
+    }
+
     /// Fail closed when the durable park kind and the approval identity
     /// disagree, so stripping or adding the identity cannot reclassify a wait.
     pub fn validate_park_kind(&self) -> Result<(), CheckpointError> {
@@ -400,6 +414,7 @@ mod tests {
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -440,6 +455,7 @@ mod tests {
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -470,12 +486,14 @@ mod tests {
                 tool_call_id: "tool-1".into(),
                 kind: Default::default(),
                 allow_call_id: String::new(),
+                plan_digest: String::new(),
             }),
             todos: vec![],
             governance: None,
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -508,6 +526,7 @@ mod tests {
                 tool_call_id: "call-1".into(),
                 kind,
                 allow_call_id: String::new(),
+                plan_digest: String::new(),
             }),
             todos: vec![],
             governance: Some(GovernanceCheckpoint {
@@ -527,6 +546,7 @@ mod tests {
             replay: None,
             content: None,
             prompt_start_turns: None,
+            plan_jail: false,
         }
     }
 
@@ -565,6 +585,15 @@ mod tests {
         let wait = parked_checkpoint(ParkKind::PromptWait, false);
         assert!(wait.is_prompt_wait());
         assert!(wait.validate_park_kind().is_ok());
+
+        let plan = parked_checkpoint(ParkKind::Plan, false);
+        assert!(plan.is_plan_park());
+        assert!(plan.validate_park_kind().is_ok());
+        let plan_with_approval = parked_checkpoint(ParkKind::Plan, true);
+        assert!(matches!(
+            plan_with_approval.validate_park_kind(),
+            Err(CheckpointError::ParkKindMismatch { .. })
+        ));
     }
 
     #[test]

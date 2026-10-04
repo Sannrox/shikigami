@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
   `session/request_permission` and `resume_answer`. Session `max_turns` is
   per prompt, including ask/escalate resumes. Unattended `run` is unchanged.
+- Additive `run.plan_jail` (default off): mutating tools fail closed except
+  writes to `.shikigami/plan.md`. `report` parks `ParkKind::Plan` with the
+  plan digest. Resume `--plan-accept` starts execute authority on the same
+  run; `--plan-reject` completes failed and keeps the jail. `doctor` names the mode when
+  selected. Env: `SHIKIGAMI_RUN_PLAN_JAIL`. ACP maps the park through
+  `session/request_permission` so the TUI overlay shows the plan text.
 - [ADR 0015](docs/decisions/0015-nested-child-runs.md): nested child runs
   as first-class Runs (post-1.0; default off).
 
