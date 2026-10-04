@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session/update`, `session/request_permission`, `session/cancel`). See
   [docs/acp.md](docs/acp.md).
 - `shikigami tui`: thin interactive host; ACP client of the in-process
-  session. Dense transcript, permission and plan overlays, Ctrl-C cancel,
-  continue-last-in-cwd (`session/load`, fail closed → `session/new`). Bare
-  `shikigami` stays usage/help. See [docs/tui.md](docs/tui.md).
+  session. Dense transcript, PageUp/PageDown, permission and plan overlays,
+  Ctrl-C cancel, continue-last-in-cwd (`session/load`, fail closed →
+  `session/new`). Bare `shikigami` stays usage/help. See
+  [docs/tui.md](docs/tui.md).
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
@@ -30,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- TUI depends on ratatui 0.30 (crossterm 0.28 backend only) so the
+  unmaintained `paste` crate is not in the graph.
 - VISION: desktop UI stays a client; a terminal process host is in-tree
   and thin.
 

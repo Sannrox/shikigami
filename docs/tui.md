@@ -19,6 +19,7 @@ Credentials come from the environment, same as CLI. There is no TUI login.
 | Start | `initialize`, then `session/load` of the last session in this cwd, or `session/new` when load fails or none exists |
 | Prompt | Enter sends `session/prompt` |
 | Stream | Dense transcript of `session/update` (assistant text, tool calls) |
+| Scroll | PageUp / PageDown through the transcript; a new prompt returns to the tail |
 | Permission | Overlay on `session/request_permission`; `y` allow, `n` deny |
 | Plan | Overlay when a `plan` session update arrives; Ctrl-P toggles, Esc hides |
 | Cancel | Ctrl-C while a prompt is running sends `session/cancel` |

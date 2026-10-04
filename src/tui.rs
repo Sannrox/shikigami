@@ -15,7 +15,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::prelude::{Constraint, CrosstermBackend, Layout, Rect, Style, Stylize};
+use ratatui::prelude::{Constraint, CrosstermBackend, Layout, Rect, Style};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde_json::{Value, json};
@@ -72,6 +72,9 @@ struct Shared {
     status: String,
     busy: bool,
     input: String,
+    /// Rows above the follow-tail. 0 means stick to the newest output.
+    scroll_back: u16,
+    transcript_h: u16,
 }
 
 #[derive(Clone)]
@@ -105,6 +108,8 @@ impl TuiSession {
                     status: "ready".into(),
                     busy: false,
                     input: String::new(),
+                    scroll_back: 0,
+                    transcript_h: 0,
                 })),
             },
             session_id: String::new(),
@@ -184,6 +189,7 @@ impl TuiSession {
             }
             shared.busy = true;
             shared.status = "running".into();
+            shared.scroll_back = 0;
             shared.transcript.push(TranscriptLine::User(text.clone()));
         }
 
@@ -580,6 +586,16 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
     }
 
     match key.code {
+        KeyCode::PageUp => {
+            let mut shared = session.lock_shared();
+            let page = shared.transcript_h.max(1);
+            shared.scroll_back = shared.scroll_back.saturating_add(page);
+        }
+        KeyCode::PageDown => {
+            let mut shared = session.lock_shared();
+            let page = shared.transcript_h.max(1);
+            shared.scroll_back = shared.scroll_back.saturating_sub(page);
+        }
         KeyCode::Char(ch) if !ctrl => session.lock_shared().input.push(ch),
         KeyCode::Backspace => {
             session.lock_shared().input.pop();
@@ -608,7 +624,7 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
 }
 
 fn draw(frame: &mut Frame, session: &TuiSession) {
-    let shared = session.lock_shared();
+    let mut shared = session.lock_shared();
     let overlay = if let Some(pending) = shared.permission.as_ref() {
         Some(format_permission(pending))
     } else if shared.show_plan {
@@ -616,12 +632,11 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     } else {
         None
     };
+    let area = frame.area();
     let overlay_h = overlay
         .as_ref()
-        .map(|text| (text.lines().count() as u16 + 2).clamp(3, 10))
+        .map(|text| overlay_height(text, area))
         .unwrap_or(0);
-
-    let area = frame.area();
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -639,11 +654,16 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    let offset = scroll_offset(&body, chunks[1]);
+    shared.transcript_h = chunks[1].height;
+    let (follow_y, x) = scroll_offset(&body, chunks[1]);
+    if shared.scroll_back > follow_y {
+        shared.scroll_back = follow_y;
+    }
+    let y = follow_y.saturating_sub(shared.scroll_back);
     frame.render_widget(
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
-            .scroll(offset),
+            .scroll((y, x)),
         chunks[1],
     );
 
@@ -672,14 +692,22 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     );
 }
 
+fn wrapped_rows(text: &str, width: u16) -> u16 {
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .min(u16::MAX as usize) as u16
+}
+
+fn overlay_height(text: &str, area: Rect) -> u16 {
+    let interior = area.width.saturating_sub(2).max(1);
+    let rows = wrapped_rows(text, interior).saturating_add(2);
+    let max = area.height.saturating_sub(4).max(3);
+    rows.clamp(3, max)
+}
+
 fn scroll_offset(body: &str, area: Rect) -> (u16, u16) {
-    let width = area.width.max(1) as usize;
-    let mut rows: u16 = 0;
-    for line in body.lines() {
-        let chars = line.chars().count().max(1);
-        let wrapped = chars.div_ceil(width) as u16;
-        rows = rows.saturating_add(wrapped);
-    }
+    let rows = wrapped_rows(body, area.width.max(1));
     let h = area.height.max(1);
     (rows.saturating_sub(h), 0)
 }
@@ -811,6 +839,20 @@ mod tests {
         assert_eq!(scroll_offset(&body, area), (2, 0));
         let short = Rect::new(0, 0, 80, 20);
         assert_eq!(scroll_offset("hello", short), (0, 0));
+        let words = "123456 123456 123456";
+        assert_eq!(scroll_offset(words, Rect::new(0, 0, 10, 2)), (1, 0));
+    }
+
+    #[test]
+    fn overlay_height_uses_wrapped_rows() {
+        let args = "x".repeat(400);
+        let text = format!("allow write_file?\n{args}\ny allow  n deny");
+        let area = Rect::new(0, 0, 20, 24);
+        assert_eq!(overlay_height(&text, area), 20);
+        assert_eq!(
+            overlay_height("allow?\nok\ny n", Rect::new(0, 0, 80, 24)),
+            5
+        );
     }
 
     #[tokio::test]
@@ -874,6 +916,22 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
         assert!(matches!(handle_key(&session, key), KeyResult::Continue));
         assert_eq!(session.lock_shared().input, "p");
+    }
+
+    #[tokio::test]
+    async fn page_up_scrolls_back_and_new_prompt_returns_to_tail() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        session.lock_shared().transcript_h = 10;
+        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert!(matches!(handle_key(&session, key), KeyResult::Continue));
+        assert_eq!(session.lock_shared().scroll_back, 10);
+        session.spawn_prompt("next".into()).await.unwrap();
+        assert_eq!(session.lock_shared().scroll_back, 0);
+        let _ = session.wait_prompt().await;
     }
 
     #[tokio::test]
