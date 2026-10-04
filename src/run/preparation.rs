@@ -58,6 +58,9 @@ pub(super) async fn prepare(
     let stored_prompt_start = resume_checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.prompt_start_turns);
+    let stored_plan_jail = resume_checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint.plan_jail);
     let resumed_park = resume_checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.park.clone());
@@ -86,7 +89,16 @@ pub(super) async fn prepare(
         .map_err(|error| RunError::Message(format!("run registry update failed: {error}")))?;
     prepare_workspace(engine, request, &run_id, &workspace, is_resume)?;
     capture_baseline(engine, &run_id, &workspace);
-    let (prompt_id, system_prompt) = compose_context(engine, &run_id, &workspace);
+    // Only Accept restores execute authority. Reject keeps the stored jail so
+    // a later `--resume` cannot write the workspace; fresh runs use the request.
+    let plan_jail = if request.resume_plan == Some(super::PlanDecision::Accept) {
+        false
+    } else if is_resume {
+        stored_plan_jail
+    } else {
+        request.plan_jail
+    };
+    let (prompt_id, system_prompt) = compose_context(engine, &run_id, &workspace, plan_jail);
 
     let mut tools = ToolRegistry::from_config(&workspace.path, &engine.config)?;
     tools.set_todos(todos);
@@ -142,6 +154,7 @@ pub(super) async fn prepare(
         );
         session.set_resumed_ask_park(resumed_park.clone());
     }
+    session.plan_jail = plan_jail;
     if let Some(content) = content {
         let (messages, capabilities, initial_message_count, terminal, usage) =
             if let Some(binding) = content_binding.as_ref() {
@@ -270,6 +283,7 @@ fn initial_state(
         let escalate_park = checkpoint.is_escalate_park();
         let ask_park = checkpoint.is_ask_park();
         let prompt_wait = checkpoint.is_prompt_wait();
+        let plan_park = checkpoint.is_plan_park();
         let approval_wait = checkpoint
             .park
             .as_ref()
@@ -329,6 +343,36 @@ fn initial_state(
                 None => {
                     return Err(RunError::Message(format!(
                         "run {resume_id} is parked for ask=park; supply resume_ask to continue"
+                    )));
+                }
+            }
+        } else if plan_park {
+            match request.resume_plan {
+                Some(super::PlanDecision::Reject) => {
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: "plan rejected".into(),
+                        tool_call_id: park_tool_call_id.expect("plan park"),
+                        tool_calls: vec![],
+                    });
+                }
+                Some(super::PlanDecision::Accept) => {
+                    let digest = checkpoint
+                        .park
+                        .as_ref()
+                        .map(|park| park.plan_digest.as_str())
+                        .filter(|digest| !digest.is_empty())
+                        .unwrap_or("sha256:missing");
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: format!("plan accepted {digest}"),
+                        tool_call_id: park_tool_call_id.expect("plan park"),
+                        tool_calls: vec![],
+                    });
+                }
+                None => {
+                    return Err(RunError::Message(format!(
+                        "run {resume_id} is parked for plan review; supply resume_plan to continue"
                     )));
                 }
             }
@@ -441,11 +485,19 @@ fn compose_context(
     engine: &Engine,
     run_id: &str,
     workspace: &MaterializedWorkspace,
+    plan_jail: bool,
 ) -> (String, String) {
     let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
     let rules = crate::context::load_project_rules(&workspace.path, &engine.config.context);
     let skills = crate::context::load_skills(&workspace.path, &engine.config.context);
-    let prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &skills);
+    let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &skills);
+    if plan_jail {
+        prompt.push_str("\n\nPlan write-jail is active. Mutating tools may only write `");
+        prompt.push_str(crate::tools::PLAN_JAIL_PATH);
+        prompt.push_str(
+            "`. Call report when the plan is ready for operator review. After accept, execute authority is restored on this run.",
+        );
+    }
     engine.emit(
         run_id,
         HarnessEvent::Prompt {
@@ -589,5 +641,47 @@ mod tests {
         let checkpoint = Checkpoint::load(&state.runs_dir(), run_id).unwrap();
         assert_eq!(checkpoint.run_id, run_id);
         assert_eq!(checkpoint.workspace, prepared.workspace.path);
+        assert!(!prepared.system_prompt.contains("Plan write-jail"));
+    }
+
+    #[tokio::test]
+    async fn plan_jail_adds_mode_instructions_to_the_system_prompt() {
+        let directory = tempdir().unwrap();
+        let state = StateRoot::new(directory.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.events.adapter = "none".into();
+        config.workspace.root = directory.path().join("ws").to_string_lossy().into();
+        config.model.adapter = "scripted".into();
+        let registry = Arc::new(RunRegistry::new(state.path()).unwrap());
+        let engine = Engine::new(
+            config.clone(),
+            Arc::from(governance::from_config(&config).unwrap()),
+            Arc::from(workspace::from_config(&config).unwrap()),
+            Arc::from(crate::model::from_config(&config).unwrap()),
+            Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            state.runs_dir(),
+            Arc::clone(&registry),
+        );
+        let run_id = "plan-jail-prompt";
+        registry.start(run_id, "task", None, None).unwrap();
+        let mut request = RunRequest::new("task");
+        request.keep_workspace = true;
+        request.plan_jail = true;
+        let prepared = prepare(&engine, &request, run_id.into(), None, None, None)
+            .await
+            .unwrap();
+        assert!(prepared.session.plan_jail);
+        assert!(
+            prepared.system_prompt.contains("Plan write-jail"),
+            "{}",
+            prepared.system_prompt
+        );
+        assert!(
+            prepared
+                .system_prompt
+                .contains(crate::tools::PLAN_JAIL_PATH)
+        );
     }
 }

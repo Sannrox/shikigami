@@ -14,9 +14,9 @@ pub(crate) use catalog::{ReplayToolAuthority, replay_tool_authority};
 pub(crate) use environment::ToolEnvironment;
 
 pub use catalog::{
-    ToolDef, builtin_catalog, builtin_is_authorized, definitions_for_enabled,
+    PLAN_JAIL_PATH, ToolDef, builtin_catalog, builtin_is_authorized, definitions_for_enabled,
     is_parallel_safe_tool, model_visible_builtin_definitions, must_be_exclusive_batch,
-    mutates_workspace,
+    mutates_workspace, plan_jail_allows, plan_jail_destination_ok, read_plan_jail_file,
 };
 pub use path::{is_unsafe_relative_path, path_is_ignored};
 pub use registry::{ExternalTool, ToolRegistry};
@@ -378,6 +378,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::UnsafePath(_)));
+    }
+
+    #[tokio::test]
+    async fn read_file_does_not_create_missing_parents() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["read_file"]);
+        let err = tools
+            .execute("read_file", r#"{"path":"missing/nested.txt"}"#)
+            .await
+            .unwrap_err();
+        assert!(!matches!(err, ToolError::UnsafePath(_)), "{err}");
+        assert!(!dir.path().join("missing").exists());
     }
 
     #[tokio::test]
