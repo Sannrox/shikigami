@@ -84,6 +84,7 @@ Choose a process host for the common integration paths:
 - CLI: one-shot operator and CI use (`doctor` / `run`) — [CLI reference](docs/cli.md)
 - `serve`: long-running filesystem or plane-claim intake — [serve guide](docs/serve.md)
 - MCP stdio: IDE and tool clients — [MCP guide](docs/mcp.md)
+- ACP / TUI: session guest and interactive terminal host — [ACP](docs/acp.md), [TUI](docs/tui.md)
 - Library: advanced in-process integrations that need direct results,
   cancellation, events, or metrics — [embedding guide](docs/embedding.md)
 

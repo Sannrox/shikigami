@@ -176,6 +176,11 @@ enum Command {
     ///
     /// Evolving process host, same rank as `mcp`. Not freeze-core.
     Acp,
+    /// Interactive terminal host. ACP client of the in-process session. See docs/tui.md.
+    ///
+    /// Evolving process host, same rank as `mcp` / `acp`. Not freeze-core.
+    /// Bare `shikigami` stays usage/help.
+    Tui,
     /// Export a run transcript as JSONL from local checkpoint state.
     Export {
         /// Run id under the state root (`runs/<id>/checkpoint.json`).
@@ -732,6 +737,12 @@ async fn run() -> anyhow::Result<()> {
             eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             shikigami::acp::run_stdio(harness)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Command::Tui => {
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            shikigami::tui::run(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }

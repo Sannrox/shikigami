@@ -1,9 +1,9 @@
 # ACP
 
 `shikigami acp` is a thin **Agent Client Protocol** process host over
-`Harness`. It is the rusui P1 guest contract and the protocol the in-crate TUI
-speaks. Evolving, same rank as [`mcp.md`](mcp.md). Not part of the ADR 0004
-freeze-core CLI (`version` / `doctor` / `run` / `serve`).
+`Harness`. It is the rusui P1 guest contract and the protocol the in-crate
+[`tui`](tui.md) speaks. Evolving, same rank as [`mcp.md`](mcp.md). Not part of
+the ADR 0004 freeze-core CLI (`version` / `doctor` / `run` / `serve`).
 
 Transport: JSON-RPC 2.0 on **stdio**, newline-delimited. MCP Content-Length
 stays the MCP host. No network bind.

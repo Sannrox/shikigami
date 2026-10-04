@@ -417,7 +417,7 @@ impl AcpHost {
         }
     }
 
-    async fn arm_cancel(&self, session_id: &str) {
+    pub(crate) async fn arm_cancel(&self, session_id: &str) {
         let mut sessions = self.sessions.lock().await;
         let Some(live) = sessions.get_mut(session_id) else {
             return;
@@ -497,6 +497,38 @@ impl AcpHost {
         let path = self.sessions_dir().join(format!("{session_id}.json"));
         let bytes = std::fs::read(path).ok()?;
         serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Most recently persisted session for `cwd`, if any. Used by the TUI
+    /// continue-last-in-cwd path (`session/load`, fail closed → `session/new`).
+    pub(crate) fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
+        let dir = self.sessions_dir();
+        let mut best: Option<(std::time::SystemTime, String)> = None;
+        for entry in std::fs::read_dir(dir).ok()? {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(persisted) = serde_json::from_slice::<PersistedSession>(&bytes) else {
+                continue;
+            };
+            if !same_cwd(Path::new(&persisted.cwd), cwd) {
+                continue;
+            }
+            let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(known, _)| mtime >= *known) {
+                best = Some((mtime, persisted.session_id));
+            }
+        }
+        best.map(|(_, id)| id)
     }
 
     async fn set_run_id(&self, session_id: &str, run_id: Option<String>) -> Result<(), String> {
@@ -1023,6 +1055,20 @@ fn prompt_text(prompt: &Value) -> Result<String, Value> {
 
 fn rpc_error(code: i64, message: impl Into<String>) -> Value {
     json!({ "code": code, "message": message.into() })
+}
+
+fn same_cwd(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => {
+            let a = left.to_string_lossy();
+            let b = right.to_string_lossy();
+            a.trim_end_matches('/') == b.trim_end_matches('/')
+        }
+    }
 }
 
 /// Serve ACP on process stdio until EOF. Newline-delimited JSON-RPC.

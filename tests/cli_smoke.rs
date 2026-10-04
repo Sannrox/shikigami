@@ -51,6 +51,19 @@ fn version_prints_product_identity() {
 }
 
 #[test]
+fn help_lists_tui_and_keeps_freeze_core() {
+    cargo_bin_cmd!("shikigami")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tui"))
+        .stdout(predicate::str::contains("version"))
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("run"))
+        .stdout(predicate::str::contains("serve"));
+}
+
+#[test]
 fn doctor_succeeds_on_local_defaults() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
