@@ -145,7 +145,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/fallback.rs` | Fail-closed local-model fallback admission: typed grant, fence, selection, evidence identity, and reconciliation (not a new port) |
 | `src/evidence_queue.rs` | Bounded durable spool for signed delayed evidence: identities, conflict, retention, and redacted observability |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates plane session, governed Run admission, governed model turns, run completion, tool authorization, harvest durability and event reporting, and plane claim acquisition plus lease RPCs to private deep modules |
-| `src/tools/`, `src/mcp/`, `src/mcp_server/`, `src/acp.rs` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, shared bounded framing behind the stdio adapter seams, and the ACP newline JSON-RPC session host |
+| `src/tools/`, `src/mcp/`, `src/mcp_server/`, `src/acp.rs`, `src/tui.rs` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, shared bounded framing behind the stdio adapter seams, the ACP newline JSON-RPC session host, and the thin TUI ACP client |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
 | `src/sandbox.rs` | Settings-selected OS isolation for spawned children (`none` / `rlimit` / `linux_native`) |
 | `src/eval.rs` | Offline golden-fixture harness (`shikigami eval`) |

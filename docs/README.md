@@ -31,6 +31,7 @@ Operator and contributor documentation for **shikigami**.
 | Network egress policy | [network.md](network.md) |
 | MCP client and server host | [mcp.md](mcp.md) |
 | ACP session guest host | [acp.md](acp.md) |
+| TUI interactive host | [tui.md](tui.md) |
 | Lifecycle hooks | [hooks.md](hooks.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |

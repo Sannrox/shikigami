@@ -15,7 +15,8 @@ results, cancellation, events, or metrics:
 
 The CLI, `serve`, MCP, ACP, and TUI hosts all use the same `Harness`; choosing
 a process host does not fork the turn loop or weaken governance. `shikigami acp`
-is the shipped ACP guest. `shikigami tui` is accepted and not yet shipped.
+is the shipped ACP guest. `shikigami tui` is the shipped interactive host
+(ACP client of the in-process session).
 
 ## Compatibility proof
 
