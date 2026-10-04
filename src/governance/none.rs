@@ -40,6 +40,10 @@ impl GovernancePort for NoneGovernance {
         true
     }
 
+    fn session_asks_mutating_tools(&self) -> bool {
+        true
+    }
+
     async fn begin_run(
         &self,
         run_id: &str,

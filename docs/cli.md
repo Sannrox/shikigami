@@ -15,13 +15,15 @@ shikigami [--state DIR] [--config FILE] [--model MODEL] <COMMAND>
 | --- | --- |
 | `version [--json]` | Product identity |
 | `doctor [--json] [--models]` | Effective profile, adapters, health, and optionally available models |
-| `run <task> [--keep-workspace] [--resume ID] [--answer TEXT]` | Execute or resume a run; `escalate` parks need an operator answer |
+| `run <task> [--keep-workspace] [--resume ID] [--answer TEXT] [--plan-jail] [--plan-accept\|--plan-reject]` | Execute or resume a run; `escalate` parks need an operator answer; plan write-jail parks need accept or reject |
 | `runs [ID] [--diagnose], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([runs.md](runs.md)) |
 | `artifacts ID [--patch]` | Export retained artifact metadata or a captured patch |
 | `metrics [--json\|--prometheus]` | Export aggregate durable metrics ([metrics.md](metrics.md)) |
 | `eval FIXTURE [--json]` | Run offline scripted golden fixtures ([eval.md](eval.md)) |
 | `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host; filesystem supports bounded worker/control options ([serve.md](serve.md)) |
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([mcp.md](mcp.md)) |
+| `acp` | ACP session host, newline JSON-RPC ([acp.md](acp.md)). Evolving; not freeze-core |
+| `tui` | Interactive terminal host; ACP client of the in-process session ([tui.md](tui.md)). Evolving; not freeze-core |
 | `export <run_id> [-o FILE]` | Offline JSONL transcript from checkpoint ([embedding.md](embedding.md)) |
 | `replay --manifest FILE --evidence FILE [--resume ID] [--json]` | Observation-only content-bound replay ([replay.md](replay.md)) |
 | `replay-export <run_id> [--json] [-o DIR]` | Reconstruct a replay package from retained artifacts, or report missing bindings ([replay.md](replay.md)) |
@@ -38,6 +40,8 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 | `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
 | `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
 | `run --keep-workspace` | Keep the workspace after a successful run |
+| `run --plan-jail` / `SHIKIGAMI_RUN_PLAN_JAIL` | Restrict mutating tools to `.shikigami/plan.md` until `--plan-accept` |
+| `run --plan-accept` / `--plan-reject` | Resume a parked plan: Accept restores execute authority on the same run; Reject completes failed and keeps the jail so a later `--resume` stays write-jailed |
 
 There is **no** `init` command. Config is optional; disk state is created when a
 run needs it.

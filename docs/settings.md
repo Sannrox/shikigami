@@ -318,12 +318,14 @@ Rules and skills are **untrusted text** injected into the system prompt (not exe
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `max_turns` | `50` | Hard stop for the turn loop |
+| `max_turns` | `50` | Hard stop for the turn loop. Unattended `run` applies it to the run lifetime. Session hosts (`session_wait`) apply it per prompt, including ask/escalate resumes of that prompt. |
 | `compact_after_messages` | unset | Compact middle history when message count exceeds N (off by default) |
 | `compact_keep_tail` | `8` | Messages kept after the first task message when compacting |
 | `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |
+| `plan_jail` | `false` | Restrict mutating tools to `.shikigami/plan.md` until a parked plan is accepted. `report` parks `ParkKind::Plan` with the plan digest. Resume with `RunRequest.resume_plan` / `--plan-accept` / `--plan-reject`. Only Accept clears the jail; Reject completes failed and keeps it. `doctor` names the mode when selected. |
 
 CLI / env override: `shikigami run --timeout-secs N` or `SHIKIGAMI_RUN_TIMEOUT_SECS`.
+`shikigami run --plan-jail` or `SHIKIGAMI_RUN_PLAN_JAIL`.
 Embedders may also pass `RunRequest.timeout` and a cooperative
 `RunRequest.cancel` (`tokio::sync::watch::Receiver<bool>`). Cancel and timeout
 surface as errors (`RunError::Cancelled` / `TimedOut`), never as silent success.

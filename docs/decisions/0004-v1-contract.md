@@ -65,6 +65,13 @@ This does not revise the original 1.0 decision or make Shikigami an admission
 or control plane. Sekai-chisei still owns admission, claim state, fencing,
 governance, and durable operational truth.
 
+### Subsequent guest-host work
+
+Post-1.0, [ADR 0014](0014-usable-guest-hosts.md) accepts ACP and TUI as
+evolving process hosts (session wait, ask=park, plan write-jail).
+[ADR 0015](0015-nested-child-runs.md) accepts nested child **runs** inside
+one guest. Neither is freeze-core.
+
 ### Evidence considered
 
 - Embed API freeze list (`docs/embedding.md`) and ADRs 0001–0003

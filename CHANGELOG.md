@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as
+  evolving process hosts; session wait (`end_turn`); ask=park; plan
+  write-jail.
+- `shikigami acp`: newline-delimited JSON-RPC session host over `Harness`
+  (`initialize`, `session/new`, `session/load` fail-closed, `session/prompt`,
+  `session/update`, `session/request_permission`, `session/cancel`). See
+  [docs/acp.md](docs/acp.md).
+- `shikigami tui`: thin interactive host; ACP client of the in-process
+  session. Dense transcript, PageUp/PageDown, permission and plan overlays,
+  Ctrl-C cancel, continue-last-in-cwd (`session/load`, fail closed →
+  `session/new`). Bare `shikigami` stays usage/help. See
+  [docs/tui.md](docs/tui.md).
+- Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
+  `report` also waits so follow-ups keep the conversation; ungoverned
+  mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
+  `session/request_permission` and `resume_answer`. Session `max_turns` is
+  per prompt, including ask/escalate resumes. Unattended `run` is unchanged.
+- Additive `run.plan_jail` (default off): mutating tools fail closed except
+  writes to `.shikigami/plan.md`. `report` parks `ParkKind::Plan` with the
+  plan digest. Resume `--plan-accept` starts execute authority on the same
+  run; `--plan-reject` completes failed and keeps the jail. `doctor` names the mode when
+  selected. Env: `SHIKIGAMI_RUN_PLAN_JAIL`. ACP maps the park through
+  `session/request_permission` so the TUI overlay shows the plan text.
+- [ADR 0015](docs/decisions/0015-nested-child-runs.md): nested child runs
+  as first-class Runs (post-1.0; default off).
+
 ### Changed
+
+- TUI depends on ratatui 0.30 (crossterm 0.28 backend only) so the
+  unmaintained `paste` crate is not in the graph.
+- VISION: desktop UI stays a client; a terminal process host is in-tree
+  and thin.
 
 - Document active plane-authorized runtime identity requirements and recovery
   from claim-list policy or state rejection after a producing application is

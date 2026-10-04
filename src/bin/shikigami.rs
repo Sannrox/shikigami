@@ -77,6 +77,15 @@ enum Command {
         /// Read operator answer from a file (UTF-8); alternative to --answer.
         #[arg(long)]
         answer_file: Option<PathBuf>,
+        /// Restrict mutating tools to `.shikigami/plan.md` until --plan-accept.
+        #[arg(long)]
+        plan_jail: bool,
+        /// Accept a parked plan and continue with execute authority.
+        #[arg(long, conflicts_with = "plan_reject")]
+        plan_accept: bool,
+        /// Reject a parked plan and complete the run as failed.
+        #[arg(long, conflicts_with = "plan_accept")]
+        plan_reject: bool,
     },
     /// List or inspect durable local run records.
     Runs {
@@ -172,6 +181,15 @@ enum Command {
     /// Stdio only — no network bind. Not a multi-tenant control plane;
     /// prefer library embed for in-process hosts.
     Mcp,
+    /// ACP session host over stdio (newline JSON-RPC). See docs/acp.md.
+    ///
+    /// Evolving process host, same rank as `mcp`. Not freeze-core.
+    Acp,
+    /// Interactive terminal host. ACP client of the in-process session. See docs/tui.md.
+    ///
+    /// Evolving process host, same rank as `mcp` / `acp`. Not freeze-core.
+    /// Bare `shikigami` stays usage/help.
+    Tui,
     /// Export a run transcript as JSONL from local checkpoint state.
     Export {
         /// Run id under the state root (`runs/<id>/checkpoint.json`).
@@ -312,6 +330,9 @@ async fn run() -> anyhow::Result<()> {
             answer,
             answer_file,
             task_file,
+            plan_jail,
+            plan_accept,
+            plan_reject,
         } => {
             let task = match (task.is_empty(), task_file) {
                 (false, Some(_)) => {
@@ -337,6 +358,12 @@ async fn run() -> anyhow::Result<()> {
             request.timeout = timeout_secs.map(std::time::Duration::from_secs);
             request.resume_run_id = resume;
             request.resume_answer = answer;
+            request.plan_jail = plan_jail;
+            request.resume_plan = match (plan_accept, plan_reject) {
+                (true, false) => Some(shikigami::PlanDecision::Accept),
+                (false, true) => Some(shikigami::PlanDecision::Reject),
+                _ => None,
+            };
             let result = harness.run(request).await?;
             println!(
                 "run {} turns={} success={} termination={} summary={}",
@@ -362,6 +389,16 @@ async fn run() -> anyhow::Result<()> {
                     println!("resume with: shikigami run --resume {}", result.run_id);
                     return Err(anyhow::anyhow!(
                         "run parked awaiting approval (exit semantics: non-zero)"
+                    ));
+                }
+                if park.kind == shikigami::ParkKind::Plan {
+                    println!("parked kind=plan digest={}", park.plan_digest);
+                    println!(
+                        "resume with: shikigami run --resume {} --plan-accept|--plan-reject",
+                        result.run_id
+                    );
+                    return Err(anyhow::anyhow!(
+                        "run parked awaiting plan review (exit semantics: non-zero)"
                     ));
                 }
                 println!(
@@ -721,6 +758,19 @@ async fn run() -> anyhow::Result<()> {
             );
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             shikigami::mcp_server::run_stdio(harness)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Command::Acp => {
+            eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            shikigami::acp::run_stdio(harness)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Command::Tui => {
+            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            shikigami::tui::run(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }

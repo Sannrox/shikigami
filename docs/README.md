@@ -30,6 +30,8 @@ Operator and contributor documentation for **shikigami**.
 | Run and tool-call span export | [tracing.md](tracing.md) |
 | Network egress policy | [network.md](network.md) |
 | MCP client and server host | [mcp.md](mcp.md) |
+| ACP session guest host | [acp.md](acp.md) |
+| TUI interactive host | [tui.md](tui.md) |
 | Lifecycle hooks | [hooks.md](hooks.md) |
 | Choose or implement adapters | [adapters.md](adapters.md) |
 | Embed the library | [embedding.md](embedding.md) |
@@ -48,6 +50,7 @@ Dated closeouts. Use the operator pages above for current behavior.
 | Profile and adapter configuration recommendation (research #142) | [research/142-profile-adapter-configuration.md](research/142-profile-adapter-configuration.md) |
 | Plane work intake recommendation (research #129); shipped as [serve.md](serve.md) / [plane-action-run.md](plane-action-run.md) | [research/129-plane-work-intake.md](research/129-plane-work-intake.md) |
 | OS-level sandbox research #281; shipped backends in [settings.md](settings.md) and [ADR 0013](decisions/0013-os-sandbox-adapter.md) | [research/281-os-sandbox-adapter.md](research/281-os-sandbox-adapter.md) |
+| Usable agent guest (ACP, TUI, loop copies; 2026-10-03); shipped contract in [ADR 0014](decisions/0014-usable-guest-hosts.md) / [ADR 0015](decisions/0015-nested-child-runs.md) | [research/usable-agent-guest.md](research/usable-agent-guest.md) |
 
 ## Document roles
 

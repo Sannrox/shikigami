@@ -33,9 +33,12 @@ with local adapters.
 
 ## Principles
 
-1. **Headless by default.** UI is a client, not the runtime.
-2. **Shared core.** CLI, `serve`, MCP, and advanced embedders share one
-   library core (`Harness`); process hosts are the common product entry points.
+1. **Headless by default.** Desktop UI is a client, not the runtime. A
+   terminal process host is in-tree and thin
+   ([ADR 0014](docs/decisions/0014-usable-guest-hosts.md)).
+2. **Shared core.** CLI, `serve`, MCP, ACP, TUI, and advanced embedders
+   share one library core (`Harness`); process hosts are the common
+   product entry points.
 3. **Ports + settings.** Use cases change by configuration, not forks.
 4. **Fail closed when required.** Governed profiles do not silently degrade.
 5. **Runs are the unit of work.** The product name is not the instance name.
@@ -64,7 +67,7 @@ Freeze-core surfaces follow semver from crate `1.0.0`.
 | --- | --- |
 | OSS contributor | Clone, `cargo test`, offline `run` succeeds with no plane |
 | Operator | `doctor` explains effective adapters; governed path fails closed without a plane |
-| Integrator | Uses CLI/MCP/serve by default, or embeds `Harness` when in-process control is required |
+| Integrator | Uses CLI/MCP/serve by default; ACP or TUI when a session guest is required; embeds `Harness` when in-process control is required |
 | Production (stack) | Runs constrained and recorded through sekai-chisei; binary deliverable via tenkai |
 
 ## Status

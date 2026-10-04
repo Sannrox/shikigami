@@ -28,6 +28,152 @@ fn def(name: &str, description: &str, schema: &str) -> ToolDef {
 /// out of scope. MCP servers register as `mcp.<name>.<tool>` into
 /// [`crate::tools::ToolRegistry`] without changing the turn loop; skills load
 /// as prompt context, not catalog tools.
+/// Workspace-mutating builtins. Session hosts park these until ask=park allow.
+pub fn mutates_workspace(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit" | "multi_edit" | "apply_patch" | "bash" | "bash_background"
+    )
+}
+
+/// Harness-owned plan file. Plan-jail runs may write only this workspace path.
+pub const PLAN_JAIL_PATH: &str = ".shikigami/plan.md";
+
+/// Whether a tool is allowed while plan-jail is active.
+///
+/// Unknown and external names (including `mcp.*`) fail closed. Observation
+/// builtins, report/escalate, todos, and bash job polling stay allowed.
+/// Mutating builtins may write only [`PLAN_JAIL_PATH`].
+pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
+    match name {
+        "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "report" | "escalate"
+        | "bash_job_status" | "bash_job_logs" => true,
+        "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
+        "apply_patch" => apply_patch_is_plan(args_json),
+        _ => false,
+    }
+}
+
+/// True when every existing component of [`PLAN_JAIL_PATH`] under `workspace`
+/// is a real directory or file (not a symlink). Missing components are ok:
+/// the executor creates them as regular paths.
+pub fn plan_jail_destination_ok(workspace: &std::path::Path) -> bool {
+    use std::path::{Component, Path};
+    let mut current = workspace.to_path_buf();
+    for component in Path::new(PLAN_JAIL_PATH).components() {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        current.push(name);
+        let last = current == workspace.join(PLAN_JAIL_PATH);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => return false,
+            Ok(meta) if last && (!meta.is_file() || file_link_count(&meta) > 1) => return false,
+            Ok(meta) if !last && !meta.is_dir() => return false,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Read the plan file without following symlinks. Missing, redirected, or
+/// oversized files yield `None` so review never copies a host path into the
+/// park payload.
+pub fn read_plan_jail_file(workspace: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !plan_jail_destination_ok(workspace) {
+        return None;
+    }
+    let path = workspace.join(PLAN_JAIL_PATH);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    {
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return None;
+        }
+    }
+    let mut file = options.open(&path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+fn file_link_count(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.nlink()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        1
+    }
+}
+
+fn normalize_rel_path(raw: &str) -> Option<String> {
+    use std::path::{Component, Path};
+    // Do not trim: the executor writes the raw path bytes.
+    let path = Path::new(raw);
+    if super::is_unsafe_relative_path(path) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn json_path_is_plan(args_json: &str, field: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return false;
+    };
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .and_then(normalize_rel_path)
+        .is_some_and(|path| path == PLAN_JAIL_PATH)
+}
+
+fn apply_patch_is_plan(args_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return false;
+    };
+    let Some(patches) = value.get("patches").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    !patches.is_empty()
+        && patches.iter().all(|patch| {
+            patch
+                .get("path")
+                .and_then(|v| v.as_str())
+                .and_then(normalize_rel_path)
+                .is_some_and(|path| path == PLAN_JAIL_PATH)
+        })
+}
+
 pub fn builtin_catalog() -> Vec<ToolDef> {
     vec![
         def(
@@ -175,6 +321,91 @@ pub fn model_visible_builtin_definitions(enabled: &[String]) -> Vec<ToolDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_jail_allows_only_the_plan_path() {
+        let plan = format!(r#"{{"path":"{PLAN_JAIL_PATH}","content":"x"}}"#);
+        assert!(plan_jail_allows("write_file", &plan));
+        assert!(plan_jail_allows(
+            "write_file",
+            r#"{"path":"./.shikigami/plan.md","content":"x"}"#
+        ));
+        assert!(!plan_jail_allows(
+            "write_file",
+            r#"{"path":"ok.txt","content":"x"}"#
+        ));
+        assert!(!plan_jail_allows(
+            "write_file",
+            r#"{"path":"../.shikigami/plan.md","content":"x"}"#
+        ));
+        assert!(!plan_jail_allows("bash", r#"{"command":"echo hi"}"#));
+        assert!(plan_jail_allows("read_file", r#"{"path":"ok.txt"}"#));
+        assert!(plan_jail_allows(
+            "apply_patch",
+            &format!(r#"{{"patches":[{{"path":"{PLAN_JAIL_PATH}","hunks":[]}}]}}"#)
+        ));
+        assert!(!plan_jail_allows(
+            "apply_patch",
+            r#"{"patches":[{"path":"a.md","hunks":[]}]}"#
+        ));
+        assert!(!plan_jail_allows(
+            "write_file",
+            r#"{"path":".shikigami/plan.md ","content":"x"}"#
+        ));
+        assert!(!plan_jail_allows(
+            "mcp.fs.write",
+            &format!(r#"{{"path":"{PLAN_JAIL_PATH}","content":"x"}}"#)
+        ));
+        assert!(!plan_jail_allows(
+            "bash_background",
+            r#"{"command":"echo hi"}"#
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_jail_destination_rejects_symlinks() {
+        let missing = tempfile::tempdir().unwrap();
+        assert!(plan_jail_destination_ok(missing.path()));
+
+        let regular = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(regular.path().join(".shikigami")).unwrap();
+        std::fs::write(regular.path().join(PLAN_JAIL_PATH), "plan\n").unwrap();
+        assert!(plan_jail_destination_ok(regular.path()));
+
+        let file_link = tempfile::tempdir().unwrap();
+        let secret = file_link.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::fs::create_dir_all(file_link.path().join(".shikigami")).unwrap();
+        std::os::unix::fs::symlink(&secret, file_link.path().join(PLAN_JAIL_PATH)).unwrap();
+        assert!(!plan_jail_destination_ok(file_link.path()));
+
+        let parent_link = tempfile::tempdir().unwrap();
+        let other = parent_link.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(&other, parent_link.path().join(".shikigami")).unwrap();
+        assert!(!plan_jail_destination_ok(parent_link.path()));
+
+        assert!(read_plan_jail_file(regular.path()).as_deref() == Some(b"plan\n".as_slice()));
+        assert!(read_plan_jail_file(file_link.path()).is_none());
+        assert!(read_plan_jail_file(parent_link.path()).is_none());
+
+        let hard = tempfile::tempdir().unwrap();
+        let secret = hard.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::fs::create_dir_all(hard.path().join(".shikigami")).unwrap();
+        std::fs::hard_link(&secret, hard.path().join(PLAN_JAIL_PATH)).unwrap();
+        assert!(!plan_jail_destination_ok(hard.path()));
+        assert!(read_plan_jail_file(hard.path()).is_none());
+
+        let fifo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(fifo.path().join(".shikigami")).unwrap();
+        let fifo_path = fifo.path().join(PLAN_JAIL_PATH);
+        let c_path = std::ffi::CString::new(fifo_path.to_str().unwrap()).unwrap();
+        let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(made, 0);
+        assert!(!plan_jail_destination_ok(fifo.path()));
+    }
 
     #[test]
     fn bash_enables_background_helpers() {

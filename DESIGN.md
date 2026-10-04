@@ -79,8 +79,10 @@ must not appear in harness process settings.
 | Shape | Role |
 | --- | --- |
 | Library (`Harness`) | Embeddable API for hosts |
-| CLI (`shikigami`) | Thin embedded host over the library |
+| CLI (`shikigami`) | Thin embedded host over the library (`doctor` / `run` / …) |
 | Daemon (`shikigami serve`) | Thin long-running host over `Harness`; accepts filesystem-queue or plane-claim intake |
+| ACP (`shikigami acp`) | Thin session guest over `Harness` (newline JSON-RPC); evolving, [ADR 0014](docs/decisions/0014-usable-guest-hosts.md) |
+| TUI (`shikigami tui`) | Thin interactive host; ACP client of the in-process session; evolving, ADR 0014 |
 
 ## Core concepts
 
@@ -92,7 +94,7 @@ must not appear in harness process settings.
 | **Port** | Versioned boundary (governance, model, workspace, events; sandbox is settings-selected isolation, not a trait) |
 | **Adapter** | Implementation of a port selected by settings |
 | **Governance plane** | Optional external system (e.g. sekai-chisei) for policy and governed model execution |
-| **Host** | CLI, embedder, MCP server, or `serve` daemon |
+| **Host** | CLI, embedder, MCP server, `serve` daemon, ACP guest, or TUI |
 
 ## State ownership
 
@@ -143,7 +145,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/fallback.rs` | Fail-closed local-model fallback admission: typed grant, fence, selection, evidence identity, and reconciliation (not a new port) |
 | `src/evidence_queue.rs` | Bounded durable spool for signed delayed evidence: identities, conflict, retention, and redacted observability |
 | `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates plane session, governed Run admission, governed model turns, run completion, tool authorization, harvest durability and event reporting, and plane claim acquisition plus lease RPCs to private deep modules |
-| `src/tools/`, `src/mcp/`, `src/mcp_server/` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, and shared bounded framing behind the stdio adapter seams |
+| `src/tools/`, `src/mcp/`, `src/mcp_server/`, `src/acp.rs`, `src/tui.rs` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, shared bounded framing behind the stdio adapter seams, the ACP newline JSON-RPC session host, and the thin TUI ACP client |
 | `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
 | `src/sandbox.rs` | Settings-selected OS isolation for spawned children (`none` / `rlimit` / `linux_native`) |
 | `src/eval.rs` | Offline golden-fixture harness (`shikigami eval`) |
@@ -199,6 +201,9 @@ Shipped in the **1.0** tree (medium contract; see ADR 0004):
 
 Post-1.0 themes (not freeze-core):
 
+- ACP and TUI process hosts, session wait, ask=park, plan write-jail
+  ([ADR 0014](docs/decisions/0014-usable-guest-hosts.md)); nested child
+  runs ([ADR 0015](docs/decisions/0015-nested-child-runs.md))
 - Richer serve intake beyond the shipped filesystem queue, plane claim path,
   and filesystem `POST /runs` control surface
 - Deeper governance-native harvest objects
