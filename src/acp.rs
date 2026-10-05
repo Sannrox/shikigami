@@ -25,6 +25,9 @@ use crate::run::{
     compact_messages,
 };
 
+/// ACP protocol version this host speaks. `initialize` accepts client offers
+/// of 1 or 2 so v2-capable clients can connect, and always replies with this
+/// value. Success is not an agreement to speak v2.
 const PROTOCOL_VERSION: u32 = 1;
 
 type PendingPermissions = HashMap<u64, (String, oneshot::Sender<Value>)>;
@@ -1507,6 +1510,87 @@ mod tests {
             .await
             .unwrap();
         rpc_ok(&created)["sessionId"].as_str().unwrap().to_string()
+    }
+
+    fn assert_initialize_speaks_v1(result: &Value) {
+        assert_eq!(result["protocolVersion"], 1);
+        assert_eq!(result["agentCapabilities"]["loadSession"], true);
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["image"],
+            false
+        );
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["audio"],
+            false
+        );
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
+            false
+        );
+        assert_eq!(result["authMethods"], json!([]));
+        assert_eq!(result["agentInfo"]["name"], crate::identity::PRODUCT);
+        assert_eq!(result["agentInfo"]["version"], crate::identity::VERSION);
+    }
+
+    #[tokio::test]
+    async fn initialize_accepts_v1_and_v2_and_always_returns_v1() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        for (id, offered) in [
+            (1, json!(1)),
+            (2, json!(2)),
+            (3, json!("1")),
+            (4, json!("2")),
+        ] {
+            let resp = host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "initialize",
+                        "params": { "protocolVersion": offered, "capabilities": {} }
+                    }),
+                    &client,
+                )
+                .await
+                .unwrap();
+            assert_initialize_speaks_v1(rpc_ok(&resp));
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_rejects_unsupported_protocol_version() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let resp = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": 3, "capabilities": {} }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported protocolVersion 3"),
+            "{}",
+            resp["error"]["message"]
+        );
     }
 
     #[tokio::test]

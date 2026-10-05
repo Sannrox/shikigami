@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse hard-linked or non-regular destinations, matching plan-jail
   reads. A symlink or hardlink swap after the destination check cannot
   land content on another inode.
+- Document ACP `initialize`: this host speaks protocol version 1, accepts
+  client offers of 1 or 2, always returns 1, and advertises the fixed
+  `loadSession` / `promptCapabilities` / empty `authMethods` payload.
+  Tests cover the v2-offer / v1-answer matrix. Success is not an
+  agreement to speak v2.
 
 ### Changed
 
