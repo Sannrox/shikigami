@@ -17,6 +17,7 @@ pub use catalog::{
     PLAN_JAIL_PATH, ToolDef, builtin_catalog, builtin_is_authorized, definitions_for_enabled,
     is_parallel_safe_tool, model_visible_builtin_definitions, must_be_exclusive_batch,
     mutates_workspace, plan_jail_allows, plan_jail_destination_ok, read_plan_jail_file,
+    write_plan_jail_file,
 };
 pub use path::{is_unsafe_relative_path, path_is_ignored};
 pub use registry::{ExternalTool, ToolRegistry};

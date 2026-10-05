@@ -96,7 +96,7 @@ variable name (for example `SEKAI_TOKEN`) that holds a raw token or
 | Id | Status | Role |
 | --- | --- | --- |
 | `scripted` | stable for 1.x | Deterministic multi-turn JSON script (default offline) |
-| `http` | stable for 1.x | OpenAI-compatible Chat Completions (`model-http` feature) |
+| `http` | stable for 1.x | OpenAI-compatible Chat Completions (`model-http` feature). Any Chat Completions gateway works, including a local CLIProxyAPI listen; see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml). |
 | `plane` | with sekai-chisei | Placeholder id; actual turns are owned by governance |
 
 When governance is `sekai-chisei`, the engine uses the plane for planning even if

@@ -36,6 +36,8 @@ pub enum RegistryError {
     Active(String),
     #[error("run {0} is not active")]
     NotActive(String),
+    #[error("run {0} was cancelled before start")]
+    CancelledBeforeStart(String),
     #[error("tool call `{1}` in run {0} is already claimed by another execution attempt")]
     AlreadyClaimed(String, String),
     #[error("run registry lock poisoned")]
@@ -142,6 +144,9 @@ impl RunRegistry {
         }) {
             return Err(RegistryError::Active(run_id.into()));
         }
+        if existing.is_none() && self.cancel_root.join(run_id).is_file() {
+            return Err(RegistryError::CancelledBeforeStart(run_id.into()));
+        }
         self.acquire_owner_unlocked(run_id, now)?;
         let record = match existing {
             Some(mut record) => {
@@ -168,6 +173,10 @@ impl RunRegistry {
                 record
             }
             None => {
+                if self.cancel_root.join(run_id).is_file() {
+                    let _ = self.remove_owner_unlocked(run_id);
+                    return Err(RegistryError::CancelledBeforeStart(run_id.into()));
+                }
                 self.clear_cancel_unlocked(run_id)?;
                 RunRecord {
                     schema_version: RUN_REGISTRY_SCHEMA_VERSION,
@@ -388,6 +397,29 @@ impl RunRegistry {
         fs::write(self.cancel_root.join(run_id), b"cancel\n")?;
         record.cancel_requested = true;
         self.write(&record)
+    }
+
+    /// Write a cancel marker for an assigned run id that may not have
+    /// called [`Self::start`] yet (nested wait=false spawn window).
+    pub fn request_cancel(&self, run_id: &str) -> Result<(), RegistryError> {
+        let run_lock = self.lock_for(run_id)?;
+        let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
+        match self.load_unlocked(run_id) {
+            Ok(mut record) => {
+                if !matches!(record.status.as_str(), "starting" | "running") {
+                    return Err(RegistryError::NotActive(run_id.into()));
+                }
+                fs::write(self.cancel_root.join(run_id), b"cancel\n")?;
+                record.cancel_requested = true;
+                self.write(&record)
+            }
+            Err(RegistryError::Missing(_)) => {
+                fs::create_dir_all(&self.cancel_root)?;
+                fs::write(self.cancel_root.join(run_id), b"cancel\n")?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn cancel_requested(&self, run_id: &str) -> bool {
@@ -678,6 +710,30 @@ mod tests {
         assert!(registry.cancel_requested("run-1"));
         registry.clear_cancel("run-1").unwrap();
         assert!(!registry.cancel_requested("run-1"));
+    }
+
+    #[test]
+    fn cancel_of_missing_id_blocks_later_start() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.request_cancel("run-1").unwrap();
+        assert!(registry.cancel_requested("run-1"));
+        assert!(matches!(
+            registry.start("run-1", "task", None, None),
+            Err(RegistryError::CancelledBeforeStart(_))
+        ));
+        assert!(
+            !registry
+                .run_dir("run-1")
+                .unwrap()
+                .join(RUN_OWNER_FILENAME)
+                .exists(),
+            "CancelledBeforeStart must release the owner lease"
+        );
+        registry.clear_cancel("run-1").unwrap();
+        registry
+            .start("run-1", "task", None, None)
+            .expect("cleared cancel must start without a leaked owner");
     }
 
     #[test]

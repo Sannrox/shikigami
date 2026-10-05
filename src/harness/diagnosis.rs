@@ -57,6 +57,12 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
     if harness.config.run.plan_jail {
         lines.push(format!("plan_jail:  on ({})", crate::tools::PLAN_JAIL_PATH));
     }
+    if harness.config.run.nested {
+        lines.push(format!(
+            "nested:     on (depth<={} children<={})",
+            harness.config.run.nested_max_depth, harness.config.run.nested_max_children
+        ));
+    }
     if harness.config.hooks.is_empty() {
         lines.push("hooks:     (none)".into());
     } else {

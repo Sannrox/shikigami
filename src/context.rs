@@ -56,12 +56,8 @@ pub struct SkillPack {
     pub truncated: bool,
 }
 
-/// Load configured skill packs from `skills_root/<id>/SKILL.md`.
-pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPack> {
-    if settings.skills.is_empty() {
-        return Vec::new();
-    }
-    let root = match &settings.skills_root {
+fn skills_root(workspace: &Path, settings: &ContextSettings) -> PathBuf {
+    match &settings.skills_root {
         Some(r) if !r.is_empty() => {
             let p = PathBuf::from(r);
             if p.is_absolute() {
@@ -71,30 +67,112 @@ pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPac
             }
         }
         _ => workspace.join(".shikigami/skills"),
+    }
+}
+
+/// Roots searched for `/skill:name`. Runtime packs first, then `.agents/skills`.
+fn skill_search_roots(workspace: &Path, settings: &ContextSettings) -> Vec<PathBuf> {
+    let primary = skills_root(workspace, settings);
+    let agents = workspace.join(".agents/skills");
+    if agents == primary {
+        vec![primary]
+    } else {
+        vec![primary, agents]
+    }
+}
+
+fn skill_md(root: &Path, id: &str) -> PathBuf {
+    root.join(id).join("SKILL.md")
+}
+
+fn valid_skill_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains("..") && !id.contains('/') && !id.contains('\\')
+}
+
+fn scan_skill_ids(root: &Path) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return ids;
     };
-    let max = settings.max_skill_bytes.clamp(1, MAX_DEFAULT * 4);
-    let mut out = Vec::new();
-    for id in &settings.skills {
-        if id.contains("..") || id.contains('/') || id.contains('\\') {
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name.to_str() else {
             continue;
+        };
+        if valid_skill_id(id) && skill_md(root, id).is_file() {
+            ids.push(id.to_string());
         }
-        let path = root.join(id).join("SKILL.md");
+    }
+    ids
+}
+
+/// Skill ids the TUI can offer as `/skill:name`.
+///
+/// Configured `context.skills` is an allow-list. When that list is empty,
+/// ids are discovered from `skills_root` and `<workspace>/.agents/skills`
+/// directories that contain `SKILL.md`. [`load_skills`] still injects only
+/// configured ids into the system prompt.
+pub fn list_skill_ids(workspace: &Path, settings: &ContextSettings) -> Vec<String> {
+    let roots = skill_search_roots(workspace, settings);
+    if !settings.skills.is_empty() {
+        return settings
+            .skills
+            .iter()
+            .filter(|id| {
+                valid_skill_id(id) && roots.iter().any(|root| skill_md(root, id).is_file())
+            })
+            .cloned()
+            .collect();
+    }
+    let mut ids = Vec::new();
+    for root in &roots {
+        for id in scan_skill_ids(root) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// Load one skill pack by id. Honors the configured allow-list when it is set.
+/// Prefers `skills_root` over `.agents/skills` when both define the same id.
+pub fn load_skill(workspace: &Path, settings: &ContextSettings, id: &str) -> Option<SkillPack> {
+    if !valid_skill_id(id) {
+        return None;
+    }
+    if !settings.skills.is_empty() && !settings.skills.iter().any(|listed| listed == id) {
+        return None;
+    }
+    let max = settings.max_skill_bytes.clamp(1, MAX_DEFAULT * 4);
+    for root in skill_search_roots(workspace, settings) {
+        let path = skill_md(&root, id);
         if !path.is_file() {
             continue;
         }
-        let Some((body, digest, truncated)) =
-            load_truncated_text(&path, max, "\n\n… [skill truncated]\n")
-        else {
-            continue;
-        };
-        out.push(SkillPack {
-            id: id.clone(),
+        let (body, digest, truncated) =
+            load_truncated_text(&path, max, "\n\n… [skill truncated]\n")?;
+        return Some(SkillPack {
+            id: id.to_string(),
             body,
             digest,
             truncated,
         });
     }
-    out
+    None
+}
+
+/// Load configured skill packs from `skills_root/<id>/SKILL.md`.
+pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPack> {
+    if settings.skills.is_empty() {
+        return Vec::new();
+    }
+    settings
+        .skills
+        .iter()
+        .filter_map(|id| load_skill(workspace, settings, id))
+        .collect()
 }
 
 fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String, String, bool)> {
@@ -179,5 +257,64 @@ mod tests {
         let composed = compose_system_prompt("BASE", None, &packs);
         assert!(composed.contains("Skill `demo`"));
         assert!(composed.contains("tests first"));
+    }
+
+    #[test]
+    fn list_skill_ids_scans_root_when_unlisted() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join(".shikigami/skills/demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "prefer tests first\n").unwrap();
+        let ids = list_skill_ids(dir.path(), &ContextSettings::default());
+        assert_eq!(ids, vec!["demo"]);
+        let pack = load_skill(dir.path(), &ContextSettings::default(), "demo").unwrap();
+        assert!(pack.body.contains("tests first"));
+        assert!(load_skills(dir.path(), &ContextSettings::default()).is_empty());
+    }
+
+    #[test]
+    fn list_skill_ids_honors_allow_list() {
+        let dir = tempdir().unwrap();
+        for id in ["keep", "skip"] {
+            let skill_dir = dir.path().join(".shikigami/skills").join(id);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), format!("{id}\n")).unwrap();
+        }
+        let s = ContextSettings {
+            skills: vec!["keep".into()],
+            ..Default::default()
+        };
+        assert_eq!(list_skill_ids(dir.path(), &s), vec!["keep"]);
+        assert!(load_skill(dir.path(), &s, "skip").is_none());
+    }
+
+    #[test]
+    fn list_skill_ids_includes_agents_skills() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join(".agents/skills/verify-change");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "run make validate\n").unwrap();
+        let ids = list_skill_ids(dir.path(), &ContextSettings::default());
+        assert_eq!(ids, vec!["verify-change"]);
+        let pack = load_skill(dir.path(), &ContextSettings::default(), "verify-change").unwrap();
+        assert!(pack.body.contains("make validate"));
+        assert!(load_skills(dir.path(), &ContextSettings::default()).is_empty());
+    }
+
+    #[test]
+    fn runtime_pack_wins_over_agents_skill_with_the_same_id() {
+        let dir = tempdir().unwrap();
+        let runtime = dir.path().join(".shikigami/skills/demo");
+        let agents = dir.path().join(".agents/skills/demo");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(runtime.join("SKILL.md"), "from runtime\n").unwrap();
+        std::fs::write(agents.join("SKILL.md"), "from agents\n").unwrap();
+        let pack = load_skill(dir.path(), &ContextSettings::default(), "demo").unwrap();
+        assert!(pack.body.contains("from runtime"));
+        assert_eq!(
+            list_skill_ids(dir.path(), &ContextSettings::default()),
+            vec!["demo"]
+        );
     }
 }

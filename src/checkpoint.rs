@@ -30,6 +30,26 @@ pub enum ParkKind {
     Plan,
 }
 
+impl ParkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Escalate => "escalate",
+            Self::Approval => "approval",
+            Self::Ask => "ask",
+            Self::PromptWait => "prompt_wait",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+/// Parent checkpoint identity for a nested child run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildRunRecord {
+    pub run_id: String,
+    pub profile: String,
+    pub task: String,
+}
+
 /// Structured park state when a run awaits an operator answer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParkedState {
@@ -187,6 +207,25 @@ pub struct Checkpoint {
     /// Plan write-jail is still active. Absent/false on older checkpoints.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan_jail: bool,
+    /// Root nested tools were enabled for this attempt. Restored on resume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nested: bool,
+    /// Nested children started by this run. Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChildRunRecord>,
+    /// Depth of this run in a nested tree (0 = root).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub nested_depth: u32,
+    /// Parent run id when this attempt is a nested child.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_run_id: String,
+    /// Typed nested profile (`explore` / `plan` / `full`). Empty on root runs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nested_profile: String,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Error)]
@@ -415,6 +454,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -456,6 +500,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -494,6 +543,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -547,6 +601,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         }
     }
 

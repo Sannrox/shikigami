@@ -14,13 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write-jail.
 - `shikigami acp`: newline-delimited JSON-RPC session host over `Harness`
   (`initialize`, `session/new`, `session/load` fail-closed, `session/prompt`,
-  `session/update`, `session/request_permission`, `session/cancel`). See
-  [docs/acp.md](docs/acp.md).
+  `session/compact`, `session/update`, `session/request_permission`,
+  `session/cancel`). See [docs/acp.md](docs/acp.md).
 - `shikigami tui`: thin interactive host; ACP client of the in-process
-  session. Dense transcript, PageUp/PageDown, permission and plan overlays,
-  Ctrl-C cancel, continue-last-in-cwd (`session/load`, fail closed →
-  `session/new`). Bare `shikigami` stays usage/help. See
-  [docs/tui.md](docs/tui.md).
+  session. Dense transcript, framed composer, PageUp/PageDown, permission
+  and plan in the composer, Ctrl-C cancel, continue-last-in-cwd
+  (`session/load`, fail closed → `session/new`). Bare `shikigami` stays
+  usage/help. See [docs/tui.md](docs/tui.md).
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
@@ -31,12 +31,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plan digest. Resume `--plan-accept` starts execute authority on the same
   run; `--plan-reject` completes failed and keeps the jail. `doctor` names the mode when
   selected. Env: `SHIKIGAMI_RUN_PLAN_JAIL`. ACP maps the park through
-  `session/request_permission` so the TUI overlay shows the plan text.
-- [ADR 0015](docs/decisions/0015-nested-child-runs.md): nested child runs
-  as first-class Runs (post-1.0; default off).
+  `session/request_permission` so the TUI dock shows the plan text.
+- [ADR 0015](docs/decisions/0015-nested-child-runs.md): additive
+  `run.nested` (default off) injects `child_run` / `child_status`. A
+  child is a first-class Run (`explore` read-only, `plan` write-jail,
+  `full` parent authority) sharing the parent workspace; `worktree=true`
+  isolates. Children run unattended to a summary. Session hosts
+  ask=park before `full`/`plan` `child_run` and any `worktree=true`.
+  Depth and fan-out caps fail
+  closed. Children do not inherit nested tools. Explore and
+  plan-jailed children do not attach parent MCP servers. `doctor`
+  names the mode when selected. Env: `SHIKIGAMI_RUN_NESTED`. CLI:
+  `--nested`. ACP/TUI show `child_run` as a tool event.
+- Example settings for ungoverned `http` through a local OpenAI-compatible
+  gateway ([`examples/cliproxy-http.toml`](examples/cliproxy-http.toml)).
+
+### Fixed
+
+- Nested plan Accept keeps the child's spawn-time plan-jail. A plan-profile
+  child, or a full child of a still-jailed parent, cannot write the shared
+  workspace (or attach MCP) after Accept while the parent remains jailed.
+  Root Accept still restores execute authority.
+- Plan-jail writes to `.shikigami/plan.md` (`write_file`, `edit`,
+  `multi_edit`, `apply_patch`) open the plan path with `O_NOFOLLOW` and
+  refuse hard-linked or non-regular destinations, matching plan-jail
+  reads. A symlink or hardlink swap after the destination check cannot
+  land content on another inode.
+- Document ACP `initialize`: this host speaks protocol version 1, accepts
+  client offers of 1 or 2, always returns 1, and advertises the fixed
+  `loadSession` / `promptCapabilities` / empty `authMethods` payload.
+  Tests cover the v2-offer / v1-answer matrix. Success is not an
+  agreement to speak v2.
 
 ### Changed
 
+- `shikigami tui`: framed composer (`>` between two `─` rules), dim footer
+  under it, blank line between turns, `·` tool gutter with path-first
+  fields. Ask and plan replace the composer; the transcript stays in view
+  and pins to the composer when short. Visible draft while a turn runs;
+  input cursor and prompt history. Prompt errors land in the transcript;
+  stderr event JSON is discarded while the alt-screen is up. Redraws only
+  on key, resize, or session update; crossterm events use a bounded
+  channel. Typing `/` opens a command list (`/compact`, `/new`, `/exit`,
+  `/quit`, `/skill:name` from `.shikigami/skills` and `.agents/skills`).
+- ACP `session/compact` shrinks the live session run's middle history.
 - TUI depends on ratatui 0.30 (crossterm 0.28 backend only) so the
   unmaintained `paste` crate is not in the graph.
 - VISION: desktop UI stays a client; a terminal process host is in-tree

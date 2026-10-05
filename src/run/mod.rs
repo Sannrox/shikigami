@@ -35,6 +35,7 @@ use crate::workspace::{WorkspaceError, WorkspacePort};
 
 mod artifact_lifecycle;
 mod model_turn;
+mod nested;
 mod preparation;
 mod resume;
 mod session;
@@ -104,6 +105,16 @@ pub struct RunRequest {
     pub plan_jail: bool,
     /// Accept or reject a `ParkKind::Plan` park on resume.
     pub resume_plan: Option<PlanDecision>,
+    /// Enable nested child-run tools for this attempt when settings allow.
+    pub nested: bool,
+    /// Depth of this run (0 = root). Children are parent + 1.
+    pub nested_depth: u32,
+    /// Parent run id when this request is a nested child.
+    pub parent_run_id: Option<String>,
+    /// Typed child profile; the model cannot invent one.
+    pub nested_profile: Option<ChildProfile>,
+    /// Pre-assigned run id (nested children persist identity before start).
+    pub assigned_run_id: Option<String>,
 }
 
 /// Session-host decision for an ask=park mutating tool.
@@ -122,6 +133,25 @@ pub enum PlanDecision {
     Reject,
 }
 
+/// Typed nested-child profile. The model cannot invent values outside this set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildProfile {
+    Explore,
+    Plan,
+    Full,
+}
+
+impl ChildProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explore => "explore",
+            Self::Plan => "plan",
+            Self::Full => "full",
+        }
+    }
+}
+
 impl RunRequest {
     pub fn new(task: impl Into<String>) -> Self {
         Self {
@@ -138,6 +168,11 @@ impl RunRequest {
             resume_ask: None,
             plan_jail: false,
             resume_plan: None,
+            nested: false,
+            nested_depth: 0,
+            parent_run_id: None,
+            nested_profile: None,
+            assigned_run_id: None,
         }
     }
 }
@@ -368,15 +403,12 @@ impl Engine {
                     if !recovered.keep_workspace && recovered.run.success {
                         let cleanup = match recovered.workspace_adapter.as_str() {
                             "directory" => crate::workspace::WorkspaceCleanup::RemoveDir,
-                            "git-worktree" => {
-                                crate::workspace::WorkspaceCleanup::RemoveGitWorktree {
-                                    repo: std::path::PathBuf::from(&self.config.workspace.root),
-                                    branch: format!(
-                                        "{}{run_id}",
-                                        self.config.workspace.branch_prefix
-                                    ),
-                                }
-                            }
+                            "git-worktree" => crate::workspace::git_worktree_cleanup(
+                                &recovered.run.workspace,
+                                run_id,
+                                &self.config.workspace.branch_prefix,
+                                std::path::Path::new(&self.config.workspace.root),
+                            ),
                             _ => crate::workspace::WorkspaceCleanup::None,
                         };
                         let workspace = crate::workspace::MaterializedWorkspace {
@@ -384,7 +416,7 @@ impl Engine {
                             adapter: recovered.workspace_adapter,
                             cleanup,
                         };
-                        let _ = self.workspace.cleanup(&workspace);
+                        let _ = crate::workspace::apply_cleanup(&workspace);
                     }
                     artifact_dir
                 } else {
@@ -445,6 +477,7 @@ mod tests {
     use crate::state::StateRoot;
     use crate::tools;
     use crate::workspace;
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
@@ -476,6 +509,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
 
         let err =
@@ -522,6 +560,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
 
         let err =
@@ -577,6 +620,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap_err();
@@ -613,6 +661,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap_err();
@@ -661,6 +714,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap_err();
@@ -725,6 +783,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap();
@@ -838,6 +901,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap_err();
@@ -916,6 +984,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap();
@@ -1011,6 +1084,11 @@ mod tests {
                 resume_ask: None,
                 plan_jail: false,
                 resume_plan: None,
+                nested: false,
+                nested_depth: 0,
+                parent_run_id: None,
+                nested_profile: None,
+                assigned_run_id: None,
             })
             .await
             .unwrap_err();
@@ -1070,6 +1148,87 @@ mod tests {
             state_runs: state.runs_dir(),
             registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
         }
+    }
+
+    /// Parent model from `parent_script`; child spawn uses `config.model.script_json`.
+    fn engine_nested(dir: &tempfile::TempDir, mut config: Config, parent_script: &str) -> Engine {
+        config.run.nested = true;
+        let child_script = config.model.script_json.clone();
+        config.model.script_json = Some(parent_script.into());
+        let parent_model = crate::model::from_config(&config).unwrap();
+        config.model.script_json = child_script;
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(parent_model),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
+        }
+    }
+
+    fn child_run_then_report(profile: &str, task: &str, parent_summary: &str) -> String {
+        serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": profile,
+                        "task": task
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": parent_summary,
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string()
+    }
+
+    fn write_then_report(path: &str, content: &str, summary: &str) -> String {
+        serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "write_file",
+                    "args_json": serde_json::json!({
+                        "path": path,
+                        "content": content
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": summary,
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string()
+    }
+
+    fn nested_child_tool_payload(checkpoint: &Checkpoint) -> serde_json::Value {
+        checkpoint
+            .messages
+            .iter()
+            .find_map(|message| {
+                if message.role != "tool" {
+                    return None;
+                }
+                serde_json::from_str::<serde_json::Value>(&message.content).ok()
+            })
+            .expect("parent child_run tool payload")
     }
 
     #[tokio::test]
@@ -1749,5 +1908,1813 @@ mod tests {
             "plan review leaked symlink target: {}",
             park.question
         );
+    }
+
+    #[tokio::test]
+    async fn nested_explore_child_cannot_write_and_parent_stores_run_id() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(write_then_report("pwn.txt", "no\n", "explored"));
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        let child = &parent.children[0];
+        assert_eq!(child.profile, "explore");
+        assert_eq!(child.task, "scout");
+        let payload = nested_child_tool_payload(&parent);
+        assert_eq!(payload["run_id"], child.run_id);
+        assert_eq!(payload["profile"], "explore");
+        assert_eq!(payload["summary"], "explored");
+        let child_cp = Checkpoint::load(&eng.state_runs, &child.run_id).unwrap();
+        assert_eq!(child_cp.parent_run_id, done.run_id);
+        assert_eq!(child_cp.nested_depth, 1);
+        assert!(!child_cp.workspace.join("pwn.txt").exists());
+        assert!(!done.workspace.join("pwn.txt").exists());
+        assert!(
+            child_cp
+                .messages
+                .iter()
+                .any(|message| message.content.contains("tool not enabled: write_file")),
+            "explore child must deny writes: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_plan_child_is_write_jailed() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        let other = serde_json::json!({
+            "path": "other.txt",
+            "content": "no\n"
+        })
+        .to_string();
+        let plan = serde_json::json!({
+            "path": crate::tools::PLAN_JAIL_PATH,
+            "content": "# plan\n"
+        })
+        .to_string();
+        let report = serde_json::json!({"summary": "planned", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {"tool_calls":[{"name":"write_file","args_json": other}]},
+                {"tool_calls":[{"name":"write_file","args_json": plan}]},
+                {"tool_calls":[{"name":"report","args_json": report}]}
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("plan", "draft", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = &parent.children[0].run_id;
+        let payload = nested_child_tool_payload(&parent);
+        assert_eq!(payload["termination"], "parked");
+        assert_eq!(payload["park"]["kind"], "plan");
+        let child_cp = Checkpoint::load(&eng.state_runs, child_id).unwrap();
+        assert_eq!(child_cp.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert!(child_cp.plan_jail);
+        assert!(
+            child_cp
+                .workspace
+                .join(crate::tools::PLAN_JAIL_PATH)
+                .is_file()
+        );
+        assert!(!child_cp.workspace.join("other.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn nested_parent_complete_keeps_shared_workspace_for_parked_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("plan", "draft", "parent done"),
+        );
+        let req = RunRequest::new("delegate");
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = parent.children[0].run_id.clone();
+        let child = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert!(
+            child.workspace.exists(),
+            "parent complete must not remove a shared parked child workspace"
+        );
+        assert!(child.workspace.join(crate::tools::PLAN_JAIL_PATH).is_file());
+
+        let mut resume_config = base_config(&dir);
+        resume_config.model.script_json = Some(plan_jail_script());
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_plan = Some(PlanDecision::Accept);
+        let child_done = resume_eng.run(resume).await.unwrap();
+        assert!(
+            !child.workspace.join("ok.txt").exists(),
+            "Accept on a nested plan child must not lift the write-jail"
+        );
+        let child_after = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert!(child_after.plan_jail);
+        assert_ne!(
+            child_done.termination,
+            RunTermination::Completed,
+            "nested plan Accept must not restore execute authority: {}",
+            child_done.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_full_child_mutates_when_parent_may() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(write_then_report("ok.txt", "yes\n", "wrote"));
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = &parent.children[0].run_id;
+        let child_cp = Checkpoint::load(&eng.state_runs, child_id).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(child_cp.workspace.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
+        assert_eq!(child_cp.workspace, done.workspace);
+        assert_eq!(
+            std::fs::read_to_string(done.workspace.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_depth_cap_refuses_grandchild_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested_max_depth = 1;
+        config.model.script_json = Some(child_run_then_report("explore", "deeper", "child done"));
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        let child_cp = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        assert!(child_cp.children.is_empty());
+        assert!(
+            child_cp.messages.iter().any(|message| {
+                message.content.contains("tool not enabled: child_run")
+                    || message.content.contains("nested depth cap")
+            }),
+            "depth cap must refuse grandchild child_run: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_fan_out_cap_fail_closed() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested_max_children = 1;
+        config.model.script_json = Some(write_then_report("x.txt", "x\n", "child"));
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({"profile":"explore","task":"one"}).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({"profile":"explore","task":"two"}).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({"summary":"parent done","success":true}).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert!(
+            parent.messages.iter().any(|message| {
+                message.role == "tool" && message.content.contains("fan-out cap")
+            }),
+            "second child_run must fail closed: {:?}",
+            parent.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_default_off_has_no_child_tool() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(child_run_then_report("explore", "scout", "parent done"));
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(parent.children.is_empty());
+        assert!(
+            parent
+                .messages
+                .iter()
+                .any(|message| { message.content.contains("tool not enabled: child_run") }),
+            "default off must not expose child_run: {:?}",
+            parent.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_request_flag_enables_tools_when_settings_are_off() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested = false;
+        config.model.script_json = Some(write_then_report("pwn.txt", "no\n", "explored"));
+        let child_script = config.model.script_json.clone();
+        config.model.script_json = Some(child_run_then_report("explore", "scout", "parent done"));
+        let parent_model = crate::model::from_config(&config).unwrap();
+        config.model.script_json = child_script;
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let eng = Engine {
+            governance: Arc::from(governance::from_config(&config).unwrap()),
+            workspace: Arc::from(workspace::from_config(&config).unwrap()),
+            model: Arc::from(parent_model),
+            events: Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            config,
+            state_runs: state.runs_dir(),
+            registry: Arc::new(RunRegistry::new(state.path()).unwrap()),
+        };
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.nested = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn nested_child_begin_run_is_distinct_and_park_is_not_parent_approval() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "approve child?"
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "ask", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(done.summary, "parent done");
+        assert!(done.park.is_none());
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = &parent.children[0].run_id;
+        assert_ne!(child_id, &done.run_id);
+        let child_cp = Checkpoint::load(&eng.state_runs, child_id).unwrap();
+        assert_eq!(child_cp.park.as_ref().unwrap().kind, ParkKind::Escalate);
+        let parent_op = parent
+            .governance
+            .as_ref()
+            .map(|gov| gov.operation_id.as_str())
+            .unwrap_or_default();
+        let child_op = child_cp
+            .governance
+            .as_ref()
+            .map(|gov| gov.operation_id.as_str())
+            .unwrap_or_default();
+        assert!(!parent_op.is_empty());
+        assert!(!child_op.is_empty());
+        assert_ne!(parent_op, child_op);
+        let child_record = eng.registry.load(child_id).unwrap();
+        assert_eq!(
+            child_record.logical_operation_id.as_deref(),
+            Some(done.run_id.as_str())
+        );
+        let payload = nested_child_tool_payload(&parent);
+        assert_eq!(payload["termination"], "parked");
+        assert_eq!(payload["park"]["kind"], "escalate");
+    }
+
+    #[tokio::test]
+    async fn nested_explore_resume_keeps_read_only_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "approve explore?"
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = parent.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.nested_profile, "explore");
+        assert_eq!(child_cp.park.as_ref().unwrap().kind, ParkKind::Escalate);
+
+        let mut resume_config = base_config(&dir);
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "already parked"},
+                {
+                    "tool_calls": [{
+                        "name": "write_file",
+                        "args_json": serde_json::json!({
+                            "path": "pwn.txt",
+                            "content": "no\n"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "resumed",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_answer = Some("yes".into());
+        let resumed = resume_eng.run(resume).await.unwrap();
+        let child_after = Checkpoint::load(&resume_eng.state_runs, &child_id).unwrap();
+        assert!(!child_after.workspace.join("pwn.txt").exists());
+        assert!(
+            child_after
+                .messages
+                .iter()
+                .any(|message| { message.content.contains("tool not enabled: write_file") }),
+            "explore resume must keep read-only tools: {:?}",
+            child_after.messages
+        );
+        assert_ne!(resumed.termination, RunTermination::Failed);
+    }
+
+    #[tokio::test]
+    async fn nested_full_child_run_asks_on_parent_then_completes() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(write_then_report("ok.txt", "yes\n", "wrote"));
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let asked = eng.run(req).await.unwrap();
+        assert_eq!(asked.park.as_ref().unwrap().kind, ParkKind::Ask);
+        let parent = Checkpoint::load(&eng.state_runs, &asked.run_id).unwrap();
+        assert!(
+            parent.children.is_empty(),
+            "full child_run must ask before spawn"
+        );
+        assert!(!asked.workspace.join("ok.txt").exists());
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(asked.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let done = eng.run(resume).await.unwrap();
+        assert_eq!(done.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let payload = nested_child_tool_payload(&parent);
+        assert_eq!(payload["termination"], "completed");
+        assert_eq!(payload["success"], true);
+        assert_eq!(
+            std::fs::read_to_string(done.workspace.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_explore_child_does_not_attach_parent_mcp_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config
+            .tools
+            .mcp_servers
+            .push(crate::config::McpServerSettings {
+                name: "demo".into(),
+                command: "mock".into(),
+                args: vec![],
+                transport: "stdio".into(),
+                url: None,
+                token_env: None,
+                framing: crate::config::McpFraming::ContentLength,
+                timeout_secs: 30,
+            });
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.echo",
+                        "args_json": "{\"text\":\"hi\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "explored",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_cp = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        assert!(
+            child_cp.messages.iter().any(|message| {
+                message.content.contains("mcp.demo.echo")
+                    && (message.content.contains("not enabled")
+                        || message.content.contains("unknown")
+                        || message.content.contains("denies"))
+            }),
+            "explore child must not execute parent MCP tools: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_explore_child_denies_parallel_web_fetch_before_authorize() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.tool_concurrency = 4;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [
+                        {
+                            "name": "web_fetch",
+                            "args_json": "{\"url\":\"https://example.com/a\"}"
+                        },
+                        {
+                            "name": "web_fetch",
+                            "args_json": "{\"url\":\"https://example.com/b\"}"
+                        }
+                    ]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "explored",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_cp = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        let denied = child_cp
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "tool" && message.content.contains("tool not enabled: web_fetch")
+            })
+            .count();
+        assert_eq!(
+            denied, 2,
+            "explore parallel web_fetch must deny before execute: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_plan_child_does_not_attach_parent_mcp_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config
+            .tools
+            .mcp_servers
+            .push(crate::config::McpServerSettings {
+                name: "demo".into(),
+                command: "mock".into(),
+                args: vec![],
+                transport: "stdio".into(),
+                url: None,
+                token_env: None,
+                framing: crate::config::McpFraming::ContentLength,
+                timeout_secs: 30,
+            });
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.echo",
+                        "args_json": "{\"text\":\"hi\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "planned",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("plan", "draft", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_cp = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        assert!(child_cp.plan_jail);
+        assert!(
+            child_cp.messages.iter().any(|message| {
+                message.content.contains("mcp.demo.echo")
+                    && (message.content.contains("not enabled")
+                        || message.content.contains("unknown")
+                        || message.content.contains("denies"))
+            }),
+            "plan child must not attach parent MCP servers: {:?}",
+            child_cp.messages
+        );
+        assert!(
+            child_cp.messages.iter().all(|message| {
+                !message.content.contains("plan jail") && !message.content.contains("plan_jail")
+            }),
+            "denied MCP must be missing, not jailed: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_plan_jail_full_child_does_not_attach_parent_mcp_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        config
+            .tools
+            .mcp_servers
+            .push(crate::config::McpServerSettings {
+                name: "demo".into(),
+                command: "mock".into(),
+                args: vec![],
+                transport: "stdio".into(),
+                url: None,
+                token_env: None,
+                framing: crate::config::McpFraming::ContentLength,
+                timeout_secs: 30,
+            });
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.echo",
+                        "args_json": "{\"text\":\"hi\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "wrote",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_cp = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        assert!(child_cp.plan_jail);
+        assert!(
+            child_cp.messages.iter().any(|message| {
+                message.content.contains("mcp.demo.echo")
+                    && (message.content.contains("not enabled")
+                        || message.content.contains("unknown")
+                        || message.content.contains("denies"))
+            }),
+            "jailed full child must not attach parent MCP servers: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_child_resume_does_not_reenable_nested_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested_max_depth = 2;
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "approve explore?"
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = parent.children[0].run_id.clone();
+
+        let mut resume_config = base_config(&dir);
+        resume_config.run.nested = true;
+        resume_config.run.nested_max_depth = 2;
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "already parked"},
+                {
+                    "tool_calls": [{
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "full",
+                            "task": "pwn"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "write_file",
+                        "args_json": serde_json::json!({
+                            "path": "pwn.txt",
+                            "content": "no\n"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "resumed",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_answer = Some("yes".into());
+        resume.nested = true;
+        let resumed = resume_eng.run(resume).await.unwrap();
+        let child_after = Checkpoint::load(&resume_eng.state_runs, &child_id).unwrap();
+        assert!(child_after.children.is_empty());
+        assert!(!child_after.workspace.join("pwn.txt").exists());
+        assert!(
+            child_after
+                .messages
+                .iter()
+                .any(|message| { message.content.contains("tool not enabled: child_run") }),
+            "resumed nested child must not inherit child_run: {:?}",
+            child_after.messages
+        );
+        assert_ne!(resumed.termination, RunTermination::Failed);
+    }
+
+    #[tokio::test]
+    async fn nested_wait_false_reports_running_after_registry_start() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "explored",
+                        "success": true
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": "scout",
+                        "wait": false
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let payload = nested_child_tool_payload(&parent);
+        assert_eq!(payload["status"], "running");
+        let child_id = parent.children[0].run_id.clone();
+        assert!(
+            eng.registry.load(&child_id).is_ok(),
+            "wait=false must not return running before registry.start: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_unattended_park_finalizes_background_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "slow",
+                        "wait": false
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "parent park"
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(2), eng.run(req))
+            .await
+            .expect("unattended park must not wait for the child's sleep")
+            .unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Escalate);
+        let children: Vec<_> = eng
+            .registry
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.run_id != parked.run_id)
+            .collect();
+        assert!(
+            !children.is_empty(),
+            "wait=false child must be recorded: {children:?}"
+        );
+        assert!(
+            children.iter().all(|record| record.status != "running"),
+            "unattended park must finalize wait=false children before return: {children:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_parent_complete_cancels_detached_background_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2 && printf late > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "slow",
+                        "wait": false
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "parent park"
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let asked = eng.run(req).await.unwrap();
+        assert_eq!(asked.park.as_ref().unwrap().kind, ParkKind::Ask);
+        let mut allow = RunRequest::new("");
+        allow.keep_workspace = true;
+        allow.session_wait = true;
+        allow.resume_run_id = Some(asked.run_id.clone());
+        allow.resume_ask = Some(AskDecision::Allow);
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(2), eng.run(allow))
+            .await
+            .expect("parent park must not wait for wait=false child")
+            .unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Escalate);
+        let mut resume_config = base_config(&dir);
+        resume_config.run.nested = true;
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "turn 0"},
+                {"content": "turn 1"},
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "parent done",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        resume.resume_answer = Some("yes".into());
+        let done = resume_eng.run(resume).await.unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let records = resume_eng.registry.list().unwrap();
+            let children: Vec<_> = records
+                .iter()
+                .filter(|record| record.run_id != done.run_id)
+                .collect();
+            assert!(
+                !children.is_empty(),
+                "detached child must be recorded in the registry"
+            );
+            for record in &children {
+                assert!(
+                    record.cancel_requested || record.status != "running",
+                    "parent complete must request_cancel the detached child: {record:?}"
+                );
+            }
+            if children.iter().all(|record| record.status != "running") {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("detached child still running after cancel timeout: {children:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // Wait past a kill-vs-write race on the child's `sleep 2 && printf`.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !done.workspace.join("late.txt").exists(),
+            "cancelled detached child must not keep writing the shared workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_parent_cancel_stops_waited_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2 && printf done > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "slow", "parent done"),
+        );
+        let registry = Arc::clone(&eng.registry);
+        let state_runs = eng.state_runs.clone();
+        let cancel = tokio::spawn(async move {
+            for _ in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let Ok(records) = registry.list() else {
+                    continue;
+                };
+                for record in records {
+                    let Ok(checkpoint) = Checkpoint::load(&state_runs, &record.run_id) else {
+                        continue;
+                    };
+                    if checkpoint.parent_run_id.is_empty() && !checkpoint.children.is_empty() {
+                        let _ = registry.cancel(&record.run_id);
+                        return;
+                    }
+                }
+            }
+        });
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let err = tokio::time::timeout(std::time::Duration::from_secs(3), eng.run(req))
+            .await
+            .expect("parent cancel must not wait for the full child sleep")
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::Cancelled),
+            "parent must cancel: {err}"
+        );
+        let _ = cancel.await;
+        for record in eng.registry.list().unwrap() {
+            assert_ne!(
+                record.status, "running",
+                "dropped child must finalize: {record:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_waited_child_cancel_does_not_cancel_parent() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2 && printf late > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "slow", "parent done"),
+        );
+        let registry = Arc::clone(&eng.registry);
+        let state_runs = eng.state_runs.clone();
+        let cancel = tokio::spawn(async move {
+            for _ in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let Ok(records) = registry.list() else {
+                    continue;
+                };
+                for record in records {
+                    let Ok(checkpoint) = Checkpoint::load(&state_runs, &record.run_id) else {
+                        continue;
+                    };
+                    if !checkpoint.parent_run_id.is_empty() {
+                        let _ = registry.cancel(&record.run_id);
+                        return;
+                    }
+                }
+            }
+        });
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = tokio::time::timeout(std::time::Duration::from_secs(3), eng.run(req))
+            .await
+            .expect("parent must finish after an independent child cancel")
+            .unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(done.summary, "parent done");
+        let _ = cancel.await;
+        assert!(
+            !done.workspace.join("late.txt").exists(),
+            "cancelled waited child must not keep writing the shared workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_parent_timeout_covers_background_child_join() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 5 && printf late > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "slow",
+                        "wait": false
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.timeout = Some(std::time::Duration::from_millis(200));
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), eng.run(req))
+            .await
+            .expect("parent timeout must return")
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::TimedOut(_)),
+            "parent must time out while joining a wait=false child: {err}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        for record in eng.registry.list().unwrap() {
+            assert_ne!(
+                record.status, "running",
+                "parent timeout must wait for wait=false children to stop: {record:?}"
+            );
+            if let Some(workspace) = &record.workspace {
+                assert!(
+                    !std::path::Path::new(workspace).join("late.txt").exists(),
+                    "timed-out parent must not leave child bash writing the shared workspace"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_plan_jail_parent_can_start_explore_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        config.model.script_json = Some(write_then_report("pwn.txt", "no\n", "explored"));
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(parent.children[0].profile, "explore");
+        let payload = nested_child_tool_payload(&parent);
+        assert_eq!(payload["profile"], "explore");
+        assert_ne!(
+            done.termination,
+            RunTermination::Failed,
+            "plan-jail parent must dispatch child_run: {}",
+            done.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_plan_jail_full_child_stays_jailed() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        config.model.script_json = Some(write_then_report("pwn.txt", "no\n", "wrote"));
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(parent.children[0].profile, "full");
+        let child = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        assert!(child.plan_jail);
+        assert!(!child.workspace.join("pwn.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn nested_plan_jail_full_child_accept_does_not_widen_jail() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(parent.plan_jail);
+        assert_eq!(parent.children[0].profile, "full");
+        let child_id = parent.children[0].run_id.clone();
+        let child = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert!(child.plan_jail);
+        assert!(!child.workspace.join("ok.txt").exists());
+
+        let mut resume_config = base_config(&dir);
+        resume_config.model.script_json = Some(plan_jail_script());
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_plan = Some(PlanDecision::Accept);
+        let child_done = resume_eng.run(resume).await.unwrap();
+        assert!(
+            !child_done.workspace.join("ok.txt").exists(),
+            "Accept on a nested child must not widen jail while the parent is jailed"
+        );
+        let child_after = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert!(child_after.plan_jail);
+        let parent_after = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(parent_after.plan_jail);
+    }
+
+    #[tokio::test]
+    async fn nested_plan_jail_parent_denies_worktree_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": "scout",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(
+            parent.children.is_empty(),
+            "plan-jail must not materialize a git-worktree child"
+        );
+        assert!(
+            parent
+                .messages
+                .iter()
+                .any(|message| { message.role == "tool" && message.content.contains("worktree") }),
+            "denied child_run must name worktree: {:?}",
+            parent.messages
+        );
+    }
+
+    fn init_git_repo(path: &std::path::Path) {
+        std::fs::create_dir_all(path).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet", "-b", "main"])
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "test@example.invalid"])
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.name", "Test"])
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(path.join("README"), "ok\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "--quiet", "-m", "init"])
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    fn git_worktree_list(repo: &std::path::Path) -> String {
+        String::from_utf8(
+            Command::new("git")
+                .args(["-C", &repo.to_string_lossy(), "worktree", "list"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn nested_worktree_child_resume_removes_git_worktree() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        init_git_repo(&project);
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        config.model.script_json = Some(plan_jail_script());
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "plan",
+                        "task": "draft",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let parent = eng.run(req).await.unwrap();
+        assert_eq!(parent.termination, RunTermination::Completed);
+        let parent_cp = Checkpoint::load(&eng.state_runs, &parent.run_id).unwrap();
+        let child_id = parent_cp.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.workspace_adapter, "git-worktree");
+        assert_eq!(child_cp.park.as_ref().unwrap().kind, ParkKind::Plan);
+        let listed = git_worktree_list(&project);
+        assert!(
+            listed.contains(&child_cp.workspace.display().to_string()),
+            "parked plan worktree must stay registered: {listed}"
+        );
+
+        let mut resume_config = base_config(&dir);
+        resume_config.workspace.adapter = "inplace".into();
+        resume_config.workspace.root = project.to_string_lossy().into();
+        resume_config.model.script_json = Some(plan_jail_script());
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_plan = Some(PlanDecision::Accept);
+        let done = resume_eng.run(resume).await.unwrap();
+        assert!(
+            !child_cp.workspace.join("ok.txt").exists(),
+            "Accept on a nested plan child must not lift the write-jail"
+        );
+        let child_after = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert!(child_after.plan_jail);
+        assert_ne!(done.termination, RunTermination::Completed);
+        let listed = git_worktree_list(&project);
+        assert!(
+            listed.contains(&child_cp.workspace.display().to_string()),
+            "nested plan Accept is not a successful complete; worktree stays: {listed}"
+        );
+        assert!(
+            child_cp.workspace.exists(),
+            "isolated worktree must remain while the child is still jailed"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_worktree_full_child_complete_removes_git_worktree() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        init_git_repo(&project);
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        config.model.script_json = Some(write_then_report("ok.txt", "yes\n", "wrote"));
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "edit",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let parent = eng.run(req).await.unwrap();
+        assert_eq!(parent.termination, RunTermination::Completed);
+        let parent_cp = Checkpoint::load(&eng.state_runs, &parent.run_id).unwrap();
+        let child_id = parent_cp.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.workspace_adapter, "git-worktree");
+        let payload = nested_child_tool_payload(&parent_cp);
+        assert_eq!(payload["termination"], "completed");
+        assert_eq!(payload["success"], true);
+        let listed = git_worktree_list(&project);
+        assert!(
+            !listed.contains(&child_id),
+            "successful non-park complete must git worktree remove: {listed}"
+        );
+        assert!(
+            !child_cp.workspace.exists(),
+            "isolated worktree directory must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_explore_child_sees_parent_inplace_files() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("seen.txt"), "from-parent\n").unwrap();
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        let read = serde_json::json!({"path": "seen.txt"}).to_string();
+        let report = serde_json::json!({"summary": "saw it", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {"tool_calls":[{"name":"read_file","args_json": read}]},
+                {"tool_calls":[{"name":"report","args_json": report}]}
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("explore", "scout", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = &parent.children[0].run_id;
+        let child_cp = Checkpoint::load(&eng.state_runs, child_id).unwrap();
+        assert_eq!(child_cp.workspace, done.workspace);
+        assert!(
+            child_cp
+                .messages
+                .iter()
+                .any(|message| message.content.contains("from-parent")),
+            "explore child must read parent files: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_spawn_failure_does_not_burn_fan_out() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested_max_children = 1;
+        config.model.script_json = Some(write_then_report("pwn.txt", "no\n", "explored"));
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": "isolated",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": "scout"
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(parent.children[0].task, "scout");
+        assert!(
+            parent.messages.iter().any(|message| {
+                message.role == "tool"
+                    && message
+                        .content
+                        .contains("worktree=true requires a git checkout")
+            }),
+            "failed worktree spawn must surface as a tool error: {:?}",
+            parent.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_worktree_add_failure_does_not_burn_fan_out() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested_max_children = 1;
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join(".git"), "not a git dir\n").unwrap();
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "explored",
+                        "success": true
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": "isolated",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": "scout"
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(parent.children[0].task, "scout");
+        assert!(
+            parent.messages.iter().any(|message| {
+                message.role == "tool"
+                    && (message.content.contains("git")
+                        || message.content.contains("worktree")
+                        || message.content.contains("Workspace"))
+            }),
+            "failed git worktree add must surface as a tool error: {:?}",
+            parent.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_resume_keeps_nested_tools_without_request_flag() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested = false;
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "park"
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.nested = true;
+        let parked = eng.run(req).await.unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        let parked_cp = Checkpoint::load(&eng.state_runs, &parked.run_id).unwrap();
+        assert!(parked_cp.nested);
+
+        let mut resume_config = base_config(&dir);
+        resume_config.run.nested = false;
+        resume_config.model.script_json = Some(write_then_report("pwn.txt", "no\n", "explored"));
+        let child_script = resume_config.model.script_json.clone();
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "already parked"},
+                {
+                    "tool_calls": [{
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "scout"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "resumed",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_model = crate::model::from_config(&resume_config).unwrap();
+        resume_config.model.script_json = child_script;
+        let resume_eng = engine(&dir, resume_config);
+        let resume_eng = Engine {
+            model: Arc::from(parent_model),
+            ..resume_eng
+        };
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        resume.resume_answer = Some("yes".into());
+        let done = resume_eng.run(resume).await.unwrap();
+        assert_eq!(done.summary, "resumed");
+        let parent = Checkpoint::load(&resume_eng.state_runs, &parked.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(parent.children[0].profile, "explore");
     }
 }

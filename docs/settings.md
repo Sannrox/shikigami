@@ -104,9 +104,9 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | --- | --- | --- |
 | `adapter` | `"scripted"` | `scripted` \| `http` \| `plane` |
 | `script_json` | built-in demo script | JSON array of turns for `scripted` |
-| `base_url` | OpenAI-compatible default | Base URL for `http` |
-| `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. |
-| `api_key_env` | `"OPENAI_API_KEY"` | Env var for HTTP API key |
+| `base_url` | OpenAI-compatible default | Base URL for `http` (Chat Completions). A local gateway such as CLIProxyAPI is typically `http://127.0.0.1:8317/v1`. |
+| `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. Set an explicit id for a gateway catalog (see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)). |
+| `api_key_env` | `"OPENAI_API_KEY"` | Env var for the HTTP API key. For a local gateway this is the gateway access key (for CLIProxyAPI, `CLIPROXY_API_KEY`), not an upstream provider token. |
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
 
@@ -308,7 +308,7 @@ governance reports and events). See [mcp.md](mcp.md).
 | `load_project_rules` | `true` | Load first matching rules file from the **workspace** root |
 | `rules_filenames` | `["AGENTS.md","shikigami.rules.md"]` | Tried in order; flat names only |
 | `max_rules_bytes` | `32768` | Truncate with a marker when larger |
-| `skills_root` | unset → `.shikigami/skills` under workspace | Root for skill packs |
+| `skills_root` | unset → `.shikigami/skills` under workspace | Root for skill packs. TUI `/skill:name` also searches `.agents/skills`. |
 | `skills` | `[]` | Skill directory names (`<root>/<id>/SKILL.md`) |
 | `max_skill_bytes` | `32768` | Per-skill size cap |
 
@@ -323,9 +323,13 @@ Rules and skills are **untrusted text** injected into the system prompt (not exe
 | `compact_keep_tail` | `8` | Messages kept after the first task message when compacting |
 | `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |
 | `plan_jail` | `false` | Restrict mutating tools to `.shikigami/plan.md` until a parked plan is accepted. `report` parks `ParkKind::Plan` with the plan digest. Resume with `RunRequest.resume_plan` / `--plan-accept` / `--plan-reject`. Only Accept clears the jail; Reject completes failed and keeps it. `doctor` names the mode when selected. |
+| `nested` | `false` | Enable `child_run` / `child_status`. A child is a first-class Run with a typed profile (`explore` read-only, `plan` write-jail, `full` parent authority). Default shares the parent workspace (ACP/TUI inplace included); `worktree=true` isolates with `git-worktree` outside the parent jail (harvest is the child summary; successful isolated trees are cleaned up with `git worktree remove`, including after `--resume` of a parked plan child, unless the resume sets `keep_workspace`). Plan-jail parents may start shared-workspace children; `worktree=true` is denied because materialize mutates the parent git checkout. `full`/`plan` children inherit the parent jail (writes stay on `.shikigami/plan.md`); `explore` is read-only. Explore and plan-jailed children do not attach parent MCP servers. Children run unattended to a summary (they do not inherit `session_wait`). Session hosts ask=park before `full`/`plan` `child_run` and before any `worktree=true`. Git worktree add/remove runs with hooks disabled. Children do not inherit nested tools, including on resume, so only one nesting level is implemented (`nested_max_depth` > 1 is reserved). A parked parent restores nested tools on `--resume`. Unattended park cancels `wait=false` children and waits until their registry rows are terminal (in-flight tools drop on cancel). Session hosts leave them running until the parent completes. Parent complete keeps a shared workspace while a recorded child is still parked or running. `local`/`none` authorize the tool names; `http-callback` and `sekai-chisei` keep host/plane allow-lists. `doctor` names the mode when selected. |
+| `nested_max_depth` | `1` | Maximum nested depth (root is 0). Must be greater than zero. |
+| `nested_max_children` | `4` | Maximum children one parent may start. Must be greater than zero. Depth and fan-out caps fail closed. |
 
 CLI / env override: `shikigami run --timeout-secs N` or `SHIKIGAMI_RUN_TIMEOUT_SECS`.
 `shikigami run --plan-jail` or `SHIKIGAMI_RUN_PLAN_JAIL`.
+`shikigami run --nested` or `SHIKIGAMI_RUN_NESTED`.
 Embedders may also pass `RunRequest.timeout` and a cooperative
 `RunRequest.cancel` (`tokio::sync::watch::Receiver<bool>`). Cancel and timeout
 surface as errors (`RunError::Cancelled` / `TimedOut`), never as silent success.
@@ -449,6 +453,7 @@ Offline defaults never require a plane.
 ## Examples
 
 - [../examples/local-run.toml](../examples/local-run.toml)
+- [../examples/cliproxy-http.toml](../examples/cliproxy-http.toml)
 - [../examples/governed-sekai-chisei.toml](../examples/governed-sekai-chisei.toml)
 
 Adapter semantics: [adapters.md](adapters.md).

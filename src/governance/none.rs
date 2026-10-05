@@ -20,7 +20,7 @@ pub struct NoneGovernance {
 impl NoneGovernance {
     pub fn from_config(config: &Config) -> Self {
         Self {
-            enabled_tools: config.tools.effective_enabled(),
+            enabled_tools: super::in_process_enabled_tools(config),
             durability: LocalDurability::default(),
         }
     }

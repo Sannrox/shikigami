@@ -44,9 +44,18 @@ impl ToolRegistry {
     /// network policy, ignore behavior, protected environment names, and
     /// sandbox policy stay coordinated behind the registry interface.
     pub fn from_config(workspace: impl Into<PathBuf>, config: &Config) -> Result<Self, ToolError> {
+        Self::from_config_enabled(workspace, config, config.tools.effective_enabled())
+    }
+
+    /// Same as [`Self::from_config`] with an explicit allow-list (nested tools).
+    pub fn from_config_enabled(
+        workspace: impl Into<PathBuf>,
+        config: &Config,
+        enabled: Vec<String>,
+    ) -> Result<Self, ToolError> {
         Self::with_builtins_sandbox_protected_environment(
             workspace,
-            config.tools.effective_enabled(),
+            enabled,
             config.tools.bash_timeout_secs,
             config.network.clone(),
             config.tools.respect_ignore,

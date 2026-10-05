@@ -80,6 +80,9 @@ enum Command {
         /// Restrict mutating tools to `.shikigami/plan.md` until --plan-accept.
         #[arg(long)]
         plan_jail: bool,
+        /// Enable nested child-run tools for this run (`child_run` / `child_status`).
+        #[arg(long)]
+        nested: bool,
         /// Accept a parked plan and continue with execute authority.
         #[arg(long, conflicts_with = "plan_reject")]
         plan_accept: bool,
@@ -331,6 +334,7 @@ async fn run() -> anyhow::Result<()> {
             answer_file,
             task_file,
             plan_jail,
+            nested,
             plan_accept,
             plan_reject,
         } => {
@@ -359,6 +363,7 @@ async fn run() -> anyhow::Result<()> {
             request.resume_run_id = resume;
             request.resume_answer = answer;
             request.plan_jail = plan_jail;
+            request.nested = nested;
             request.resume_plan = match (plan_accept, plan_reject) {
                 (true, false) => Some(shikigami::PlanDecision::Accept),
                 (false, true) => Some(shikigami::PlanDecision::Reject),
