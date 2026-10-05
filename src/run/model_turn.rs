@@ -19,6 +19,8 @@ use super::{Engine, RunError, RunRequest};
 
 /// Compact middle of the message list when over `threshold`.
 /// Keeps the first message (task) and the last `keep_tail` messages.
+/// If the tail would start on a tool result, it expands to the assistant
+/// that issued those calls so providers still see a complete exchange.
 /// Returns `(before, after)` when compaction ran.
 pub fn compact_messages(
     messages: &mut Vec<ChatMessage>,
@@ -30,9 +32,15 @@ pub fn compact_messages(
         return None;
     }
     let head = messages.first().cloned()?;
-    let tail_start = before.saturating_sub(keep_tail);
+    let tail_start = tool_exchange_tail_start(messages, before.saturating_sub(keep_tail).max(1));
+    if tail_start <= 1 {
+        return None;
+    }
     let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
     let dropped = before.saturating_sub(1 + tail.len());
+    if dropped == 0 {
+        return None;
+    }
     let summary = ChatMessage {
         role: "user".into(),
         content: format!(
@@ -46,6 +54,32 @@ pub fn compact_messages(
         .chain(tail)
         .collect();
     Some((before, messages.len()))
+}
+
+fn is_tool_result(msg: &ChatMessage) -> bool {
+    msg.role == "tool"
+}
+
+fn assistant_has_tool_calls(msg: &ChatMessage) -> bool {
+    msg.role == "assistant" && !msg.tool_calls.is_empty()
+}
+
+fn tool_exchange_tail_start(messages: &[ChatMessage], proposed: usize) -> usize {
+    if proposed >= messages.len() || !is_tool_result(&messages[proposed]) {
+        return proposed;
+    }
+    let mut start = proposed;
+    while start > 1 && is_tool_result(&messages[start]) {
+        start -= 1;
+    }
+    if assistant_has_tool_calls(&messages[start]) {
+        return start;
+    }
+    let mut start = proposed;
+    while start < messages.len() && is_tool_result(&messages[start]) {
+        start += 1;
+    }
+    start
 }
 
 /// Deep private module that owns the durable protocol around model planning.
@@ -663,5 +697,60 @@ mod tests {
         assert_eq!(msgs[0].content, "m0");
         assert!(msgs[1].content.contains("compacted"));
         assert_eq!(msgs.last().unwrap().content, "m19");
+    }
+
+    #[test]
+    fn compact_messages_keeps_complete_tool_exchange() {
+        let mut msgs = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "task".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "a1".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "u2".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    args_json: r#"{"command":"echo hi"}"#.into(),
+                }],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "hi".into(),
+                tool_call_id: "c1".into(),
+                tool_calls: vec![],
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "done".into(),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            },
+        ];
+        let (before, after) = compact_messages(&mut msgs, 0, 2).unwrap();
+        assert_eq!(before, 6);
+        assert!(after < before);
+        let tool_idx = msgs.iter().position(|m| m.role == "tool").unwrap();
+        assert!(
+            tool_idx > 0 && !msgs[tool_idx - 1].tool_calls.is_empty(),
+            "tail must keep the assistant call with its tool result: {msgs:?}"
+        );
+        assert_eq!(msgs[tool_idx - 1].tool_calls[0].id, "c1");
     }
 }
