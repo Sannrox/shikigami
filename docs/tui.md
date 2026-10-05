@@ -29,7 +29,8 @@ Continue-last-in-cwd is fail closed: an unknown or unreadable previous session
 starts `session/new`.
 
 The host requires a terminal. It does not add a theming engine, plugin store,
-voice, dashboard, or web view.
+voice, dashboard, or web view. Nested `child_run` appears as a tool event in
+the transcript.
 
 ## Proof
 

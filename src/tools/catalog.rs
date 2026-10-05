@@ -43,11 +43,14 @@ pub const PLAN_JAIL_PATH: &str = ".shikigami/plan.md";
 ///
 /// Unknown and external names (including `mcp.*`) fail closed. Observation
 /// builtins, report/escalate, todos, and bash job polling stay allowed.
-/// Mutating builtins may write only [`PLAN_JAIL_PATH`].
+/// Mutating builtins may write only [`PLAN_JAIL_PATH`]. Shared-workspace
+/// `child_run` is allowed; `worktree=true` is not, because materialize
+/// runs unsandboxed `git worktree add` against the parent checkout.
 pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
     match name {
         "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "report" | "escalate"
-        | "bash_job_status" | "bash_job_logs" => true,
+        | "bash_job_status" | "bash_job_logs" | "child_status" => true,
+        "child_run" => child_run_plan_jail_ok(args_json),
         "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
         "apply_patch" => apply_patch_is_plan(args_json),
         _ => false,
@@ -144,6 +147,13 @@ fn normalize_rel_path(raw: &str) -> Option<String> {
     } else {
         Some(parts.join("/"))
     }
+}
+
+fn child_run_plan_jail_ok(args_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return false;
+    };
+    value.get("worktree") != Some(&serde_json::Value::Bool(true))
 }
 
 fn json_path_is_plan(args_json: &str, field: &str) -> bool {
@@ -251,6 +261,16 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             "HTTP(S) GET a URL and return truncated text (status, final URL, body). Opt-in tool; respects [network] egress. Blocks private/link-local targets. Not a browser.",
             r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#,
         ),
+        def(
+            "child_run",
+            "Start a nested child Run. Profiles: explore (read-only), plan (write-jail), full (parent authority). The child shares the parent workspace; worktree=true isolates with git-worktree. wait (default true) returns the child summary; false returns the child run_id.",
+            r#"{"type":"object","properties":{"profile":{"type":"string","enum":["explore","plan","full"]},"task":{"type":"string"},"wait":{"type":"boolean"},"worktree":{"type":"boolean"}},"required":["profile","task"]}"#,
+        ),
+        def(
+            "child_status",
+            "Poll a nested child started by this run.",
+            r#"{"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}"#,
+        ),
     ]
 }
 
@@ -356,6 +376,20 @@ mod tests {
             "mcp.fs.write",
             &format!(r#"{{"path":"{PLAN_JAIL_PATH}","content":"x"}}"#)
         ));
+        assert!(plan_jail_allows(
+            "child_run",
+            r#"{"profile":"explore","task":"scout"}"#
+        ));
+        assert!(plan_jail_allows(
+            "child_run",
+            r#"{"profile":"explore","task":"scout","worktree":false}"#
+        ));
+        assert!(!plan_jail_allows(
+            "child_run",
+            r#"{"profile":"explore","task":"scout","worktree":true}"#
+        ));
+        assert!(!plan_jail_allows("child_run", "not-json"));
+        assert!(plan_jail_allows("child_status", r#"{"run_id":"child"}"#));
         assert!(!plan_jail_allows(
             "bash_background",
             r#"{"command":"echo hi"}"#

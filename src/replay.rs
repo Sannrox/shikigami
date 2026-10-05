@@ -1837,6 +1837,11 @@ mod tests {
             content,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         checkpoint.save(&state.runs_dir()).unwrap();
         if finish {

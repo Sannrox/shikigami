@@ -285,6 +285,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         cp.save(&runs).unwrap();
 
@@ -348,6 +353,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         cp.save(&runs).unwrap();
         let jsonl = export_run_transcript(&runs, "run-compact", &ExportOptions::default()).unwrap();
@@ -403,6 +413,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         };
         cp.save(&runs).unwrap();
 

@@ -2413,6 +2413,11 @@ mod tests {
             content: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: vec![],
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
         }
     }
 
