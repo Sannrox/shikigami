@@ -117,9 +117,13 @@ pub(super) async fn prepare(
         .map_err(|error| RunError::Message(format!("run registry update failed: {error}")))?;
     prepare_workspace(engine, request, &run_id, &workspace, is_resume)?;
     capture_baseline(engine, &run_id, &workspace);
-    // Only Accept restores execute authority. Reject keeps the stored jail so
-    // a later `--resume` cannot write the workspace; fresh runs use the request.
-    let plan_jail = if request.resume_plan == Some(super::PlanDecision::Accept) {
+    // Root Accept restores execute authority. Nested children keep the stored
+    // jail so Accept cannot exceed spawn-time / parent plan-jail (a plan child
+    // or a full child of a jailed parent). Reject keeps the stored jail so a
+    // later `--resume` cannot write the workspace; fresh runs use the request.
+    let plan_jail = if request.resume_plan == Some(super::PlanDecision::Accept)
+        && stored_parent_run_id.is_empty()
+    {
         false
     } else if is_resume {
         stored_plan_jail

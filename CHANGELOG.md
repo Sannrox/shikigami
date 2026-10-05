@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Nested plan Accept keeps the child's spawn-time plan-jail. A plan-profile
+  child, or a full child of a still-jailed parent, cannot write the shared
+  workspace (or attach MCP) after Accept while the parent remains jailed.
+  Root Accept still restores execute authority.
 - Plan-jail writes to `.shikigami/plan.md` (`write_file`, `edit`,
   `multi_edit`, `apply_patch`) open the plan path with `O_NOFOLLOW` and
   refuse hard-linked or non-regular destinations, matching plan-jail
