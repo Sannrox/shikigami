@@ -142,6 +142,10 @@ impl ToolExecutor {
         if content.len() as u64 > MAX_FILE_BYTES {
             return Err(ToolError::FileTooLarge(path.to_path_buf()));
         }
+        if super::catalog::is_plan_jail_rel_path(path) {
+            super::catalog::write_plan_jail_file(&self.workspace, content.as_bytes())?;
+            return Ok(());
+        }
         let path = self.resolve_write(path)?;
         std::fs::write(path, content)?;
         Ok(())
@@ -195,7 +199,11 @@ impl ToolExecutor {
             )));
         }
 
-        let mut planned: Vec<(PathBuf, String)> = Vec::new();
+        enum PlannedWrite {
+            Abs(PathBuf, String),
+            PlanJail(String),
+        }
+        let mut planned: Vec<PlannedWrite> = Vec::new();
         let mut applied = 0usize;
         for file in patches {
             let path = PathBuf::from(&file.path);
@@ -230,12 +238,20 @@ impl ToolExecutor {
             if text.len() as u64 > MAX_FILE_BYTES {
                 return Err(ToolError::FileTooLarge(path));
             }
-            // Resolve path jail before staging write.
-            let abs = self.resolve_write(&path)?;
-            planned.push((abs, text));
+            if super::catalog::is_plan_jail_rel_path(&path) {
+                planned.push(PlannedWrite::PlanJail(text));
+            } else {
+                let abs = self.resolve_write(&path)?;
+                planned.push(PlannedWrite::Abs(abs, text));
+            }
         }
-        for (abs, text) in planned {
-            std::fs::write(abs, text)?;
+        for write in planned {
+            match write {
+                PlannedWrite::PlanJail(text) => {
+                    super::catalog::write_plan_jail_file(&self.workspace, text.as_bytes())?;
+                }
+                PlannedWrite::Abs(abs, text) => std::fs::write(abs, text)?,
+            }
         }
         Ok(applied)
     }
