@@ -22,6 +22,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/new` | client → agent | Create a session id over a workspace `cwd` |
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed** |
 | `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error |
+| `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. |
 | `session/update` | agent → client | One notification per completed model turn (honest streaming) until the model adapter streams |
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |

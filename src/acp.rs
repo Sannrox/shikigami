@@ -22,6 +22,7 @@ use crate::mcp::framing;
 use crate::model::ChatMessage;
 use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
+    compact_messages,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -80,6 +81,7 @@ impl AcpHost {
             "session/new" => self.session_new(&params).await,
             "session/load" => self.session_load(&params, client).await,
             "session/prompt" => self.session_prompt(&params, client).await,
+            "session/compact" => self.session_compact(&params).await,
             other => Err(rpc_error(-32601, format!("Method not found: {other}"))),
         };
         Some(match result {
@@ -177,6 +179,43 @@ impl AcpHost {
             "sessionId": session_id,
             "cwd": live.cwd.display().to_string(),
         }))
+    }
+
+    async fn session_compact(&self, params: &Value) -> Result<Value, Value> {
+        self.require_init()?;
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| rpc_error(-32602, "session/compact requires sessionId"))?;
+        let (cwd, run_id) = {
+            let sessions = self.sessions.lock().await;
+            let live = sessions
+                .get(session_id)
+                .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            if live.cancel.is_some() {
+                return Err(rpc_error(-32000, "prompt already in flight"));
+            }
+            (live.cwd.clone(), live.run_id.clone())
+        };
+        let Some(run_id) = run_id else {
+            return Ok(json!({ "before": 0, "after": 0 }));
+        };
+        let harness = self
+            .harness_for_cwd(&cwd)
+            .map_err(|e| rpc_error(-32603, e))?;
+        let mut checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
+            .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
+        let keep = harness.config.run.compact_keep_tail.max(2) as usize;
+        let before = checkpoint.messages.len();
+        let after = if let Some((_, after)) = compact_messages(&mut checkpoint.messages, 0, keep) {
+            checkpoint
+                .save(&harness.state.runs_dir())
+                .map_err(|e| rpc_error(-32603, e.to_string()))?;
+            after
+        } else {
+            before
+        };
+        Ok(json!({ "before": before, "after": after }))
     }
 
     async fn replay_session_history(
@@ -507,6 +546,10 @@ impl AcpHost {
         } else {
             Err(rpc_error(-32600, "initialize required"))
         }
+    }
+
+    pub(crate) fn context_settings(&self) -> &crate::config::ContextSettings {
+        &self.harness.config.context
     }
 
     fn harness_for_cwd(&self, cwd: &Path) -> Result<Harness, String> {
@@ -1552,6 +1595,92 @@ mod tests {
             .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
             .collect();
         assert_eq!(chunks.len(), 2, "{updates:?}");
+    }
+
+    #[tokio::test]
+    async fn session_compact_shrinks_checkpoint_messages() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let empty = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "session/compact",
+                    "params": { "sessionId": session_id }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&empty)["before"], 0);
+        assert_eq!(rpc_ok(&empty)["after"], 0);
+
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+
+        let persisted: PersistedSession = serde_json::from_slice(
+            &std::fs::read(
+                dir.path()
+                    .join("state/acp-sessions")
+                    .join(format!("{session_id}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let run_id = persisted.run_id.expect("run after prompt");
+        let runs = dir.path().join("state/runs");
+        let mut checkpoint = Checkpoint::load(&runs, &run_id).unwrap();
+        checkpoint.messages = (0..20)
+            .map(|i| ChatMessage {
+                role: if i == 0 { "user" } else { "assistant" }.into(),
+                content: format!("m{i}"),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            })
+            .collect();
+        checkpoint.save(&runs).unwrap();
+
+        let compacted = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "session/compact",
+                    "params": { "sessionId": session_id }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let before = rpc_ok(&compacted)["before"].as_u64().unwrap();
+        let after = rpc_ok(&compacted)["after"].as_u64().unwrap();
+        assert_eq!(before, 20);
+        assert!(after < before, "before={before} after={after}");
+        let loaded = Checkpoint::load(&runs, &run_id).unwrap();
+        assert_eq!(loaded.messages.len() as u64, after);
+        assert!(loaded.messages[1].content.contains("compacted"));
     }
 
     #[tokio::test]
