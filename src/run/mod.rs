@@ -514,6 +514,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
 
         let err =
@@ -565,6 +567,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
 
         let err =
@@ -2317,6 +2321,83 @@ mod tests {
                 .iter()
                 .any(|message| { message.content.contains("tool not enabled: write_file") }),
             "explore resume must keep read-only tools: {:?}",
+            child_after.messages
+        );
+        assert_ne!(resumed.termination, RunTermination::Failed);
+    }
+
+    #[tokio::test]
+    async fn nested_full_child_resume_keeps_spawn_tool_mode() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::Read;
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "approve full?"
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = parent.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.nested_profile, "full");
+        assert_eq!(child_cp.tools_mode, "read");
+        assert_eq!(child_cp.park.as_ref().unwrap().kind, ParkKind::Escalate);
+
+        let mut resume_config = base_config(&dir);
+        resume_config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "already parked"},
+                {
+                    "tool_calls": [{
+                        "name": "write_file",
+                        "args_json": serde_json::json!({
+                            "path": "pwn.txt",
+                            "content": "no\n"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "resumed",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_answer = Some("yes".into());
+        let resumed = resume_eng.run(resume).await.unwrap();
+        let child_after = Checkpoint::load(&resume_eng.state_runs, &child_id).unwrap();
+        assert!(!child_after.workspace.join("pwn.txt").exists());
+        assert!(
+            child_after
+                .messages
+                .iter()
+                .any(|message| { message.content.contains("tool not enabled: write_file") }),
+            "full child resume must keep spawn-time read tools: {:?}",
             child_after.messages
         );
         assert_ne!(resumed.termination, RunTermination::Failed);

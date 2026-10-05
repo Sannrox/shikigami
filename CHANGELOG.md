@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Nested child resume keeps spawn-time `tools.mode` / enabled tools and
+  intersects them with the current host (never unions). A full or plan
+  child spawned under Read cannot write after resume on a WorkspaceExec
+  host. Explore was already pinned.
 - Nested plan Accept keeps the child's spawn-time plan-jail. A plan-profile
   child, or a full child of a still-jailed parent, cannot write the shared
   workspace (or attach MCP) after Accept while the parent remains jailed.

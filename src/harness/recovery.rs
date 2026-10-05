@@ -469,6 +469,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         }
     }
 
