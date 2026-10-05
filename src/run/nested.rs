@@ -262,6 +262,14 @@ async fn child_run(
                     &session.parent_run_id,
                 ) {
                     let _ = engine.registry.request_cancel(&child_id);
+                    // Bound the drain so a stalled child cannot block parent
+                    // cancel/timeout. If the child finishes, its transaction
+                    // reaps. Otherwise reap an isolated worktree here.
+                    tokio::select! {
+                        _ = &mut child_fut => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                    }
+                    reap_nested_worktree(engine, &child_id);
                     return Err(error);
                 }
             }
@@ -360,6 +368,34 @@ async fn wait_for_background_child_start(
             return Err(error);
         }
     }
+}
+
+fn reap_nested_worktree(engine: &Engine, child_id: &str) {
+    let Ok(child) = Checkpoint::load(&engine.state_runs, child_id) else {
+        return;
+    };
+    // Nested `worktree=true` spawn sets `request.keep_workspace=false`.
+    // `save_recoverable` later forces the checkpoint keep bit for root
+    // resume/inspection; that recovery flag must not skip this fallback
+    // when the child's transaction is still stuck in `complete_run`.
+    if child.workspace_adapter != "git-worktree"
+        || child.parent_run_id.is_empty()
+        || child.park.is_some()
+    {
+        return;
+    }
+    let cleanup = workspace::git_worktree_cleanup(
+        &child.workspace,
+        child_id,
+        &engine.config.workspace.branch_prefix,
+        std::path::Path::new(&engine.config.workspace.root),
+    );
+    let ws = workspace::MaterializedWorkspace {
+        path: child.workspace,
+        adapter: child.workspace_adapter,
+        cleanup,
+    };
+    let _ = workspace::apply_cleanup(&ws);
 }
 
 fn rollback_unstarted_child(session: &mut RunSession, tools: &ToolRegistry, child_id: &str) {

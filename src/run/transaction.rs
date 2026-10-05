@@ -276,7 +276,8 @@ impl<'a> RunTransaction<'a> {
                         let _ = session.save_recoverable(pending_park.clone(), tools.as_ref());
                     }
                 }
-                // Do not delete workspace on cancel/timeout/max-turns so resume works.
+                // Root cancel/timeout keeps the workspace for resume. Nested
+                // git-worktree children still reap: they are not a resume host.
                 self.engine.emit(
                     &session.run_id,
                     HarnessEvent::RunFinished {
@@ -291,6 +292,13 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
+                self.cleanup_workspace(
+                    &ws,
+                    &session,
+                    &request,
+                    false,
+                    session.keeps_parked_workspace(pending_park.is_some()),
+                );
                 self.export_spans(&mut session, false).await;
                 return Err(e);
             }
@@ -343,6 +351,7 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 self.export_spans(&mut session, false).await;
                 return Err(error);
             }
@@ -370,6 +379,7 @@ impl<'a> RunTransaction<'a> {
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, false)
                     .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 return Err(error.into());
             }
             // Successful completion clears adapter-owned receipt correlation
@@ -393,6 +403,7 @@ impl<'a> RunTransaction<'a> {
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, false)
                     .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 return Err(error);
             }
         }
@@ -405,31 +416,16 @@ impl<'a> RunTransaction<'a> {
         // Keep workspace on park. Isolated git-worktree *children* honor the
         // run/resume `keep_workspace` flag, not the park-forced checkpoint
         // bit, so `--resume` of a parked plan worktree still `git worktree
-        // remove` unless the operator asked to keep it. Parent git-worktree
-        // runs keep the freeze-core park-forced keep.
-        if success && termination != RunTermination::Parked {
-            let keep = if ws.adapter == "git-worktree" && !session.parent_run_id.is_empty() {
-                request.keep_workspace
-            } else {
-                session.keep_workspace
-            };
-            let shared_child_open = session.children.iter().any(|child| {
-                let Ok(checkpoint) = Checkpoint::load(&self.engine.state_runs, &child.run_id)
-                else {
-                    return false;
-                };
-                checkpoint.workspace == session.workspace
-                    && (checkpoint.park.is_some()
-                        || self
-                            .engine
-                            .registry
-                            .run_is_active(&child.run_id)
-                            .unwrap_or(false))
-            });
-            if !keep && !shared_child_open {
-                let _ = crate::workspace::apply_cleanup(&ws);
-            }
-        }
+        // remove` unless the operator asked to keep it. Nested worktree
+        // children also reap on cancel/fail. Parent git-worktree runs keep
+        // the freeze-core park-forced keep.
+        self.cleanup_workspace(
+            &ws,
+            &session,
+            &request,
+            success,
+            termination == RunTermination::Parked,
+        );
 
         self.engine.emit(
             &session.run_id,
@@ -447,6 +443,7 @@ impl<'a> RunTransaction<'a> {
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, false)
                     .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 return Err(error);
             }
         }
@@ -479,6 +476,51 @@ impl<'a> RunTransaction<'a> {
             cost,
             todos: tools.todos(),
         })
+    }
+
+    /// Root cancel/timeout keeps the tree for resume. Nested git-worktree
+    /// children with `keep_workspace=false` reap on any non-park terminal.
+    fn cleanup_workspace(
+        &self,
+        ws: &crate::workspace::MaterializedWorkspace,
+        session: &super::session::RunSession,
+        request: &RunRequest,
+        success: bool,
+        parked: bool,
+    ) {
+        if parked {
+            return;
+        }
+        let nested_worktree = ws.adapter == "git-worktree" && !session.parent_run_id.is_empty();
+        let keep = if nested_worktree {
+            request.keep_workspace
+        } else if success {
+            session.keep_workspace
+        } else {
+            true
+        };
+        if keep {
+            return;
+        }
+        if !nested_worktree {
+            let shared_child_open = session.children.iter().any(|child| {
+                let Ok(checkpoint) = Checkpoint::load(&self.engine.state_runs, &child.run_id)
+                else {
+                    return false;
+                };
+                checkpoint.workspace == session.workspace
+                    && (checkpoint.park.is_some()
+                        || self
+                            .engine
+                            .registry
+                            .run_is_active(&child.run_id)
+                            .unwrap_or(false))
+            });
+            if shared_child_open {
+                return;
+            }
+        }
+        let _ = crate::workspace::apply_cleanup(ws);
     }
 
     async fn finish_nested_children(

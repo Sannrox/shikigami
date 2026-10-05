@@ -169,6 +169,16 @@ impl RunSession {
             .then(|| park.clone())
     }
 
+    /// True when this transaction created a park or `save_recoverable`
+    /// would persist an inherited approval/ask park. Nested worktree
+    /// cleanup uses this so a cancel during resume cannot reap a still
+    /// parked isolated tree.
+    pub(super) fn keeps_parked_workspace(&self, pending_park: bool) -> bool {
+        pending_park
+            || self.open_resumed_approval_park().is_some()
+            || self.resumed_ask_park.is_some()
+    }
+
     pub fn set_content(
         &mut self,
         resolver: Arc<dyn ContentResolver>,
