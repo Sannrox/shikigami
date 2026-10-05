@@ -2026,11 +2026,21 @@ mod tests {
         let resume_eng = engine(&dir, resume_config);
         let mut resume = RunRequest::new("");
         resume.keep_workspace = true;
-        resume.resume_run_id = Some(child_id);
+        resume.resume_run_id = Some(child_id.clone());
         resume.resume_plan = Some(PlanDecision::Accept);
         let child_done = resume_eng.run(resume).await.unwrap();
-        assert_eq!(child_done.termination, RunTermination::Completed);
-        assert!(child_done.success);
+        assert!(
+            !child.workspace.join("ok.txt").exists(),
+            "Accept on a nested plan child must not lift the write-jail"
+        );
+        let child_after = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert!(child_after.plan_jail);
+        assert_ne!(
+            child_done.termination,
+            RunTermination::Completed,
+            "nested plan Accept must not restore execute authority: {}",
+            child_done.summary
+        );
     }
 
     #[tokio::test]
@@ -3194,6 +3204,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_plan_jail_full_child_accept_does_not_widen_jail() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.plan_jail = true;
+        config.model.script_json = Some(plan_jail_script());
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.plan_jail = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(parent.plan_jail);
+        assert_eq!(parent.children[0].profile, "full");
+        let child_id = parent.children[0].run_id.clone();
+        let child = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child.park.as_ref().unwrap().kind, ParkKind::Plan);
+        assert!(child.plan_jail);
+        assert!(!child.workspace.join("ok.txt").exists());
+
+        let mut resume_config = base_config(&dir);
+        resume_config.model.script_json = Some(plan_jail_script());
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_plan = Some(PlanDecision::Accept);
+        let child_done = resume_eng.run(resume).await.unwrap();
+        assert!(
+            !child_done.workspace.join("ok.txt").exists(),
+            "Accept on a nested child must not widen jail while the parent is jailed"
+        );
+        let child_after = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert!(child_after.plan_jail);
+        let parent_after = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(parent_after.plan_jail);
+    }
+
+    #[tokio::test]
     async fn nested_plan_jail_parent_denies_worktree_child() {
         let dir = tempdir().unwrap();
         let mut config = base_config(&dir);
@@ -3352,12 +3405,71 @@ mod tests {
         resume.resume_run_id = Some(child_id.clone());
         resume.resume_plan = Some(PlanDecision::Accept);
         let done = resume_eng.run(resume).await.unwrap();
-        assert_eq!(done.termination, RunTermination::Completed);
-        assert!(done.success);
+        assert!(
+            !child_cp.workspace.join("ok.txt").exists(),
+            "Accept on a nested plan child must not lift the write-jail"
+        );
+        let child_after = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert!(child_after.plan_jail);
+        assert_ne!(done.termination, RunTermination::Completed);
+        let listed = git_worktree_list(&project);
+        assert!(
+            listed.contains(&child_cp.workspace.display().to_string()),
+            "nested plan Accept is not a successful complete; worktree stays: {listed}"
+        );
+        assert!(
+            child_cp.workspace.exists(),
+            "isolated worktree must remain while the child is still jailed"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_worktree_full_child_complete_removes_git_worktree() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        init_git_repo(&project);
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        config.model.script_json = Some(write_then_report("ok.txt", "yes\n", "wrote"));
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "edit",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let parent = eng.run(req).await.unwrap();
+        assert_eq!(parent.termination, RunTermination::Completed);
+        let parent_cp = Checkpoint::load(&eng.state_runs, &parent.run_id).unwrap();
+        let child_id = parent_cp.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.workspace_adapter, "git-worktree");
+        let payload = nested_child_tool_payload(&parent_cp);
+        assert_eq!(payload["termination"], "completed");
+        assert_eq!(payload["success"], true);
         let listed = git_worktree_list(&project);
         assert!(
             !listed.contains(&child_id),
-            "resume complete must git worktree remove: {listed}"
+            "successful non-park complete must git worktree remove: {listed}"
         );
         assert!(
             !child_cp.workspace.exists(),
