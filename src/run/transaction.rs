@@ -541,7 +541,6 @@ impl<'a> RunTransaction<'a> {
             return Ok(());
         }
         let mut bounds_error = None;
-        let mut grace_deadline = None;
         let joins = session.take_background_joins();
         if !joins.is_empty() {
             let join_fut = tokio::task::spawn_blocking(move || {
@@ -565,7 +564,6 @@ impl<'a> RunTransaction<'a> {
                             started,
                             timeout,
                             &mut bounds_error,
-                            &mut grace_deadline,
                         );
                     }
                 }
@@ -574,9 +572,9 @@ impl<'a> RunTransaction<'a> {
         // Park detaches JoinHandles. Resume cannot restore them. Cancel any
         // still-running recorded child so it cannot keep writing the shared
         // workspace after the parent completes, then wait until those
-        // children leave `running` (in-flight bash observes cancel). Parent
-        // timeout/cancel still wait, with a short grace once the parent
-        // clock has already expired.
+        // children leave `running` (in-flight bash observes cancel). Do not
+        // return while a child is still active: a 2s grace would let
+        // `sleep N && write` finish after parent cancel/timeout.
         for child in &session.children {
             if self
                 .engine
@@ -590,14 +588,7 @@ impl<'a> RunTransaction<'a> {
         let mut interval = tokio::time::interval(Duration::from_millis(50));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            self.note_nested_bounds(
-                session,
-                request,
-                started,
-                timeout,
-                &mut bounds_error,
-                &mut grace_deadline,
-            );
+            self.note_nested_bounds(session, request, started, timeout, &mut bounds_error);
             let any_active = session.children.iter().any(|child| {
                 self.engine
                     .registry
@@ -605,9 +596,6 @@ impl<'a> RunTransaction<'a> {
                     .unwrap_or(false)
             });
             if !any_active {
-                break;
-            }
-            if grace_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 break;
             }
             interval.tick().await;
@@ -625,7 +613,6 @@ impl<'a> RunTransaction<'a> {
         started: tokio::time::Instant,
         timeout: Option<Duration>,
         bounds_error: &mut Option<RunError>,
-        grace_deadline: &mut Option<tokio::time::Instant>,
     ) {
         if bounds_error.is_some() {
             return;
@@ -641,7 +628,6 @@ impl<'a> RunTransaction<'a> {
             for child in &session.children {
                 let _ = self.engine.registry.request_cancel(&child.run_id);
             }
-            *grace_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(2));
             *bounds_error = Some(error);
         }
     }

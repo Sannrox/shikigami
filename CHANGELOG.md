@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Nested parent cancel/timeout waits until `wait=false` children are
+  inactive, including children whose JoinHandles were detached across
+  park/resume. A 2s grace no longer returns while a child can still
+  write the shared workspace.
 - Nested `worktree=true` children `git worktree remove` on cancel, fail,
   and successful complete, not only on success. Parked plan worktrees stay
   until a later non-park terminal.
