@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- Cargo workspace: `shikigami` remains the embeddable library; `shikigami-cli`
+  owns the `shikigami` binary (clap); `shikigami-tui` owns the interactive
+  host (ratatui); `shikigami-types` owns identity, digest, and atomic-file
+  helpers. `tokio` is `default-features = false` with the features the library
+  calls.
+
 ### Added
 
 - [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as

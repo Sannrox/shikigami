@@ -64,7 +64,7 @@ jobs:
         id: release
         shell: bash
         run: |
-          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="shikigami") | .version')"
           tag_version="${GITHUB_REF_NAME#v}"
           if [[ "$version" != "$tag_version" ]]; then
             echo "release tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2

@@ -1291,6 +1291,34 @@ impl ConfigSource {
     }
 }
 
+/// Replace known secret values (from env) with `[REDACTED]` in a text line.
+pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
+    let mut out = line.to_string();
+    let mut secrets = Vec::new();
+    if let Some(name) = &config.governance.token_env
+        && let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+    {
+        if let Some(stripped) = v.strip_prefix("Bearer ") {
+            secrets.push(stripped.to_string());
+        }
+        secrets.push(v);
+    }
+    if let Ok(v) = std::env::var(&config.model.api_key_env)
+        && !v.is_empty()
+    {
+        secrets.push(v);
+    }
+    // Longest first so partial overlaps redact fully.
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for s in secrets {
+        if s.len() >= 8 {
+            out = out.replace(&s, "[REDACTED]");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

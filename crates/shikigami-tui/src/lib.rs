@@ -1,7 +1,7 @@
 //! Thin interactive process host: ACP client of the in-process session.
 //!
 //! Evolving surface, same rank as `shikigami acp`. Not freeze-core.
-//! See [ADR 0014](../docs/decisions/0014-usable-guest-hosts.md).
+//! See [ADR 0014](../../../docs/decisions/0014-usable-guest-hosts.md).
 
 use std::io::{IsTerminal, stdin, stdout};
 use std::path::Path;
@@ -28,9 +28,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
-use crate::acp::{AcpClient, AcpHost};
-use crate::harness::Harness;
-use crate::identity::{PRODUCT, VERSION};
+use shikigami::acp::{AcpClient, AcpHost};
+use shikigami::harness::Harness;
+use shikigami::identity::{PRODUCT, VERSION};
 
 /// Run the interactive host on a real terminal until quit.
 pub async fn run(harness: Harness) -> Result<(), String> {
@@ -523,7 +523,7 @@ impl TuiSession {
                 hint: "start a new session".into(),
             },
         ];
-        for id in crate::context::list_skill_ids(&self.cwd, self.host.context_settings()) {
+        for id in shikigami::context::list_skill_ids(&self.cwd, self.host.context_settings()) {
             out.push(SlashCommand {
                 name: format!("skill:{id}"),
                 hint: "load skill pack".into(),
@@ -590,7 +590,7 @@ impl TuiSession {
                 let Some(id) = other.strip_prefix("skill:") else {
                     return KeyResult::Continue;
                 };
-                match crate::context::load_skill(&self.cwd, self.host.context_settings(), id) {
+                match shikigami::context::load_skill(&self.cwd, self.host.context_settings(), id) {
                     Some(pack) => {
                         let display = if args.is_empty() {
                             format!("/{other}")
@@ -1806,8 +1806,8 @@ fn scroll_offset(body: &str, area: Rect) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::state::StateRoot;
+    use shikigami::config::Config;
+    use shikigami::state::StateRoot;
     use tempfile::tempdir;
 
     fn scripted_host(dir: &Path, script: &str) -> AcpHost {
