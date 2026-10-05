@@ -11,6 +11,9 @@ shikigami --state ./state tui
 ```
 
 Credentials come from the environment, same as CLI. There is no TUI login.
+Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
+`--config` as `doctor` / `run`; see
+[`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml).
 
 ## Behavior
 

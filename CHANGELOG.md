@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plan-jailed children do not attach parent MCP servers. `doctor`
   names the mode when selected. Env: `SHIKIGAMI_RUN_NESTED`. CLI:
   `--nested`. ACP/TUI show `child_run` as a tool event.
+- Example settings for ungoverned `http` through a local OpenAI-compatible
+  gateway ([`examples/cliproxy-http.toml`](examples/cliproxy-http.toml)).
 
 ### Changed
 

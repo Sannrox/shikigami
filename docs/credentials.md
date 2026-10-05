@@ -8,7 +8,7 @@ TOML, git, doctor output, or event streams.
 | Secret | Settings field | Typical env |
 | --- | --- | --- |
 | Plane bearer token | `governance.token_env` | `SEKAI_TOKEN` |
-| HTTP model API key | `model.api_key_env` | `OPENAI_API_KEY` |
+| HTTP model API key | `model.api_key_env` | `OPENAI_API_KEY` (or `CLIPROXY_API_KEY` for a local OpenAI-compatible gateway; see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)) |
 
 Settings store **names of env vars**, never secret values.
 
@@ -23,6 +23,7 @@ token_env = "SEKAI_TOKEN"
 ```bash
 export SEKAI_TOKEN="…"          # shell / CI secret store / agent host
 export OPENAI_API_KEY="…"       # only for ungoverned http model
+export CLIPROXY_API_KEY="…"     # gateway access key when using examples/cliproxy-http.toml
 shikigami --config examples/governed-sekai-chisei.toml doctor
 ```
 

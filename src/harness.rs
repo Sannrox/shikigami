@@ -970,6 +970,7 @@ mod tests {
     fn example_tomls_have_no_inline_secrets() {
         let examples = [
             include_str!("../examples/local-run.toml"),
+            include_str!("../examples/cliproxy-http.toml"),
             include_str!("../examples/governed-sekai-chisei.toml"),
         ];
         for body in examples {
