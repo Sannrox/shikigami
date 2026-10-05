@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -87,6 +90,8 @@ struct Shared {
     /// Rows above the follow-tail. 0 means stick to the newest output.
     scroll_back: u16,
     transcript_h: u16,
+    /// Last drawn composer width; Up/Down use it to step visual rows.
+    composer_w: u16,
     dirty: bool,
     /// Esc hid the `/` list; cleared once the draft no longer starts with `/`.
     slash_dismissed: bool,
@@ -109,6 +114,7 @@ impl Shared {
             history_scratch: String::new(),
             scroll_back: 0,
             transcript_h: 0,
+            composer_w: 80,
             dirty: true,
             slash_dismissed: false,
             slash_selected: 0,
@@ -116,10 +122,33 @@ impl Shared {
     }
 
     fn insert_char(&mut self, ch: char) {
+        self.insert_str(&ch.to_string());
+    }
+
+    fn insert_str(&mut self, text: &str) {
+        let mut extra = Vec::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\r' {
+                extra.push('\n');
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                continue;
+            }
+            let ch = if ch == '\t' { ' ' } else { ch };
+            if ch == '\n' || !ch.is_control() {
+                extra.push(ch);
+            }
+        }
+        if extra.is_empty() {
+            return;
+        }
         let mut chars: Vec<char> = self.input.chars().collect();
         let i = self.cursor.min(chars.len());
-        chars.insert(i, ch);
-        self.cursor = i + 1;
+        let added = extra.len();
+        chars.splice(i..i, extra);
+        self.cursor = i + added;
         self.input = chars.into_iter().collect();
         self.history_idx = None;
         self.slash_selected = 0;
@@ -254,6 +283,27 @@ impl Shared {
         let page = self.transcript_h.max(1);
         self.scroll_back = self.scroll_back.saturating_sub(page);
         self.dirty = true;
+    }
+
+    /// Move one visual composer row. False means the cursor is already on an edge.
+    fn move_cursor_row(&mut self, delta: isize) -> bool {
+        let width = self.composer_w.max(1);
+        let rows = prompt_rows(&self.input, width);
+        if rows.len() <= 1 {
+            return false;
+        }
+        let (x, y) = prompt_cursor(&self.input, self.cursor, width, &rows);
+        let dest = y as isize + delta;
+        if dest < 0 || dest >= rows.len() as isize {
+            return false;
+        }
+        let next = char_index_at(&self.input, &rows, dest as usize, x);
+        if next == self.cursor {
+            return true;
+        }
+        self.cursor = next;
+        self.dirty = true;
+        true
     }
 }
 
@@ -925,34 +975,126 @@ fn truncate_one_line(s: &str, max: usize) -> String {
     }
 }
 
-fn prompt_view(input: &str, cursor: usize, width: u16) -> (String, u16) {
+struct PromptRow {
+    start: usize,
+    end: usize,
+}
+
+fn wrap_logical(chars: &[char], start: usize, end: usize, avail: usize) -> Vec<PromptRow> {
+    if start == end {
+        return vec![PromptRow { start, end }];
+    }
+    let mut rows = Vec::new();
+    let mut i = start;
+    while i < end {
+        let row_start = i;
+        let mut used = 0;
+        while i < end {
+            let w = char_cols(chars[i]);
+            if w == 0 {
+                i += 1;
+                continue;
+            }
+            if used > 0 && used + w > avail {
+                break;
+            }
+            used += w;
+            i += 1;
+            if used >= avail {
+                break;
+            }
+        }
+        if i == row_start {
+            i += 1;
+        }
+        rows.push(PromptRow {
+            start: row_start,
+            end: i,
+        });
+    }
+    rows
+}
+
+fn composer_avail(width: u16) -> usize {
+    // `> ` takes two cells; keep one so the caret can sit after a full row.
+    width.saturating_sub(3).max(1) as usize
+}
+
+fn prompt_rows(input: &str, width: u16) -> Vec<PromptRow> {
     let chars: Vec<char> = input.chars().collect();
-    let cursor = cursor.min(chars.len());
+    let avail = composer_avail(width);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '\n' {
+            rows.extend(wrap_logical(&chars, start, i, avail));
+            start = i + 1;
+        }
+    }
+    rows.extend(wrap_logical(&chars, start, chars.len(), avail));
+    rows
+}
+
+fn prompt_cursor(input: &str, cursor: usize, width: u16, rows: &[PromptRow]) -> (u16, u16) {
+    let chars: Vec<char> = input.chars().collect();
+    let pos = cursor.min(chars.len());
     let prefix = 2u16;
-    let avail = width.saturating_sub(prefix).max(1) as usize;
-    let cursor_budget = avail.saturating_sub(1);
-    let mut start = cursor;
-    let mut before_w = 0;
-    while start > 0 {
-        let w = char_cols(chars[start - 1]);
-        if before_w + w > cursor_budget {
+    if rows.is_empty() {
+        return (prefix.min(width.saturating_sub(1)), 0);
+    }
+    let mut row_i = rows.len() - 1;
+    for (i, row) in rows.iter().enumerate() {
+        let next = rows.get(i + 1).map(|r| r.start);
+        // A soft-wrap boundary index belongs to the filled row so Up/Down
+        // stay on that row's reserved caret cell.
+        if next.is_none_or(|next| pos < next || (pos == row.end && next == row.end)) {
+            row_i = i;
             break;
         }
-        start -= 1;
-        before_w += w;
     }
-    let mut view = String::new();
-    let mut view_w = 0;
-    for &ch in chars.iter().skip(start) {
-        let w = char_cols(ch);
-        if view_w + w > avail {
+    let row = &rows[row_i];
+    let upto = pos.clamp(row.start, row.end);
+    let before: String = chars[row.start..upto].iter().collect();
+    let x = prefix.saturating_add(display_cols(&before) as u16);
+    (x.min(width.saturating_sub(1)), row_i as u16)
+}
+
+fn char_index_at(input: &str, rows: &[PromptRow], row: usize, col: u16) -> usize {
+    let Some(target) = rows.get(row) else {
+        return input.chars().count();
+    };
+    let chars: Vec<char> = input.chars().collect();
+    let want = col.saturating_sub(2) as usize;
+    let mut used = 0;
+    let mut i = target.start;
+    while i < target.end {
+        let w = char_cols(chars[i]);
+        if used + w > want {
             break;
         }
-        view.push(ch);
-        view_w += w;
+        used += w;
+        i += 1;
     }
-    let cursor_x = prefix.saturating_add(before_w as u16);
-    (format!("> {view}"), cursor_x.min(width.saturating_sub(1)))
+    i
+}
+
+fn prompt_block(input: &str, cursor: usize, width: u16) -> (Vec<String>, u16, u16) {
+    let chars: Vec<char> = input.chars().collect();
+    let rows = prompt_rows(input, width);
+    let (x, y) = prompt_cursor(input, cursor, width, &rows);
+    let mut lines = Vec::with_capacity(rows.len().max(1));
+    for (i, row) in rows.iter().enumerate() {
+        let text: String = chars[row.start..row.end].iter().collect();
+        if i == 0 {
+            lines.push(format!("> {text}"));
+        } else {
+            lines.push(format!("  {text}"));
+        }
+    }
+    if lines.is_empty() {
+        lines.push("> ".into());
+    }
+    (lines, x, y)
 }
 
 #[async_trait]
@@ -1163,7 +1305,13 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut out = stdout();
-        let _ = execute!(out, LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(
+            out,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
     }
 }
 
@@ -1208,7 +1356,11 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _guard = TerminalGuard;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen).map_err(|e| e.to_string())?;
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
+    let _ = execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     #[cfg(unix)]
     let _stderr = StderrSilence::apply();
     let mut terminal = Terminal::new(CrosstermBackend::new(out)).map_err(|e| e.to_string())?;
@@ -1278,6 +1430,7 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
             Event::Resize(_, _) => {
                 session.lock_shared().dirty = true;
             }
+            Event::Paste(text) => handle_paste(&session, &text),
             _ => {}
         }
     }
@@ -1367,8 +1520,18 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 shared.dirty = true;
             }
         }
-        KeyCode::Up => session.lock_shared().history_up(),
-        KeyCode::Down => session.lock_shared().history_down(),
+        KeyCode::Up => {
+            let mut shared = session.lock_shared();
+            if !shared.move_cursor_row(-1) {
+                shared.history_up();
+            }
+        }
+        KeyCode::Down => {
+            let mut shared = session.lock_shared();
+            if !shared.move_cursor_row(1) {
+                shared.history_down();
+            }
+        }
         KeyCode::Tab if slash_open => {
             let matches = session.slash_matches();
             let mut shared = session.lock_shared();
@@ -1387,6 +1550,13 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         KeyCode::Backspace => session.lock_shared().backspace(),
         KeyCode::Delete => session.lock_shared().delete_forward(),
         KeyCode::Enter => {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            {
+                session.lock_shared().insert_char('\n');
+                return KeyResult::Continue;
+            }
             if session.lock_shared().busy {
                 return KeyResult::Continue;
             }
@@ -1417,6 +1587,13 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         _ => {}
     }
     KeyResult::Continue
+}
+
+fn handle_paste(session: &TuiSession, text: &str) {
+    if session.lock_shared().permission.is_some() {
+        return;
+    }
+    session.lock_shared().insert_str(text);
 }
 
 fn dim_style() -> Style {
@@ -1454,10 +1631,15 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     let asking = shared.permission.is_some();
     let planning = shared.show_plan && shared.plan.is_some() && !asking;
     let inner = composer_inner(&shared);
+    let wrap_w = area.width.max(1);
+    shared.composer_w = wrap_w;
+    let (prompt_lines, cursor_x, cursor_y) = prompt_block(&shared.input, shared.cursor, wrap_w);
     let composer_h = if asking || planning {
         composer_height(&inner, area)
     } else {
-        1
+        let rows = prompt_lines.len().max(1) as u16;
+        let max = area.height.saturating_sub(4).max(1);
+        rows.min(max)
     };
     let slash_cap = area.height.saturating_sub(6).min(8) as usize;
     if !slash_cmds.is_empty() {
@@ -1572,11 +1754,19 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
             .collect();
         frame.render_widget(Paragraph::new(styled).wrap(Wrap { trim: false }), composer);
     } else {
-        let (view, cursor_x) = prompt_view(&shared.input, shared.cursor, composer.width);
-        frame.render_widget(Paragraph::new(view), composer);
+        let scroll = cursor_y.saturating_sub(composer_h.saturating_sub(1));
+        let shown: Vec<Line> = prompt_lines
+            .iter()
+            .skip(scroll as usize)
+            .take(composer_h as usize)
+            .map(|row| Line::from(row.clone()))
+            .collect();
+        frame.render_widget(Paragraph::new(shown), composer);
         frame.set_cursor_position(Position {
-            x: composer.x.saturating_add(cursor_x),
-            y: composer.y,
+            x: composer
+                .x
+                .saturating_add(cursor_x.min(composer.width.saturating_sub(1))),
+            y: composer.y.saturating_add(cursor_y.saturating_sub(scroll)),
         });
     }
 
@@ -1988,6 +2178,67 @@ mod tests {
         assert_eq!(session.lock_shared().input, "");
     }
 
+    #[tokio::test]
+    async fn shift_enter_inserts_newline_without_sending() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        type_text(&session, "hi");
+        let shift = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert!(matches!(handle_key(&session, shift), KeyResult::Continue));
+        assert_eq!(session.lock_shared().input, "hi\n");
+        let alt = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert!(matches!(handle_key(&session, alt), KeyResult::Continue));
+        assert_eq!(session.lock_shared().input, "hi\n\n");
+        type_text(&session, "there");
+        match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            KeyResult::Prompt { display, send } => {
+                assert_eq!(display, "hi\n\nthere");
+                assert_eq!(send, "hi\n\nthere");
+            }
+            other => panic!("expected send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paste_inserts_newlines() {
+        let mut shared = Shared::new();
+        shared.insert_str("error\r\n--> src/tui.rs\n");
+        assert_eq!(shared.input, "error\n--> src/tui.rs\n");
+        assert_eq!(shared.cursor, shared.input.chars().count());
+        shared.insert_str("\tfn");
+        assert_eq!(shared.input, "error\n--> src/tui.rs\n fn");
+        let mut cr = Shared::new();
+        cr.insert_str("first\rsecond");
+        assert_eq!(cr.input, "first\nsecond");
+    }
+
+    #[tokio::test]
+    async fn arrows_move_inside_multiline_draft() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        type_text(&session, "ab");
+        handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        type_text(&session, "cd");
+        assert_eq!(session.lock_shared().input, "ab\ncd");
+        assert_eq!(session.lock_shared().cursor, 5);
+        handle_key(&session, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(session.lock_shared().cursor, 2);
+        handle_key(&session, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(session.lock_shared().cursor, 5);
+        session.lock_shared().clear_input();
+        session.spawn_prompt("first".into()).await.unwrap();
+        let _ = session.wait_prompt().await;
+        type_text(&session, "xy");
+        handle_key(&session, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(session.lock_shared().input, "first");
+    }
+
     #[test]
     fn session_update_marks_dirty() {
         let mut shared = Shared::new();
@@ -2011,19 +2262,55 @@ mod tests {
     }
 
     #[test]
-    fn prompt_view_keeps_cursor_on_screen() {
-        let (view, x) = prompt_view("abcdefghij", 10, 6);
-        assert_eq!(view, "> hij");
-        assert_eq!(x, 5);
-        let (view, x) = prompt_view("ab", 1, 80);
-        assert_eq!(view, "> ab");
+    fn prompt_block_grows_and_wraps() {
+        let (lines, x, y) = prompt_block("ab\ncd", 5, 80);
+        assert_eq!(lines, vec!["> ab".to_string(), "  cd".to_string()]);
+        assert_eq!(y, 1);
+        assert_eq!(x, 4);
+        let (lines, x, y) = prompt_block("ab", 1, 80);
+        assert_eq!(lines, vec!["> ab".to_string()]);
+        assert_eq!(y, 0);
         assert_eq!(x, 3);
-        let (view, x) = prompt_view("中文", 2, 6);
-        assert_eq!(view, "> 文");
+        let (lines, x, y) = prompt_block("abc", 3, 6);
+        assert_eq!(lines, vec!["> abc".to_string()]);
+        assert_eq!(y, 0);
+        assert_eq!(x, 5);
+        let (lines, x, y) = prompt_block("abcdefghij", 10, 6);
+        assert_eq!(
+            lines,
+            vec![
+                "> abc".to_string(),
+                "  def".to_string(),
+                "  ghi".to_string(),
+                "  j".to_string()
+            ]
+        );
+        assert_eq!(y, 3);
+        assert_eq!(x, 3);
+        let (lines, x, y) = prompt_block("中文", 1, 6);
+        assert_eq!(lines, vec!["> 中".to_string(), "  文".to_string()]);
+        assert_eq!(y, 0);
         assert_eq!(x, 4);
-        let (view, x) = prompt_view("中文", 1, 6);
-        assert_eq!(view, "> 中文");
-        assert_eq!(x, 4);
+        let (lines, _, y) = prompt_block("中文", 2, 4);
+        assert_eq!(lines, vec!["> 中".to_string(), "  文".to_string()]);
+        assert_eq!(y, 1);
+        let mut shared = Shared::new();
+        shared.composer_w = 6;
+        shared.insert_str("abc\nabc");
+        assert_eq!(shared.cursor, 7);
+        assert!(shared.move_cursor_row(-1));
+        assert_eq!(shared.cursor, 3);
+        shared.clear_input();
+        shared.insert_str("abcdef");
+        assert_eq!(shared.cursor, 6);
+        let (_, x, y) = prompt_block(&shared.input, 3, 6);
+        assert_eq!((x, y), (5, 0));
+        assert!(shared.move_cursor_row(-1));
+        assert_eq!(shared.cursor, 3);
+        let (_, x, y) = prompt_block(&shared.input, shared.cursor, 6);
+        assert_eq!((x, y), (5, 0));
+        assert!(shared.move_cursor_row(1));
+        assert_eq!(shared.cursor, 6);
     }
 
     #[test]

@@ -24,7 +24,7 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 | Action | Mapping |
 | --- | --- |
 | Start | `initialize`, then `session/load` of the last session in this cwd, or `session/new` when load fails or none exists |
-| Prompt | Enter sends `session/prompt`. Framed composer (`>` between two `─` rules); draft stays visible while a turn runs; Left/Right/Home/End move the cursor; Up/Down walk sent prompts. |
+| Prompt | Enter sends `session/prompt`. Framed composer (`>` between two `─` rules); short drafts stay one row; Shift+Enter / Alt+Enter insert a newline and the composer grows in place (capped like ask/plan). Bracketed paste inserts as typed text, including newlines. `>` on the first composer line only. Left/Right/Home/End move the cursor; Up/Down move inside a multiline draft and walk sent prompts from the first or last row. Draft stays visible while a turn runs. |
 | Slash | Type `/` while idle to open a dim command list above the composer (Tab complete, Up/Down select, Esc dismiss, Enter run). `/compact` shrinks the live run history. `/new` starts a new session in this cwd. `/exit` and `/quit` leave the host. `/skill:name` loads `.shikigami/skills/<name>` or `.agents/skills/<name>` and sends it as the prompt. Unknown slash is a normal prompt. |
 | Stream | Dense transcript of `session/update` (dim `you` prefix, assistant text, `·` tool name/path, blank line between turns) |
 | Scroll | PageUp / PageDown through the transcript, including while a permission is up; a new prompt returns to the tail |

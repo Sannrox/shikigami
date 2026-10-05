@@ -80,7 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under it, blank line between turns, `·` tool gutter with path-first
   fields. Ask and plan replace the composer; the transcript stays in view
   and pins to the composer when short. Visible draft while a turn runs;
-  input cursor and prompt history. Prompt errors land in the transcript;
+  input cursor and prompt history. The composer grows in place for
+  Shift+Enter / Alt+Enter newlines and bracketed paste (`>` on the first
+  line only). Prompt errors land in the transcript;
   stderr event JSON is discarded while the alt-screen is up. Redraws only
   on key, resize, or session update; crossterm events use a bounded
   channel. Typing `/` opens a command list (`/compact`, `/new`, `/exit`,
