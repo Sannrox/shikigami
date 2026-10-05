@@ -222,6 +222,12 @@ pub struct Checkpoint {
     /// Typed nested profile (`explore` / `plan` / `full`). Empty on root runs.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub nested_profile: String,
+    /// Spawn-time `tools.mode` for nested children. Empty on root / old checkpoints.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tools_mode: String,
+    /// Spawn-time enabled tool names for nested children. Empty on root / old checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_enabled: Vec<String>,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -459,6 +465,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -505,6 +513,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -548,6 +558,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -606,6 +618,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         }
     }
 
