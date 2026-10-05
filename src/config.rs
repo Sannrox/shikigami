@@ -1317,6 +1317,25 @@ name = "governed"
     }
 
     #[test]
+    fn cliproxy_http_example_selects_loopback_http_model() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cliproxy-http.toml");
+        fs::write(&path, include_str!("../examples/cliproxy-http.toml")).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.model.adapter, "http");
+        assert_eq!(
+            config.model.base_url.as_deref(),
+            Some("http://127.0.0.1:8317/v1")
+        );
+        assert_eq!(config.model.model, "grok-4.6");
+        assert_eq!(config.model.api_key_env, "CLIPROXY_API_KEY");
+        assert_eq!(config.tools.mode, PermissionMode::Workspace);
+        assert_eq!(config.network.egress, EgressMode::Allowlist);
+        assert_eq!(config.network.allow_hosts, vec!["127.0.0.1".to_string()]);
+        config.validate().unwrap();
+    }
+
+    #[test]
     fn loads_nested_settings() {
         let dir = tempdir().unwrap();
         let path = Config::path_in(dir.path());

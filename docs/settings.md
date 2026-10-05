@@ -104,9 +104,9 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | --- | --- | --- |
 | `adapter` | `"scripted"` | `scripted` \| `http` \| `plane` |
 | `script_json` | built-in demo script | JSON array of turns for `scripted` |
-| `base_url` | OpenAI-compatible default | Base URL for `http` |
-| `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. |
-| `api_key_env` | `"OPENAI_API_KEY"` | Env var for HTTP API key |
+| `base_url` | OpenAI-compatible default | Base URL for `http` (Chat Completions). A local gateway such as CLIProxyAPI is typically `http://127.0.0.1:8317/v1`. |
+| `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. Set an explicit id for a gateway catalog (see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)). |
+| `api_key_env` | `"OPENAI_API_KEY"` | Env var for the HTTP API key. For a local gateway this is the gateway access key (for CLIProxyAPI, `CLIPROXY_API_KEY`), not an upstream provider token. |
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
 
@@ -453,6 +453,7 @@ Offline defaults never require a plane.
 ## Examples
 
 - [../examples/local-run.toml](../examples/local-run.toml)
+- [../examples/cliproxy-http.toml](../examples/cliproxy-http.toml)
 - [../examples/governed-sekai-chisei.toml](../examples/governed-sekai-chisei.toml)
 
 Adapter semantics: [adapters.md](adapters.md).
