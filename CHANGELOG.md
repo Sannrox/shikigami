@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example settings for ungoverned `http` through a local OpenAI-compatible
   gateway ([`examples/cliproxy-http.toml`](examples/cliproxy-http.toml)).
 
+### Fixed
+
+- Plan-jail writes to `.shikigami/plan.md` (`write_file`, `edit`,
+  `multi_edit`, `apply_patch`) open the plan path with `O_NOFOLLOW` and
+  refuse hard-linked or non-regular destinations, matching plan-jail
+  reads. A symlink or hardlink swap after the destination check cannot
+  land content on another inode.
+
 ### Changed
 
 - `shikigami tui`: framed composer (`>` between two `─` rules), dim footer
