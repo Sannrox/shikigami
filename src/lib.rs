@@ -104,8 +104,8 @@ pub use replay::{
     export_replay_inputs, steps_from_messages, text_digest, workspace_digest,
 };
 pub use run::{
-    AskDecision, ParkInfo, ParkKind, PlanDecision, RunRequest, RunResult, RunTermination,
-    SYSTEM_PROMPT,
+    AskDecision, ChildProfile, ParkInfo, ParkKind, PlanDecision, RunRequest, RunResult,
+    RunTermination, SYSTEM_PROMPT,
 };
 pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,

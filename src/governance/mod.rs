@@ -23,6 +23,18 @@ pub use http_callback::HttpCallbackGovernance;
 pub use local::LocalGovernance;
 pub use none::NoneGovernance;
 
+/// In-process adapters authorize nested child tools; the run registry injects
+/// them only when `run.nested` / `RunRequest.nested` is on.
+fn in_process_enabled_tools(config: &Config) -> Vec<String> {
+    let mut enabled = config.tools.effective_enabled();
+    for name in ["child_run", "child_status"] {
+        if !enabled.iter().any(|tool| tool == name) {
+            enabled.push(name.into());
+        }
+    }
+    enabled
+}
+
 /// A model exposed by the configured governance/model source.
 ///
 /// Governed model availability is authoritative in sekai-chisei. Local

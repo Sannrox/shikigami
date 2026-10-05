@@ -32,8 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run; `--plan-reject` completes failed and keeps the jail. `doctor` names the mode when
   selected. Env: `SHIKIGAMI_RUN_PLAN_JAIL`. ACP maps the park through
   `session/request_permission` so the TUI overlay shows the plan text.
-- [ADR 0015](docs/decisions/0015-nested-child-runs.md): nested child runs
-  as first-class Runs (post-1.0; default off).
+- [ADR 0015](docs/decisions/0015-nested-child-runs.md): additive
+  `run.nested` (default off) injects `child_run` / `child_status`. A
+  child is a first-class Run (`explore` read-only, `plan` write-jail,
+  `full` parent authority) sharing the parent workspace; `worktree=true`
+  isolates. Children run unattended to a summary. Session hosts
+  ask=park before `full`/`plan` `child_run` and any `worktree=true`.
+  Depth and fan-out caps fail
+  closed. Children do not inherit nested tools. Explore and
+  plan-jailed children do not attach parent MCP servers. `doctor`
+  names the mode when selected. Env: `SHIKIGAMI_RUN_NESTED`. CLI:
+  `--nested`. ACP/TUI show `child_run` as a tool event.
 
 ### Changed
 

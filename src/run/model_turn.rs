@@ -129,6 +129,7 @@ impl<'a> DurableModelTurn<'a> {
             self.request,
             self.started,
             self.timeout,
+            &session.parent_run_id,
         )?;
 
         if self.staged_turn.is_none() && self.staged_content_turn.is_none() {
@@ -287,6 +288,7 @@ impl<'a> DurableModelTurn<'a> {
             self.request,
             self.started,
             self.timeout,
+            &session.parent_run_id,
         )?;
         session.spans.end_turn();
         Ok(turn)

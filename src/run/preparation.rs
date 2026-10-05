@@ -61,6 +61,34 @@ pub(super) async fn prepare(
     let stored_plan_jail = resume_checkpoint
         .as_ref()
         .is_some_and(|checkpoint| checkpoint.plan_jail);
+    let stored_nested = resume_checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint.nested);
+    let stored_children = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.children.clone())
+        .unwrap_or_default();
+    let stored_nested_depth = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.nested_depth)
+        .unwrap_or(request.nested_depth);
+    let stored_parent_run_id = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.parent_run_id.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| request.parent_run_id.clone())
+        .unwrap_or_default();
+    let stored_nested_profile = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.nested_profile.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            request
+                .nested_profile
+                .map(|profile| profile.as_str().into())
+        })
+        .unwrap_or_default();
+    let nested_profile = super::nested::parse_profile(&stored_nested_profile).ok();
     let resumed_park = resume_checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.park.clone());
@@ -98,11 +126,39 @@ pub(super) async fn prepare(
     } else {
         request.plan_jail
     };
-    let (prompt_id, system_prompt) = compose_context(engine, &run_id, &workspace, plan_jail);
+    let nested_tools = super::nested::nested_tools_enabled(
+        engine,
+        request,
+        content.is_some(),
+        stored_nested_depth,
+        &stored_parent_run_id,
+        stored_nested,
+    );
+    let (prompt_id, system_prompt) = compose_context(
+        engine,
+        &run_id,
+        &workspace,
+        plan_jail,
+        nested_tools,
+        nested_profile,
+    );
 
-    let mut tools = ToolRegistry::from_config(&workspace.path, &engine.config)?;
+    let explore = nested_profile == Some(super::ChildProfile::Explore);
+    let mut enabled = if explore {
+        crate::config::ToolsSettings::tools_for_mode(crate::config::PermissionMode::Read)
+    } else {
+        engine.config.tools.effective_enabled()
+    };
+    if nested_tools {
+        for name in ["child_run", "child_status"] {
+            if !enabled.iter().any(|tool| tool == name) {
+                enabled.push(name.into());
+            }
+        }
+    }
+    let mut tools = ToolRegistry::from_config_enabled(&workspace.path, &engine.config, enabled)?;
     tools.set_todos(todos);
-    if !engine.config.tools.mcp_servers.is_empty() {
+    if !explore && !plan_jail && !engine.config.tools.mcp_servers.is_empty() {
         crate::mcp::attach_mcp_servers(&mut tools, &engine.config).await?;
     }
     let tool_defs = tools.definitions();
@@ -155,6 +211,11 @@ pub(super) async fn prepare(
         session.set_resumed_ask_park(resumed_park.clone());
     }
     session.plan_jail = plan_jail;
+    session.nested = nested_tools;
+    session.children = stored_children;
+    session.nested_depth = stored_nested_depth;
+    session.parent_run_id = stored_parent_run_id;
+    session.nested_profile = stored_nested_profile;
     if let Some(content) = content {
         let (messages, capabilities, initial_message_count, terminal, usage) =
             if let Some(binding) = content_binding.as_ref() {
@@ -262,18 +323,29 @@ fn initial_state(
                 status: "resuming".into(),
             },
         );
+        let adapter = if checkpoint.workspace_adapter.is_empty() {
+            configured_workspace_adapter(&engine.config).into()
+        } else {
+            checkpoint.workspace_adapter.clone()
+        };
+        let cleanup = if adapter == "inplace" {
+            WorkspaceCleanup::None
+        } else if adapter == "git-worktree" {
+            crate::workspace::git_worktree_cleanup(
+                &resumed_workspace,
+                resume_id,
+                &engine.config.workspace.branch_prefix,
+                std::path::Path::new(&engine.config.workspace.root),
+            )
+        } else if checkpoint.keep_workspace {
+            WorkspaceCleanup::None
+        } else {
+            WorkspaceCleanup::RemoveDir
+        };
         let workspace = MaterializedWorkspace {
             path: resumed_workspace,
-            adapter: if checkpoint.workspace_adapter.is_empty() {
-                configured_workspace_adapter(&engine.config).into()
-            } else {
-                checkpoint.workspace_adapter.clone()
-            },
-            cleanup: if checkpoint.keep_workspace || checkpoint.workspace_adapter == "inplace" {
-                WorkspaceCleanup::None
-            } else {
-                WorkspaceCleanup::RemoveDir
-            },
+            adapter,
+            cleanup,
         };
         let task = if request.task.is_empty() {
             checkpoint.task.clone()
@@ -486,6 +558,8 @@ fn compose_context(
     run_id: &str,
     workspace: &MaterializedWorkspace,
     plan_jail: bool,
+    nested_tools: bool,
+    nested_profile: Option<super::ChildProfile>,
 ) -> (String, String) {
     let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
     let rules = crate::context::load_project_rules(&workspace.path, &engine.config.context);
@@ -497,6 +571,16 @@ fn compose_context(
         prompt.push_str(
             "`. Call report when the plan is ready for operator review. After accept, execute authority is restored on this run.",
         );
+    }
+    if nested_tools {
+        prompt.push_str(
+            "\n\nNested child runs are available via child_run. Profiles: explore (read-only), plan (write-jail), full (parent authority). Depth and fan-out are capped. child_status polls a child of this run.",
+        );
+    }
+    if let Some(profile) = nested_profile {
+        prompt.push_str("\n\nThis is a nested child run (profile=");
+        prompt.push_str(profile.as_str());
+        prompt.push_str("). Report a structured summary; do not assume parent execute authority.");
     }
     engine.emit(
         run_id,

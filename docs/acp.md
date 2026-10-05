@@ -35,7 +35,8 @@ the same prompt. Hitting the budget parks `end_turn` with
 `stopReason: max_turn_requests` so the next prompt can continue. A readable
 session run that is not waiting fails closed instead of starting a new run.
 Background bash jobs are reaped when a run parks; they do not survive
-ask=park.
+ask=park. Nested `child_run` is a tool event on the parent session; there is
+no extra ACP method.
 `session/cancel` keeps the session run and parks it for the next prompt.
 A later prompt on an outstanding ask/escalate park restores the permission
 wait; an unreadable checkpoint fails closed instead of starting a new run.

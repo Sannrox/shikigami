@@ -4,6 +4,7 @@
 //! heartbeat publication, Run transaction invocation, and durable terminal
 //! finalization. [`Engine`](super::Engine) remains the stable public interface.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ pub(super) fn check_bounds(
     request: &RunRequest,
     started: tokio::time::Instant,
     timeout: Option<Duration>,
+    parent_run_id: &str,
 ) -> Result<(), RunError> {
     engine
         .registry
@@ -40,12 +42,53 @@ pub(super) fn check_bounds(
     if engine.registry.cancel_requested(run_id) {
         return Err(RunError::Cancelled);
     }
+    if !parent_run_id.is_empty() && engine.registry.cancel_requested(parent_run_id) {
+        return Err(RunError::Cancelled);
+    }
+    if request
+        .parent_run_id
+        .as_deref()
+        .is_some_and(|parent| engine.registry.cancel_requested(parent))
+    {
+        return Err(RunError::Cancelled);
+    }
     if let Some(limit) = timeout
         && started.elapsed() >= limit
     {
         return Err(RunError::TimedOut(limit));
     }
     Ok(())
+}
+
+/// Drive `fut` until it completes or [`check_bounds`] fails.
+///
+/// Dropping `fut` on cancel/timeout is what stops an in-flight `bash`
+/// (`kill_on_drop` plus the process-group guard). Nested `wait=false`
+/// children share the parent workspace, so a parent complete that only
+/// writes a cancel marker would otherwise let `sleep N && write` finish.
+pub(super) async fn run_until_cancelled<T, F>(
+    engine: &Engine,
+    run_id: &str,
+    request: &RunRequest,
+    started: tokio::time::Instant,
+    timeout: Option<Duration>,
+    parent_run_id: &str,
+    fut: F,
+) -> Result<T, RunError>
+where
+    F: Future<Output = T>,
+{
+    let mut fut = std::pin::pin!(fut);
+    let mut interval = tokio::time::interval(Duration::from_millis(50));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut fut => return Ok(result),
+            _ = interval.tick() => {
+                check_bounds(engine, run_id, request, started, timeout, parent_run_id)?;
+            }
+        }
+    }
 }
 
 pub(super) struct RunSupervision<'a> {
@@ -109,6 +152,11 @@ impl<'a> RunSupervision<'a> {
             resume_ask: None,
             plan_jail: false,
             resume_plan: None,
+            nested: false,
+            nested_depth: 0,
+            parent_run_id: None,
+            nested_profile: None,
+            assigned_run_id: None,
         };
         self.execute_inner(
             run_request,
@@ -199,6 +247,9 @@ impl<'a> RunSupervision<'a> {
         {
             request.plan_jail = true;
         }
+        if request.resume_run_id.is_none() && content.is_none() && self.engine.config.run.nested {
+            request.nested = true;
+        }
         let resume_checkpoint = self.preflight(
             &request,
             expected_checkpoint_digest,
@@ -208,17 +259,22 @@ impl<'a> RunSupervision<'a> {
         let run_id = request
             .resume_run_id
             .clone()
+            .or_else(|| request.assigned_run_id.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let content_run = content.is_some();
         self.acquire_run(&run_id, &request)?;
 
-        let heartbeat_task = self.spawn_heartbeat(run_id.clone());
+        let mut lifecycle = RunLifecycle {
+            engine: self.engine,
+            run_id: run_id.clone(),
+            heartbeat: Some(self.spawn_heartbeat(run_id.clone())),
+            content_run,
+            finished: false,
+        };
         let result = RunTransaction::new(self.engine)
             .execute(request, run_id.clone(), resume_checkpoint, replay, content)
             .await;
-        heartbeat_task.abort();
-        let _ = heartbeat_task.await;
-        self.finish_run(&run_id, &result, content_run);
+        lifecycle.finish(&result);
         result
     }
 
@@ -371,15 +427,20 @@ impl<'a> RunSupervision<'a> {
     }
 
     fn acquire_run(&self, run_id: &str, request: &RunRequest) -> Result<(), RunError> {
-        self.engine
-            .registry
-            .start(
-                run_id,
-                &request.task,
-                request.logical_operation_id.as_deref(),
-                None,
-            )
-            .map_err(|error| RunError::Message(format!("run registry start failed: {error}")))
+        match self.engine.registry.start(
+            run_id,
+            &request.task,
+            request.logical_operation_id.as_deref(),
+            None,
+        ) {
+            Ok(()) => Ok(()),
+            Err(crate::registry::RegistryError::CancelledBeforeStart(_)) => {
+                Err(RunError::Cancelled)
+            }
+            Err(error) => Err(RunError::Message(format!(
+                "run registry start failed: {error}"
+            ))),
+        }
     }
 
     fn spawn_heartbeat(&self, run_id: String) -> tokio::task::JoinHandle<()> {
@@ -410,6 +471,50 @@ impl<'a> RunSupervision<'a> {
             Err(error) => {
                 let _ = self.engine.registry.finish_error(run_id, error);
             }
+        }
+    }
+}
+
+/// Aborts heartbeat and finalizes the registry if `Engine::run` is dropped
+/// (parent cancel of a waited child, ACP cancel of the host future).
+struct RunLifecycle<'a> {
+    engine: &'a Engine,
+    run_id: String,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
+    content_run: bool,
+    finished: bool,
+}
+
+impl RunLifecycle<'_> {
+    fn finish(&mut self, result: &Result<RunResult, RunError>) {
+        self.abort_heartbeat();
+        RunSupervision {
+            engine: self.engine,
+        }
+        .finish_run(&self.run_id, result, self.content_run);
+        self.finished = true;
+    }
+
+    fn abort_heartbeat(&mut self) {
+        if let Some(task) = self.heartbeat.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for RunLifecycle<'_> {
+    fn drop(&mut self) {
+        self.abort_heartbeat();
+        if !self.finished {
+            if let Ok(checkpoint) = Checkpoint::load(&self.engine.state_runs, &self.run_id) {
+                for child in checkpoint.children {
+                    let _ = self.engine.registry.request_cancel(&child.run_id);
+                }
+            }
+            let _ = self
+                .engine
+                .registry
+                .finish_error(&self.run_id, &RunError::Cancelled);
         }
     }
 }

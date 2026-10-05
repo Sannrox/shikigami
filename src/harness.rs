@@ -942,6 +942,31 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_nested_when_selected() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.run.nested = true;
+        config.run.nested_max_depth = 2;
+        config.run.nested_max_children = 3;
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert!(
+            report.lines.iter().any(|line| {
+                line.contains("nested:")
+                    && line.contains("depth<=2")
+                    && line.contains("children<=3")
+            }),
+            "expected nested doctor line: {:?}",
+            report.lines
+        );
+        assert!(
+            report.to_json_value().get("nested").is_none(),
+            "nested must stay in lines, not the JSON schema"
+        );
+    }
+
+    #[test]
     fn example_tomls_have_no_inline_secrets() {
         let examples = [
             include_str!("../examples/local-run.toml"),
