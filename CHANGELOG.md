@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Nested `worktree=true` children `git worktree remove` on cancel, fail,
+  and successful complete, not only on success. Parked plan worktrees stay
+  until a later non-park terminal.
 - Nested child resume keeps spawn-time `tools.mode` / enabled tools and
   intersects them with the current host (never unions). A full or plan
   child spawned under Read cannot write after resume on a WorkspaceExec
