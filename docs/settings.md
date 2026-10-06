@@ -109,6 +109,9 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `api_key_env` | `"OPENAI_API_KEY"` | Env var for the HTTP API key. For a local gateway this is the gateway access key (for CLIProxyAPI, `CLIPROXY_API_KEY`), not an upstream provider token. |
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
+| `effort` | unset | Optional reasoning effort; adapters that do not speak it ignore it |
+
+When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
 
 #### `[model.fallback]`
 
@@ -127,8 +130,6 @@ No delivery-system keys. Unknown fields deny at parse time. Existing governed
 and local profiles are unchanged. Production enablement still requires a
 verifiable governance-issued envelope whose model digest matches.
 
-When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
-
 #### Scripted turn JSON
 
 ```json
@@ -145,6 +146,20 @@ When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never
   }
 ]
 ```
+
+### `[session.modes.<name>]`
+
+ACP session catalog ([ADR 0016](decisions/0016-session-mode.md)). Names are
+`low`, `medium`, `high`, and `ultra`. Extra names fail closed. Empty mapping
+inherits `[model]` and `[tools]`. Omit the table and omitted ACP `mode` keeps
+today's spawn.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `model` | inherit `[model].model` | Model id for this mode |
+| `effort` | unset | Optional reasoning effort; adapters that do not speak it ignore it |
+| `prompt` | unset | Extra system-prompt section |
+| `tools` | inherit | Optional further restrict the host tool set. Empty list fails closed. |
 
 ### `[workspace]`
 

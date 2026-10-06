@@ -19,9 +19,9 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | Method | Direction | Role |
 | --- | --- | --- |
 | `initialize` | client → agent | Speak protocol version 1. Accept client `protocolVersion` 1 or 2 (number or decimal string). Always reply `protocolVersion: 1` with the capability payload below. Other versions are `-32602 unsupported protocolVersion`. Success is not an agreement to speak v2. |
-| `session/new` | client → agent | Create a session id over a workspace `cwd` |
+| `session/new` | client → agent | Create a session id over a workspace `cwd`. Optional `mode` (`low` / `medium` / `high` / `ultra`) freezes the session ([ADR 0016](decisions/0016-session-mode.md)). Omit the field for today's spawn. |
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed** |
-| `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error |
+| `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error. A `mode` different from the frozen session mode is `-32602`. |
 | `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. |
 | `session/update` | agent → client | One notification per completed model turn (honest streaming) until the model adapter streams |
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
@@ -72,9 +72,13 @@ answer `session/request_permission` cannot complete a mutating prompt.
 
 Content parts reuse `run_content` bounds. This host concatenates `text` prompt
 parts; it does not add a multimodal stack. Prompt attachments are
-[ADR 0017](decisions/0017-acp-attachments.md) (not yet on the wire). Session
-mode is [ADR 0016](decisions/0016-session-mode.md) (honored by
-[#372](https://github.com/Sannrox/shikigami/issues/372)).
+[ADR 0017](decisions/0017-acp-attachments.md) (not yet on the wire).
+
+Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
+name a catalog mode; the mapping lives in `[session.modes]` settings. A later
+`session/prompt` that names a different mode is refused. The selected mode,
+model, effort, and tool set are a `session/update` with
+`sessionUpdate: session_mode`. Omit `mode` and today's spawn is unchanged.
 
 ## Proof
 

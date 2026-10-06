@@ -84,6 +84,15 @@ pub enum HarnessEvent {
         #[serde(default)]
         ignore: Vec<String>,
     },
+    /// Frozen session mode for an ACP/TUI session (ADR 0016).
+    SessionMode {
+        mode: String,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        #[serde(default)]
+        tools: Vec<String>,
+    },
 }
 
 pub trait EventSink: Send + Sync {

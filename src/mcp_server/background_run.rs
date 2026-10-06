@@ -208,6 +208,9 @@ fn format_event(event: &HarnessEvent) -> String {
                 files.len()
             )
         }
+        HarnessEvent::SessionMode { mode, model, .. } => {
+            format!("session_mode={mode} model={model}")
+        }
         HarnessEvent::Message { level, text } => format!("message[{level}]={text}"),
     }
 }

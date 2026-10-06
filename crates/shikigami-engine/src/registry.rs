@@ -792,6 +792,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::ContextCompacted { .. } => "context_compacted",
         HarnessEvent::TodosUpdated { .. } => "todos_updated",
         HarnessEvent::HandoffBrief { .. } => "handoff_brief",
+        HarnessEvent::SessionMode { .. } => "session_mode",
     }
 }
 
@@ -830,6 +831,7 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
         HarnessEvent::HandoffBrief { task, files, .. } => {
             format!("task_chars={} files={}", task.chars().count(), files.len())
         }
+        HarnessEvent::SessionMode { mode, model, .. } => format!("mode={mode} model={model}"),
     };
     Some(detail)
 }
