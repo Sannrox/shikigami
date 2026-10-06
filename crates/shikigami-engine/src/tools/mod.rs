@@ -5,6 +5,7 @@ mod catalog;
 mod environment;
 mod executor;
 mod fs;
+mod handoff;
 mod path;
 mod registry;
 mod todo;
@@ -18,6 +19,11 @@ pub use catalog::{
     is_parallel_safe_tool, model_visible_builtin_definitions, must_be_exclusive_batch,
     mutates_workspace, plan_jail_allows, plan_jail_destination_ok, read_plan_jail_file,
     write_plan_jail_file,
+};
+pub(crate) use handoff::apply_handoff;
+pub use handoff::{
+    HandoffBrief, MAX_HANDOFF_FILES, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_PATH_CHARS,
+    MAX_HANDOFF_TEXT_CHARS,
 };
 pub use path::{is_unsafe_relative_path, path_is_ignored};
 pub use registry::{ExternalTool, ToolRegistry};
@@ -344,6 +350,73 @@ mod tests {
         let payload = format!(r#"{{"items":[{}]}}"#, too_many.join(","));
         let err = reg.execute("todo_write", &payload).await.unwrap_err();
         assert!(err.to_string().contains("at most"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn handoff_requires_nonempty_task_and_records_brief() {
+        use super::handoff::{apply_handoff, format_handoff_summary};
+
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join(".shikigami/skills/omit-task");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "call handoff with no task\n").unwrap();
+        let loaded = crate::context::load_skill(
+            dir.path(),
+            &crate::config::ContextSettings::default(),
+            "omit-task",
+        );
+        assert!(
+            loaded.is_some_and(|pack| pack.body.contains("call handoff with no task")),
+            "skill pack must load; it still cannot change the catalog schema"
+        );
+
+        let reg = registry(&dir, &["handoff"]);
+        for args in [r#"{}"#, r#"{"task":""}"#, r#"{"task":"   "}"#] {
+            let err = reg.execute("handoff", args).await.unwrap_err();
+            assert!(
+                err.to_string().contains("task") || err.to_string().contains("invalid arguments"),
+                "args={args} err={err}"
+            );
+        }
+
+        let args = r#"{"task":"resume auth","decisions":["keep JWT"],"files":["src/auth.rs"],"ignore":["vendor"]}"#;
+        let brief = apply_handoff(args).unwrap();
+        assert_eq!(brief.task, "resume auth");
+        assert_eq!(brief.decisions, vec!["keep JWT".to_string()]);
+        assert_eq!(brief.files, vec!["src/auth.rs".to_string()]);
+        assert_eq!(brief.ignore, vec!["vendor".to_string()]);
+        let out = reg.execute("handoff", args).await.unwrap();
+        assert_eq!(out, ToolOutput::Text(format_handoff_summary(&brief)));
+    }
+
+    #[tokio::test]
+    async fn handoff_caps_text_and_files() {
+        let dir = tempdir().unwrap();
+        let reg = registry(&dir, &["handoff"]);
+        let too_long = "x".repeat(MAX_HANDOFF_TEXT_CHARS + 1);
+        let err = reg
+            .execute("handoff", &format!(r#"{{"task":"{too_long}"}}"#))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("task"), "{err}");
+
+        let too_many: Vec<String> = (0..MAX_HANDOFF_FILES + 1)
+            .map(|i| format!(r#""f{i}.rs""#))
+            .collect();
+        let err = reg
+            .execute(
+                "handoff",
+                &format!(r#"{{"task":"ok","files":[{}]}}"#, too_many.join(",")),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("files"), "{err}");
+
+        let err = reg
+            .execute("handoff", r#"{"task":"ok","files":["../secret"]}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("workspace-relative"), "{err}");
     }
 
     #[tokio::test]

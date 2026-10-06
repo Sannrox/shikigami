@@ -42,14 +42,14 @@ pub const PLAN_JAIL_PATH: &str = ".shikigami/plan.md";
 /// Whether a tool is allowed while plan-jail is active.
 ///
 /// Unknown and external names (including `mcp.*`) fail closed. Observation
-/// builtins, report/escalate, todos, and bash job polling stay allowed.
+/// builtins, report/escalate, todos, handoff, and bash job polling stay allowed.
 /// Mutating builtins may write only [`PLAN_JAIL_PATH`]. Shared-workspace
 /// `child_run` is allowed; `worktree=true` is not, because materialize
 /// runs unsandboxed `git worktree add` against the parent checkout.
 pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
     match name {
-        "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "report" | "escalate"
-        | "bash_job_status" | "bash_job_logs" | "child_status" => true,
+        "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "handoff" | "report"
+        | "escalate" | "bash_job_status" | "bash_job_logs" | "child_status" => true,
         "child_run" => child_run_plan_jail_ok(args_json),
         "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
         "apply_patch" => apply_patch_is_plan(args_json),
@@ -371,6 +371,11 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]}},"required":["id","content","status"]}}},"required":["items"]}"#,
         ),
         def(
+            "handoff",
+            "Write a brief the host may pass as the first prompt of a fresh session. Does not start a session, child run, or plane session.",
+            r#"{"type":"object","properties":{"task":{"type":"string"},"decisions":{"type":"array","items":{"type":"string"}},"files":{"type":"array","items":{"type":"string"}},"ignore":{"type":"array","items":{"type":"string"}}},"required":["task"]}"#,
+        ),
+        def(
             "web_fetch",
             "HTTP(S) GET a URL and return truncated text (status, final URL, body). Opt-in tool; respects [network] egress. Blocks private/link-local targets. Not a browser.",
             r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#,
@@ -396,7 +401,7 @@ pub fn must_be_exclusive_batch(name: &str) -> bool {
 /// Tools safe to run concurrently with each other (workspace reads plus
 /// `web_fetch`; no workspace mutation).
 ///
-/// Write tools, bash, todo_write, report/escalate stay serial for the whole batch.
+/// Write tools, bash, todo_write, handoff, report/escalate stay serial for the whole batch.
 pub fn is_parallel_safe_tool(name: &str) -> bool {
     matches!(name, "read_file" | "glob" | "grep" | "web_fetch")
 }
@@ -504,9 +509,39 @@ mod tests {
         ));
         assert!(!plan_jail_allows("child_run", "not-json"));
         assert!(plan_jail_allows("child_status", r#"{"run_id":"child"}"#));
+        assert!(plan_jail_allows(
+            "handoff",
+            r#"{"task":"continue the work"}"#
+        ));
         assert!(!plan_jail_allows(
             "bash_background",
             r#"{"command":"echo hi"}"#
+        ));
+    }
+
+    #[test]
+    fn handoff_is_serial_denied_replay_and_plan_jail_allowed() {
+        use crate::config::{PermissionMode, ToolsSettings};
+
+        assert!(
+            ToolsSettings::default_coding_tools()
+                .iter()
+                .any(|name| name == "handoff")
+        );
+        assert!(
+            ToolsSettings::tools_for_mode(PermissionMode::Read)
+                .iter()
+                .any(|name| name == "handoff")
+        );
+        assert!(!must_be_exclusive_batch("handoff"));
+        assert!(!is_parallel_safe_tool("handoff"));
+        assert_eq!(
+            replay_tool_authority("handoff"),
+            ReplayToolAuthority::Denied
+        );
+        assert!(plan_jail_allows(
+            "handoff",
+            r#"{"task":"continue the work"}"#
         ));
     }
 

@@ -271,7 +271,7 @@ async fn redeem_permit(
 }
 
 pub(super) fn requires_external_action(name: &str) -> bool {
-    !matches!(name, "report" | "escalate" | "todo_write")
+    !matches!(name, "report" | "escalate" | "todo_write" | "handoff")
 }
 
 pub(super) fn risk_class(name: &str) -> &'static str {

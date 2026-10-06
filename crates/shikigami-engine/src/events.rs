@@ -73,6 +73,17 @@ pub enum HarnessEvent {
         summary: String,
         item_count: usize,
     },
+    /// Brief a host may pass as the first prompt of a fresh session.
+    /// Emitted by `handoff`; does not start a session, child run, or plane session.
+    HandoffBrief {
+        task: String,
+        #[serde(default)]
+        decisions: Vec<String>,
+        #[serde(default)]
+        files: Vec<String>,
+        #[serde(default)]
+        ignore: Vec<String>,
+    },
 }
 
 pub trait EventSink: Send + Sync {

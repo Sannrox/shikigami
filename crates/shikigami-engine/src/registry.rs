@@ -637,6 +637,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::Prompt { .. } => "prompt",
         HarnessEvent::ContextCompacted { .. } => "context_compacted",
         HarnessEvent::TodosUpdated { .. } => "todos_updated",
+        HarnessEvent::HandoffBrief { .. } => "handoff_brief",
     }
 }
 
@@ -672,6 +673,9 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
             format!("before={before} after={after}")
         }
         HarnessEvent::TodosUpdated { item_count, .. } => format!("items={item_count}"),
+        HarnessEvent::HandoffBrief { task, files, .. } => {
+            format!("task_chars={} files={}", task.chars().count(), files.len())
+        }
     };
     Some(detail)
 }

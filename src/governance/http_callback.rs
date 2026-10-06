@@ -30,6 +30,7 @@ fn tool_skips_host_authz(name: &str) -> bool {
             | "report"
             | "escalate"
             | "todo_write"
+            | "handoff"
             | "bash_job_status"
             | "bash_job_logs"
     )

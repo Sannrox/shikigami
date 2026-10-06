@@ -134,7 +134,7 @@ authorized through the plane’s host-executed external-action API
 | `write_file` / `edit` / `multi_edit` / `apply_patch` | yes | `write` |
 | `read_file` / `glob` / `grep` / `web_fetch` | yes | `read` |
 | unknown / MCP names | yes | `write` (default) |
-| `report` / `escalate` / `todo_write` | no | — (harness-internal terminate, park, or checklist) |
+| `report` / `escalate` / `todo_write` / `handoff` | no | — (harness-internal terminate, park, checklist, or brief) |
 
 ### Decision handling (headless)
 
