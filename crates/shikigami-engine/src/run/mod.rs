@@ -46,7 +46,7 @@ mod transaction;
 use supervision::RunSupervision;
 
 pub use model_turn::compact_messages;
-pub(crate) use resume::validate_resumed_workspace;
+pub use resume::validate_resumed_workspace;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
 pub const SYSTEM_PROMPT: &str = crate::prompts::HARNESS_V1.body;
@@ -275,7 +275,7 @@ impl RunError {
 
 /// Low-level run engine.
 ///
-/// Most hosts should use [`crate::Harness`]. The fields remain public for
+/// Most hosts should use `shikigami::Harness`. The fields remain public for
 /// compatibility with existing 1.x embedders; new construction should use
 /// [`Engine::new`] so first-party wiring stays at one interface.
 pub struct Engine {
@@ -350,14 +350,11 @@ impl Engine {
         self.run_with_checkpoint_digest(request, None).await
     }
 
-    pub(crate) async fn run_content(
-        &self,
-        request: ContentRunRequestV1,
-    ) -> Result<RunResult, RunError> {
+    pub async fn run_content(&self, request: ContentRunRequestV1) -> Result<RunResult, RunError> {
         RunSupervision::new(self).execute_content(request).await
     }
 
-    pub(crate) async fn run_with_checkpoint_digest(
+    pub async fn run_with_checkpoint_digest(
         &self,
         request: RunRequest,
         expected_checkpoint_digest: Option<&str>,
@@ -367,7 +364,7 @@ impl Engine {
             .await
     }
 
-    pub(crate) async fn replay(&self, request: ReplayRequest) -> Result<ReplayResult, ReplayError> {
+    pub async fn replay(&self, request: ReplayRequest) -> Result<ReplayResult, ReplayError> {
         let execution = request.admit()?;
         if let Some(run_id) = request.resume_run_id.as_deref()
             && let Some(mut recovered) = crate::replay::recover_terminal_replay(

@@ -2196,21 +2196,19 @@ version = "1.1.1"
 dependencies = [
  "async-trait",
  "chrono",
- "futures-util",
  "libc",
  "proptest",
- "regex",
  "reqwest",
- "sekai-client",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shikigami-engine",
+ "shikigami-governance-sekai",
+ "shikigami-http",
  "shikigami-plane-intake",
- "shikigami-types",
  "tempfile",
  "thiserror",
  "tokio",
- "toml",
  "url",
  "uuid",
 ]
@@ -2229,6 +2227,53 @@ dependencies = [
  "shikigami-tui",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "shikigami-engine"
+version = "1.1.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "libc",
+ "proptest",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shikigami-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "shikigami-governance-sekai"
+version = "1.1.1"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "sekai-client",
+ "serde_json",
+ "shikigami-engine",
+ "shikigami-plane-intake",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "shikigami-http"
+version = "1.1.1"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde_json",
+ "shikigami-engine",
 ]
 
 [[package]]

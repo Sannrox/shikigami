@@ -171,7 +171,7 @@ impl Default for GovernanceSettings {
 
 /// Operator-facing hint when a sekai-chisei endpoint is remote plaintext HTTP
 /// and `governance.allow_insecure_remote` is still false.
-pub(crate) const REMOTE_PLAINTEXT_GOVERNANCE_HINT: &str = "governance.endpoint uses plaintext http on a non-loopback host; set governance.allow_insecure_remote=true only for private-network compose, or use https";
+pub const REMOTE_PLAINTEXT_GOVERNANCE_HINT: &str = "governance.endpoint uses plaintext http on a non-loopback host; set governance.allow_insecure_remote=true only for private-network compose, or use https";
 
 fn is_loopback_host(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
@@ -189,7 +189,7 @@ fn is_loopback_host(host: &str) -> bool {
 /// True when `endpoint` is `http://` and the host is not loopback.
 /// Matches `sekai-client` URI policy so doctor/connect can fail closed
 /// before the SDK returns an opaque invalid-argument error.
-pub(crate) fn is_remote_plaintext_http_endpoint(endpoint: &str) -> bool {
+pub fn is_remote_plaintext_http_endpoint(endpoint: &str) -> bool {
     let Ok(url) = url::Url::parse(endpoint.trim()) else {
         return false;
     };
@@ -895,7 +895,7 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-pub(crate) enum ConfigResolutionError {
+pub enum ConfigResolutionError {
     Search(ConfigError),
     Override(ConfigError),
 }
@@ -930,7 +930,7 @@ impl Config {
         resolution::resolve_search(explicit, state_root, cwd)
     }
 
-    pub(crate) fn resolve_search_with_model(
+    pub fn resolve_search_with_model(
         explicit: Option<&Path>,
         state_root: &Path,
         cwd: &Path,
@@ -1244,7 +1244,7 @@ impl Config {
     /// Remote plaintext `http://` on `sekai-chisei` is unusable unless the
     /// operator opt-in is set. Doctor and connect use this instead of the
     /// SDK's opaque invalid-argument error.
-    pub(crate) fn governance_blocks_remote_plaintext(&self) -> bool {
+    pub fn governance_blocks_remote_plaintext(&self) -> bool {
         self.governance.adapter == "sekai-chisei"
             && !self.governance.allow_insecure_remote
             && self
@@ -1256,7 +1256,7 @@ impl Config {
 
     /// Credential environment names consumed by the harness and never exposed
     /// to agent-controlled tool or MCP stdio subprocesses.
-    pub(crate) fn protected_tool_environment_names(&self) -> Vec<String> {
+    pub fn protected_tool_environment_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         if let Some(name) = &self.governance.token_env {
             names.push(name.clone());
@@ -1348,7 +1348,7 @@ name = "governed"
     fn cliproxy_http_example_selects_loopback_http_model() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("cliproxy-http.toml");
-        fs::write(&path, include_str!("../examples/cliproxy-http.toml")).unwrap();
+        fs::write(&path, include_str!("../../../examples/cliproxy-http.toml")).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.model.adapter, "http");
         assert_eq!(

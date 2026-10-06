@@ -148,8 +148,7 @@ impl DelayedEnvelope {
         ))
     }
 
-    #[cfg(test)]
-    pub(crate) fn seal_test_hmac(&mut self) -> Result<(), QueueDenial> {
+    pub fn seal_test_hmac(&mut self) -> Result<(), QueueDenial> {
         self.signature_algorithm = TEST_HMAC_SHA256.into();
         self.binding_digest = self.compute_binding_digest()?;
         self.signature = self.test_hmac_signature()?;

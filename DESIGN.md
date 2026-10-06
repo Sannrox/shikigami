@@ -137,37 +137,18 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | --- | --- |
 | `src/harness.rs`, `src/harness/diagnosis.rs`, `src/harness/recovery.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep recovery module |
 | `crates/shikigami-types` (`identity`, `digest`, `atomic`) | Product identity, shared SHA-256 hex/prefixed digests and Unix-ms clocks, atomic file replace |
-| `src/content.rs` | Additive bounded content descriptors, host resolver contract, metadata-only sidecar checkpoints, and content transcript projection |
-| `src/run/` | Thin `Engine` interface over deep run admission and supervision (including cancel/timeout bounds), host-local Run preparation, the Run artifact lifecycle, the durable run transaction, durable model turns (including compaction), durable tool batches (including call identity), resume validation, and `RunSession` checkpoints |
-| `src/replay.rs` | Versioned replay manifest/evidence admission, canonical bindings, observation-only authority, ordered comparison, and read-only export from retained artifacts |
+| `crates/shikigami-engine` | Turn loop (`Engine`), ports, settings, workspace jail, sandbox, ungoverned scripted/plane model and events adapters, in-process `none`/`local` governance, tools, MCP client, replay, content, fallback, evidence queue, checkpoints, registry, metrics, tracing, transcripts, worker lifecycle |
+| `crates/shikigami-http` | OpenAI-compatible HTTP `ModelPort` adapter selected by `Harness::from_config` |
+| `crates/shikigami-governance-sekai` | Production `sekai-chisei` `GovernancePort` plus `PlaneIntakePort`; consumes versioned `sekai-client` |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |
 | `crates/shikigami-plane-intake` | `PlaneIntakePort` and claim values shared by the sekai adapter and plane serve |
 | `src/plane_intake.rs`, `src/plane_intake/` | Claimed-work mapping plus thin `run_plane_serve` over private deep plane serve loop and claimed-run transaction (including one lease-safe fenced RPC retry protocol) |
-| `src/fallback.rs` | Fail-closed local-model fallback admission: typed grant, fence, selection, evidence identity, and reconciliation (not a new port) |
-| `src/evidence_queue.rs` | Bounded durable spool for signed delayed evidence: identities, conflict, retention, and redacted observability |
-| `src/governance/` | `none`, `local`, `http-callback` (`host-authz` alias), `sekai-chisei`; the production adapter delegates plane session, governed Run admission, governed model turns, run completion, tool authorization, harvest durability and event reporting, and plane claim acquisition plus lease RPCs to private deep modules |
-| `src/tools/`, `src/mcp/`, `src/mcp_server/`, `src/acp.rs`, `crates/shikigami-tui` | Run-scoped `ToolRegistry` interface over private builtin execution (catalog authority, jailed dispatch, shared bash spawn), private deep MCP tool attachment and background Run lifecycle modules, shared bounded framing behind the stdio adapter seams, the ACP newline JSON-RPC session host, and the thin TUI ACP client |
-| `src/workspace.rs` | Directory, in-place, and git-worktree materialization |
-| `src/sandbox.rs` | Settings-selected OS isolation for spawned children (`none` / `rlimit` / `linux_native`) |
+| `src/governance/` | Host adapter `http-callback` (`host-authz` alias) plus `from_config` wiring for `sekai-chisei` |
+| `src/mcp_server/`, `src/acp.rs`, `crates/shikigami-tui` | MCP server host, ACP newline JSON-RPC session host, and the thin TUI ACP client |
 | `src/eval.rs` | Offline golden-fixture harness (`shikigami eval`) |
-| `src/hooks.rs` | Operator-trusted lifecycle hooks |
-| `src/model.rs` | Scripted / HTTP (ungoverned) |
-| `src/events.rs` | stderr / jsonl / none |
-| `src/worker_lifecycle.rs` | Canonical worker snapshot publisher plus thin `serve_lifecycle_http` over the private fleet HTTP probe protocol |
-| `src/config.rs`, `src/config/resolution.rs` | Versioned settings over the private deep effective settings resolution protocol |
 | `crates/shikigami-cli` | CLI host (`shikigami` binary) |
 | `src/plane_host.rs` | Optional in-process plane host bootstrap for embedders |
-| `src/tracing_export.rs` | Identity-only OTLP/file span export |
-| `src/metrics.rs` | Host-local run/tool counters and snapshots |
-| `src/artifacts.rs` | Retained workspace artifact manifests |
-| `src/registry.rs` | Durable run registry records |
-| `src/state.rs` | Host state-root layout |
-| `src/transcript.rs` | Run transcript export |
-| `src/checkpoint.rs` | Local run/governance checkpoint files |
-| `src/context.rs` | Compacted conversation context |
-| `src/identity.rs` | Re-export of `shikigami-types` product name and crate version |
-| `src/prompts/` | Versioned harness prompt assets |
-| `sekai-client` dependency | Versioned Rust facade over canonical sekai-chisei gRPC contracts |
+| `sekai-client` dependency | Versioned Rust facade over canonical sekai-chisei gRPC contracts; consumed by `shikigami-governance-sekai` |
 
 ## Cargo features
 
@@ -178,7 +159,9 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 
 Workspace members: `shikigami` (library), `shikigami-cli` (binary),
 `shikigami-tui` (interactive host), `shikigami-types` (identity/digest/atomic),
-`shikigami-plane-intake` (claim port and values).
+`shikigami-plane-intake` (claim port and values), `shikigami-engine` (turn loop
+and ports), `shikigami-http` (HTTP model adapter),
+`shikigami-governance-sekai` (sekai-chisei adapter).
 CLI and TUI features forward onto the library. `cargo run --bin shikigami`
 and `cargo test --workspace` stay the contributor commands.
 

@@ -549,7 +549,7 @@ fn child_engine(
     }
     config.events.adapter = "none".into();
     let workspace = workspace::from_config(&config).map_err(RunError::Workspace)?;
-    let model = crate::model::from_config(&config)?;
+    let model = parent.model.fresh_for_child(&config)?;
     let events = crate::events::from_config(&config, &parent.state_runs)
         .map_err(|error| RunError::Message(error.to_string()))?;
     Ok(Engine::new(

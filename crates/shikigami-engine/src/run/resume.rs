@@ -57,7 +57,7 @@ fn canonical_workspace_below(root: &Path, suffix: &[&str]) -> Result<PathBuf, Ru
 }
 
 /// Ensure a resumed checkpoint still points at the workspace this config owns.
-pub(crate) fn validate_resumed_workspace(
+pub fn validate_resumed_workspace(
     config: &Config,
     state_runs: &Path,
     resume_id: &str,

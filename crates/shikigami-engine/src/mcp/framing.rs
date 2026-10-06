@@ -9,21 +9,18 @@
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_HEADER_BYTES: usize = 8 * 1024;
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 
 /// Write one `Content-Length` framed message.
-pub(crate) async fn write<W: AsyncWrite + Unpin>(
-    writer: &mut W,
-    message: &Value,
-) -> Result<(), String> {
+pub async fn write<W: AsyncWrite + Unpin>(writer: &mut W, message: &Value) -> Result<(), String> {
     let framed = encode(message)?;
     writer.write_all(&framed).await.map_err(|e| e.to_string())?;
     writer.flush().await.map_err(|e| e.to_string())
 }
 
 /// Write one newline-delimited message (MCP stdio transport).
-pub(crate) async fn write_line<W: AsyncWrite + Unpin>(
+pub async fn write_line<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &Value,
 ) -> Result<(), String> {
@@ -39,7 +36,7 @@ pub(crate) async fn write_line<W: AsyncWrite + Unpin>(
 /// Leading JSON whitespace (blank separators between line frames, indentation)
 /// is skipped up to [`MAX_HEADER_BYTES`]. Both paths enforce
 /// [`MAX_FRAME_BYTES`] before allocating the body.
-pub(crate) async fn read<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, String> {
+pub async fn read<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, String> {
     let mut skipped = 0usize;
     loop {
         let buffered = reader.fill_buf().await.map_err(|e| e.to_string())?;
@@ -130,7 +127,7 @@ async fn read_content_length<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<
     serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
-pub(crate) fn encode(message: &Value) -> Result<Vec<u8>, String> {
+pub fn encode(message: &Value) -> Result<Vec<u8>, String> {
     let body = serde_json::to_vec(message).map_err(|e| e.to_string())?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     let mut framed = header.into_bytes();
@@ -140,7 +137,7 @@ pub(crate) fn encode(message: &Value) -> Result<Vec<u8>, String> {
 
 /// Compact serialization escapes newlines inside strings, so the body is a
 /// single line by construction; only the size bound needs checking.
-pub(crate) fn encode_line(message: &Value) -> Result<Vec<u8>, String> {
+pub fn encode_line(message: &Value) -> Result<Vec<u8>, String> {
     let mut body = serde_json::to_vec(message).map_err(|e| e.to_string())?;
     if body.len() > MAX_FRAME_BYTES {
         return Err(format!("mcp frame exceeds {MAX_FRAME_BYTES} bytes"));

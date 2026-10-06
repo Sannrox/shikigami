@@ -21,40 +21,26 @@
 //! Ports are selected by [Config] settings. Production governance is
 //! `sekai-chisei`. Tenkai delivers the binary only — not a runtime port.
 
+pub use shikigami_engine::{
+    artifacts, checkpoint, config, content, context, events, evidence_queue, fallback, hooks,
+    identity, mcp, metrics, prompts, registry, replay, run, sandbox, state, tools, tracing_export,
+    transcript, worker_lifecycle, workspace,
+};
+
+pub(crate) use shikigami_engine::digest;
+
 pub mod acp;
-pub mod artifacts;
-pub(crate) mod atomic;
-pub mod checkpoint;
-pub mod config;
-pub mod content;
-pub mod context;
-pub(crate) mod digest;
 pub mod eval;
-pub mod events;
-pub mod evidence_queue;
-pub mod fallback;
 pub mod governance;
 pub mod harness;
-pub mod hooks;
-pub mod identity;
-pub mod mcp;
 pub mod mcp_server;
-pub mod metrics;
 pub mod model;
 pub mod plane_host;
 pub mod plane_intake;
-pub mod prompts;
-pub mod registry;
-pub mod replay;
-pub mod run;
-pub mod sandbox;
 pub mod serve;
-pub mod state;
-pub mod tools;
-pub mod tracing_export;
-pub mod transcript;
-pub mod worker_lifecycle;
-pub mod workspace;
+
+#[cfg(test)]
+mod content_tests;
 
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpFraming, McpServerSettings, PermissionMode,
