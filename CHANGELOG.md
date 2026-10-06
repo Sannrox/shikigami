@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load failure stays on the current session.
 - TUI: `/copy` (Ctrl+Y while idle) copies the last assistant transcript line
   to the terminal clipboard via OSC 52.
+- TUI: while a prompt is running, a static dim `running` row sits above
+  the composer (same slot as the slash list). Idle has no extra row.
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through

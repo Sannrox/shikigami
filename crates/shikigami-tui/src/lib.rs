@@ -1126,6 +1126,9 @@ fn prompt_line(shared: &Shared) -> String {
 
 const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /copy  /exit  /quit  /skill:name  /help";
 
+/// Static busy marker in the slash-list slot above the composer.
+const RUNNING_MARKER: &str = "running";
+
 /// Bound OSC 52 so a huge assistant reply cannot stall the TTY.
 const OSC52_MAX_BYTES: usize = 32 * 1024;
 
@@ -1196,6 +1199,15 @@ fn slash_visible(shared: &Shared) -> bool {
         && !shared.show_plan
         && !shared.slash_dismissed
         && shared.input.starts_with('/')
+}
+
+/// One static dim row in the slash-list slot while a prompt is in flight.
+fn running_marker_visible(shared: &Shared) -> bool {
+    shared.busy && !shared.dock_open()
+}
+
+fn running_marker_row() -> String {
+    format!("  {RUNNING_MARKER}")
 }
 
 fn slash_query(input: &str) -> &str {
@@ -2135,22 +2147,29 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     let wrap_w = area.width.max(1);
     shared.composer_w = wrap_w;
     let (prompt_lines, cursor_x, cursor_y) = prompt_block(&shared.input, shared.cursor, wrap_w);
-    let composer_h = if asking || planning {
-        composer_height(&inner, area)
-    } else {
-        let rows = prompt_lines.len().max(1) as u16;
-        let max = area.height.saturating_sub(4).max(1);
-        rows.min(max)
-    };
     let slash_cap = area.height.saturating_sub(6).min(8) as usize;
     if !slash_cmds.is_empty() {
         shared.slash_selected = slash_selected.min(slash_cmds.len() - 1);
     }
     let (slash_start, slash_vis) = slash_window(shared.slash_selected, slash_cmds.len(), slash_cap);
     let slash_h = slash_vis as u16;
+    let running_row = running_marker_visible(&shared) && slash_h == 0;
+    let overlay_h = if slash_h > 0 {
+        slash_h
+    } else if running_row {
+        1
+    } else {
+        0
+    };
+    let composer_budget = area.height.saturating_sub(4 + overlay_h).max(1);
+    let composer_h = if asking || planning {
+        composer_height(&inner, area)
+    } else {
+        (prompt_lines.len().max(1) as u16).min(composer_budget)
+    };
     let mut constraints = vec![Constraint::Min(1)];
-    if slash_h > 0 {
-        constraints.push(Constraint::Length(slash_h));
+    if overlay_h > 0 {
+        constraints.push(Constraint::Length(overlay_h));
     }
     constraints.extend([
         Constraint::Length(1),
@@ -2232,6 +2251,14 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
             })
             .collect();
         frame.render_widget(Paragraph::new(rows), slash_area);
+    } else if running_row {
+        let overlay = chunks[idx];
+        idx += 1;
+        let text = truncate_display(&running_marker_row(), overlay.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, dim_style()))),
+            overlay,
+        );
     }
 
     frame.render_widget(Paragraph::new(rule_line(chunks[idx].width)), chunks[idx]);
@@ -2239,6 +2266,7 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
 
     let composer = chunks[idx];
     idx += 1;
+    let composer_h = composer.height;
     shared.composer_h = composer_h;
     shared.composer_area = composer;
     if asking || planning {
@@ -2715,6 +2743,153 @@ mod tests {
         ));
         assert_eq!(queued_display(&session).as_deref(), Some("/compact"));
         assert_eq!(session.lock_shared().input, "");
+        let _ = session.wait_prompt().await;
+    }
+
+    fn prompt_task_finished(session: &TuiSession) -> bool {
+        session
+            .prompt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
+    }
+
+    fn draw_if_dirty(session: &TuiSession) -> bool {
+        if session.lock_shared().dirty {
+            let _ = drawn_text(session);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn buffer_row(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut out = String::new();
+        for x in 0..buf.area().width {
+            if let Some(cell) = buf.cell((x, y)) {
+                out.push_str(cell.symbol());
+            }
+        }
+        out.trim_end().to_string()
+    }
+
+    fn row_is_dim(buf: &ratatui::buffer::Buffer, y: u16) -> bool {
+        let mut saw = false;
+        for x in 0..buf.area().width {
+            let Some(cell) = buf.cell((x, y)) else {
+                continue;
+            };
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            if !cell.modifier.contains(Modifier::DIM) {
+                return false;
+            }
+            saw = true;
+        }
+        saw
+    }
+
+    fn slot_above_composer_rule(session: &TuiSession) -> (String, bool) {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, session)).unwrap();
+        let composer_y = session.lock_shared().composer_area.y;
+        let buf = terminal.backend().buffer();
+        let rule = buffer_row(buf, composer_y.saturating_sub(1));
+        assert!(
+            !rule.is_empty() && rule.chars().all(|ch| ch == '─'),
+            "expected composer rule, got {rule:?}"
+        );
+        let y = composer_y.saturating_sub(2);
+        (buffer_row(buf, y), row_is_dim(buf, y))
+    }
+
+    #[tokio::test]
+    async fn idle_draw_has_no_running_row_above_composer() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        assert!(!session.lock_shared().busy);
+        let (row, _) = slot_above_composer_rule(&session);
+        assert_ne!(row.trim(), RUNNING_MARKER, "{row:?}");
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(!footer.contains(RUNNING_MARKER), "{footer}");
+    }
+
+    #[tokio::test]
+    async fn spawn_prompt_shows_dim_running_row_until_idle() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        let (idle_row, _) = slot_above_composer_rule(&session);
+        assert_ne!(idle_row.trim(), RUNNING_MARKER, "{idle_row:?}");
+
+        session.spawn_prompt("write".into()).await.unwrap();
+        assert!(session.lock_shared().busy);
+        let (row, dim) = slot_above_composer_rule(&session);
+        assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+        assert!(dim, "running marker must be dim: {row:?}");
+
+        let _ = session.wait_prompt().await;
+        assert!(!session.lock_shared().busy);
+        let (done_row, _) = slot_above_composer_rule(&session);
+        assert_ne!(done_row.trim(), RUNNING_MARKER, "{done_row:?}");
+    }
+
+    #[tokio::test]
+    async fn running_marker_skips_idle_ticks() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        assert!(draw_if_dirty(&session));
+        for _ in 0..3 {
+            assert!(!draw_if_dirty(&session));
+        }
+
+        session.spawn_prompt("write".into()).await.unwrap();
+        wait_until(|| prompt_task_finished(&session)).await;
+        assert!(session.lock_shared().busy);
+        let mut frames = 0usize;
+        for _ in 0..5 {
+            if draw_if_dirty(&session) {
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 1, "busy marker must not force extra idle frames");
+        assert!(!session.lock_shared().dirty);
+        let (row, dim) = slot_above_composer_rule(&session);
+        assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+        assert!(dim, "running marker must be dim: {row:?}");
+
+        let _ = session.wait_prompt().await;
+        frames = 0;
+        for _ in 0..5 {
+            if draw_if_dirty(&session) {
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 1);
+        assert!(!session.lock_shared().busy);
+        let (done_row, _) = slot_above_composer_rule(&session);
+        assert_ne!(done_row.trim(), RUNNING_MARKER, "{done_row:?}");
+    }
+
+    #[tokio::test]
+    async fn running_marker_reserves_composer_height() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.spawn_prompt("write".into()).await.unwrap();
+        session
+            .lock_shared()
+            .insert_str(&format!("{}\n", "line").repeat(30));
+        let _ = drawn_text(&session);
+        let composer_h = session.lock_shared().composer_h;
+        assert!(
+            composer_h <= 19,
+            "busy overlay must stay in the 24-row budget: composer_h={composer_h}"
+        );
+        let (row, dim) = slot_above_composer_rule(&session);
+        assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+        assert!(dim, "running marker must be dim: {row:?}");
         let _ = session.wait_prompt().await;
     }
 
