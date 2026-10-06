@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nested `wait=false` children share one runtime instead of one OS thread
+  and runtime each. Fan-out and join/cancel semantics are unchanged.
 - Cargo workspace: `shikigami` remains the embeddable library; `shikigami-cli`
   owns the `shikigami` binary (clap); `shikigami-tui` owns the interactive
   host (ratatui); `shikigami-types` owns identity, digest, and atomic-file

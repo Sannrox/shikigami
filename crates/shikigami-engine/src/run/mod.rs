@@ -2909,6 +2909,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_background_children_share_one_runtime() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        let n = config.run.nested_max_children.max(1);
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "explored",
+                        "success": true
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let mut parent_turns = Vec::new();
+        for i in 0..n {
+            parent_turns.push(serde_json::json!({
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "explore",
+                        "task": format!("scout-{i}"),
+                        "wait": false
+                    }).to_string()
+                }]
+            }));
+        }
+        parent_turns.push(serde_json::json!({
+            "tool_calls": [{
+                "name": "report",
+                "args_json": serde_json::json!({
+                    "summary": "parent done",
+                    "success": true
+                }).to_string()
+            }]
+        }));
+        let parent_script = serde_json::Value::Array(parent_turns).to_string();
+        let builds_before = super::nested::background_runtime_builds();
+        let spawns_before = super::nested::background_spawns();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), n as usize);
+        let spawns = super::nested::background_spawns() - spawns_before;
+        let builds = super::nested::background_runtime_builds() - builds_before;
+        assert!(
+            n > 1,
+            "fan-out default must spawn more than one child to prove pooling"
+        );
+        assert!(
+            spawns >= n,
+            "each wait=false child must go through the pooled spawn helper, spawns={spawns}"
+        );
+        assert!(
+            builds <= 1,
+            "N background children must share one runtime, not N; builds={builds}"
+        );
+    }
+
+    #[tokio::test]
     async fn nested_unattended_park_finalizes_background_child() {
         let dir = tempdir().unwrap();
         let mut config = base_config(&dir);

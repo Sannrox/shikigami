@@ -543,20 +543,17 @@ impl<'a> RunTransaction<'a> {
         let mut bounds_error = None;
         let joins = session.take_background_joins();
         if !joins.is_empty() {
-            let join_fut = tokio::task::spawn_blocking(move || {
+            let join_fut = async move {
                 for handle in joins {
-                    let _ = handle.join();
+                    let _ = handle.await;
                 }
-            });
+            };
             tokio::pin!(join_fut);
             let mut interval = tokio::time::interval(Duration::from_millis(50));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    joined = &mut join_fut => {
-                        let _ = joined;
-                        break;
-                    }
+                    () = &mut join_fut => break,
                     _ = interval.tick() => {
                         self.note_nested_bounds(
                             session,
