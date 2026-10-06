@@ -22,6 +22,9 @@ use super::resume::{configured_workspace_adapter, validate_resumed_workspace};
 use super::transaction::RunTransaction;
 use super::{ContentExecution, Engine, RunError, RunRequest, RunResult, SYSTEM_PROMPT};
 
+/// Observe cancel markers and the run timeout. Does not refresh the owner
+/// lease: [`RunSupervision::spawn_heartbeat`] writes `run.json` on a coarse
+/// cadence so a 50ms poll cannot rewrite the registry.
 pub(super) fn check_bounds(
     engine: &Engine,
     run_id: &str,
@@ -30,10 +33,6 @@ pub(super) fn check_bounds(
     timeout: Option<Duration>,
     parent_run_id: &str,
 ) -> Result<(), RunError> {
-    engine
-        .registry
-        .heartbeat(run_id)
-        .map_err(|error| RunError::Message(format!("run registry heartbeat failed: {error}")))?;
     if let Some(rx) = &request.cancel
         && *rx.borrow()
     {
@@ -443,10 +442,16 @@ impl<'a> RunSupervision<'a> {
         }
     }
 
+    /// Refresh the local owner lease. Cadence is a fraction of the 120s TTL
+    /// (`ACTIVE_HEARTBEAT_TTL_MS`); cancel/timeout polling must not write.
     fn spawn_heartbeat(&self, run_id: String) -> tokio::task::JoinHandle<()> {
         let registry = Arc::clone(&self.engine.registry);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // start()/update_running already stamped the lease; skip the
+            // immediate first tick so this task only rewrites on the 30s cadence.
+            interval.tick().await;
             loop {
                 interval.tick().await;
                 if registry.heartbeat(&run_id).is_err() {
