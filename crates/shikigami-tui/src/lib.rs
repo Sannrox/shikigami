@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -99,6 +100,12 @@ struct Shared {
     /// Rows above the follow-tail. 0 means stick to the newest output.
     scroll_back: u16,
     transcript_h: u16,
+    /// Rows skipped from the top of an overflowing ask/plan dock.
+    dock_scroll: u16,
+    /// Last drawn composer height; 0 until draw, so undrawn docks do not steal paging.
+    composer_h: u16,
+    /// Last drawn composer slot; wheel hit-tests this.
+    composer_area: Rect,
     /// Last drawn composer width; Up/Down use it to step visual rows.
     composer_w: u16,
     dirty: bool,
@@ -124,6 +131,9 @@ impl Shared {
             history_scratch: String::new(),
             scroll_back: 0,
             transcript_h: 0,
+            dock_scroll: 0,
+            composer_h: 0,
+            composer_area: Rect::default(),
             composer_w: 80,
             dirty: true,
             slash_dismissed: false,
@@ -237,6 +247,7 @@ impl Shared {
         self.history_idx = None;
         self.show_plan = false;
         self.scroll_back = 0;
+        self.dock_scroll = 0;
         self.slash_dismissed = false;
         self.slash_selected = 0;
         self.dirty = true;
@@ -302,16 +313,74 @@ impl Shared {
         self.dirty = true;
     }
 
-    fn page_up(&mut self) {
+    fn dock_open(&self) -> bool {
+        self.permission.is_some() || (self.show_plan && self.plan.is_some())
+    }
+
+    fn dock_max_scroll(&self) -> u16 {
+        if !self.dock_open() || self.composer_h == 0 {
+            return 0;
+        }
+        wrapped_rows(&composer_inner(self), self.composer_w.max(1)).saturating_sub(self.composer_h)
+    }
+
+    /// Scroll an overflowing dock. False means no dock overflow or already at that edge.
+    fn try_scroll_dock(&mut self, dir: i16) -> bool {
+        let max = self.dock_max_scroll();
+        if max == 0 {
+            return false;
+        }
+        let page = self.composer_h.max(1);
+        let next = if dir < 0 {
+            self.dock_scroll.saturating_sub(page)
+        } else {
+            self.dock_scroll.saturating_add(page).min(max)
+        };
+        if next == self.dock_scroll {
+            return false;
+        }
+        self.dock_scroll = next;
+        self.dirty = true;
+        true
+    }
+
+    fn page_transcript_up(&mut self) {
         let page = self.transcript_h.max(1);
         self.scroll_back = self.scroll_back.saturating_add(page);
         self.dirty = true;
     }
 
-    fn page_down(&mut self) {
+    fn page_transcript_down(&mut self) {
         let page = self.transcript_h.max(1);
         self.scroll_back = self.scroll_back.saturating_sub(page);
         self.dirty = true;
+    }
+
+    fn page_up(&mut self) {
+        if self.try_scroll_dock(-1) {
+            return;
+        }
+        self.page_transcript_up();
+    }
+
+    fn page_down(&mut self) {
+        if self.try_scroll_dock(1) {
+            return;
+        }
+        self.page_transcript_down();
+    }
+
+    /// Wheel over an overflowing dock scrolls it; otherwise (or at the edge) page the transcript.
+    fn wheel(&mut self, dir: i16, column: u16, row: u16) {
+        let over_dock = self.dock_open() && rect_contains(self.composer_area, column, row);
+        if over_dock && self.try_scroll_dock(dir) {
+            return;
+        }
+        if dir < 0 {
+            self.page_transcript_up();
+        } else {
+            self.page_transcript_down();
+        }
     }
 
     /// Last tool only. No-op when the transcript has no tools.
@@ -553,6 +622,7 @@ impl TuiSession {
             let _ = pending.tx.send(json!({
                 "outcome": { "outcome": "cancelled" }
             }));
+            shared.dock_scroll = 0;
         }
         shared.dirty = true;
     }
@@ -566,6 +636,7 @@ impl TuiSession {
         let _ = pending.tx.send(json!({
             "outcome": { "outcome": outcome, "optionId": outcome }
         }));
+        shared.dock_scroll = 0;
         shared.dirty = true;
     }
 
@@ -718,6 +789,7 @@ impl TuiSession {
         shared.queued = None;
         shared.status = "ready".into();
         shared.scroll_back = 0;
+        shared.dock_scroll = 0;
         shared.dirty = true;
         Ok(())
     }
@@ -953,7 +1025,7 @@ fn status_line(session_id: &str, shared: &Shared, width: u16) -> String {
     {
         parts.push("^o tool".into());
     }
-    parts.push("pgup/pgdn".into());
+    parts.push("pgup/pgdn/wheel".into());
     truncate_display(&format!("  {}", parts.join("  ")), width as usize)
 }
 
@@ -1226,6 +1298,7 @@ impl AcpClient for TuiClient {
                 raw_input: raw_input.to_string(),
                 tx,
             });
+            shared.dock_scroll = 0;
             shared.dirty = true;
         }
         rx.await
@@ -1332,6 +1405,7 @@ fn apply_update(shared: &mut Shared, params: &Value) {
             if !entries.is_empty() {
                 shared.plan = Some(Plan { entries });
                 shared.show_plan = true;
+                shared.dock_scroll = 0;
             }
         }
         _ => return,
@@ -1411,6 +1485,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             out,
             PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen,
             crossterm::cursor::Show
@@ -1459,7 +1534,13 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _guard = TerminalGuard;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )
+    .map_err(|e| e.to_string())?;
     let _ = execute!(
         out,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -1505,42 +1586,33 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
             Ok(None) => break,
             Err(_) => continue,
         };
-        match ev {
-            Event::Key(key) if key.kind == event::KeyEventKind::Press => {
-                match handle_key(&session, key) {
-                    KeyResult::Quit => break,
-                    KeyResult::Prompt { display, send } => {
-                        if let Err(err) = session.spawn_prompt_with(display, send).await {
-                            let mut shared = session.lock_shared();
-                            shared.transcript.push(TranscriptLine::System(err));
-                            shared.status = "error".into();
-                            shared.dirty = true;
-                        }
-                    }
-                    KeyResult::Compact => {
-                        if let Err(err) = session.compact().await {
-                            let mut shared = session.lock_shared();
-                            shared.transcript.push(TranscriptLine::System(err));
-                            shared.status = "error".into();
-                            shared.dirty = true;
-                        }
-                    }
-                    KeyResult::NewSession => {
-                        if let Err(err) = session.new_session().await {
-                            let mut shared = session.lock_shared();
-                            shared.transcript.push(TranscriptLine::System(err));
-                            shared.status = "error".into();
-                            shared.dirty = true;
-                        }
-                    }
-                    KeyResult::Continue => {}
+        match handle_event(&session, ev) {
+            KeyResult::Quit => break,
+            KeyResult::Prompt { display, send } => {
+                if let Err(err) = session.spawn_prompt_with(display, send).await {
+                    let mut shared = session.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
                 }
             }
-            Event::Resize(_, _) => {
-                session.lock_shared().dirty = true;
+            KeyResult::Compact => {
+                if let Err(err) = session.compact().await {
+                    let mut shared = session.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
+                }
             }
-            Event::Paste(text) => handle_paste(&session, &text),
-            _ => {}
+            KeyResult::NewSession => {
+                if let Err(err) = session.new_session().await {
+                    let mut shared = session.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
+                }
+            }
+            KeyResult::Continue => {}
         }
     }
     Ok(())
@@ -1553,6 +1625,34 @@ enum KeyResult {
     Prompt { display: String, send: String },
     Compact,
     NewSession,
+}
+
+fn handle_event(session: &TuiSession, ev: Event) -> KeyResult {
+    match ev {
+        Event::Key(key) if key.kind == event::KeyEventKind::Press => handle_key(session, key),
+        Event::Mouse(mouse) => {
+            handle_mouse(session, mouse);
+            KeyResult::Continue
+        }
+        Event::Paste(text) => {
+            handle_paste(session, &text);
+            KeyResult::Continue
+        }
+        Event::Resize(_, _) => {
+            session.lock_shared().dirty = true;
+            KeyResult::Continue
+        }
+        _ => KeyResult::Continue,
+    }
+}
+
+fn handle_mouse(session: &TuiSession, mouse: MouseEvent) {
+    let dir = match mouse.kind {
+        MouseEventKind::ScrollUp => -1,
+        MouseEventKind::ScrollDown => 1,
+        _ => return,
+    };
+    session.lock_shared().wheel(dir, mouse.column, mouse.row);
 }
 
 fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
@@ -1857,7 +1957,13 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
 
     let composer = chunks[idx];
     idx += 1;
+    shared.composer_h = composer_h;
+    shared.composer_area = composer;
     if asking || planning {
+        let max = wrapped_rows(&inner, wrap_w).saturating_sub(composer_h);
+        if shared.dock_scroll > max {
+            shared.dock_scroll = max;
+        }
         let styled: Vec<Line> = inner
             .lines()
             .map(|row| {
@@ -1871,7 +1977,12 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
                 }
             })
             .collect();
-        frame.render_widget(Paragraph::new(styled).wrap(Wrap { trim: false }), composer);
+        frame.render_widget(
+            Paragraph::new(styled)
+                .wrap(Wrap { trim: false })
+                .scroll((shared.dock_scroll, 0)),
+            composer,
+        );
     } else {
         let scroll = cursor_y.saturating_sub(composer_h.saturating_sub(1));
         let shown: Vec<Line> = prompt_lines
@@ -1914,6 +2025,13 @@ fn composer_height(text: &str, area: Rect) -> u16 {
     let rows = wrapped_rows(text, area.width.max(1)).max(1);
     let max = area.height.saturating_sub(4).max(1);
     rows.min(max)
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && row >= area.y
+        && column < area.x.saturating_add(area.width)
+        && row < area.y.saturating_add(area.height)
 }
 
 fn scroll_offset(body: &str, area: Rect) -> (u16, u16) {
@@ -2342,6 +2460,15 @@ mod tests {
         assert_eq!(session.lock_shared().input, "p");
     }
 
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
     #[tokio::test]
     async fn page_up_scrolls_back_and_new_prompt_returns_to_tail() {
         let dir = tempdir().unwrap();
@@ -2356,6 +2483,23 @@ mod tests {
         session.spawn_prompt("next".into()).await.unwrap();
         assert_eq!(session.lock_shared().scroll_back, 0);
         let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn mouse_scroll_pages_transcript_like_page_keys() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.lock_shared().transcript_h = 10;
+        assert!(matches!(
+            handle_event(&session, wheel(MouseEventKind::ScrollUp, 0, 0)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 10);
+        assert!(matches!(
+            handle_event(&session, wheel(MouseEventKind::ScrollDown, 0, 0)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 0);
     }
 
     #[tokio::test]
@@ -2562,6 +2706,45 @@ mod tests {
         assert!(!session.lock_shared().dirty);
     }
 
+    fn install_permission(session: &TuiSession, raw_input: String) {
+        let (tx, _rx) = oneshot::channel();
+        let mut shared = session.lock_shared();
+        shared.permission = Some(PendingPermission {
+            title: "write_file".into(),
+            raw_input,
+            tx,
+        });
+    }
+
+    fn tall_permission_input() -> String {
+        let mut lines = Vec::new();
+        for i in 0..40 {
+            lines.push(format!("arg-line-{i:02}"));
+        }
+        lines.push("later-unique-arg-line".into());
+        json!({ "command": lines.join("\n") }).to_string()
+    }
+
+    fn page_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn page_dock_down_until(session: &TuiSession, needle: &str) -> String {
+        let mut text = String::new();
+        for _ in 0..8 {
+            let before = session.lock_shared().dock_scroll;
+            assert!(matches!(
+                handle_event(session, Event::Key(page_key(KeyCode::PageDown))),
+                KeyResult::Continue
+            ));
+            text = drawn_text(session);
+            if text.contains(needle) || session.lock_shared().dock_scroll == before {
+                break;
+            }
+        }
+        text
+    }
+
     #[tokio::test]
     async fn asking_still_pages_transcript() {
         let dir = tempdir().unwrap();
@@ -2569,20 +2752,81 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
         let session = TuiSession::start(host, &cwd).await.unwrap();
-        let (tx, _rx) = oneshot::channel();
-        {
-            let mut shared = session.lock_shared();
-            shared.transcript_h = 10;
-            shared.permission = Some(PendingPermission {
-                title: "write_file".into(),
-                raw_input: r#"{"path":"ok.txt"}"#.into(),
-                tx,
-            });
-        }
-        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
-        assert!(matches!(handle_key(&session, key), KeyResult::Continue));
+        install_permission(&session, r#"{"path":"ok.txt"}"#.into());
+        let _ = drawn_text(&session);
+        assert_eq!(session.lock_shared().dock_max_scroll(), 0);
+        session.lock_shared().transcript_h = 10;
+        assert!(matches!(
+            handle_key(&session, page_key(KeyCode::PageUp)),
+            KeyResult::Continue
+        ));
         assert_eq!(session.lock_shared().scroll_back, 10);
+        assert_eq!(session.lock_shared().dock_scroll, 0);
         assert!(session.lock_shared().permission.is_some());
+    }
+
+    #[tokio::test]
+    async fn overflowing_permission_body_is_reachable() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        install_permission(&session, tall_permission_input());
+        let overlay = session.overlay_text().expect("permission overlay");
+        assert!(
+            overlay.contains("later-unique-arg-line"),
+            "ask must keep later argument lines: {overlay}"
+        );
+        let first = drawn_text(&session);
+        assert!(session.lock_shared().dock_max_scroll() > 0);
+        assert!(
+            !first.contains("later-unique-arg-line"),
+            "overflow must clip later arguments until scrolled: {first}"
+        );
+        let back = session.lock_shared().scroll_back;
+        let paged = page_dock_down_until(&session, "later-unique-arg-line");
+        assert!(
+            paged.contains("later-unique-arg-line"),
+            "PageDown on an overflowing dock must reveal later arguments: {paged}"
+        );
+        assert_eq!(session.lock_shared().scroll_back, back);
+        assert!(session.lock_shared().dock_scroll > 0);
+        assert!(matches!(
+            handle_event(&session, Event::Key(page_key(KeyCode::PageUp))),
+            KeyResult::Continue
+        ));
+        let reset = drawn_text(&session);
+        assert!(
+            !reset.contains("later-unique-arg-line"),
+            "PageUp on a scrolled dock must hide later arguments again: {reset}"
+        );
+        let (x, y) = {
+            let shared = session.lock_shared();
+            (shared.composer_area.x, shared.composer_area.y)
+        };
+        let mut wheeled = reset;
+        for _ in 0..8 {
+            assert!(matches!(
+                handle_event(&session, wheel(MouseEventKind::ScrollDown, x, y)),
+                KeyResult::Continue
+            ));
+            wheeled = drawn_text(&session);
+            if wheeled.contains("later-unique-arg-line") {
+                break;
+            }
+        }
+        assert!(
+            wheeled.contains("later-unique-arg-line"),
+            "wheel on the dock must reveal later arguments: {wheeled}"
+        );
+        assert_eq!(session.lock_shared().scroll_back, back);
+        session.lock_shared().dock_scroll = 0;
+        session.lock_shared().transcript_h = 10;
+        session.lock_shared().scroll_back = 0;
+        assert!(matches!(
+            handle_event(&session, wheel(MouseEventKind::ScrollUp, 0, 0)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 10);
+        assert_eq!(session.lock_shared().dock_scroll, 0);
     }
 
     #[tokio::test]

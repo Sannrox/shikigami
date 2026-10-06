@@ -28,8 +28,8 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 | Slash | Type `/` while idle to open a dim command list above the composer (Tab complete, Up/Down select, Esc dismiss, Enter run). `/compact` shrinks the live run history. `/new` starts a new session in this cwd. `/exit` and `/quit` leave the host. `/skill:name` loads `.shikigami/skills/<name>` or `.agents/skills/<name>` and sends it as the prompt. Unknown slash is a normal prompt. |
 | Stream | Dense transcript of `session/update` (dim `you` prefix, assistant text, `·` tool name/path, blank line between turns) |
 | Tool output | Ctrl+O expands the last tool to a wrapped `·`-prefixed block; a second Ctrl+O collapses. No-op when there are no tools. |
-| Scroll | PageUp / PageDown through the transcript, including while a permission is up; a new prompt returns to the tail |
-| Permission | Replaces the composer on `session/request_permission` (title plus argument fields, `> y allow` / `n deny`); Esc cancel. Plan write-jail review uses this composer (leading wrapped rows of the question; it does not page a plan taller than the terminal). The transcript stays visible. |
+| Scroll | PageUp / PageDown / wheel page the transcript (a new prompt returns to the tail). Overflowing ask/plan docks take PageUp/PageDown and wheel on that slot first; at the top or bottom they resume transcript paging. Mouse capture is on while the alt-screen is up, so drag-select may not work; PageUp/PageDown stay the keyboard path. |
+| Permission | Replaces the composer on `session/request_permission` (title plus argument fields, `> y allow` / `n deny`); Esc cancel. Plan write-jail review uses this composer. Overflowing argument lists scroll in the dock; they are not truncated. The transcript stays visible. |
 | Plan | Replaces the composer when a `plan` session update arrives; Ctrl-P toggles, Esc hides |
 | Cancel | Ctrl-C while a prompt is running sends `session/cancel` |
 | Quit | Ctrl-C when idle, Ctrl-D when idle, or `/exit` / `/quit` |
