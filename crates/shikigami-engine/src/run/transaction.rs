@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use tokio::sync::watch;
 
 use crate::checkpoint::{Checkpoint, ParkKind, ParkedState};
 use crate::events::HarnessEvent;
@@ -572,30 +573,78 @@ impl<'a> RunTransaction<'a> {
         // children leave `running` (in-flight bash observes cancel). Do not
         // return while a child is still active: a 2s grace would let
         // `sleep N && write` finish after parent cancel/timeout.
-        for child in &session.children {
-            if self
-                .engine
-                .registry
-                .run_is_active(&child.run_id)
-                .unwrap_or(false)
-            {
-                let _ = self.engine.registry.request_cancel(&child.run_id);
-            }
-        }
+        // Same-process finish notifies the interned idle watch. JSON
+        // membership is rechecked when entering the wait, after a notify,
+        // and if the owner-lease TTL elapses without one. Children with no
+        // interned watch (another process owns them) fall back to JSON on
+        // the bounds tick. Bounds ticks do not load JSON for interned waits.
         let mut interval = tokio::time::interval(Duration::from_millis(50));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut cancelled = std::collections::HashSet::new();
         loop {
             self.note_nested_bounds(session, request, started, timeout, &mut bounds_error);
-            let any_active = session.children.iter().any(|child| {
-                self.engine
+            let mut idle_watches = Vec::new();
+            let mut external = false;
+            for child in &session.children {
+                if !self
+                    .engine
                     .registry
                     .run_is_active(&child.run_id)
                     .unwrap_or(false)
-            });
-            if !any_active {
+                {
+                    continue;
+                }
+                let (rx, interned) =
+                    self.engine
+                        .registry
+                        .watch_idle(&child.run_id)
+                        .map_err(|error| {
+                            RunError::Message(format!("nested child idle watch: {error}"))
+                        })?;
+                let already_idle = *rx.borrow();
+                if cancelled.insert(child.run_id.clone()) {
+                    let _ = self.engine.registry.request_cancel(&child.run_id);
+                }
+                if already_idle
+                    && !self
+                        .engine
+                        .registry
+                        .run_is_active(&child.run_id)
+                        .unwrap_or(false)
+                {
+                    // Finish landed between the membership check and
+                    // subscribe; the new watch will not see another notify.
+                    continue;
+                }
+                external |= !interned;
+                idle_watches.push((rx, already_idle));
+            }
+            if idle_watches.is_empty() {
                 break;
             }
-            interval.tick().await;
+            let mut waiting = tokio::task::JoinSet::new();
+            for (rx, already_idle) in idle_watches {
+                waiting.spawn(wait_for_child_idle(rx, already_idle));
+            }
+            let lease = tokio::time::sleep(Duration::from_millis(
+                crate::registry::ACTIVE_HEARTBEAT_TTL_MS,
+            ));
+            tokio::pin!(lease);
+            loop {
+                self.note_nested_bounds(session, request, started, timeout, &mut bounds_error);
+                if waiting.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if external {
+                            break;
+                        }
+                    }
+                    _ = waiting.join_next() => {}
+                    () = &mut lease => break,
+                }
+            }
         }
         match bounds_error {
             Some(error) => Err(error),
@@ -638,6 +687,20 @@ impl<'a> RunTransaction<'a> {
                     text: format!("span export failed: {error}"),
                 },
             );
+        }
+    }
+}
+
+async fn wait_for_child_idle(mut rx: watch::Receiver<bool>, already_idle: bool) {
+    if already_idle {
+        // Stale `true` with a live registry row: wait for the next finish
+        // notify (`send_replace` wakes even when the value stays true).
+        let _ = rx.changed().await;
+        return;
+    }
+    while !*rx.borrow() {
+        if rx.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -733,6 +796,190 @@ mod tests {
         let checkpoint = Checkpoint::load(&state.runs_dir(), run_id).unwrap();
         assert_eq!(checkpoint.completed_turns, 1);
         assert_eq!(checkpoint.messages.last().unwrap().content, "done");
+    }
+
+    fn nested_idle_fixture(
+        dir: &tempfile::TempDir,
+        parent_id: &str,
+        child_id: &str,
+    ) -> (Engine, super::super::session::RunSession, Arc<RunRegistry>) {
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.events.adapter = "none".into();
+        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+        config.model.adapter = "scripted".into();
+        config.model.script_json = Some(r#"[{"content":"done"}]"#.into());
+        let registry = Arc::new(RunRegistry::new(state.path()).unwrap());
+        let engine = Engine::new(
+            config.clone(),
+            Arc::from(governance::from_config(&config).unwrap()),
+            Arc::from(workspace::from_config(&config).unwrap()),
+            Arc::from(crate::model::from_config(&config).unwrap()),
+            Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            state.runs_dir(),
+            Arc::clone(&registry),
+        );
+        let mut session = super::super::session::RunSession::new(
+            state.runs_dir(),
+            Arc::from(governance::from_config(&config).unwrap()),
+            parent_id,
+            "delegate",
+            dir.path().join("ws"),
+            "inplace",
+            true,
+            vec![],
+            0,
+        );
+        registry.start(child_id, "scout", None, None).unwrap();
+        session.children.push(crate::checkpoint::ChildRunRecord {
+            run_id: child_id.into(),
+            profile: "explore".into(),
+            task: "scout".into(),
+        });
+        (engine, session, registry)
+    }
+
+    #[tokio::test]
+    async fn nested_parent_finish_idle_wait_is_notify_driven() {
+        let dir = tempdir().unwrap();
+        let (engine, mut session, registry) =
+            nested_idle_fixture(&dir, "parent-idle", "child-idle");
+        let delay = Duration::from_millis(200);
+        let finisher = {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                registry
+                    .finish_error("child-idle", &RunError::Cancelled)
+                    .unwrap();
+            })
+        };
+        let before = crate::registry::run_is_active_count_for("child-idle");
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            RunTransaction::new(&engine).finish_nested_children(
+                &mut session,
+                &RunRequest::new("delegate"),
+                started,
+                None,
+                true,
+                true,
+            ),
+        )
+        .await
+        .expect("idle wait must resolve on registry notify")
+        .unwrap();
+        finisher.await.unwrap();
+        assert!(
+            started.elapsed() >= delay,
+            "parent finish must wait for the child idle notify"
+        );
+        let extra = crate::registry::run_is_active_count_for("child-idle") - before;
+        assert!(
+            extra <= 3,
+            "parent finish must not poll run_is_active at 50ms; extra={extra}"
+        );
+        assert!(
+            !registry.run_is_active("child-idle").unwrap(),
+            "cancelled child must be observed idle"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_parent_finish_sees_already_finished_child_without_poll() {
+        let dir = tempdir().unwrap();
+        let (engine, mut session, registry) =
+            nested_idle_fixture(&dir, "parent-already-idle", "child-already-idle");
+        registry
+            .finish_error("child-already-idle", &RunError::Cancelled)
+            .unwrap();
+        let before = crate::registry::run_is_active_count_for("child-already-idle");
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            RunTransaction::new(&engine).finish_nested_children(
+                &mut session,
+                &RunRequest::new("delegate"),
+                tokio::time::Instant::now(),
+                None,
+                true,
+                true,
+            ),
+        )
+        .await
+        .expect("already-finished children must not hang parent finish")
+        .unwrap();
+        assert_eq!(
+            crate::registry::run_is_active_count_for("child-already-idle") - before,
+            1,
+            "already-idle children confirm once via run_is_active, then skip the wait"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_parent_finish_cancels_still_active_child_and_observes_idle() {
+        let dir = tempdir().unwrap();
+        let (engine, mut session, registry) =
+            nested_idle_fixture(&dir, "parent-cancel-idle", "child-still-active");
+        let finisher = {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                assert!(
+                    registry.cancel_requested("child-still-active"),
+                    "still-active children must be cancelled on parent finish"
+                );
+                registry
+                    .finish_error("child-still-active", &RunError::Cancelled)
+                    .unwrap();
+            })
+        };
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            RunTransaction::new(&engine).finish_nested_children(
+                &mut session,
+                &RunRequest::new("delegate"),
+                tokio::time::Instant::now(),
+                None,
+                true,
+                false,
+            ),
+        )
+        .await
+        .expect("idle wait must resolve after cancel")
+        .unwrap();
+        finisher.await.unwrap();
+        assert!(!registry.run_is_active("child-still-active").unwrap());
+    }
+
+    #[tokio::test]
+    async fn nested_parent_finish_reports_timeout_when_children_already_idle() {
+        let dir = tempdir().unwrap();
+        let (engine, mut session, registry) =
+            nested_idle_fixture(&dir, "parent-bounds-idle", "child-bounds-idle");
+        registry
+            .finish_error("child-bounds-idle", &RunError::Cancelled)
+            .unwrap();
+        let err = tokio::time::timeout(
+            Duration::from_millis(200),
+            RunTransaction::new(&engine).finish_nested_children(
+                &mut session,
+                &RunRequest::new("delegate"),
+                tokio::time::Instant::now() - Duration::from_secs(5),
+                Some(Duration::from_millis(1)),
+                true,
+                true,
+            ),
+        )
+        .await
+        .expect("already-idle finish must not hang while reporting bounds")
+        .expect_err("parent timeout must surface even when children are idle");
+        assert!(
+            matches!(err, RunError::TimedOut(_)),
+            "expected TimedOut, got {err:?}"
+        );
     }
 
     #[test]
