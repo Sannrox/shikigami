@@ -47,6 +47,73 @@ fn plan_jail_deny(call: &ToolCall, workspace: &std::path::Path) -> Option<String
     None
 }
 
+/// Isolated `wait=false` `child_run`s may share one start-wait under
+/// `nested_max_children`. Workspace-mutating tools, `wait=true`, and
+/// `worktree=true` keep the whole batch serial. Parallel-safe reads may
+/// share the isolated batch; they still execute through the serial
+/// checkpoint protocol, then the queued children wait together.
+fn batch_can_concurrent_child_starts(
+    calls: &[ToolCall],
+    session_wait: bool,
+    plan_jail: bool,
+    session_asks: bool,
+    hooks_need_serial: bool,
+) -> bool {
+    if hooks_need_serial || calls.len() <= 1 {
+        return false;
+    }
+    let mut any_wait_false = false;
+    for call in calls {
+        if call.name == "child_run"
+            && super::nested::child_run_allows_concurrent_start(&call.args_json)
+        {
+            any_wait_false = true;
+            if session_wait
+                && !plan_jail
+                && session_asks
+                && super::nested::session_ask_park(&call.name, &call.args_json)
+            {
+                return false;
+            }
+            continue;
+        }
+        if tools::is_parallel_safe_tool(&call.name) {
+            continue;
+        }
+        return false;
+    }
+    any_wait_false
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn flush_pending_background_children(
+    engine: &super::Engine,
+    session: &mut RunSession,
+    request: &RunRequest,
+    tools: &ToolRegistry,
+    pending: &mut Vec<(usize, ToolCall, super::nested::QueuedBackgroundChild)>,
+    out: &mut Vec<(usize, ToolCall, Result<ToolOutput, String>)>,
+    started: tokio::time::Instant,
+    timeout: Option<Duration>,
+) -> Result<(), RunError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let waited = super::nested::wait_for_queued_background_children(
+        engine,
+        session,
+        request,
+        tools,
+        std::mem::take(pending),
+        started,
+        timeout,
+    )
+    .await?;
+    out.extend(waited);
+    out.sort_by_key(|(i, _, _)| *i);
+    Ok(())
+}
+
 /// Deep private module that owns the durable protocol around a tool batch.
 pub(super) struct DurableToolBatch<'a> {
     engine: &'a Engine,
@@ -190,8 +257,18 @@ impl<'a> DurableToolBatch<'a> {
             );
         }
 
-        // Parallel path only when every call is parallel-safe (reads/`web_fetch`),
-        // no execution-checkpoint tools, and no pre/post_tool or on_park hooks.
+        // Parallel JoinSet path only when every call is parallel-safe
+        // (reads/`web_fetch`). `child_run` is not globally parallel-safe:
+        // wait=true stays serial, and a mutating tool in the same batch
+        // keeps children off JoinSet. Isolated wait=false starts share one
+        // nested start-wait under `nested_max_children` on the serial path.
+        let concurrent_child_starts = batch_can_concurrent_child_starts(
+            &turn.tool_calls,
+            request.session_wait,
+            session.plan_jail,
+            self.engine.governance.session_asks_mutating_tools(),
+            hooks_need_serial,
+        );
         let batch_outcomes: Vec<(usize, ToolCall, Result<ToolOutput, String>)> = if can_parallel {
             check_bounds(
                 self.engine,
@@ -255,19 +332,47 @@ impl<'a> DurableToolBatch<'a> {
             raw.sort_by_key(|(i, _, _)| *i);
             raw
         } else {
+            let nested_sem = concurrent_child_starts.then(|| {
+                let remaining = self
+                    .engine
+                    .config
+                    .run
+                    .nested_max_children
+                    .max(1)
+                    .saturating_sub(session.children.len() as u32);
+                Semaphore::new(remaining as usize)
+            });
+            let mut pending_background: Vec<(
+                usize,
+                ToolCall,
+                super::nested::QueuedBackgroundChild,
+            )> = Vec::new();
             let mut out = Vec::with_capacity(turn.tool_calls.len());
             for (index, call) in turn.tool_calls.iter().enumerate() {
                 if already_answered(session, call, index) {
                     continue;
                 }
-                check_bounds(
+                if let Err(error) = check_bounds(
                     self.engine,
                     &session.run_id,
                     request,
                     started,
                     timeout,
                     &session.parent_run_id,
-                )?;
+                ) {
+                    flush_pending_background_children(
+                        self.engine,
+                        session,
+                        request,
+                        tools.as_ref(),
+                        &mut pending_background,
+                        &mut out,
+                        started,
+                        timeout,
+                    )
+                    .await?;
+                    return Err(error);
+                }
                 if !tools.is_enabled(&call.name) {
                     // Deny before authorize so a read-only explore child
                     // (or a parent with nested off) cannot redeem a
@@ -297,6 +402,17 @@ impl<'a> DurableToolBatch<'a> {
                     && self.engine.governance.session_asks_mutating_tools()
                     && !ask_granted
                 {
+                    flush_pending_background_children(
+                        self.engine,
+                        session,
+                        request,
+                        tools.as_ref(),
+                        &mut pending_background,
+                        &mut out,
+                        started,
+                        timeout,
+                    )
+                    .await?;
                     let emissions = self.persist_completed_prefix(session, handle, &out).await?;
                     return self
                         .park_for_ask(
@@ -365,6 +481,17 @@ impl<'a> DurableToolBatch<'a> {
                         .tool_execution_is_claimed(&session.run_id, &stable_call_id)
                         .unwrap_or(true)
                     {
+                        flush_pending_background_children(
+                            self.engine,
+                            session,
+                            request,
+                            tools.as_ref(),
+                            &mut pending_background,
+                            &mut out,
+                            started,
+                            timeout,
+                        )
+                        .await?;
                         return Err(GovernanceError::Message(format!(
                             "host effect refused, not claimed exclusively: tool call `{stable_call_id}` in run {} is already claimed by another execution attempt",
                             session.run_id
@@ -422,6 +549,20 @@ impl<'a> DurableToolBatch<'a> {
                         reason,
                     } = e
                     {
+                        // Wait for already-queued wait=false starts so their
+                        // tool results are in `out` before this park. Resume
+                        // must see those calls as answered.
+                        flush_pending_background_children(
+                            self.engine,
+                            session,
+                            request,
+                            tools.as_ref(),
+                            &mut pending_background,
+                            &mut out,
+                            started,
+                            timeout,
+                        )
+                        .await?;
                         let emissions =
                             self.persist_completed_prefix(session, handle, &out).await?;
                         if !emissions.is_empty() {
@@ -516,24 +657,86 @@ impl<'a> DurableToolBatch<'a> {
                     self.engine.governance.clear_approval_park(handle).await?;
                 }
                 let executed = if nested {
-                    match super::nested::execute_child_tool(
-                        self.engine,
-                        session,
-                        request,
-                        tools.as_ref(),
-                        call,
-                        started,
-                        timeout,
-                    )
-                    .await
+                    if let Some(sem) = nested_sem.as_ref()
+                        && call.name == "child_run"
+                        && super::nested::child_run_allows_concurrent_start(&call.args_json)
                     {
-                        Ok(output) => Ok(output),
-                        Err(error)
-                            if matches!(error, RunError::Cancelled | RunError::TimedOut(_)) =>
-                        {
-                            return Err(error);
+                        let permit = match sem.try_acquire() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                let max_children =
+                                    self.engine.config.run.nested_max_children.max(1);
+                                out.push((
+                                    index,
+                                    call.clone(),
+                                    Err(format!(
+                                        "nested fan-out cap ({max_children}) refuses another child_run"
+                                    )),
+                                ));
+                                continue;
+                            }
+                        };
+                        match super::nested::queue_wait_false_child_run(
+                            self.engine,
+                            session,
+                            request,
+                            tools.as_ref(),
+                            call,
+                        ) {
+                            Ok(queued) => {
+                                permit.forget();
+                                pending_background.push((index, call.clone(), queued));
+                                continue;
+                            }
+                            Err(error)
+                                if matches!(error, RunError::Cancelled | RunError::TimedOut(_)) =>
+                            {
+                                flush_pending_background_children(
+                                    self.engine,
+                                    session,
+                                    request,
+                                    tools.as_ref(),
+                                    &mut pending_background,
+                                    &mut out,
+                                    started,
+                                    timeout,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                            Err(error) => Err(error.to_string()),
                         }
-                        Err(error) => Err(error.to_string()),
+                    } else {
+                        match super::nested::execute_child_tool(
+                            self.engine,
+                            session,
+                            request,
+                            tools.as_ref(),
+                            call,
+                            started,
+                            timeout,
+                        )
+                        .await
+                        {
+                            Ok(output) => Ok(output),
+                            Err(error)
+                                if matches!(error, RunError::Cancelled | RunError::TimedOut(_)) =>
+                            {
+                                flush_pending_background_children(
+                                    self.engine,
+                                    session,
+                                    request,
+                                    tools.as_ref(),
+                                    &mut pending_background,
+                                    &mut out,
+                                    started,
+                                    timeout,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
                     }
                 } else {
                     match super::supervision::run_until_cancelled(
@@ -549,7 +752,20 @@ impl<'a> DurableToolBatch<'a> {
                     {
                         Ok(Ok(output)) => Ok(output),
                         Ok(Err(error)) => Err(error.to_string()),
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            flush_pending_background_children(
+                                self.engine,
+                                session,
+                                request,
+                                tools.as_ref(),
+                                &mut pending_background,
+                                &mut out,
+                                started,
+                                timeout,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                     }
                 };
                 match executed {
@@ -557,6 +773,17 @@ impl<'a> DurableToolBatch<'a> {
                     Err(e) => out.push((index, call.clone(), Err(e))),
                 }
             }
+            flush_pending_background_children(
+                self.engine,
+                session,
+                request,
+                tools.as_ref(),
+                &mut pending_background,
+                &mut out,
+                started,
+                timeout,
+            )
+            .await?;
             out
         };
 
@@ -1342,6 +1569,88 @@ mod tests {
         assert_eq!(stable_tool_call_id(&anonymous, 2, 3), "tool-2-3");
         assert_eq!(conversation_tool_call_id(&named, 2, 3), "call-1");
         assert_eq!(conversation_tool_call_id(&anonymous, 2, 3), "tool-2-3");
+    }
+
+    fn child_call(wait: bool, worktree: bool) -> ToolCall {
+        let mut args = serde_json::json!({
+            "profile": "explore",
+            "task": "scout",
+            "wait": wait
+        });
+        if worktree {
+            args["worktree"] = serde_json::json!(true);
+        }
+        ToolCall {
+            id: String::new(),
+            name: "child_run".into(),
+            args_json: args.to_string(),
+        }
+    }
+
+    #[test]
+    fn isolated_wait_false_children_can_start_together() {
+        let calls = [child_call(false, false), child_call(false, false)];
+        assert!(batch_can_concurrent_child_starts(
+            &calls, false, false, true, false
+        ));
+        let with_read = [
+            child_call(false, false),
+            ToolCall {
+                id: String::new(),
+                name: "read_file".into(),
+                args_json: r#"{"path":"a.txt"}"#.into(),
+            },
+        ];
+        assert!(batch_can_concurrent_child_starts(
+            &with_read, false, false, true, false
+        ));
+        assert!(!tools::is_parallel_safe_tool("child_run"));
+    }
+
+    #[test]
+    fn writes_wait_true_and_worktree_keep_child_batch_serial() {
+        let write_and_child = [
+            ToolCall {
+                id: String::new(),
+                name: "write_file".into(),
+                args_json: r#"{"path":"a.txt","content":"x"}"#.into(),
+            },
+            child_call(false, false),
+        ];
+        assert!(!batch_can_concurrent_child_starts(
+            &write_and_child,
+            false,
+            false,
+            true,
+            false
+        ));
+        let wait_true = [child_call(true, false), child_call(true, false)];
+        assert!(!batch_can_concurrent_child_starts(
+            &wait_true, false, false, true, false
+        ));
+        let worktree = [child_call(false, true), child_call(false, false)];
+        assert!(!batch_can_concurrent_child_starts(
+            &worktree, false, false, true, false
+        ));
+        let full = ToolCall {
+            id: String::new(),
+            name: "child_run".into(),
+            args_json: r#"{"profile":"full","task":"edit","wait":false}"#.into(),
+        };
+        assert!(!batch_can_concurrent_child_starts(
+            &[full.clone(), full],
+            true,
+            false,
+            true,
+            false
+        ));
+        assert!(!batch_can_concurrent_child_starts(
+            &[child_call(false, false)],
+            false,
+            false,
+            true,
+            false
+        ));
     }
 
     #[test]
