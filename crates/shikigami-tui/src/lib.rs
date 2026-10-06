@@ -50,7 +50,9 @@ struct ToolLine {
     id: String,
     title: String,
     status: String,
+    /// Full rawInput summary or result text. Collapse is `expanded`, not a wipe.
     detail: String,
+    expanded: bool,
 }
 
 enum TranscriptLine {
@@ -282,6 +284,20 @@ impl Shared {
     fn page_down(&mut self) {
         let page = self.transcript_h.max(1);
         self.scroll_back = self.scroll_back.saturating_sub(page);
+        self.dirty = true;
+    }
+
+    /// Last tool only. No-op when the transcript has no tools.
+    fn toggle_last_tool(&mut self) {
+        let Some(TranscriptLine::Tool(tool)) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find(|line| matches!(line, TranscriptLine::Tool(_)))
+        else {
+            return;
+        };
+        tool.expanded = !tool.expanded;
         self.dirty = true;
     }
 
@@ -697,11 +713,28 @@ fn format_tool(tool: &ToolLine) -> String {
     } else {
         tool.detail.as_str()
     };
-    if tool.status == "failed" && !tool.detail.is_empty() {
-        format!("· {}  {}  failed", tool.title, rest)
-    } else {
-        format!("· {}  {}", tool.title, rest)
+    let failed = tool.status == "failed" && !tool.detail.is_empty();
+    if !tool.expanded {
+        let one = truncate_one_line(rest, 80);
+        return if failed {
+            format!("· {}  {one}  failed", tool.title)
+        } else {
+            format!("· {}  {one}", tool.title)
+        };
     }
+    let mut lines = rest.lines();
+    let first = lines.next().unwrap_or("");
+    let mut out = if failed {
+        format!("· {}  {first}  failed", tool.title)
+    } else {
+        format!("· {}  {first}", tool.title)
+    };
+    for line in lines {
+        out.push('\n');
+        out.push_str("· ");
+        out.push_str(line);
+    }
+    out
 }
 
 fn permission_dock(pending: &PendingPermission) -> String {
@@ -856,6 +889,13 @@ fn status_line(session_id: &str, shared: &Shared, width: u16) -> String {
     }
     if shared.plan.is_some() {
         parts.push("^p plan".into());
+    }
+    if shared
+        .transcript
+        .iter()
+        .any(|line| matches!(line, TranscriptLine::Tool(_)))
+    {
+        parts.push("^o tool".into());
     }
     parts.push("pgup/pgdn".into());
     truncate_display(&format!("  {}", parts.join("  ")), width as usize)
@@ -1188,6 +1228,7 @@ fn apply_update(shared: &mut Shared, params: &Value) {
                 title,
                 status,
                 detail,
+                expanded: false,
             }));
         }
         "tool_call_update" => {
@@ -1468,6 +1509,10 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             shared.show_plan = !shared.show_plan;
             shared.dirty = true;
         }
+        return KeyResult::Continue;
+    }
+    if ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O')) {
+        session.lock_shared().toggle_last_tool();
         return KeyResult::Continue;
     }
 
@@ -2116,6 +2161,152 @@ mod tests {
         assert!(text.contains("write_file"), "{text}");
         assert!(text.contains("hello.txt"), "{text}");
         assert!(!text.contains("{\"path\""), "{text}");
+    }
+
+    fn ctrl_o() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+    }
+
+    async fn notify_multiline_tool(session: &TuiSession) {
+        session
+            .client
+            .notify(
+                "session/update",
+                json!({
+                    "sessionId": session.session_id(),
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "t1",
+                        "title": "bash",
+                        "status": "pending",
+                        "rawInput": {"command": "cat notes"}
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        session
+            .client
+            .notify(
+                "session/update",
+                json!({
+                    "sessionId": session.session_id(),
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "t1",
+                        "status": "completed",
+                        "content": [{
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "first line of stdout\nlater-unique-line\nthird"
+                            }
+                        }]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn drawn_text(session: &TuiSession) -> String {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, session)).unwrap();
+        let buf = terminal.backend().buffer();
+        let area = buf.area();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn tool_line_count(text: &str) -> usize {
+        text.lines().filter(|line| line.starts_with('·')).count()
+    }
+
+    #[tokio::test]
+    async fn collapsed_tool_stays_one_line_for_multiline_result() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        notify_multiline_tool(&session).await;
+        let text = session.transcript_text();
+        assert_eq!(tool_line_count(&text), 1, "{text}");
+        assert!(text.contains("first line of stdout"), "{text}");
+        assert!(!text.contains("later-unique-line"), "{text}");
+        assert!(!drawn_text(&session).contains("later-unique-line"));
+    }
+
+    #[tokio::test]
+    async fn ctrl_o_expands_last_tool_and_collapses() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        notify_multiline_tool(&session).await;
+        type_text(&session, "draft");
+        assert!(matches!(
+            handle_key(&session, ctrl_o()),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "draft");
+        let text = session.transcript_text();
+        assert!(text.contains("later-unique-line"), "{text}");
+        assert!(tool_line_count(&text) > 1, "{text}");
+        let drawn = drawn_text(&session);
+        assert!(drawn.contains("later-unique-line"), "{drawn}");
+        match session.lock_shared().transcript.last() {
+            Some(TranscriptLine::Tool(tool)) => {
+                assert!(tool.expanded);
+                assert!(tool.detail.contains("later-unique-line"));
+                assert_eq!(format_tool(tool), text);
+            }
+            _ => panic!("expected tool line"),
+        }
+        assert!(matches!(
+            handle_key(&session, ctrl_o()),
+            KeyResult::Continue
+        ));
+        let text = session.transcript_text();
+        assert_eq!(tool_line_count(&text), 1, "{text}");
+        assert!(!text.contains("later-unique-line"), "{text}");
+        assert!(!drawn_text(&session).contains("later-unique-line"));
+        match session.lock_shared().transcript.last() {
+            Some(TranscriptLine::Tool(tool)) => {
+                assert!(!tool.expanded);
+                assert!(tool.detail.contains("later-unique-line"));
+            }
+            _ => panic!("expected tool line"),
+        }
+        assert_eq!(session.lock_shared().input, "draft");
+    }
+
+    #[tokio::test]
+    async fn ctrl_o_without_tools_is_a_noop() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        type_text(&session, "hello");
+        session.lock_shared().dirty = false;
+        assert!(matches!(
+            handle_key(&session, ctrl_o()),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "hello");
+        assert!(session.transcript_text().is_empty());
+        assert!(!session.lock_shared().dirty);
     }
 
     #[tokio::test]
