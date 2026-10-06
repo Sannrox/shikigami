@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nested parent finish waits on a registry idle signal instead of a 50ms
+  `run_is_active` poll. Still-active children are still cancelled and
+  observed idle.
 - Nested `wait=false` start waits on a registry start signal instead of a
   20ms `Checkpoint::load` poll. Slot claims in one start-wait share one
   parent checkpoint save.

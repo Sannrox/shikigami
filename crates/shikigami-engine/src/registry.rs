@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -21,7 +21,34 @@ pub const RUN_RECORD_FILENAME: &str = "run.json";
 pub const RUN_EVENTS_FILENAME: &str = "events.jsonl";
 pub const RUN_CANCEL_FILENAME: &str = "cancel";
 pub const RUN_OWNER_FILENAME: &str = "owner";
-const ACTIVE_HEARTBEAT_TTL_MS: u64 = 120_000;
+pub(crate) const ACTIVE_HEARTBEAT_TTL_MS: u64 = 120_000;
+#[derive(Debug)]
+struct IdleSignal {
+    tx: watch::Sender<bool>,
+    /// Set when this process started or finished the run. JSON-seeded
+    /// watches stay `false` so parent finish can keep polling disk.
+    local: bool,
+}
+
+type IdleSignalMap = HashMap<String, IdleSignal>;
+
+#[cfg(test)]
+static RUN_IS_ACTIVE_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_run_is_active(run_id: &str) {
+    if let Ok(mut ids) = RUN_IS_ACTIVE_IDS.lock() {
+        ids.push(run_id.to_owned());
+    }
+}
+
+#[cfg(test)]
+pub fn run_is_active_count_for(run_id: &str) -> usize {
+    RUN_IS_ACTIVE_IDS
+        .lock()
+        .map(|ids| ids.iter().filter(|id| id.as_str() == run_id).count())
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Error)]
 pub enum RegistryError {
@@ -96,6 +123,9 @@ pub struct RunRegistry {
     run_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Same-process start waiters for nested `wait=false` children.
     start_signals: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Same-process idle waiters for nested child finish/park. Interned by
+    /// `runs_root` so a resume Engine still sees children started earlier.
+    idle_signals: Arc<Mutex<IdleSignalMap>>,
 }
 
 impl RunRegistry {
@@ -108,11 +138,14 @@ impl RunRegistry {
 
     /// Read-only view of existing run records. Does not create directories.
     pub fn inspect(state_root: impl AsRef<Path>) -> Self {
+        let runs_root = state_root.as_ref().join("runs");
+        let idle_signals = shared_idle_signals(&runs_root);
         Self {
-            runs_root: state_root.as_ref().join("runs"),
+            runs_root,
             cancel_root: state_root.as_ref().join("run-controls"),
             run_locks: Arc::new(Mutex::new(HashMap::new())),
             start_signals: Arc::new(Mutex::new(HashMap::new())),
+            idle_signals,
         }
     }
 
@@ -212,6 +245,7 @@ impl RunRegistry {
             return Err(error);
         }
         self.notify_started(run_id);
+        self.notify_idle_state(run_id, false);
         Ok(())
     }
 
@@ -248,6 +282,61 @@ impl RunRegistry {
             None => {
                 let (tx, _) = watch::channel(true);
                 signals.insert(run_id.to_owned(), tx);
+            }
+        }
+    }
+
+    /// Subscribe to this process leaving `starting`/`running` for `run_id`.
+    /// The receiver is `true` once finish has been written, including if
+    /// finish already happened, and when the run is not active.
+    ///
+    /// The `bool` is `true` when this process already interned a signal
+    /// (local start/finish). `false` means the watch was seeded from JSON,
+    /// so another process may own the run.
+    pub(crate) fn watch_idle(
+        &self,
+        run_id: &str,
+    ) -> Result<(watch::Receiver<bool>, bool), RegistryError> {
+        validate_run_id(run_id)?;
+        {
+            let signals = self.idle_signals.lock().map_err(|_| RegistryError::Lock)?;
+            if let Some(signal) = signals.get(run_id) {
+                return Ok((signal.tx.subscribe(), signal.local));
+            }
+        }
+        // Seed without holding `idle_signals` across `run_is_active` (that
+        // lock order would deadlock finish, which holds the run lock then
+        // notifies idle).
+        let idle = !self.run_is_active(run_id).unwrap_or(false);
+        let mut signals = self.idle_signals.lock().map_err(|_| RegistryError::Lock)?;
+        if let Some(signal) = signals.get(run_id) {
+            return Ok((signal.tx.subscribe(), signal.local));
+        }
+        let (tx, rx) = watch::channel(idle);
+        signals.insert(run_id.to_owned(), IdleSignal { tx, local: false });
+        Ok((rx, false))
+    }
+
+    pub(crate) fn clear_idle_signal(&self, run_id: &str) {
+        if let Ok(mut signals) = self.idle_signals.lock() {
+            signals.remove(run_id);
+        }
+    }
+
+    fn notify_idle_state(&self, run_id: &str, idle: bool) {
+        let Ok(mut signals) = self.idle_signals.lock() else {
+            return;
+        };
+        match signals.get_mut(run_id) {
+            Some(signal) => {
+                // `send` is a no-op without receivers; parent finish
+                // subscribes after joining children that already finished.
+                signal.tx.send_replace(idle);
+                signal.local = true;
+            }
+            None => {
+                let (tx, _) = watch::channel(idle);
+                signals.insert(run_id.to_owned(), IdleSignal { tx, local: true });
             }
         }
     }
@@ -366,7 +455,10 @@ impl RunRegistry {
         self.clear_cancel_unlocked(&result.run_id)?;
         self.write(&record)?;
         self.clear_start_signal(&result.run_id);
-        self.remove_owner_unlocked(&result.run_id)
+        let removed = self.remove_owner_unlocked(&result.run_id);
+        self.notify_idle_state(&result.run_id, true);
+        self.clear_idle_signal(&result.run_id);
+        removed
     }
 
     pub fn finish_error(&self, run_id: &str, error: &RunError) -> Result<(), RegistryError> {
@@ -383,7 +475,10 @@ impl RunRegistry {
         self.clear_cancel_unlocked(run_id)?;
         self.write(&record)?;
         self.clear_start_signal(run_id);
-        self.remove_owner_unlocked(run_id)
+        let removed = self.remove_owner_unlocked(run_id);
+        self.notify_idle_state(run_id, true);
+        self.clear_idle_signal(run_id);
+        removed
     }
 
     pub fn load(&self, run_id: &str) -> Result<RunRecord, RegistryError> {
@@ -393,6 +488,8 @@ impl RunRegistry {
     }
 
     pub fn run_is_active(&self, run_id: &str) -> Result<bool, RegistryError> {
+        #[cfg(test)]
+        note_run_is_active(run_id);
         let run_lock = self.lock_for(run_id)?;
         let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
         let record = self.load_unlocked(run_id)?;
@@ -544,6 +641,8 @@ impl RunRegistry {
         // run anymore, so its crashed state is eligible for cleanup.
         self.clear_cancel_unlocked(run_id)?;
         self.clear_start_signal(run_id);
+        self.notify_idle_state(run_id, true);
+        self.clear_idle_signal(run_id);
         fs::remove_dir_all(self.run_dir(run_id)?)?;
         Ok(())
     }
@@ -628,6 +727,16 @@ impl RunRegistry {
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         ))
     }
+}
+
+fn shared_idle_signals(runs_root: &Path) -> Arc<Mutex<IdleSignalMap>> {
+    static MAPS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<IdleSignalMap>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut maps = MAPS.lock().unwrap_or_else(|poison| poison.into_inner());
+    Arc::clone(
+        maps.entry(runs_root.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(HashMap::new()))),
+    )
 }
 
 fn validate_run_id(run_id: &str) -> Result<(), RegistryError> {
@@ -753,6 +862,93 @@ mod tests {
         assert!(
             *late.borrow(),
             "a watcher created after start must see the durable record"
+        );
+    }
+
+    #[test]
+    fn missing_run_is_already_idle_for_watchers() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        let (rx, interned) = registry.watch_idle("run-1").unwrap();
+        assert!(
+            *rx.borrow(),
+            "a run with no record is not active, so idle waiters must not hang"
+        );
+        assert!(
+            !interned,
+            "a missing run has no local start signal to intern"
+        );
+    }
+
+    #[test]
+    fn finish_notifies_in_process_idle_watchers() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.start("run-1", "task", None, None).unwrap();
+        let (rx, interned) = registry.watch_idle("run-1").unwrap();
+        assert!(interned);
+        assert!(!*rx.borrow());
+        registry
+            .finish_error("run-1", &RunError::Cancelled)
+            .unwrap();
+        assert!(*rx.borrow());
+        let (late, _) = registry.watch_idle("run-1").unwrap();
+        assert!(
+            *late.borrow(),
+            "a watcher created after finish must see idle"
+        );
+    }
+
+    #[test]
+    fn finish_without_waiters_is_still_idle_for_late_watchers() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.start("run-1", "task", None, None).unwrap();
+        registry
+            .finish_error("run-1", &RunError::Cancelled)
+            .unwrap();
+        let (late, _) = registry.watch_idle("run-1").unwrap();
+        assert!(
+            *late.borrow(),
+            "finish must publish idle even when no waiter was subscribed"
+        );
+    }
+
+    #[test]
+    fn json_seeded_idle_watch_stays_external_until_local_notify() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        registry.start("run-1", "task", None, None).unwrap();
+        registry.clear_idle_signal("run-1");
+        let (rx, local) = registry.watch_idle("run-1").unwrap();
+        assert!(!*rx.borrow());
+        assert!(
+            !local,
+            "a JSON-seeded watch is not a local start/finish signal"
+        );
+        let (_, again) = registry.watch_idle("run-1").unwrap();
+        assert!(
+            !again,
+            "resubscribing must not treat a JSON-seeded signal as local"
+        );
+    }
+
+    #[test]
+    fn finish_notifies_idle_watchers_on_a_separate_registry_instance() {
+        let dir = tempdir().unwrap();
+        let first = RunRegistry::new(dir.path()).unwrap();
+        let second = RunRegistry::new(dir.path()).unwrap();
+        first.start("run-1", "task", None, None).unwrap();
+        let (rx, interned) = second.watch_idle("run-1").unwrap();
+        assert!(
+            interned,
+            "resume Engine must share the interned idle signal"
+        );
+        assert!(!*rx.borrow());
+        first.finish_error("run-1", &RunError::Cancelled).unwrap();
+        assert!(
+            *rx.borrow(),
+            "resume/new Engine must observe child idle from the original registry"
         );
     }
 
