@@ -201,6 +201,13 @@ fn format_event(event: &HarnessEvent) -> String {
         HarnessEvent::TodosUpdated { item_count, .. } => {
             format!("todos item_count={item_count}")
         }
+        HarnessEvent::HandoffBrief { task, files, .. } => {
+            format!(
+                "handoff task_chars={} files={}",
+                task.chars().count(),
+                files.len()
+            )
+        }
         HarnessEvent::Message { level, text } => format!("message[{level}]={text}"),
     }
 }

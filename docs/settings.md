@@ -210,7 +210,7 @@ OTLP/HTTP tracing export). Does not interpose bash sockets; see
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `tool_concurrency` | `4` | Max concurrent tools when a turn’s batch is **all parallel-safe** (`read_file`, `glob`, `grep`, `web_fetch`). `1` forces sequential. Any write/bash/`todo_write`/`report`/`escalate` batch runs **serially**. Tool messages are applied in original call order. |
+| `tool_concurrency` | `4` | Max concurrent tools when a turn’s batch is **all parallel-safe** (`read_file`, `glob`, `grep`, `web_fetch`). `1` forces sequential. Any write/bash/`todo_write`/`handoff`/`report`/`escalate` batch runs **serially**. Tool messages are applied in original call order. |
 
 ### `[tools]`
 
@@ -224,7 +224,7 @@ OTLP/HTTP tracing export). Does not interpose bash sockets; see
 | Mode | Effective tools (before optional `enabled` intersect) |
 | --- | --- |
 | `custom` | `enabled` if set, else coding default (writes/search, **no** bash) |
-| `read` | `read_file`, `glob`, `grep`, `todo_write`, `report`, `escalate` |
+| `read` | `read_file`, `glob`, `grep`, `todo_write`, `handoff`, `report`, `escalate` |
 | `workspace` | coding default (no bash) |
 | `workspace_exec` | coding default + `bash` (also exposes `bash_background` / `bash_job_status` / `bash_job_logs`) |
 
@@ -248,6 +248,11 @@ provide filesystem, PID, or network isolation.
 
 Coding default includes `todo_write` (run-scoped checklist; max 32 items).
 It is **not** a plane work-unit API and does not replace `escalate`/park.
+
+Coding default includes `handoff` (brief event: required `task`, optional
+`decisions` / `files` / `ignore`). It does **not** start a session, child
+run, or plane session; the host that sees `handoff_brief` decides what to
+do next. Skills cannot omit `task`.
 
 Coding default also includes `apply_patch` (structured multi-hunk patches with
 optional context; atomic across files). Prefer `edit` / `multi_edit` for exact

@@ -151,6 +151,114 @@ async fn repeated_tools_in_one_turn_have_distinct_call_ids() {
 }
 
 #[tokio::test]
+async fn live_event_stream_receives_handoff_brief() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"handoff","args_json":"{\"task\":\"resume auth\",\"decisions\":[\"keep JWT\"],\"files\":[\"src/auth.rs\"],\"ignore\":[\"vendor\"]}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"briefed\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    assert!(!config.run.nested);
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("write a brief");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(result.termination, shikigami::RunTermination::Completed);
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let brief = events.iter().find_map(|event| match event {
+        HarnessEvent::HandoffBrief {
+            task,
+            decisions,
+            files,
+            ignore,
+        } => Some((
+            task.clone(),
+            decisions.clone(),
+            files.clone(),
+            ignore.clone(),
+        )),
+        _ => None,
+    });
+    assert_eq!(
+        brief,
+        Some((
+            "resume auth".into(),
+            vec!["keep JWT".into()],
+            vec!["src/auth.rs".into()],
+            vec!["vendor".into()]
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolStart { name, .. } if name == "child_run"
+        )),
+        "handoff must not start a child run: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_event_stream_keeps_each_handoff_brief_in_a_batch() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[
+            {"name":"handoff","args_json":"{\"task\":\"first\"}"},
+            {"name":"handoff","args_json":"{\"task\":\"second\"}"}
+        ]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"briefed\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("two briefs");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let tasks: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            HarnessEvent::HandoffBrief { task, .. } => Some(task),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tasks, vec!["first".to_string(), "second".to_string()]);
+}
+
+#[tokio::test]
 async fn bash_tool_events_cannot_emit_configured_harness_credentials() {
     use shikigami::{ChannelSink, HarnessEvent};
     use std::sync::Arc;

@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -50,7 +51,9 @@ struct ToolLine {
     id: String,
     title: String,
     status: String,
+    /// Full rawInput summary or result text. Collapse is `expanded`, not a wipe.
     detail: String,
+    expanded: bool,
 }
 
 enum TranscriptLine {
@@ -75,6 +78,11 @@ struct PendingPermission {
     tx: oneshot::Sender<Value>,
 }
 
+struct QueuedPrompt {
+    display: String,
+    send: String,
+}
+
 struct Shared {
     transcript: Vec<TranscriptLine>,
     permission: Option<PendingPermission>,
@@ -82,6 +90,8 @@ struct Shared {
     show_plan: bool,
     status: String,
     busy: bool,
+    /// One follow-up to send after the in-flight prompt finishes.
+    queued: Option<QueuedPrompt>,
     input: String,
     cursor: usize,
     history: Vec<String>,
@@ -90,6 +100,12 @@ struct Shared {
     /// Rows above the follow-tail. 0 means stick to the newest output.
     scroll_back: u16,
     transcript_h: u16,
+    /// Rows skipped from the top of an overflowing ask/plan dock.
+    dock_scroll: u16,
+    /// Last drawn composer height; 0 until draw, so undrawn docks do not steal paging.
+    composer_h: u16,
+    /// Last drawn composer slot; wheel hit-tests this.
+    composer_area: Rect,
     /// Last drawn composer width; Up/Down use it to step visual rows.
     composer_w: u16,
     dirty: bool,
@@ -107,6 +123,7 @@ impl Shared {
             show_plan: false,
             status: "ready".into(),
             busy: false,
+            queued: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -114,6 +131,9 @@ impl Shared {
             history_scratch: String::new(),
             scroll_back: 0,
             transcript_h: 0,
+            dock_scroll: 0,
+            composer_h: 0,
+            composer_area: Rect::default(),
             composer_w: 80,
             dirty: true,
             slash_dismissed: false,
@@ -227,10 +247,30 @@ impl Shared {
         self.history_idx = None;
         self.show_plan = false;
         self.scroll_back = 0;
+        self.dock_scroll = 0;
         self.slash_dismissed = false;
         self.slash_selected = 0;
         self.dirty = true;
         text
+    }
+
+    /// Store or replace the one-slot follow-up from the current draft.
+    fn queue_follow_up(&mut self) {
+        let text = self.take_input();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.queued = Some(QueuedPrompt {
+            display: trimmed.to_string(),
+            send: trimmed.to_string(),
+        });
+    }
+
+    fn drop_queue(&mut self) {
+        if self.queued.take().is_some() {
+            self.dirty = true;
+        }
     }
 
     fn sync_slash_dismissed(&mut self) {
@@ -273,15 +313,87 @@ impl Shared {
         self.dirty = true;
     }
 
-    fn page_up(&mut self) {
+    fn dock_open(&self) -> bool {
+        self.permission.is_some() || (self.show_plan && self.plan.is_some())
+    }
+
+    fn dock_max_scroll(&self) -> u16 {
+        if !self.dock_open() || self.composer_h == 0 {
+            return 0;
+        }
+        wrapped_rows(&composer_inner(self), self.composer_w.max(1)).saturating_sub(self.composer_h)
+    }
+
+    /// Scroll an overflowing dock. False means no dock overflow or already at that edge.
+    fn try_scroll_dock(&mut self, dir: i16) -> bool {
+        let max = self.dock_max_scroll();
+        if max == 0 {
+            return false;
+        }
+        let page = self.composer_h.max(1);
+        let next = if dir < 0 {
+            self.dock_scroll.saturating_sub(page)
+        } else {
+            self.dock_scroll.saturating_add(page).min(max)
+        };
+        if next == self.dock_scroll {
+            return false;
+        }
+        self.dock_scroll = next;
+        self.dirty = true;
+        true
+    }
+
+    fn page_transcript_up(&mut self) {
         let page = self.transcript_h.max(1);
         self.scroll_back = self.scroll_back.saturating_add(page);
         self.dirty = true;
     }
 
-    fn page_down(&mut self) {
+    fn page_transcript_down(&mut self) {
         let page = self.transcript_h.max(1);
         self.scroll_back = self.scroll_back.saturating_sub(page);
+        self.dirty = true;
+    }
+
+    fn page_up(&mut self) {
+        if self.try_scroll_dock(-1) {
+            return;
+        }
+        self.page_transcript_up();
+    }
+
+    fn page_down(&mut self) {
+        if self.try_scroll_dock(1) {
+            return;
+        }
+        self.page_transcript_down();
+    }
+
+    /// Wheel over an overflowing dock scrolls it; otherwise (or at the edge) page the transcript.
+    fn wheel(&mut self, dir: i16, column: u16, row: u16) {
+        let over_dock = self.dock_open() && rect_contains(self.composer_area, column, row);
+        if over_dock && self.try_scroll_dock(dir) {
+            return;
+        }
+        if dir < 0 {
+            self.page_transcript_up();
+        } else {
+            self.page_transcript_down();
+        }
+    }
+
+    /// Last tool only. No-op when the transcript has no tools.
+    fn toggle_last_tool(&mut self) {
+        let Some(TranscriptLine::Tool(tool)) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find(|line| matches!(line, TranscriptLine::Tool(_)))
+        else {
+            return;
+        };
+        tool.expanded = !tool.expanded;
         self.dirty = true;
     }
 
@@ -450,10 +562,10 @@ impl TuiSession {
         let host = Arc::clone(&self.host);
         let client = self.client.clone();
         let shared = Arc::clone(&self.client.shared);
+        // Stay busy until wait_prompt reaps this handle so Enter cannot spawn over it.
         let task = tokio::spawn(async move {
             let resp = host.handle(msg, &client).await;
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
-            state.busy = false;
             apply_prompt_result(&mut state, resp.as_ref());
             state.dirty = true;
             resp
@@ -464,9 +576,30 @@ impl TuiSession {
 
     async fn wait_prompt(&self) -> Option<Value> {
         let task = self.prompt.lock().unwrap_or_else(|e| e.into_inner()).take();
-        match task {
+        let resp = match task {
             Some(task) => task.await.ok().flatten(),
             None => None,
+        };
+        let mut shared = self.lock_shared();
+        shared.busy = false;
+        shared.dirty = true;
+        resp
+    }
+
+    /// Send the queued follow-up after `wait_prompt` unless that turn was cancelled.
+    async fn drain_queued_prompt(&self, last: Option<&Value>) -> Result<(), String> {
+        let queued = {
+            let mut shared = self.lock_shared();
+            if prompt_cancelled(last) {
+                shared.drop_queue();
+                None
+            } else {
+                shared.queued.take()
+            }
+        };
+        match queued {
+            Some(QueuedPrompt { display, send }) => self.spawn_prompt_with(display, send).await,
+            None => Ok(()),
         }
     }
 
@@ -484,10 +617,12 @@ impl TuiSession {
             let _ = host.handle(msg, &client).await;
         });
         let mut shared = self.lock_shared();
+        shared.drop_queue();
         if let Some(pending) = shared.permission.take() {
             let _ = pending.tx.send(json!({
                 "outcome": { "outcome": "cancelled" }
             }));
+            shared.dock_scroll = 0;
         }
         shared.dirty = true;
     }
@@ -501,11 +636,16 @@ impl TuiSession {
         let _ = pending.tx.send(json!({
             "outcome": { "outcome": outcome, "optionId": outcome }
         }));
+        shared.dock_scroll = 0;
         shared.dirty = true;
     }
 
     fn slash_catalog(&self) -> Vec<SlashCommand> {
         let mut out = vec![
+            SlashCommand {
+                name: "help".into(),
+                hint: "keys and slash commands".into(),
+            },
             SlashCommand {
                 name: "compact".into(),
                 hint: "shrink conversation history".into(),
@@ -583,6 +723,14 @@ impl TuiSession {
 
     fn slash_run(&self, name: &str, args: &str) -> KeyResult {
         match name {
+            "help" => {
+                let mut shared = self.lock_shared();
+                shared
+                    .transcript
+                    .push(TranscriptLine::System(HELP_TEXT.into()));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             "compact" => KeyResult::Compact,
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
@@ -650,8 +798,10 @@ impl TuiSession {
         shared.plan = None;
         shared.show_plan = false;
         shared.permission = None;
+        shared.queued = None;
         shared.status = "ready".into();
         shared.scroll_back = 0;
+        shared.dock_scroll = 0;
         shared.dirty = true;
         Ok(())
     }
@@ -697,11 +847,28 @@ fn format_tool(tool: &ToolLine) -> String {
     } else {
         tool.detail.as_str()
     };
-    if tool.status == "failed" && !tool.detail.is_empty() {
-        format!("· {}  {}  failed", tool.title, rest)
-    } else {
-        format!("· {}  {}", tool.title, rest)
+    let failed = tool.status == "failed" && !tool.detail.is_empty();
+    if !tool.expanded {
+        let one = truncate_one_line(rest, 80);
+        return if failed {
+            format!("· {}  {one}  failed", tool.title)
+        } else {
+            format!("· {}  {one}", tool.title)
+        };
     }
+    let mut lines = rest.lines();
+    let first = lines.next().unwrap_or("");
+    let mut out = if failed {
+        format!("· {}  {first}  failed", tool.title)
+    } else {
+        format!("· {}  {first}", tool.title)
+    };
+    for line in lines {
+        out.push('\n');
+        out.push_str("· ");
+        out.push_str(line);
+    }
+    out
 }
 
 fn permission_dock(pending: &PendingPermission) -> String {
@@ -795,6 +962,8 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
+const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /exit  /quit  /skill:name  /help";
+
 fn slash_visible(shared: &Shared) -> bool {
     !shared.busy
         && shared.permission.is_none()
@@ -857,7 +1026,20 @@ fn status_line(session_id: &str, shared: &Shared, width: u16) -> String {
     if shared.plan.is_some() {
         parts.push("^p plan".into());
     }
-    parts.push("pgup/pgdn".into());
+    if let Some(queued) = shared.queued.as_ref() {
+        parts.push(format!(
+            "queued  {}",
+            truncate_one_line(&queued.display, 32)
+        ));
+    }
+    if shared
+        .transcript
+        .iter()
+        .any(|line| matches!(line, TranscriptLine::Tool(_)))
+    {
+        parts.push("^o tool".into());
+    }
+    parts.push("pgup/pgdn/wheel".into());
     truncate_display(&format!("  {}", parts.join("  ")), width as usize)
 }
 
@@ -1130,6 +1312,7 @@ impl AcpClient for TuiClient {
                 raw_input: raw_input.to_string(),
                 tx,
             });
+            shared.dock_scroll = 0;
             shared.dirty = true;
         }
         rx.await
@@ -1188,6 +1371,7 @@ fn apply_update(shared: &mut Shared, params: &Value) {
                 title,
                 status,
                 detail,
+                expanded: false,
             }));
         }
         "tool_call_update" => {
@@ -1235,6 +1419,7 @@ fn apply_update(shared: &mut Shared, params: &Value) {
             if !entries.is_empty() {
                 shared.plan = Some(Plan { entries });
                 shared.show_plan = true;
+                shared.dock_scroll = 0;
             }
         }
         _ => return,
@@ -1268,6 +1453,12 @@ fn merge_text(lines: &mut Vec<TranscriptLine>, kind: TranscriptLine, text: Strin
         (_, TranscriptLine::Assistant(_)) => lines.push(TranscriptLine::Assistant(text)),
         _ => lines.push(TranscriptLine::System(text)),
     }
+}
+
+fn prompt_cancelled(resp: Option<&Value>) -> bool {
+    resp.and_then(|v| v.pointer("/result/stopReason"))
+        .and_then(|v| v.as_str())
+        == Some("cancelled")
 }
 
 fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
@@ -1308,6 +1499,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             out,
             PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen,
             crossterm::cursor::Show
@@ -1356,7 +1548,13 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _guard = TerminalGuard;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )
+    .map_err(|e| e.to_string())?;
     let _ = execute!(
         out,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -1386,7 +1584,13 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
             guard.as_ref().is_some_and(|task| task.is_finished())
         };
         if finished {
-            let _ = session.wait_prompt().await;
+            let last = session.wait_prompt().await;
+            if let Err(err) = session.drain_queued_prompt(last.as_ref()).await {
+                let mut shared = session.lock_shared();
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
             session.lock_shared().dirty = true;
             continue;
         }
@@ -1396,42 +1600,33 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
             Ok(None) => break,
             Err(_) => continue,
         };
-        match ev {
-            Event::Key(key) if key.kind == event::KeyEventKind::Press => {
-                match handle_key(&session, key) {
-                    KeyResult::Quit => break,
-                    KeyResult::Prompt { display, send } => {
-                        if let Err(err) = session.spawn_prompt_with(display, send).await {
-                            let mut shared = session.lock_shared();
-                            shared.transcript.push(TranscriptLine::System(err));
-                            shared.status = "error".into();
-                            shared.dirty = true;
-                        }
-                    }
-                    KeyResult::Compact => {
-                        if let Err(err) = session.compact().await {
-                            let mut shared = session.lock_shared();
-                            shared.transcript.push(TranscriptLine::System(err));
-                            shared.status = "error".into();
-                            shared.dirty = true;
-                        }
-                    }
-                    KeyResult::NewSession => {
-                        if let Err(err) = session.new_session().await {
-                            let mut shared = session.lock_shared();
-                            shared.transcript.push(TranscriptLine::System(err));
-                            shared.status = "error".into();
-                            shared.dirty = true;
-                        }
-                    }
-                    KeyResult::Continue => {}
+        match handle_event(&session, ev) {
+            KeyResult::Quit => break,
+            KeyResult::Prompt { display, send } => {
+                if let Err(err) = session.spawn_prompt_with(display, send).await {
+                    let mut shared = session.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
                 }
             }
-            Event::Resize(_, _) => {
-                session.lock_shared().dirty = true;
+            KeyResult::Compact => {
+                if let Err(err) = session.compact().await {
+                    let mut shared = session.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
+                }
             }
-            Event::Paste(text) => handle_paste(&session, &text),
-            _ => {}
+            KeyResult::NewSession => {
+                if let Err(err) = session.new_session().await {
+                    let mut shared = session.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
+                }
+            }
+            KeyResult::Continue => {}
         }
     }
     Ok(())
@@ -1444,6 +1639,34 @@ enum KeyResult {
     Prompt { display: String, send: String },
     Compact,
     NewSession,
+}
+
+fn handle_event(session: &TuiSession, ev: Event) -> KeyResult {
+    match ev {
+        Event::Key(key) if key.kind == event::KeyEventKind::Press => handle_key(session, key),
+        Event::Mouse(mouse) => {
+            handle_mouse(session, mouse);
+            KeyResult::Continue
+        }
+        Event::Paste(text) => {
+            handle_paste(session, &text);
+            KeyResult::Continue
+        }
+        Event::Resize(_, _) => {
+            session.lock_shared().dirty = true;
+            KeyResult::Continue
+        }
+        _ => KeyResult::Continue,
+    }
+}
+
+fn handle_mouse(session: &TuiSession, mouse: MouseEvent) {
+    let dir = match mouse.kind {
+        MouseEventKind::ScrollUp => -1,
+        MouseEventKind::ScrollDown => 1,
+        _ => return,
+    };
+    session.lock_shared().wheel(dir, mouse.column, mouse.row);
 }
 
 fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
@@ -1468,6 +1691,10 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             shared.show_plan = !shared.show_plan;
             shared.dirty = true;
         }
+        return KeyResult::Continue;
+    }
+    if ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O')) {
+        session.lock_shared().toggle_last_tool();
         return KeyResult::Continue;
     }
 
@@ -1557,8 +1784,12 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 session.lock_shared().insert_char('\n');
                 return KeyResult::Continue;
             }
-            if session.lock_shared().busy {
-                return KeyResult::Continue;
+            {
+                let mut shared = session.lock_shared();
+                if shared.busy {
+                    shared.queue_follow_up();
+                    return KeyResult::Continue;
+                }
             }
             let text = session.lock_shared().input.clone();
             if let Some(result) = session.slash_enter(&text) {
@@ -1582,6 +1813,8 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             } else if shared.show_plan {
                 shared.show_plan = false;
                 shared.dirty = true;
+            } else {
+                shared.drop_queue();
             }
         }
         _ => {}
@@ -1738,7 +1971,13 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
 
     let composer = chunks[idx];
     idx += 1;
+    shared.composer_h = composer_h;
+    shared.composer_area = composer;
     if asking || planning {
+        let max = wrapped_rows(&inner, wrap_w).saturating_sub(composer_h);
+        if shared.dock_scroll > max {
+            shared.dock_scroll = max;
+        }
         let styled: Vec<Line> = inner
             .lines()
             .map(|row| {
@@ -1752,7 +1991,12 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
                 }
             })
             .collect();
-        frame.render_widget(Paragraph::new(styled).wrap(Wrap { trim: false }), composer);
+        frame.render_widget(
+            Paragraph::new(styled)
+                .wrap(Wrap { trim: false })
+                .scroll((shared.dock_scroll, 0)),
+            composer,
+        );
     } else {
         let scroll = cursor_y.saturating_sub(composer_h.saturating_sub(1));
         let shown: Vec<Line> = prompt_lines
@@ -1795,6 +2039,13 @@ fn composer_height(text: &str, area: Rect) -> u16 {
     let rows = wrapped_rows(text, area.width.max(1)).max(1);
     let max = area.height.saturating_sub(4).max(1);
     rows.min(max)
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && row >= area.y
+        && column < area.x.saturating_add(area.width)
+        && row < area.y.saturating_add(area.height)
 }
 
 fn scroll_offset(body: &str, area: Rect) -> (u16, u16) {
@@ -2002,20 +2253,199 @@ mod tests {
         assert!(!cwd.join("ok.txt").exists());
     }
 
-    #[tokio::test]
-    async fn enter_while_busy_keeps_draft() {
-        let dir = tempdir().unwrap();
+    async fn start_session(dir: &tempfile::TempDir, script: &str) -> TuiSession {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
-        session.lock_shared().busy = true;
-        session.lock_shared().input = "follow up".into();
-        session.lock_shared().cursor = 9;
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(handle_key(&session, key), KeyResult::Continue));
-        assert_eq!(session.lock_shared().input, "follow up");
-        assert_eq!(session.prompt_text(), "> follow up");
+        let host = Arc::new(scripted_host(dir.path(), script));
+        TuiSession::start(host, &cwd).await.unwrap()
+    }
+
+    fn enter_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn user_prompts(session: &TuiSession) -> Vec<String> {
+        session
+            .lock_shared()
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                TranscriptLine::User(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn queued_display(session: &TuiSession) -> Option<String> {
+        session
+            .lock_shared()
+            .queued
+            .as_ref()
+            .map(|queued| queued.display.clone())
+    }
+
+    async fn spawn_then_queue(session: &TuiSession, text: &str) {
+        session.spawn_prompt("write".into()).await.unwrap();
+        type_text(session, text);
+        assert!(matches!(
+            handle_key(session, enter_key()),
+            KeyResult::Continue
+        ));
+    }
+
+    #[tokio::test]
+    async fn enter_while_busy_queues_follow_up_without_second_prompt() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        assert_eq!(session.lock_shared().input, "");
+        assert_eq!(session.prompt_text(), "> ");
+        assert_eq!(queued_display(&session).as_deref(), Some("follow up"));
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        assert!(
+            session
+                .prompt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        );
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(footer.contains("queued  follow up"), "{footer}");
+        let err = session.spawn_prompt("too soon".into()).await.unwrap_err();
+        assert!(err.contains("already in flight"), "{err}");
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn enter_while_busy_replaces_queued_follow_up() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "first").await;
+        type_text(&session, "second");
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        assert_eq!(queued_display(&session).as_deref(), Some("second"));
+        assert_eq!(session.lock_shared().input, "");
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(footer.contains("queued  second"), "{footer}");
+        assert!(!footer.contains("queued  first"), "{footer}");
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn esc_drops_queued_follow_up() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        assert_eq!(queued_display(&session).as_deref(), Some("follow up"));
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(queued_display(&session).is_none());
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(!footer.contains("queued"), "{footer}");
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn esc_hides_plan_before_dropping_queue() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        {
+            let mut shared = session.lock_shared();
+            shared.plan = Some(Plan {
+                entries: vec![PlanEntry {
+                    content: "inspect".into(),
+                    status: "pending".into(),
+                }],
+            });
+            shared.show_plan = true;
+        }
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(handle_key(&session, esc), KeyResult::Continue));
+        assert!(!session.lock_shared().show_plan);
+        assert_eq!(queued_display(&session).as_deref(), Some("follow up"));
+        assert!(matches!(handle_key(&session, esc), KeyResult::Continue));
+        assert!(queued_display(&session).is_none());
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn finish_drains_queued_follow_up_into_session_prompt() {
+        let dir = tempdir().unwrap();
+        let session = start_session(
+            &dir,
+            r#"[{"content":"first reply"},{"content":"queued reply"}]"#,
+        )
+        .await;
+        spawn_then_queue(&session, "follow up").await;
+        let first = session.wait_prompt().await;
+        assert_eq!(
+            first.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+            Some(&json!("end_turn"))
+        );
+        session.drain_queued_prompt(first.as_ref()).await.unwrap();
+        let second = session.wait_prompt().await;
+        assert_eq!(
+            second
+                .as_ref()
+                .and_then(|v| v.pointer("/result/stopReason")),
+            Some(&json!("end_turn"))
+        );
+        assert!(queued_display(&session).is_none());
+        assert_eq!(
+            user_prompts(&session),
+            vec!["write".to_string(), "follow up".to_string()]
+        );
+        let text = session.transcript_text();
+        assert!(text.contains("first reply"), "{text}");
+        assert!(text.contains("queued reply"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_queued_follow_up_without_sending() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(handle_key(&session, ctrl_c), KeyResult::Continue));
+        assert!(queued_display(&session).is_none());
+        let stop = session.wait_prompt().await;
+        session.drain_queued_prompt(stop.as_ref()).await.unwrap();
+        assert!(queued_display(&session).is_none());
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        assert!(
+            session
+                .prompt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        );
+        assert!(!session.transcript_text().contains("you  follow up"));
+    }
+
+    #[tokio::test]
+    async fn slash_while_busy_is_a_character_not_a_list() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.spawn_prompt("write".into()).await.unwrap();
+        type_text(&session, "/compact");
+        assert_eq!(session.lock_shared().input, "/compact");
+        assert!(!slash_visible(&session.lock_shared()));
+        assert!(session.slash_matches().is_empty());
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        assert_eq!(queued_display(&session).as_deref(), Some("/compact"));
+        assert_eq!(session.lock_shared().input, "");
+        let _ = session.wait_prompt().await;
     }
 
     #[tokio::test]
@@ -2044,6 +2474,15 @@ mod tests {
         assert_eq!(session.lock_shared().input, "p");
     }
 
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
     #[tokio::test]
     async fn page_up_scrolls_back_and_new_prompt_returns_to_tail() {
         let dir = tempdir().unwrap();
@@ -2058,6 +2497,23 @@ mod tests {
         session.spawn_prompt("next".into()).await.unwrap();
         assert_eq!(session.lock_shared().scroll_back, 0);
         let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn mouse_scroll_pages_transcript_like_page_keys() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.lock_shared().transcript_h = 10;
+        assert!(matches!(
+            handle_event(&session, wheel(MouseEventKind::ScrollUp, 0, 0)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 10);
+        assert!(matches!(
+            handle_event(&session, wheel(MouseEventKind::ScrollDown, 0, 0)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 0);
     }
 
     #[tokio::test]
@@ -2118,6 +2574,191 @@ mod tests {
         assert!(!text.contains("{\"path\""), "{text}");
     }
 
+    fn ctrl_o() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+    }
+
+    async fn notify_multiline_tool(session: &TuiSession) {
+        session
+            .client
+            .notify(
+                "session/update",
+                json!({
+                    "sessionId": session.session_id(),
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "t1",
+                        "title": "bash",
+                        "status": "pending",
+                        "rawInput": {"command": "cat notes"}
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        session
+            .client
+            .notify(
+                "session/update",
+                json!({
+                    "sessionId": session.session_id(),
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "t1",
+                        "status": "completed",
+                        "content": [{
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "first line of stdout\nlater-unique-line\nthird"
+                            }
+                        }]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn drawn_text(session: &TuiSession) -> String {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, session)).unwrap();
+        let buf = terminal.backend().buffer();
+        let area = buf.area();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn tool_line_count(text: &str) -> usize {
+        text.lines().filter(|line| line.starts_with('·')).count()
+    }
+
+    #[tokio::test]
+    async fn collapsed_tool_stays_one_line_for_multiline_result() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        notify_multiline_tool(&session).await;
+        let text = session.transcript_text();
+        assert_eq!(tool_line_count(&text), 1, "{text}");
+        assert!(text.contains("first line of stdout"), "{text}");
+        assert!(!text.contains("later-unique-line"), "{text}");
+        assert!(!drawn_text(&session).contains("later-unique-line"));
+    }
+
+    #[tokio::test]
+    async fn ctrl_o_expands_last_tool_and_collapses() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        notify_multiline_tool(&session).await;
+        type_text(&session, "draft");
+        assert!(matches!(
+            handle_key(&session, ctrl_o()),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "draft");
+        let text = session.transcript_text();
+        assert!(text.contains("later-unique-line"), "{text}");
+        assert!(tool_line_count(&text) > 1, "{text}");
+        let drawn = drawn_text(&session);
+        assert!(drawn.contains("later-unique-line"), "{drawn}");
+        match session.lock_shared().transcript.last() {
+            Some(TranscriptLine::Tool(tool)) => {
+                assert!(tool.expanded);
+                assert!(tool.detail.contains("later-unique-line"));
+                assert_eq!(format_tool(tool), text);
+            }
+            _ => panic!("expected tool line"),
+        }
+        assert!(matches!(
+            handle_key(&session, ctrl_o()),
+            KeyResult::Continue
+        ));
+        let text = session.transcript_text();
+        assert_eq!(tool_line_count(&text), 1, "{text}");
+        assert!(!text.contains("later-unique-line"), "{text}");
+        assert!(!drawn_text(&session).contains("later-unique-line"));
+        match session.lock_shared().transcript.last() {
+            Some(TranscriptLine::Tool(tool)) => {
+                assert!(!tool.expanded);
+                assert!(tool.detail.contains("later-unique-line"));
+            }
+            _ => panic!("expected tool line"),
+        }
+        assert_eq!(session.lock_shared().input, "draft");
+    }
+
+    #[tokio::test]
+    async fn ctrl_o_without_tools_is_a_noop() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        type_text(&session, "hello");
+        session.lock_shared().dirty = false;
+        assert!(matches!(
+            handle_key(&session, ctrl_o()),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "hello");
+        assert!(session.transcript_text().is_empty());
+        assert!(!session.lock_shared().dirty);
+    }
+
+    fn install_permission(session: &TuiSession, raw_input: String) {
+        let (tx, _rx) = oneshot::channel();
+        let mut shared = session.lock_shared();
+        shared.permission = Some(PendingPermission {
+            title: "write_file".into(),
+            raw_input,
+            tx,
+        });
+    }
+
+    fn tall_permission_input() -> String {
+        let mut lines = Vec::new();
+        for i in 0..40 {
+            lines.push(format!("arg-line-{i:02}"));
+        }
+        lines.push("later-unique-arg-line".into());
+        json!({ "command": lines.join("\n") }).to_string()
+    }
+
+    fn page_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn page_dock_down_until(session: &TuiSession, needle: &str) -> String {
+        let mut text = String::new();
+        for _ in 0..8 {
+            let before = session.lock_shared().dock_scroll;
+            assert!(matches!(
+                handle_event(session, Event::Key(page_key(KeyCode::PageDown))),
+                KeyResult::Continue
+            ));
+            text = drawn_text(session);
+            if text.contains(needle) || session.lock_shared().dock_scroll == before {
+                break;
+            }
+        }
+        text
+    }
+
     #[tokio::test]
     async fn asking_still_pages_transcript() {
         let dir = tempdir().unwrap();
@@ -2125,20 +2766,81 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
         let session = TuiSession::start(host, &cwd).await.unwrap();
-        let (tx, _rx) = oneshot::channel();
-        {
-            let mut shared = session.lock_shared();
-            shared.transcript_h = 10;
-            shared.permission = Some(PendingPermission {
-                title: "write_file".into(),
-                raw_input: r#"{"path":"ok.txt"}"#.into(),
-                tx,
-            });
-        }
-        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
-        assert!(matches!(handle_key(&session, key), KeyResult::Continue));
+        install_permission(&session, r#"{"path":"ok.txt"}"#.into());
+        let _ = drawn_text(&session);
+        assert_eq!(session.lock_shared().dock_max_scroll(), 0);
+        session.lock_shared().transcript_h = 10;
+        assert!(matches!(
+            handle_key(&session, page_key(KeyCode::PageUp)),
+            KeyResult::Continue
+        ));
         assert_eq!(session.lock_shared().scroll_back, 10);
+        assert_eq!(session.lock_shared().dock_scroll, 0);
         assert!(session.lock_shared().permission.is_some());
+    }
+
+    #[tokio::test]
+    async fn overflowing_permission_body_is_reachable() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        install_permission(&session, tall_permission_input());
+        let overlay = session.overlay_text().expect("permission overlay");
+        assert!(
+            overlay.contains("later-unique-arg-line"),
+            "ask must keep later argument lines: {overlay}"
+        );
+        let first = drawn_text(&session);
+        assert!(session.lock_shared().dock_max_scroll() > 0);
+        assert!(
+            !first.contains("later-unique-arg-line"),
+            "overflow must clip later arguments until scrolled: {first}"
+        );
+        let back = session.lock_shared().scroll_back;
+        let paged = page_dock_down_until(&session, "later-unique-arg-line");
+        assert!(
+            paged.contains("later-unique-arg-line"),
+            "PageDown on an overflowing dock must reveal later arguments: {paged}"
+        );
+        assert_eq!(session.lock_shared().scroll_back, back);
+        assert!(session.lock_shared().dock_scroll > 0);
+        assert!(matches!(
+            handle_event(&session, Event::Key(page_key(KeyCode::PageUp))),
+            KeyResult::Continue
+        ));
+        let reset = drawn_text(&session);
+        assert!(
+            !reset.contains("later-unique-arg-line"),
+            "PageUp on a scrolled dock must hide later arguments again: {reset}"
+        );
+        let (x, y) = {
+            let shared = session.lock_shared();
+            (shared.composer_area.x, shared.composer_area.y)
+        };
+        let mut wheeled = reset;
+        for _ in 0..8 {
+            assert!(matches!(
+                handle_event(&session, wheel(MouseEventKind::ScrollDown, x, y)),
+                KeyResult::Continue
+            ));
+            wheeled = drawn_text(&session);
+            if wheeled.contains("later-unique-arg-line") {
+                break;
+            }
+        }
+        assert!(
+            wheeled.contains("later-unique-arg-line"),
+            "wheel on the dock must reveal later arguments: {wheeled}"
+        );
+        assert_eq!(session.lock_shared().scroll_back, back);
+        session.lock_shared().dock_scroll = 0;
+        session.lock_shared().transcript_h = 10;
+        session.lock_shared().scroll_back = 0;
+        assert!(matches!(
+            handle_event(&session, wheel(MouseEventKind::ScrollUp, 0, 0)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 10);
+        assert_eq!(session.lock_shared().dock_scroll, 0);
     }
 
     #[tokio::test]
@@ -2387,6 +3089,40 @@ mod tests {
             }
             other => panic!("expected prompt, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn slash_help_writes_system_block_and_stays_idle() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        assert!(session.slash_catalog().iter().any(|cmd| cmd.name == "help"));
+        type_text(&session, "/help");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().input.is_empty());
+        assert!(!session.lock_shared().busy);
+        assert!(session.overlay_text().is_none());
+        let text = session.transcript_text();
+        assert!(text.contains("Enter"), "{text}");
+        assert!(text.contains("Shift+Enter"), "{text}");
+        assert!(text.contains("Ctrl-C"), "{text}");
+        assert!(text.contains("/compact"), "{text}");
+        assert!(text.contains("/new"), "{text}");
+        assert!(text.contains("/exit"), "{text}");
+        assert!(text.contains("/quit"), "{text}");
+        assert!(
+            session
+                .lock_shared()
+                .transcript
+                .iter()
+                .any(|line| matches!(line, TranscriptLine::System(_))),
+            "{text}"
+        );
     }
 
     #[tokio::test]

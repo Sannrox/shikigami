@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nested `wait=false` children share one runtime instead of one OS thread
+  and runtime each. Fan-out and join/cancel semantics are unchanged.
 - Cargo workspace: `shikigami` remains the embeddable library; `shikigami-cli`
   owns the `shikigami` binary (clap); `shikigami-tui` owns the interactive
   host (ratatui); `shikigami-types` owns identity, digest, and atomic-file
@@ -17,9 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `shikigami-plane-intake` owns `PlaneIntakePort` and the claim values the
   sekai adapter and plane serve loop share. Mapping claimed work onto
   `RunRequest` and `run_plane_serve` stay in the library.
+- `shikigami-engine` owns the turn loop, ports, workspace jail, and
+  in-process adapters. `Harness` composition and the http-callback adapter
+  stay in the library.
+- `shikigami-http` owns the OpenAI-compatible HTTP model adapter.
+  Nested children construct a fresh model through `ModelPort::fresh_for_child`
+  so the engine does not instantiate host adapters.
+- `shikigami-governance-sekai` owns the sekai-chisei governance adapter and
+  its `PlaneIntakePort` implementation. `sekai-client` / tonic sit in that
+  crate.
 
 ### Added
 
+- Coding default includes `handoff`: writes a brief event (`task` required;
+  optional `decisions` / `files` / `ignore`) a host may pass as the first
+  prompt of a fresh session. Does not start a session, child run, or plane
+  session.
 - [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as
   evolving process hosts; session wait (`end_turn`); ask=park; plan
   write-jail.
@@ -32,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and plan in the composer, Ctrl-C cancel, continue-last-in-cwd
   (`session/load`, fail closed → `session/new`). Bare `shikigami` stays
   usage/help. See [docs/tui.md](docs/tui.md).
+- TUI: Ctrl+O expands the last tool's output; a second press collapses.
+- TUI: Enter while a prompt is running queues one follow-up; a second Enter
+  replaces it, Esc or Ctrl-C drops it, and a finished turn sends it.
+- TUI: wheel scroll pages the transcript like PageUp/PageDown. Overflowing
+  ask/plan docks scroll first; at the top or bottom they resume transcript
+  paging. Permission arguments are not truncated.
+- TUI: `/help` writes a short system block of keys and slash names, then
+  returns to the idle composer.
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through

@@ -273,7 +273,7 @@ impl GovernancePort for ScriptedApprovalGovernance {
     ) -> Result<(), GovernanceError> {
         if matches!(
             name,
-            "report" | "escalate" | "todo_write" | "read_file" | "glob" | "grep"
+            "report" | "escalate" | "todo_write" | "handoff" | "read_file" | "glob" | "grep"
         ) {
             return self
                 .inner

@@ -1,0 +1,1846 @@
+//! Versioned harness settings.
+//!
+//! Resolve: defaults → optional file → environment → CLI.
+//! Tenkai is not a runtime setting.
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+mod resolution;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    pub version: u32,
+    #[serde(default)]
+    pub profile: ProfileSettings,
+    #[serde(default)]
+    pub governance: GovernanceSettings,
+    #[serde(default)]
+    pub workspace: WorkspaceSettings,
+    #[serde(default)]
+    pub tools: ToolsSettings,
+    #[serde(default)]
+    pub run: RunSettings,
+    #[serde(default)]
+    pub events: EventsSettings,
+    /// Optional OpenTelemetry span export. Off by default.
+    #[serde(default)]
+    pub tracing: TracingSettings,
+    #[serde(default)]
+    pub model: ModelSettings,
+    #[serde(default)]
+    pub context: ContextSettings,
+    #[serde(default)]
+    pub network: NetworkSettings,
+    /// OS-level limits and isolation for child processes. The default keeps
+    /// the historical no-op; `rlimit` is Unix-only limits, `linux_native` is
+    /// the Linux production tier (Landlock + seccomp).
+    #[serde(default)]
+    pub sandbox: SandboxSettings,
+    /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
+    #[serde(default)]
+    pub hooks: Vec<HookSettings>,
+}
+
+/// One lifecycle hook entry (`command` is operator-trusted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookSettings {
+    /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park`
+    pub event: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_hook_timeout_ms")]
+    pub timeout_ms: u64,
+    /// When true, hook failure/timeout aborts the run or tool.
+    #[serde(default)]
+    pub fail_closed: bool,
+}
+
+fn default_hook_timeout_ms() -> u64 {
+    5_000
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSettings {
+    #[serde(default = "default_profile_name")]
+    pub name: String,
+}
+
+fn default_profile_name() -> String {
+    "local".into()
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            name: default_profile_name(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernanceSettings {
+    #[serde(default = "default_governance_adapter")]
+    pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default = "default_principal")]
+    pub principal: String,
+    #[serde(default)]
+    pub fail_closed: bool,
+    /// Namespace for plane operations (sekai-chisei).
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+    /// Opt-in for plaintext `http://` governance endpoints whose host is not
+    /// loopback. Default false; required for private-network compose names.
+    /// `sekai-client` keeps rejecting remote plaintext until this is true.
+    #[serde(default)]
+    pub allow_insecure_remote: bool,
+    #[serde(default)]
+    pub delayed_evidence: DelayedEvidenceSettings,
+}
+
+/// Bounded delayed-evidence spool. Disabled by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelayedEvidenceSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_delayed_max_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_delayed_retention_ms")]
+    pub retention_ms: u64,
+    #[serde(default)]
+    pub allow_test_signatures: bool,
+}
+
+fn default_delayed_max_entries() -> usize {
+    crate::evidence_queue::DEFAULT_MAX_ENTRIES
+}
+fn default_delayed_retention_ms() -> u64 {
+    u64::try_from(crate::evidence_queue::DEFAULT_RETENTION_MS).unwrap_or(u64::MAX)
+}
+
+impl Default for DelayedEvidenceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_entries: default_delayed_max_entries(),
+            retention_ms: default_delayed_retention_ms(),
+            allow_test_signatures: false,
+        }
+    }
+}
+
+fn default_governance_adapter() -> String {
+    "none".into()
+}
+fn default_principal() -> String {
+    "shikigami".into()
+}
+fn default_namespace() -> String {
+    "default".into()
+}
+
+impl Default for GovernanceSettings {
+    fn default() -> Self {
+        Self {
+            adapter: default_governance_adapter(),
+            endpoint: None,
+            principal: default_principal(),
+            fail_closed: false,
+            namespace: default_namespace(),
+            token_env: None,
+            allow_insecure_remote: false,
+            delayed_evidence: DelayedEvidenceSettings::default(),
+        }
+    }
+}
+
+/// Operator-facing hint when a sekai-chisei endpoint is remote plaintext HTTP
+/// and `governance.allow_insecure_remote` is still false.
+pub const REMOTE_PLAINTEXT_GOVERNANCE_HINT: &str = "governance.endpoint uses plaintext http on a non-loopback host; set governance.allow_insecure_remote=true only for private-network compose, or use https";
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let ip = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    ip.parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
+}
+
+/// True when `endpoint` is `http://` and the host is not loopback.
+/// Matches `sekai-client` URI policy so doctor/connect can fail closed
+/// before the SDK returns an opaque invalid-argument error.
+pub fn is_remote_plaintext_http_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = url::Url::parse(endpoint.trim()) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    !is_loopback_host(url.host_str().unwrap_or_default())
+}
+
+fn parse_env_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSettings {
+    #[serde(default = "default_workspace_adapter")]
+    pub adapter: String,
+    #[serde(default = "default_workspace_root")]
+    pub root: String,
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+    /// Copy workspace to state after materialize for later restore.
+    #[serde(default)]
+    pub snapshot: bool,
+}
+
+fn default_workspace_adapter() -> String {
+    "directory".into()
+}
+fn default_workspace_root() -> String {
+    ".".into()
+}
+fn default_branch_prefix() -> String {
+    "shikigami/".into()
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            adapter: default_workspace_adapter(),
+            root: default_workspace_root(),
+            branch_prefix: default_branch_prefix(),
+            snapshot: false,
+        }
+    }
+}
+
+/// Host tool authority mode (composes with `enabled` allow-list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Use `enabled` if set, otherwise the safe coding default (no bash).
+    #[default]
+    Custom,
+    /// Read/search only (+ `todo_write`, `handoff`, report, escalate).
+    Read,
+    /// Read + write/edit (no bash).
+    Workspace,
+    /// Workspace + bash.
+    WorkspaceExec,
+}
+
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::Read => "read",
+            Self::Workspace => "workspace",
+            Self::WorkspaceExec => "workspace_exec",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAuthoritySummary {
+    pub configured_enabled: Vec<String>,
+    pub preset_enabled: Vec<String>,
+    pub excluded_by_intersection: Vec<String>,
+    pub effective_enabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsSettings {
+    #[serde(default)]
+    pub enabled: Vec<String>,
+    /// Expands to a base tool set; non-empty `enabled` intersects (further restricts).
+    #[serde(default)]
+    pub mode: PermissionMode,
+    #[serde(default = "default_bash_timeout")]
+    pub bash_timeout_secs: u64,
+    /// When true (default), `glob`/`grep` honor built-in defaults plus
+    /// workspace `.gitignore` and `.shikigamiignore`. `read_file` of an
+    /// explicit path is never blocked by ignore rules.
+    #[serde(default = "default_respect_ignore")]
+    pub respect_ignore: bool,
+    /// MCP servers whose tools are registered as `mcp.<name>.<tool>`.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerSettings>,
+}
+
+/// MCP server configuration (stdio command or HTTP URL).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerSettings {
+    pub name: String,
+    /// Executable for stdio transport. Special value `mock` registers an offline echo tool.
+    /// Empty when using `url` / HTTP transport.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// `stdio` (default) or `http` (JSON-RPC POST; SSE stream not required for v1).
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    /// Base URL for HTTP transport (e.g. `http://127.0.0.1:8080/mcp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Optional env var holding a Bearer token for HTTP MCP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+    /// Stdio request framing written to the server: `content-length`
+    /// (default, LSP-style headers) or `newline` (MCP stdio specification,
+    /// one JSON-RPC message per line; used by `sekai-mcp` and the reference
+    /// servers). Responses are accepted in either framing.
+    #[serde(default = "default_mcp_framing")]
+    pub framing: McpFraming,
+    /// Per-request deadline for `tools/list` and `tools/call`. A call that
+    /// exceeds it fails closed with a `deadline_exceeded` tool error; the
+    /// remote effect may still have happened and must be reconciled through
+    /// the server's receipt surface.
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+/// Stdio framing an MCP client writes to a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpFraming {
+    /// `Content-Length` headers followed by the JSON body (LSP style).
+    #[default]
+    ContentLength,
+    /// One JSON-RPC message per line (MCP stdio transport).
+    Newline,
+}
+
+impl McpServerSettings {
+    /// Stdio server with newline framing and the default deadline.
+    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: command.into(),
+            args,
+            transport: default_mcp_transport(),
+            url: None,
+            token_env: None,
+            framing: McpFraming::Newline,
+            timeout_secs: default_mcp_timeout_secs(),
+        }
+    }
+
+    /// Per-request deadline as a [`Duration`].
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs.max(1))
+    }
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".into()
+}
+
+fn default_mcp_framing() -> McpFraming {
+    McpFraming::ContentLength
+}
+
+fn default_mcp_timeout_secs() -> u64 {
+    30
+}
+
+fn default_bash_timeout() -> u64 {
+    60
+}
+
+fn default_respect_ignore() -> bool {
+    true
+}
+
+impl Default for ToolsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: Vec::new(),
+            mode: PermissionMode::Custom,
+            bash_timeout_secs: default_bash_timeout(),
+            respect_ignore: default_respect_ignore(),
+            mcp_servers: Vec::new(),
+        }
+    }
+}
+
+impl ToolsSettings {
+    /// Safe coding default without bash (also used by `custom` when enabled is empty).
+    pub fn default_coding_tools() -> Vec<String> {
+        vec![
+            "read_file".into(),
+            "write_file".into(),
+            "edit".into(),
+            "multi_edit".into(),
+            "apply_patch".into(),
+            "glob".into(),
+            "grep".into(),
+            "todo_write".into(),
+            "handoff".into(),
+            "report".into(),
+            "escalate".into(),
+        ]
+    }
+
+    pub fn tools_for_mode(mode: PermissionMode) -> Vec<String> {
+        match mode {
+            PermissionMode::Custom => Self::default_coding_tools(),
+            PermissionMode::Read => vec![
+                "read_file".into(),
+                "glob".into(),
+                "grep".into(),
+                "todo_write".into(),
+                "handoff".into(),
+                "report".into(),
+                "escalate".into(),
+            ],
+            PermissionMode::Workspace => Self::default_coding_tools(),
+            PermissionMode::WorkspaceExec => {
+                let mut t = Self::default_coding_tools();
+                t.push("bash".into());
+                // bg job tools are auto-exposed when bash is enabled (definitions())
+                t
+            }
+        }
+    }
+
+    pub fn effective_enabled(&self) -> Vec<String> {
+        let base = match self.mode {
+            PermissionMode::Custom if self.enabled.is_empty() => Self::default_coding_tools(),
+            PermissionMode::Custom => self.enabled.clone(),
+            other => Self::tools_for_mode(other),
+        };
+        if matches!(self.mode, PermissionMode::Custom) || self.enabled.is_empty() {
+            return base;
+        }
+        // Non-custom mode + explicit enabled → intersect (operator can only remove tools).
+        base.into_iter()
+            .filter(|t| self.enabled.iter().any(|e| e == t))
+            .collect()
+    }
+
+    pub fn authority_summary(&self) -> ToolAuthoritySummary {
+        let preset_enabled = Self::tools_for_mode(self.mode);
+        let effective_enabled = self.effective_enabled();
+        let excluded_by_intersection =
+            if matches!(self.mode, PermissionMode::Custom) || self.enabled.is_empty() {
+                Vec::new()
+            } else {
+                preset_enabled
+                    .iter()
+                    .filter(|tool| !effective_enabled.contains(tool))
+                    .cloned()
+                    .collect()
+            };
+        ToolAuthoritySummary {
+            configured_enabled: self.enabled.clone(),
+            preset_enabled,
+            excluded_by_intersection,
+            effective_enabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunSettings {
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
+    /// Max concurrent tool executions for a batch of parallel-safe tools only.
+    /// `1` forces sequential execution. Writes always force a serial batch.
+    #[serde(default = "default_tool_concurrency")]
+    pub tool_concurrency: u32,
+    /// Optional overall wall-clock limit in seconds (checked at turn boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// When message count exceeds this, compact middle history (None = disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_after_messages: Option<u32>,
+    /// Messages to retain after the initial user task when compacting (default 8).
+    #[serde(default = "default_compact_keep_tail")]
+    pub compact_keep_tail: u32,
+    /// Restrict mutating tools to `.shikigami/plan.md` until the parked plan
+    /// is accepted. Additive; default off.
+    #[serde(default)]
+    pub plan_jail: bool,
+    /// Enable nested child-run tools (`child_run` / `child_status`). Default off.
+    #[serde(default)]
+    pub nested: bool,
+    /// Maximum nested depth (root is 0). Default 1: the root may spawn children.
+    #[serde(default = "default_nested_max_depth")]
+    pub nested_max_depth: u32,
+    /// Maximum children a single parent may start. Default 4.
+    #[serde(default = "default_nested_max_children")]
+    pub nested_max_children: u32,
+}
+
+/// Child-process resource and isolation policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxSettings {
+    #[serde(default)]
+    pub backend: SandboxBackend,
+    /// CPU seconds for each child process (RLIMIT_CPU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_secs: Option<u64>,
+    /// Address-space limit in MiB (RLIMIT_AS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    /// Per-real-user process ceiling (RLIMIT_NPROC); not an isolated per-run limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_processes: Option<u64>,
+    /// Maximum file size in MiB (RLIMIT_FSIZE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size_mb: Option<u64>,
+    /// Maximum number of open file descriptors (RLIMIT_NOFILE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<u64>,
+    /// Extra absolute paths granted read and execute under `linux_native`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_paths: Vec<String>,
+}
+
+/// Supported local child-process limit and isolation backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackend {
+    #[default]
+    None,
+    Rlimit,
+    LinuxNative,
+}
+
+impl Default for SandboxSettings {
+    fn default() -> Self {
+        Self {
+            backend: SandboxBackend::None,
+            cpu_time_secs: None,
+            memory_mb: None,
+            user_processes: None,
+            file_size_mb: None,
+            open_files: None,
+            read_only_paths: Vec::new(),
+        }
+    }
+}
+
+fn default_max_turns() -> u32 {
+    50
+}
+
+fn default_tool_concurrency() -> u32 {
+    4
+}
+
+fn default_compact_keep_tail() -> u32 {
+    8
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            max_turns: default_max_turns(),
+            tool_concurrency: default_tool_concurrency(),
+            timeout_secs: None,
+            compact_after_messages: None,
+            compact_keep_tail: default_compact_keep_tail(),
+            plan_jail: false,
+            nested: false,
+            nested_max_depth: default_nested_max_depth(),
+            nested_max_children: default_nested_max_children(),
+        }
+    }
+}
+
+fn default_nested_max_depth() -> u32 {
+    1
+}
+
+fn default_nested_max_children() -> u32 {
+    4
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsSettings {
+    #[serde(default = "default_events_adapter")]
+    pub adapter: String,
+}
+
+fn default_events_adapter() -> String {
+    "stderr".into()
+}
+
+impl Default for EventsSettings {
+    fn default() -> Self {
+        Self {
+            adapter: default_events_adapter(),
+        }
+    }
+}
+
+/// Optional identity-only span export (`docs/tracing.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracingSettings {
+    /// When false (default), no spans are created or exported.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `none` (default) or `otlp`.
+    #[serde(default = "default_tracing_exporter")]
+    pub exporter: String,
+    /// File path, `file://` path, or OTLP/HTTP collector URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+fn default_tracing_exporter() -> String {
+    "none".into()
+}
+
+impl Default for TracingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            exporter: default_tracing_exporter(),
+            endpoint: None,
+        }
+    }
+}
+
+impl TracingSettings {
+    pub fn doctor_line(&self) -> String {
+        if !self.enabled {
+            return "tracing:    disabled".into();
+        }
+        format!(
+            "tracing:    {} {}",
+            self.exporter,
+            self.endpoint.as_deref().unwrap_or("(missing endpoint)")
+        )
+    }
+}
+
+/// Model source for turns when governance does not own planning (none/local).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettings {
+    /// `scripted` | `http` | `plane`. Plane planning is used when governance
+    /// is `sekai-chisei` or this adapter is `plane`; it does not rewrite the
+    /// governance adapter.
+    #[serde(default = "default_model_adapter")]
+    pub adapter: String,
+    /// OpenAI-compatible base URL (http adapter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default = "default_model_name")]
+    pub model: String,
+    /// Env var holding API key for http adapter.
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+    /// Inline JSON array of scripted turns for tests/demos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_json: Option<String>,
+    /// Optional cost rate: USD **microdollars** per million input tokens
+    /// (1_000_000 = $1.00 / MTok). When unset with output rate, no cost estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_usd_micros_per_mtok: Option<u64>,
+    /// Optional cost rate: USD microdollars per million output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_usd_micros_per_mtok: Option<u64>,
+    /// Opt-in governed local-model fallback. Denied by default.
+    #[serde(default)]
+    pub fallback: ModelFallbackSettings,
+}
+
+/// Additive local-model fallback settings. Delivery systems are not a key here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFallbackSettings {
+    /// Permit attempting fallback when a current signed grant exists.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Local adapter used only after fail-closed admission (`scripted` | `http`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// When set, the local digest is SHA-256 of these bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    /// Optional scripted turns for the fallback adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_json: Option<String>,
+    /// Accept fixture `test-hmac-sha256` envelopes. Default false; production
+    /// unknown algorithms remain unverifiable.
+    #[serde(default)]
+    pub allow_test_signatures: bool,
+}
+
+fn default_model_adapter() -> String {
+    "scripted".into()
+}
+fn default_model_name() -> String {
+    "auto".into()
+}
+fn default_api_key_env() -> String {
+    "OPENAI_API_KEY".into()
+}
+
+impl Default for ModelSettings {
+    fn default() -> Self {
+        Self {
+            adapter: default_model_adapter(),
+            base_url: None,
+            model: default_model_name(),
+            api_key_env: default_api_key_env(),
+            script_json: None,
+            input_usd_micros_per_mtok: None,
+            output_usd_micros_per_mtok: None,
+            fallback: ModelFallbackSettings::default(),
+        }
+    }
+}
+
+/// Project rules / extra context attached to runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSettings {
+    /// Discover and load the first matching project rules file from the workspace.
+    #[serde(default = "default_true")]
+    pub load_project_rules: bool,
+    /// Filenames tried in order under the workspace root.
+    #[serde(default = "default_rules_filenames")]
+    pub rules_filenames: Vec<String>,
+    /// Max bytes of rules text injected into the system prompt.
+    #[serde(default = "default_max_rules_bytes")]
+    pub max_rules_bytes: usize,
+    /// Root directory for skill packs (relative to workspace, or absolute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_root: Option<String>,
+    /// Skill directory names under `skills_root` (each contains `SKILL.md`).
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Max bytes per skill body.
+    #[serde(default = "default_max_rules_bytes")]
+    pub max_skill_bytes: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_rules_filenames() -> Vec<String> {
+    vec!["AGENTS.md".into(), "shikigami.rules.md".into()]
+}
+
+fn default_max_rules_bytes() -> usize {
+    32 * 1024
+}
+
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self {
+            load_project_rules: default_true(),
+            rules_filenames: default_rules_filenames(),
+            max_rules_bytes: default_max_rules_bytes(),
+            skills_root: None,
+            skills: Vec::new(),
+            max_skill_bytes: default_max_rules_bytes(),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            profile: ProfileSettings::default(),
+            governance: GovernanceSettings::default(),
+            workspace: WorkspaceSettings::default(),
+            tools: ToolsSettings::default(),
+            run: RunSettings::default(),
+            events: EventsSettings::default(),
+            tracing: TracingSettings::default(),
+            model: ModelSettings::default(),
+            context: ContextSettings::default(),
+            network: NetworkSettings::default(),
+            sandbox: SandboxSettings::default(),
+            hooks: Vec::new(),
+        }
+    }
+}
+
+/// Network egress policy (honest residual risk for unrestricted bash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressMode {
+    /// No harness-level network restriction (default OSS behavior).
+    #[default]
+    Unrestricted,
+    /// Block harness HTTP client calls (model `http` adapter, MCP HTTP, and
+    /// `web_fetch`). Bash sockets are still unrestricted.
+    Deny,
+    /// Only listed hosts for harness HTTP client.
+    Allowlist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSettings {
+    #[serde(default)]
+    pub egress: EgressMode,
+    /// Hostnames allowed when `egress = allowlist` (exact match, case-insensitive).
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            egress: EgressMode::Unrestricted,
+            allow_hosts: Vec::new(),
+        }
+    }
+}
+
+impl NetworkSettings {
+    /// Validate an HTTP(S) URL against egress policy.
+    pub fn check_http_url(&self, url: &str) -> Result<(), String> {
+        match self.egress {
+            EgressMode::Unrestricted => Ok(()),
+            EgressMode::Deny => Err("network egress denied by settings (egress=deny)".into()),
+            EgressMode::Allowlist => {
+                let host = url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+                    .ok_or_else(|| format!("cannot parse host from URL for egress check: {url}"))?;
+                let ok = self
+                    .allow_hosts
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&host));
+                if ok {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "host `{host}` not in network.allow_hosts (egress=allowlist)"
+                    ))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("failed to read config at {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write config at {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse config at {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to serialize config: {0}")]
+    Serialize(#[from] toml::ser::Error),
+    #[error("unsupported config version {found}; expected {expected}")]
+    UnsupportedVersion { found: u32, expected: u32 },
+    #[error("unknown governance adapter `{0}`")]
+    UnknownGovernanceAdapter(String),
+    #[error("unknown workspace adapter `{0}`")]
+    UnknownWorkspaceAdapter(String),
+    #[error("unknown events adapter `{0}`")]
+    UnknownEventsAdapter(String),
+    #[error("unknown model adapter `{0}`")]
+    UnknownModelAdapter(String),
+    #[error("governance adapter `sekai-chisei` requires an endpoint")]
+    MissingGovernanceEndpoint,
+    #[error("{0}")]
+    Invalid(String),
+}
+
+pub enum ConfigResolutionError {
+    Search(ConfigError),
+    Override(ConfigError),
+}
+
+impl Config {
+    pub const FILENAME: &'static str = "shikigami.toml";
+    pub const CURRENT_VERSION: u32 = 1;
+    pub const CONFIG_PATH_ENV: &'static str = "SHIKIGAMI_CONFIG";
+    pub const CONTROL_PLANE_ENV: &'static str = "SHIKIGAMI_CONTROL_PLANE";
+    pub const GOVERNANCE_ADAPTER_ENV: &'static str = "SHIKIGAMI_GOVERNANCE_ADAPTER";
+    pub const GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV: &'static str =
+        "SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE";
+    pub const PROFILE_ENV: &'static str = "SHIKIGAMI_PROFILE";
+    pub const MODEL_ADAPTER_ENV: &'static str = "SHIKIGAMI_MODEL_ADAPTER";
+    pub const MODEL_SCRIPT_ENV: &'static str = "SHIKIGAMI_MODEL_SCRIPT";
+    pub const RUN_PLAN_JAIL_ENV: &'static str = "SHIKIGAMI_RUN_PLAN_JAIL";
+    pub const RUN_NESTED_ENV: &'static str = "SHIKIGAMI_RUN_NESTED";
+
+    pub fn path_in(root: impl AsRef<Path>) -> PathBuf {
+        root.as_ref().join(Self::FILENAME)
+    }
+
+    pub fn resolve(path: impl AsRef<Path>) -> Result<(Self, ConfigSource), ConfigError> {
+        resolution::resolve(path.as_ref(), None)
+    }
+
+    pub fn resolve_search(
+        explicit: Option<&Path>,
+        state_root: &Path,
+        cwd: &Path,
+    ) -> Result<(Self, ConfigSource), ConfigError> {
+        resolution::resolve_search(explicit, state_root, cwd)
+    }
+
+    pub fn resolve_search_with_model(
+        explicit: Option<&Path>,
+        state_root: &Path,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<(Self, ConfigSource), ConfigResolutionError> {
+        resolution::resolve_search_with_model(explicit, state_root, cwd, model)
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        resolution::load(path.as_ref())
+    }
+
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        let raw = toml::to_string_pretty(self)?;
+        fs::write(path, raw).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn apply_profile_presets(&mut self) {
+        if self.profile.name == "governed" {
+            if self.governance.adapter == "none" {
+                self.governance.adapter = "sekai-chisei".into();
+            }
+            self.governance.fail_closed = true;
+            if self.model.adapter == "scripted" {
+                self.model.adapter = "plane".into();
+            }
+        }
+    }
+
+    fn apply_env(&mut self) {
+        if let Ok(value) = env::var(Self::PROFILE_ENV)
+            && !value.is_empty()
+        {
+            self.profile.name = value;
+            self.apply_profile_presets();
+        }
+        if let Ok(value) = env::var(Self::GOVERNANCE_ADAPTER_ENV)
+            && !value.is_empty()
+        {
+            self.governance.adapter = value;
+        }
+        if let Ok(value) = env::var(Self::CONTROL_PLANE_ENV)
+            && !value.is_empty()
+        {
+            self.governance.endpoint = Some(value);
+        }
+        if let Ok(value) = env::var(Self::GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV)
+            && let Some(flag) = parse_env_flag(&value)
+        {
+            self.governance.allow_insecure_remote = flag;
+        }
+        if let Ok(value) = env::var(Self::MODEL_ADAPTER_ENV)
+            && !value.is_empty()
+        {
+            self.model.adapter = value;
+        }
+        if let Ok(value) = env::var(Self::MODEL_SCRIPT_ENV)
+            && !value.is_empty()
+        {
+            self.model.script_json = Some(value);
+        }
+        if let Ok(value) = env::var(Self::RUN_PLAN_JAIL_ENV)
+            && let Some(flag) = parse_env_flag(&value)
+        {
+            self.run.plan_jail = flag;
+        }
+        if let Ok(value) = env::var(Self::RUN_NESTED_ENV)
+            && let Some(flag) = parse_env_flag(&value)
+        {
+            self.run.nested = flag;
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.governance.adapter.as_str() {
+            "none" | "local" | "sekai-chisei" | "http-callback" | "host-authz" => {}
+            other => return Err(ConfigError::UnknownGovernanceAdapter(other.into())),
+        }
+        if matches!(
+            self.governance.adapter.as_str(),
+            "http-callback" | "host-authz"
+        ) && self
+            .governance
+            .endpoint
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(ConfigError::Invalid(
+                "governance adapter `http-callback` requires governance.endpoint".into(),
+            ));
+        }
+        match self.workspace.adapter.as_str() {
+            "directory" | "inplace" | "directory-inplace" | "git-worktree" => {}
+            other => return Err(ConfigError::UnknownWorkspaceAdapter(other.into())),
+        }
+        if self.workspace.snapshot
+            && matches!(
+                self.workspace.adapter.as_str(),
+                "inplace" | "directory-inplace"
+            )
+        {
+            return Err(ConfigError::Invalid(
+                "workspace.snapshot cannot be used with adapter `inplace`".into(),
+            ));
+        }
+        match self.events.adapter.as_str() {
+            "stderr" | "jsonl" | "none" => {}
+            other => return Err(ConfigError::UnknownEventsAdapter(other.into())),
+        }
+        self.validate_tracing()?;
+        if self.run.nested_max_depth == 0 {
+            return Err(ConfigError::Invalid(
+                "run.nested_max_depth must be greater than zero".into(),
+            ));
+        }
+        if self.run.nested_max_children == 0 {
+            return Err(ConfigError::Invalid(
+                "run.nested_max_children must be greater than zero".into(),
+            ));
+        }
+        match self.model.adapter.as_str() {
+            "scripted" | "http" | "plane" => {}
+            other => return Err(ConfigError::UnknownModelAdapter(other.into())),
+        }
+        if let Some(adapter) = self.model.fallback.adapter.as_deref() {
+            match adapter {
+                "scripted" | "http" => {}
+                other => {
+                    return Err(ConfigError::Invalid(format!(
+                        "unknown model.fallback.adapter `{other}`"
+                    )));
+                }
+            }
+            if adapter == "http"
+                && self
+                    .model
+                    .fallback
+                    .artifact_path
+                    .as_ref()
+                    .map(|path| path.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                return Err(ConfigError::Invalid(
+                    "model.fallback.adapter `http` requires model.fallback.artifact_path so the local digest binds immutable bytes".into(),
+                ));
+            }
+        }
+        for (name, value) in [
+            ("sandbox.cpu_time_secs", self.sandbox.cpu_time_secs),
+            ("sandbox.memory_mb", self.sandbox.memory_mb),
+            ("sandbox.user_processes", self.sandbox.user_processes),
+            ("sandbox.file_size_mb", self.sandbox.file_size_mb),
+            ("sandbox.open_files", self.sandbox.open_files),
+        ] {
+            if value == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} must be greater than zero"
+                )));
+            }
+        }
+        if matches!(self.sandbox.backend, SandboxBackend::Rlimit) && !cfg!(unix) {
+            return Err(ConfigError::Invalid(
+                "sandbox.backend=rlimit is supported only on Unix".into(),
+            ));
+        }
+        if matches!(self.sandbox.backend, SandboxBackend::LinuxNative) && !cfg!(target_os = "linux")
+        {
+            return Err(ConfigError::Invalid(
+                "sandbox.backend=linux_native is supported only on Linux".into(),
+            ));
+        }
+        for path in &self.sandbox.read_only_paths {
+            if !Path::new(path).is_absolute() {
+                return Err(ConfigError::Invalid(format!(
+                    "sandbox.read_only_paths entry `{path}` must be an absolute path"
+                )));
+            }
+        }
+        if !self.sandbox.read_only_paths.is_empty()
+            && !matches!(self.sandbox.backend, SandboxBackend::LinuxNative)
+        {
+            return Err(ConfigError::Invalid(
+                "sandbox.read_only_paths is only applied by sandbox.backend=linux_native".into(),
+            ));
+        }
+        self.validate_governed_bash_controls()?;
+        for server in &self.tools.mcp_servers {
+            if server.timeout_secs == 0 {
+                return Err(ConfigError::Invalid(format!(
+                    "tools.mcp_servers `{}`: timeout_secs must be greater than zero",
+                    server.name
+                )));
+            }
+        }
+        if self.governance.delayed_evidence.max_entries == 0 {
+            return Err(ConfigError::Invalid(
+                "governance.delayed_evidence.max_entries must be greater than zero".into(),
+            ));
+        }
+        if self.governance.delayed_evidence.retention_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "governance.delayed_evidence.retention_ms must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_tracing(&self) -> Result<(), ConfigError> {
+        match self.tracing.exporter.as_str() {
+            "none" | "otlp" => {}
+            other => {
+                return Err(ConfigError::Invalid(format!(
+                    "unknown tracing.exporter `{other}`"
+                )));
+            }
+        }
+        if !self.tracing.enabled {
+            return Ok(());
+        }
+        if self.tracing.exporter != "otlp" {
+            return Err(ConfigError::Invalid(
+                "tracing.enabled requires tracing.exporter = \"otlp\"".into(),
+            ));
+        }
+        let endpoint = self
+            .tracing
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ConfigError::Invalid("tracing.enabled requires tracing.endpoint".into())
+            })?;
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            #[cfg(not(feature = "model-http"))]
+            {
+                return Err(ConfigError::Invalid(
+                    "otlp HTTP export requires the model-http feature".into(),
+                ));
+            }
+            self.network
+                .check_http_url(endpoint)
+                .map_err(ConfigError::Invalid)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the effective tool allow-list includes Bash (and thus
+    /// background Bash job tools).
+    pub fn bash_enabled(&self) -> bool {
+        self.tools
+            .effective_enabled()
+            .iter()
+            .any(|tool| tool == "bash")
+    }
+
+    /// Governed / fail-closed profiles that enable Bash must not run with the
+    /// historical no-op sandbox or unrestricted harness egress. Bash is only
+    /// cwd-jailed; without rlimit or linux_native plus egress policy the host
+    /// blast radius is unbounded relative to the FS tool jail.
+    fn validate_governed_bash_controls(&self) -> Result<(), ConfigError> {
+        if !self.requires_governance() || !self.bash_enabled() {
+            return Ok(());
+        }
+        if matches!(self.sandbox.backend, SandboxBackend::None) {
+            return Err(ConfigError::Invalid(
+                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires sandbox.backend=rlimit or linux_native; sandbox.backend=none refuses bash".into(),
+            ));
+        }
+        if matches!(self.network.egress, EgressMode::Unrestricted) {
+            return Err(ConfigError::Invalid(
+                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires network.egress=deny or allowlist; unrestricted refuses bash".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn requires_governance(&self) -> bool {
+        self.governance.fail_closed || self.profile.name == "governed"
+    }
+
+    pub fn uses_plane_model(&self) -> bool {
+        self.governance.adapter == "sekai-chisei" || self.model.adapter == "plane"
+    }
+
+    pub fn governance_endpoint_required(&self) -> Result<(), ConfigError> {
+        if self.governance.adapter == "sekai-chisei"
+            && self
+                .governance
+                .endpoint
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Err(ConfigError::MissingGovernanceEndpoint);
+        }
+        Ok(())
+    }
+
+    /// Remote plaintext `http://` on `sekai-chisei` is unusable unless the
+    /// operator opt-in is set. Doctor and connect use this instead of the
+    /// SDK's opaque invalid-argument error.
+    pub fn governance_blocks_remote_plaintext(&self) -> bool {
+        self.governance.adapter == "sekai-chisei"
+            && !self.governance.allow_insecure_remote
+            && self
+                .governance
+                .endpoint
+                .as_deref()
+                .is_some_and(is_remote_plaintext_http_endpoint)
+    }
+
+    /// Credential environment names consumed by the harness and never exposed
+    /// to agent-controlled tool or MCP stdio subprocesses.
+    pub fn protected_tool_environment_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(name) = &self.governance.token_env {
+            names.push(name.clone());
+        }
+        if self.model.adapter == "http" {
+            names.push(self.model.api_key_env.clone());
+        }
+        names.extend(
+            self.tools
+                .mcp_servers
+                .iter()
+                .filter_map(|server| server.token_env.clone()),
+        );
+        names.sort_by_key(|name| name.to_ascii_uppercase());
+        names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        names
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    Defaults,
+    File(PathBuf),
+}
+
+impl ConfigSource {
+    pub fn description(&self) -> String {
+        match self {
+            Self::Defaults => "defaults (optional file and env may override)".into(),
+            Self::File(path) => format!("file {}", path.display()),
+        }
+    }
+}
+
+/// Replace known secret values (from env) with `[REDACTED]` in a text line.
+pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
+    let mut out = line.to_string();
+    let mut secrets = Vec::new();
+    if let Some(name) = &config.governance.token_env
+        && let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+    {
+        if let Some(stripped) = v.strip_prefix("Bearer ") {
+            secrets.push(stripped.to_string());
+        }
+        secrets.push(v);
+    }
+    if let Ok(v) = std::env::var(&config.model.api_key_env)
+        && !v.is_empty()
+    {
+        secrets.push(v);
+    }
+    // Longest first so partial overlaps redact fully.
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for s in secrets {
+        if s.len() >= 8 {
+            out = out.replace(&s, "[REDACTED]");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn governed_profile_selects_sekai_and_plane_model() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[profile]
+name = "governed"
+"#,
+        )
+        .unwrap();
+        let (c, _) = Config::resolve(&path).unwrap();
+        assert_eq!(c.governance.adapter, "sekai-chisei");
+        assert!(c.governance.fail_closed);
+        assert_eq!(c.model.adapter, "plane");
+        assert_eq!(c.model.model, "auto");
+    }
+
+    #[test]
+    fn cliproxy_http_example_selects_loopback_http_model() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cliproxy-http.toml");
+        fs::write(&path, include_str!("../../../examples/cliproxy-http.toml")).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.model.adapter, "http");
+        assert_eq!(
+            config.model.base_url.as_deref(),
+            Some("http://127.0.0.1:8317/v1")
+        );
+        assert_eq!(config.model.model, "grok-4.6");
+        assert_eq!(config.model.api_key_env, "CLIPROXY_API_KEY");
+        assert_eq!(config.tools.mode, PermissionMode::Workspace);
+        assert_eq!(config.network.egress, EgressMode::Allowlist);
+        assert_eq!(config.network.allow_hosts, vec!["127.0.0.1".to_string()]);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn loads_nested_settings() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[governance]
+adapter = "local"
+[model]
+adapter = "scripted"
+script_json = "[]"
+"#,
+        )
+        .unwrap();
+        let (c, _) = Config::resolve(&path).unwrap();
+        assert_eq!(c.governance.adapter, "local");
+        assert_eq!(c.model.adapter, "scripted");
+        assert!(!c.governance.allow_insecure_remote);
+    }
+
+    #[test]
+    fn allow_insecure_remote_defaults_false_and_parses_true() {
+        assert!(!Config::default().governance.allow_insecure_remote);
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[governance]
+adapter = "sekai-chisei"
+endpoint = "http://chisei:50051"
+allow_insecure_remote = true
+"#,
+        )
+        .unwrap();
+        let (c, _) = Config::resolve(&path).unwrap();
+        assert!(c.governance.allow_insecure_remote);
+        assert!(!c.governance_blocks_remote_plaintext());
+        let mut blocked = c;
+        blocked.governance.allow_insecure_remote = false;
+        assert!(blocked.governance_blocks_remote_plaintext());
+    }
+
+    #[test]
+    fn remote_plaintext_http_matches_sdk_loopback_policy() {
+        assert!(!is_remote_plaintext_http_endpoint("http://127.0.0.1:50051"));
+        assert!(!is_remote_plaintext_http_endpoint("http://localhost:50051"));
+        assert!(!is_remote_plaintext_http_endpoint("http://[::1]:50051"));
+        assert!(!is_remote_plaintext_http_endpoint(
+            "https://plane.example:443"
+        ));
+        assert!(is_remote_plaintext_http_endpoint("http://chisei:50051"));
+        assert!(is_remote_plaintext_http_endpoint("http://192.0.2.1:50051"));
+    }
+
+    #[test]
+    fn parse_env_flag_accepts_common_truthy_and_falsey() {
+        assert_eq!(parse_env_flag("true"), Some(true));
+        assert_eq!(parse_env_flag("1"), Some(true));
+        assert_eq!(parse_env_flag("YES"), Some(true));
+        assert_eq!(parse_env_flag("off"), Some(false));
+        assert_eq!(parse_env_flag("false"), Some(false));
+        assert_eq!(parse_env_flag("maybe"), None);
+    }
+
+    #[test]
+    fn configured_harness_credentials_are_protected_from_tools() {
+        let mut config = Config::default();
+        config.governance.token_env = Some("PLANE_TOKEN".into());
+        config.model.adapter = "http".into();
+        config.model.api_key_env = "MODEL_KEY".into();
+        config.tools.mcp_servers.push(McpServerSettings {
+            name: "remote".into(),
+            command: String::new(),
+            args: Vec::new(),
+            transport: "http".into(),
+            url: Some("https://mcp.example".into()),
+            token_env: Some("MCP_TOKEN".into()),
+            framing: McpFraming::ContentLength,
+            timeout_secs: 30,
+        });
+
+        assert_eq!(
+            config.protected_tool_environment_names(),
+            vec!["MCP_TOKEN", "MODEL_KEY", "PLANE_TOKEN"]
+        );
+
+        config.model.adapter = "scripted".into();
+        assert!(
+            !config
+                .protected_tool_environment_names()
+                .contains(&"MODEL_KEY".into())
+        );
+    }
+
+    #[test]
+    fn mcp_server_framing_and_deadline_parse_with_compatible_defaults() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+
+[[tools.mcp_servers]]
+name = "legacy"
+command = "legacy-mcp"
+
+[[tools.mcp_servers]]
+name = "sekai"
+command = "sekai-mcp"
+framing = "newline"
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let legacy = &config.tools.mcp_servers[0];
+        assert_eq!(legacy.framing, McpFraming::ContentLength);
+        assert_eq!(legacy.timeout_secs, 30);
+        let sekai = &config.tools.mcp_servers[1];
+        assert_eq!(sekai.framing, McpFraming::Newline);
+        assert_eq!(sekai.timeout(), Duration::from_secs(5));
+        assert!(config.validate().is_ok());
+
+        let mut zero = config.clone();
+        zero.tools.mcp_servers[1].timeout_secs = 0;
+        let err = zero.validate().unwrap_err().to_string();
+        assert!(err.contains("timeout_secs"), "{err}");
+
+        fs::write(
+            &path,
+            r#"
+version = 1
+
+[[tools.mcp_servers]]
+name = "bad"
+command = "x"
+framing = "sse"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(&path).unwrap_err(),
+            ConfigError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_key() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+unknown_thing = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn property_unknown_adapters_fail_validate() {
+        use proptest::prelude::*;
+        proptest!(|(name in "[a-z]{3,12}")| {
+            let known = matches!(
+                name.as_str(),
+                "none" | "local" | "sekai-chisei"
+            );
+            let mut c = Config::default();
+            c.governance.adapter = name.clone();
+            let result = c.validate();
+            if known {
+                prop_assert!(result.is_ok());
+            } else {
+                let bad = matches!(result, Err(ConfigError::UnknownGovernanceAdapter(_)));
+                prop_assert!(bad, "expected unknown adapter error for {}", name);
+            }
+        });
+    }
+
+    #[test]
+    fn property_unknown_toml_keys_rejected() {
+        use proptest::prelude::*;
+        proptest!(|(key in "[a-z]{4,16}")| {
+            prop_assume!(key != "version");
+            let dir = tempdir().unwrap();
+            let path = Config::path_in(dir.path());
+            let body = format!("version = 1\n{key} = true\n");
+            fs::write(&path, body).unwrap();
+            let err = Config::load(&path).unwrap_err();
+            let is_parse = matches!(err, ConfigError::Parse { .. });
+            prop_assert!(is_parse, "expected Parse for key {}, got {}", key, err);
+        });
+    }
+
+    #[test]
+    fn egress_allowlist_and_deny() {
+        let deny = NetworkSettings {
+            egress: EgressMode::Deny,
+            ..Default::default()
+        };
+        assert!(deny.check_http_url("https://api.openai.com/v1").is_err());
+        let allow = NetworkSettings {
+            egress: EgressMode::Allowlist,
+            allow_hosts: vec!["api.openai.com".into()],
+        };
+        assert!(
+            allow
+                .check_http_url("https://api.openai.com/v1/chat")
+                .is_ok()
+        );
+        assert!(allow.check_http_url("https://evil.example/v1").is_err());
+        let open = NetworkSettings::default();
+        assert!(open.check_http_url("https://evil.example/v1").is_ok());
+    }
+
+    #[test]
+    fn nested_defaults_off_with_positive_caps() {
+        let config = Config::default();
+        assert!(!config.run.nested);
+        assert_eq!(config.run.nested_max_depth, 1);
+        assert_eq!(config.run.nested_max_children, 4);
+        assert!(!ToolsSettings::default_coding_tools().contains(&"child_run".into()));
+    }
+
+    #[test]
+    fn coding_default_and_read_mode_include_handoff() {
+        assert!(ToolsSettings::default_coding_tools().contains(&"handoff".into()));
+        assert!(ToolsSettings::tools_for_mode(PermissionMode::Read).contains(&"handoff".into()));
+    }
+
+    #[test]
+    fn nested_zero_caps_fail_validate() {
+        let mut config = Config::default();
+        config.run.nested_max_depth = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("nested_max_depth"), "{err}");
+        config.run.nested_max_depth = 1;
+        config.run.nested_max_children = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("nested_max_children"), "{err}");
+    }
+
+    #[test]
+    fn permission_mode_read_excludes_write_and_bash() {
+        let mut c = Config::default();
+        c.tools.mode = PermissionMode::Read;
+        let e = c.tools.effective_enabled();
+        assert!(e.contains(&"read_file".into()));
+        assert!(e.contains(&"grep".into()));
+        assert!(!e.contains(&"write_file".into()));
+        assert!(!e.contains(&"bash".into()));
+    }
+
+    #[test]
+    fn permission_mode_workspace_exec_includes_bash() {
+        let mut c = Config::default();
+        c.tools.mode = PermissionMode::WorkspaceExec;
+        assert!(c.tools.effective_enabled().contains(&"bash".into()));
+    }
+
+    #[test]
+    fn governed_bash_refuses_sandbox_none_and_unrestricted_egress() {
+        let mut c = Config::default();
+        c.profile.name = "governed".into();
+        c.apply_profile_presets();
+        c.tools.enabled = vec!["bash".into(), "report".into()];
+        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+
+        let err = c.validate().unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid(message) if message.contains("sandbox.backend=rlimit or linux_native")),
+            "{err}"
+        );
+
+        c.sandbox.backend = SandboxBackend::Rlimit;
+        let err = c.validate().unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid(message) if message.contains("network.egress")),
+            "{err}"
+        );
+
+        c.network.egress = EgressMode::Deny;
+        if cfg!(unix) {
+            c.validate().unwrap();
+        } else {
+            let err = c.validate().unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid(message) if message.contains("Unix")),
+                "{err}"
+            );
+        }
+
+        c.sandbox.backend = SandboxBackend::LinuxNative;
+        if cfg!(target_os = "linux") {
+            c.validate().unwrap();
+        } else {
+            let err = c.validate().unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid(message) if message.contains("linux_native")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_native_and_read_only_paths_parse_and_validate() {
+        let dir = tempdir().unwrap();
+        let extra = dir.path().join("toolchain");
+        fs::create_dir_all(&extra).unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            format!(
+                r#"
+version = 1
+[sandbox]
+backend = "linux_native"
+read_only_paths = ["{}"]
+"#,
+                extra.display()
+            ),
+        )
+        .unwrap();
+        let result = Config::resolve(&path);
+        if cfg!(target_os = "linux") {
+            let (c, _) = result.unwrap();
+            assert_eq!(c.sandbox.backend, SandboxBackend::LinuxNative);
+            assert_eq!(
+                c.sandbox.read_only_paths,
+                vec![extra.to_string_lossy().into_owned()]
+            );
+        } else {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("linux_native"), "{err}");
+        }
+
+        let mut c = Config::default();
+        c.sandbox.read_only_paths = vec!["relative/path".into()];
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn local_bash_still_allows_sandbox_none() {
+        let mut c = Config::default();
+        c.tools.enabled = vec!["bash".into()];
+        c.validate().unwrap();
+        assert!(c.bash_enabled());
+        assert!(!c.requires_governance());
+    }
+
+    #[test]
+    fn governed_without_bash_allows_sandbox_none() {
+        let mut c = Config::default();
+        c.profile.name = "governed".into();
+        c.apply_profile_presets();
+        c.tools.enabled = vec!["read_file".into(), "report".into()];
+        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        c.validate().unwrap();
+        assert!(!c.bash_enabled());
+    }
+
+    #[test]
+    fn permission_mode_intersect_with_enabled() {
+        let mut c = Config::default();
+        c.tools.mode = PermissionMode::Workspace;
+        c.tools.enabled = vec!["read_file".into(), "bash".into()];
+        let e = c.tools.effective_enabled();
+        assert_eq!(e, vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn tool_authority_summary_characterizes_all_compositions() {
+        let custom_default = ToolsSettings::default().authority_summary();
+        assert_eq!(
+            custom_default.effective_enabled,
+            ToolsSettings::default_coding_tools()
+        );
+        assert!(custom_default.configured_enabled.is_empty());
+        assert!(custom_default.excluded_by_intersection.is_empty());
+
+        let custom_explicit = ToolsSettings {
+            enabled: vec!["report".into()],
+            ..Default::default()
+        }
+        .authority_summary();
+        assert_eq!(custom_explicit.effective_enabled, vec!["report"]);
+        assert!(custom_explicit.excluded_by_intersection.is_empty());
+
+        let read = ToolsSettings {
+            mode: PermissionMode::Read,
+            ..Default::default()
+        }
+        .authority_summary();
+        assert!(read.effective_enabled.contains(&"read_file".into()));
+        assert!(!read.effective_enabled.contains(&"write_file".into()));
+
+        let workspace = ToolsSettings {
+            mode: PermissionMode::Workspace,
+            enabled: vec!["read_file".into(), "bash".into()],
+            ..Default::default()
+        }
+        .authority_summary();
+        assert_eq!(workspace.effective_enabled, vec!["read_file"]);
+        assert!(
+            workspace
+                .excluded_by_intersection
+                .contains(&"write_file".into())
+        );
+        assert!(!workspace.excluded_by_intersection.contains(&"bash".into()));
+
+        let workspace_exec = ToolsSettings {
+            mode: PermissionMode::WorkspaceExec,
+            ..Default::default()
+        }
+        .authority_summary();
+        assert!(workspace_exec.effective_enabled.contains(&"bash".into()));
+    }
+
+    #[test]
+    fn property_default_config_always_validates() {
+        use proptest::prelude::*;
+        // Max turns in a sane range must keep validate ok for defaults.
+        proptest!(|(max_turns in 1u32..10_000)| {
+            let mut c = Config::default();
+            c.run.max_turns = max_turns;
+            prop_assert!(c.validate().is_ok());
+            prop_assert!(!c.requires_governance());
+        });
+    }
+
+    #[test]
+    fn tracing_disabled_by_default() {
+        let config = Config::default();
+        assert!(!config.tracing.enabled);
+        assert_eq!(config.tracing.exporter, "none");
+        assert!(config.tracing.endpoint.is_none());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn tracing_enabled_requires_otlp_endpoint() {
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("exporter")
+        );
+        config.tracing.exporter = "otlp".into();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("endpoint")
+        );
+        config.tracing.endpoint = Some("/tmp/spans.json".into());
+        config.validate().unwrap();
+        config.tracing.exporter = "jaeger".into();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown tracing.exporter")
+        );
+    }
+}
