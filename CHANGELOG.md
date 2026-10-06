@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: Ctrl+O expands the last tool's output; a second press collapses.
 - TUI: Enter while a prompt is running queues one follow-up; a second Enter
   replaces it, Esc or Ctrl-C drops it, and a finished turn sends it.
+- TUI: wheel scroll pages the transcript like PageUp/PageDown. Overflowing
+  ask/plan docks scroll first; at the top or bottom they resume transcript
+  paging. Permission arguments are not truncated.
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
