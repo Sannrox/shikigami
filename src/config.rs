@@ -491,6 +491,15 @@ pub struct RunSettings {
     /// is accepted. Additive; default off.
     #[serde(default)]
     pub plan_jail: bool,
+    /// Enable nested child-run tools (`child_run` / `child_status`). Default off.
+    #[serde(default)]
+    pub nested: bool,
+    /// Maximum nested depth (root is 0). Default 1: the root may spawn children.
+    #[serde(default = "default_nested_max_depth")]
+    pub nested_max_depth: u32,
+    /// Maximum children a single parent may start. Default 4.
+    #[serde(default = "default_nested_max_children")]
+    pub nested_max_children: u32,
 }
 
 /// Child-process resource and isolation policy.
@@ -564,8 +573,19 @@ impl Default for RunSettings {
             compact_after_messages: None,
             compact_keep_tail: default_compact_keep_tail(),
             plan_jail: false,
+            nested: false,
+            nested_max_depth: default_nested_max_depth(),
+            nested_max_children: default_nested_max_children(),
         }
     }
+}
+
+fn default_nested_max_depth() -> u32 {
+    1
+}
+
+fn default_nested_max_children() -> u32 {
+    4
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -892,6 +912,7 @@ impl Config {
     pub const MODEL_ADAPTER_ENV: &'static str = "SHIKIGAMI_MODEL_ADAPTER";
     pub const MODEL_SCRIPT_ENV: &'static str = "SHIKIGAMI_MODEL_SCRIPT";
     pub const RUN_PLAN_JAIL_ENV: &'static str = "SHIKIGAMI_RUN_PLAN_JAIL";
+    pub const RUN_NESTED_ENV: &'static str = "SHIKIGAMI_RUN_NESTED";
 
     pub fn path_in(root: impl AsRef<Path>) -> PathBuf {
         root.as_ref().join(Self::FILENAME)
@@ -986,6 +1007,11 @@ impl Config {
         {
             self.run.plan_jail = flag;
         }
+        if let Ok(value) = env::var(Self::RUN_NESTED_ENV)
+            && let Some(flag) = parse_env_flag(&value)
+        {
+            self.run.nested = flag;
+        }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -1026,6 +1052,16 @@ impl Config {
             other => return Err(ConfigError::UnknownEventsAdapter(other.into())),
         }
         self.validate_tracing()?;
+        if self.run.nested_max_depth == 0 {
+            return Err(ConfigError::Invalid(
+                "run.nested_max_depth must be greater than zero".into(),
+            ));
+        }
+        if self.run.nested_max_children == 0 {
+            return Err(ConfigError::Invalid(
+                "run.nested_max_children must be greater than zero".into(),
+            ));
+        }
         match self.model.adapter.as_str() {
             "scripted" | "http" | "plane" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
@@ -1255,6 +1291,34 @@ impl ConfigSource {
     }
 }
 
+/// Replace known secret values (from env) with `[REDACTED]` in a text line.
+pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
+    let mut out = line.to_string();
+    let mut secrets = Vec::new();
+    if let Some(name) = &config.governance.token_env
+        && let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+    {
+        if let Some(stripped) = v.strip_prefix("Bearer ") {
+            secrets.push(stripped.to_string());
+        }
+        secrets.push(v);
+    }
+    if let Ok(v) = std::env::var(&config.model.api_key_env)
+        && !v.is_empty()
+    {
+        secrets.push(v);
+    }
+    // Longest first so partial overlaps redact fully.
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for s in secrets {
+        if s.len() >= 8 {
+            out = out.replace(&s, "[REDACTED]");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,6 +1342,25 @@ name = "governed"
         assert!(c.governance.fail_closed);
         assert_eq!(c.model.adapter, "plane");
         assert_eq!(c.model.model, "auto");
+    }
+
+    #[test]
+    fn cliproxy_http_example_selects_loopback_http_model() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cliproxy-http.toml");
+        fs::write(&path, include_str!("../examples/cliproxy-http.toml")).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.model.adapter, "http");
+        assert_eq!(
+            config.model.base_url.as_deref(),
+            Some("http://127.0.0.1:8317/v1")
+        );
+        assert_eq!(config.model.model, "grok-4.6");
+        assert_eq!(config.model.api_key_env, "CLIPROXY_API_KEY");
+        assert_eq!(config.tools.mode, PermissionMode::Workspace);
+        assert_eq!(config.network.egress, EgressMode::Allowlist);
+        assert_eq!(config.network.allow_hosts, vec!["127.0.0.1".to_string()]);
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1501,6 +1584,27 @@ unknown_thing = true
         assert!(allow.check_http_url("https://evil.example/v1").is_err());
         let open = NetworkSettings::default();
         assert!(open.check_http_url("https://evil.example/v1").is_ok());
+    }
+
+    #[test]
+    fn nested_defaults_off_with_positive_caps() {
+        let config = Config::default();
+        assert!(!config.run.nested);
+        assert_eq!(config.run.nested_max_depth, 1);
+        assert_eq!(config.run.nested_max_children, 4);
+        assert!(!ToolsSettings::default_coding_tools().contains(&"child_run".into()));
+    }
+
+    #[test]
+    fn nested_zero_caps_fail_validate() {
+        let mut config = Config::default();
+        config.run.nested_max_depth = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("nested_max_depth"), "{err}");
+        config.run.nested_max_depth = 1;
+        config.run.nested_max_children = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("nested_max_children"), "{err}");
     }
 
     #[test]

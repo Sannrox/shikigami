@@ -97,6 +97,7 @@ profiles. New configurations should specify adapters and
 Examples:
 
 - [`examples/local-run.toml`](examples/local-run.toml) — offline
+- [`examples/cliproxy-http.toml`](examples/cliproxy-http.toml) — ungoverned `http` model through a local OpenAI-compatible gateway (CLIProxyAPI)
 - [`examples/governed-sekai-chisei.toml`](examples/governed-sekai-chisei.toml) — plane-backed; follow the [governed guide](docs/governed-path.md)
 - [`examples/tenkai-product.toml`](examples/tenkai-product.toml) — binary delivery only
 

@@ -69,6 +69,9 @@ pub(crate) fn validate_resumed_workspace(
             checkpoint.workspace.display()
         ))
     })?;
+    if !checkpoint.parent_run_id.is_empty() {
+        return validate_nested_child_workspace(state_runs, resume_id, checkpoint, actual);
+    }
     let configured_adapter = configured_workspace_adapter(config);
     let checkpoint_adapter = if checkpoint.workspace_adapter.is_empty() {
         configured_adapter
@@ -107,6 +110,50 @@ pub(crate) fn validate_resumed_workspace(
     if actual != expected {
         return Err(RunError::Message(format!(
             "checkpoint workspace {} does not match configured workspace {}",
+            actual.display(),
+            expected.display()
+        )));
+    }
+    Ok(actual)
+}
+
+fn validate_nested_child_workspace(
+    state_runs: &Path,
+    resume_id: &str,
+    checkpoint: &Checkpoint,
+    actual: PathBuf,
+) -> Result<PathBuf, RunError> {
+    let adapter = if checkpoint.workspace_adapter.is_empty() {
+        "inplace"
+    } else {
+        checkpoint.workspace_adapter.as_str()
+    };
+    let expected = match adapter {
+        "inplace" | "directory-inplace" => {
+            let parent =
+                Checkpoint::load(state_runs, &checkpoint.parent_run_id).map_err(|error| {
+                    RunError::Message(format!(
+                        "nested child parent checkpoint cannot be loaded: {error}"
+                    ))
+                })?;
+            parent.workspace.canonicalize().map_err(|error| {
+                RunError::Message(format!(
+                    "nested child parent workspace cannot be resolved: {}: {error}",
+                    parent.workspace.display()
+                ))
+            })?
+        }
+        "directory" => canonical_workspace_below(state_runs, &[resume_id, "workspace"])?,
+        "git-worktree" => canonical_workspace_below(state_runs, &[resume_id, "worktree"])?,
+        other => {
+            return Err(RunError::Message(format!(
+                "nested child workspace adapter `{other}` cannot be resumed"
+            )));
+        }
+    };
+    if actual != expected {
+        return Err(RunError::Message(format!(
+            "nested child workspace {} does not match expected workspace {}",
             actual.display(),
             expected.display()
         )));

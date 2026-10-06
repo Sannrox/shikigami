@@ -1,0 +1,12 @@
+[package]
+name = "shikigami-plane-intake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Plane-claim port and claim types for shikigami."
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "2"

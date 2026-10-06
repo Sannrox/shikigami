@@ -92,7 +92,7 @@ jobs:
         id: package
         shell: bash
         run: |
-          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="shikigami") | .version')"
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 

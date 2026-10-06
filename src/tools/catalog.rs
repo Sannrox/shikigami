@@ -43,11 +43,14 @@ pub const PLAN_JAIL_PATH: &str = ".shikigami/plan.md";
 ///
 /// Unknown and external names (including `mcp.*`) fail closed. Observation
 /// builtins, report/escalate, todos, and bash job polling stay allowed.
-/// Mutating builtins may write only [`PLAN_JAIL_PATH`].
+/// Mutating builtins may write only [`PLAN_JAIL_PATH`]. Shared-workspace
+/// `child_run` is allowed; `worktree=true` is not, because materialize
+/// runs unsandboxed `git worktree add` against the parent checkout.
 pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
     match name {
         "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "report" | "escalate"
-        | "bash_job_status" | "bash_job_logs" => true,
+        | "bash_job_status" | "bash_job_logs" | "child_status" => true,
+        "child_run" => child_run_plan_jail_ok(args_json),
         "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
         "apply_patch" => apply_patch_is_plan(args_json),
         _ => false,
@@ -111,6 +114,120 @@ pub fn read_plan_jail_file(workspace: &std::path::Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Write the plan file without following symlinks. Refuses redirected,
+/// hard-linked, or non-regular destinations so a swap after
+/// [`plan_jail_destination_ok`] cannot land content on another inode.
+pub fn write_plan_jail_file(workspace: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    if content.len() as u64 > 2 * 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{PLAN_JAIL_PATH} exceeds size limit"),
+        ));
+    }
+    ensure_plan_jail_dir(workspace)?;
+    #[cfg(unix)]
+    {
+        write_plan_jail_file_unix(workspace, content)
+    }
+    #[cfg(not(unix))]
+    {
+        write_plan_jail_file_portable(workspace, content)
+    }
+}
+
+#[cfg(unix)]
+fn write_plan_jail_file_unix(workspace: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    // Pin `.shikigami` so a directory symlink swap cannot redirect `plan.md`.
+    let mut dir_options = std::fs::OpenOptions::new();
+    dir_options.read(true);
+    dir_options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+    let dir = match dir_options.open(workspace.join(".shikigami")) {
+        Ok(dir) => OwnedFd::from(dir),
+        Err(error) => return Err(denied_open(error)),
+    };
+    let flags =
+        libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    // SAFETY: `c"plan.md"` is NUL-terminated; `dir` is a live directory
+    // descriptor opened with O_DIRECTORY | O_NOFOLLOW.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c"plan.md".as_ptr(), flags, 0o644) };
+    if fd < 0 {
+        return Err(denied_open(std::io::Error::last_os_error()));
+    }
+    // SAFETY: `openat` returned a new owned descriptor on success.
+    let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let meta = file.metadata()?;
+    if !meta.is_file() || file_link_count(&meta) > 1 {
+        return Err(plan_jail_write_denied());
+    }
+    file.set_len(0)?;
+    file.write_all(content)?;
+    file.flush()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_plan_jail_file_portable(
+    workspace: &std::path::Path,
+    content: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    if !plan_jail_destination_ok(workspace) {
+        return Err(plan_jail_write_denied());
+    }
+    let path = workspace.join(PLAN_JAIL_PATH);
+    if let Ok(meta) = std::fs::symlink_metadata(&path)
+        && (meta.file_type().is_symlink() || !meta.is_file() || file_link_count(&meta) > 1)
+    {
+        return Err(plan_jail_write_denied());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || file_link_count(&meta) > 1 {
+        return Err(plan_jail_write_denied());
+    }
+    file.set_len(0)?;
+    file.write_all(content)?;
+    file.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn denied_open(error: std::io::Error) -> std::io::Error {
+    match error.raw_os_error() {
+        Some(libc::ELOOP | libc::ENOTDIR) => plan_jail_write_denied(),
+        _ => error,
+    }
+}
+
+/// True when `path` is the harness plan file, including `./.shikigami/plan.md`.
+pub(crate) fn is_plan_jail_rel_path(path: &std::path::Path) -> bool {
+    path.to_str()
+        .and_then(normalize_rel_path)
+        .is_some_and(|normalized| normalized == PLAN_JAIL_PATH)
+}
+
+fn plan_jail_write_denied() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("{PLAN_JAIL_PATH} must be a regular workspace file"),
+    )
+}
+
+fn ensure_plan_jail_dir(workspace: &std::path::Path) -> std::io::Result<()> {
+    let dir = workspace.join(".shikigami");
+    match std::fs::create_dir(&dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn file_link_count(meta: &std::fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
@@ -144,6 +261,13 @@ fn normalize_rel_path(raw: &str) -> Option<String> {
     } else {
         Some(parts.join("/"))
     }
+}
+
+fn child_run_plan_jail_ok(args_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args_json) else {
+        return false;
+    };
+    value.get("worktree") != Some(&serde_json::Value::Bool(true))
 }
 
 fn json_path_is_plan(args_json: &str, field: &str) -> bool {
@@ -251,6 +375,16 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             "HTTP(S) GET a URL and return truncated text (status, final URL, body). Opt-in tool; respects [network] egress. Blocks private/link-local targets. Not a browser.",
             r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#,
         ),
+        def(
+            "child_run",
+            "Start a nested child Run. Profiles: explore (read-only), plan (write-jail), full (parent authority). The child shares the parent workspace; worktree=true isolates with git-worktree. wait (default true) returns the child summary; false returns the child run_id.",
+            r#"{"type":"object","properties":{"profile":{"type":"string","enum":["explore","plan","full"]},"task":{"type":"string"},"wait":{"type":"boolean"},"worktree":{"type":"boolean"}},"required":["profile","task"]}"#,
+        ),
+        def(
+            "child_status",
+            "Poll a nested child started by this run.",
+            r#"{"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}"#,
+        ),
     ]
 }
 
@@ -356,6 +490,20 @@ mod tests {
             "mcp.fs.write",
             &format!(r#"{{"path":"{PLAN_JAIL_PATH}","content":"x"}}"#)
         ));
+        assert!(plan_jail_allows(
+            "child_run",
+            r#"{"profile":"explore","task":"scout"}"#
+        ));
+        assert!(plan_jail_allows(
+            "child_run",
+            r#"{"profile":"explore","task":"scout","worktree":false}"#
+        ));
+        assert!(!plan_jail_allows(
+            "child_run",
+            r#"{"profile":"explore","task":"scout","worktree":true}"#
+        ));
+        assert!(!plan_jail_allows("child_run", "not-json"));
+        assert!(plan_jail_allows("child_status", r#"{"run_id":"child"}"#));
         assert!(!plan_jail_allows(
             "bash_background",
             r#"{"command":"echo hi"}"#
@@ -405,6 +553,205 @@ mod tests {
         let made = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
         assert_eq!(made, 0);
         assert!(!plan_jail_destination_ok(fifo.path()));
+    }
+
+    #[test]
+    fn write_plan_jail_file_creates_a_regular_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        write_plan_jail_file(dir.path(), b"plan\n").unwrap();
+        assert_eq!(
+            read_plan_jail_file(dir.path()).as_deref(),
+            Some(b"plan\n".as_slice())
+        );
+        let meta = std::fs::symlink_metadata(dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        assert!(meta.is_file());
+        assert!(!meta.file_type().is_symlink());
+        assert_eq!(file_link_count(&meta), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_plan_jail_file_refuses_symlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".shikigami")).unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::os::unix::fs::symlink(&secret, dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        let error = write_plan_jail_file(dir.path(), b"pwned\n").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+        assert!(read_plan_jail_file(dir.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_plan_jail_file_refuses_hardlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".shikigami")).unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::fs::hard_link(&secret, dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        let error = write_plan_jail_file(dir.path(), b"pwned\n").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+        assert!(read_plan_jail_file(dir.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_plan_jail_file_refuses_parent_dir_symlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("plan.md"), "keep\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".shikigami")).unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::fs::remove_dir_all(dir.path().join(".shikigami")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".shikigami")).unwrap();
+        let error = write_plan_jail_file(dir.path(), b"pwned\n").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("plan.md")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[cfg(unix)]
+    fn tools_for_plan_writes(workspace: &std::path::Path) -> crate::tools::ToolRegistry {
+        crate::tools::ToolRegistry::with_builtins(
+            workspace,
+            vec![
+                "read_file".into(),
+                "write_file".into(),
+                "edit".into(),
+                "apply_patch".into(),
+            ],
+            5,
+            crate::config::NetworkSettings::default(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_refuses_plan_symlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".shikigami")).unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::os::unix::fs::symlink(&secret, dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        let tools = tools_for_plan_writes(dir.path());
+        let args = serde_json::json!({
+            "path": PLAN_JAIL_PATH,
+            "content": "pwned\n"
+        })
+        .to_string();
+        tools.execute("write_file", &args).await.unwrap_err();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_refuses_plan_hardlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".shikigami")).unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::fs::hard_link(&secret, dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        let tools = tools_for_plan_writes(dir.path());
+        let args = serde_json::json!({
+            "path": PLAN_JAIL_PATH,
+            "content": "pwned\n"
+        })
+        .to_string();
+        tools.execute("write_file", &args).await.unwrap_err();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_refuses_plan_parent_dir_symlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("plan.md"), "keep\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".shikigami")).unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::fs::remove_dir_all(dir.path().join(".shikigami")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".shikigami")).unwrap();
+        let tools = tools_for_plan_writes(dir.path());
+        let args = serde_json::json!({
+            "path": PLAN_JAIL_PATH,
+            "content": "pwned\n"
+        })
+        .to_string();
+        tools.execute("write_file", &args).await.unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("plan.md")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_refuses_plan_symlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        write_plan_jail_file(dir.path(), b"draft\n").unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::fs::remove_file(dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        std::os::unix::fs::symlink(&secret, dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        let tools = tools_for_plan_writes(dir.path());
+        let args = serde_json::json!({
+            "path": PLAN_JAIL_PATH,
+            "old": "keep",
+            "new": "pwned"
+        })
+        .to_string();
+        tools.execute("edit", &args).await.unwrap_err();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_refuses_plan_symlink_swap_after_destination_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        write_plan_jail_file(dir.path(), b"draft\n").unwrap();
+        assert!(plan_jail_destination_ok(dir.path()));
+        std::fs::remove_file(dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        std::os::unix::fs::symlink(&secret, dir.path().join(PLAN_JAIL_PATH)).unwrap();
+        let tools = tools_for_plan_writes(dir.path());
+        let args = serde_json::json!({
+            "patches": [{
+                "path": PLAN_JAIL_PATH,
+                "hunks": [{"old": "keep", "new": "pwned"}]
+            }]
+        })
+        .to_string();
+        tools.execute("apply_patch", &args).await.unwrap_err();
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_still_writes_a_regular_plan_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools_for_plan_writes(dir.path());
+        let args = serde_json::json!({
+            "path": PLAN_JAIL_PATH,
+            "content": "plan\n"
+        })
+        .to_string();
+        tools.execute("write_file", &args).await.unwrap();
+        assert_eq!(
+            read_plan_jail_file(dir.path()).as_deref(),
+            Some(b"plan\n".as_slice())
+        );
     }
 
     #[test]

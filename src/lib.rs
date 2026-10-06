@@ -53,7 +53,6 @@ pub mod state;
 pub mod tools;
 pub mod tracing_export;
 pub mod transcript;
-pub mod tui;
 pub mod worker_lifecycle;
 pub mod workspace;
 
@@ -104,8 +103,8 @@ pub use replay::{
     export_replay_inputs, steps_from_messages, text_digest, workspace_digest,
 };
 pub use run::{
-    AskDecision, ParkInfo, ParkKind, PlanDecision, RunRequest, RunResult, RunTermination,
-    SYSTEM_PROMPT,
+    AskDecision, ChildProfile, ParkInfo, ParkKind, PlanDecision, RunRequest, RunResult,
+    RunTermination, SYSTEM_PROMPT,
 };
 pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,

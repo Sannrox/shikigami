@@ -20,6 +20,7 @@ use crate::replay::{ReplayExecution, ReplayTerminalCheckpoint};
 use crate::tracing_export::RunSpanTrace;
 
 use super::model_turn::DurableModelTurn;
+use super::supervision::check_bounds;
 use super::tool_batch::{DurableToolBatch, ToolBatchOutcome};
 use super::{ContentExecution, Engine, ParkInfo, RunError, RunRequest, RunResult, RunTermination};
 
@@ -243,6 +244,9 @@ impl<'a> RunTransaction<'a> {
             Err(e) => {
                 let summary = e.to_string();
                 let projected_summary = projected_summary(session.is_content(), &summary);
+                let _ = self
+                    .finish_nested_children(&mut session, &request, started, timeout, true, true)
+                    .await;
                 tools.kill_background_jobs().await;
                 // The complete batch was staged before reporting, so this
                 // checkpoint cannot replay an already executed host tool.
@@ -272,7 +276,8 @@ impl<'a> RunTransaction<'a> {
                         let _ = session.save_recoverable(pending_park.clone(), tools.as_ref());
                     }
                 }
-                // Do not delete workspace on cancel/timeout/max-turns so resume works.
+                // Root cancel/timeout keeps the workspace for resume. Nested
+                // git-worktree children still reap: they are not a resume host.
                 self.engine.emit(
                     &session.run_id,
                     HarnessEvent::RunFinished {
@@ -287,6 +292,13 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
+                self.cleanup_workspace(
+                    &ws,
+                    &session,
+                    &request,
+                    false,
+                    session.keeps_parked_workspace(pending_park.is_some()),
+                );
                 self.export_spans(&mut session, false).await;
                 return Err(e);
             }
@@ -301,7 +313,48 @@ impl<'a> RunTransaction<'a> {
             session.save(tools.as_ref())?;
         }
 
-        if termination != RunTermination::Parked {
+        if termination == RunTermination::Parked {
+            // Session hosts keep wait=false children across park. Unattended
+            // `run` prints the park and exits, so cancel and join now:
+            // in-flight child tools drop on cancel (park stays off the
+            // child's task clock) and registry rows become terminal
+            // before process exit.
+            if !request.session_wait {
+                let _ = self
+                    .finish_nested_children(&mut session, &request, started, timeout, true, true)
+                    .await;
+            }
+        } else {
+            let over_bounds = check_bounds(
+                self.engine,
+                &session.run_id,
+                &request,
+                started,
+                timeout,
+                &session.parent_run_id,
+            )
+            .is_err();
+            if let Err(error) = self
+                .finish_nested_children(&mut session, &request, started, timeout, true, over_bounds)
+                .await
+            {
+                tools.kill_background_jobs().await;
+                let _ = session.save_recoverable(None, tools.as_ref());
+                self.engine.emit(
+                    &session.run_id,
+                    HarnessEvent::RunFinished {
+                        run_id: session.run_id.clone(),
+                        success: false,
+                        summary: projected_summary(session.is_content(), &error.to_string()),
+                    },
+                );
+                super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
+                    .finalize(&session.run_id, &ws.path, tools.as_ref())
+                    .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
+                self.export_spans(&mut session, false).await;
+                return Err(error);
+            }
             let governance_summary = projected_summary(session.is_content(), &final_summary);
             let completion = self
                 .engine
@@ -323,6 +376,10 @@ impl<'a> RunTransaction<'a> {
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
                 self.export_spans(&mut session, false).await;
+                let _ = self
+                    .finish_nested_children(&mut session, &request, started, timeout, true, false)
+                    .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 return Err(error.into());
             }
             // Successful completion clears adapter-owned receipt correlation
@@ -343,6 +400,10 @@ impl<'a> RunTransaction<'a> {
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
                 self.export_spans(&mut session, false).await;
+                let _ = self
+                    .finish_nested_children(&mut session, &request, started, timeout, true, false)
+                    .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 return Err(error);
             }
         }
@@ -352,10 +413,19 @@ impl<'a> RunTransaction<'a> {
             .finalize(&session.run_id, &ws.path, tools.as_ref())
             .await;
 
-        // Keep workspace on park; only delete on successful non-park completion.
-        if !session.keep_workspace && success && termination != RunTermination::Parked {
-            let _ = self.engine.workspace.cleanup(&ws);
-        }
+        // Keep workspace on park. Isolated git-worktree *children* honor the
+        // run/resume `keep_workspace` flag, not the park-forced checkpoint
+        // bit, so `--resume` of a parked plan worktree still `git worktree
+        // remove` unless the operator asked to keep it. Nested worktree
+        // children also reap on cancel/fail. Parent git-worktree runs keep
+        // the freeze-core park-forced keep.
+        self.cleanup_workspace(
+            &ws,
+            &session,
+            &request,
+            success,
+            termination == RunTermination::Parked,
+        );
 
         self.engine.emit(
             &session.run_id,
@@ -370,6 +440,10 @@ impl<'a> RunTransaction<'a> {
             session.mark_content_finalized(artifact_dir.as_deref());
             if let Err(error) = session.save(tools.as_ref()) {
                 self.export_spans(&mut session, success).await;
+                let _ = self
+                    .finish_nested_children(&mut session, &request, started, timeout, true, false)
+                    .await;
+                self.cleanup_workspace(&ws, &session, &request, false, false);
                 return Err(error);
             }
         }
@@ -389,7 +463,7 @@ impl<'a> RunTransaction<'a> {
         self.export_spans(&mut session, success).await;
 
         Ok(RunResult {
-            run_id: session.run_id,
+            run_id: session.run_id.clone(),
             success,
             summary: final_summary,
             turns: session.turns,
@@ -402,6 +476,160 @@ impl<'a> RunTransaction<'a> {
             cost,
             todos: tools.todos(),
         })
+    }
+
+    /// Root cancel/timeout keeps the tree for resume. Nested git-worktree
+    /// children with `keep_workspace=false` reap on any non-park terminal.
+    fn cleanup_workspace(
+        &self,
+        ws: &crate::workspace::MaterializedWorkspace,
+        session: &super::session::RunSession,
+        request: &RunRequest,
+        success: bool,
+        parked: bool,
+    ) {
+        if parked {
+            return;
+        }
+        let nested_worktree = ws.adapter == "git-worktree" && !session.parent_run_id.is_empty();
+        let keep = if nested_worktree {
+            request.keep_workspace
+        } else if success {
+            session.keep_workspace
+        } else {
+            true
+        };
+        if keep {
+            return;
+        }
+        if !nested_worktree {
+            let shared_child_open = session.children.iter().any(|child| {
+                let Ok(checkpoint) = Checkpoint::load(&self.engine.state_runs, &child.run_id)
+                else {
+                    return false;
+                };
+                checkpoint.workspace == session.workspace
+                    && (checkpoint.park.is_some()
+                        || self
+                            .engine
+                            .registry
+                            .run_is_active(&child.run_id)
+                            .unwrap_or(false))
+            });
+            if shared_child_open {
+                return;
+            }
+        }
+        let _ = crate::workspace::apply_cleanup(ws);
+    }
+
+    async fn finish_nested_children(
+        &self,
+        session: &mut super::session::RunSession,
+        request: &RunRequest,
+        started: tokio::time::Instant,
+        timeout: Option<Duration>,
+        join: bool,
+        cancel: bool,
+    ) -> Result<(), RunError> {
+        if cancel {
+            for child in &session.children {
+                let _ = self.engine.registry.request_cancel(&child.run_id);
+            }
+        }
+        if !join {
+            return Ok(());
+        }
+        let mut bounds_error = None;
+        let joins = session.take_background_joins();
+        if !joins.is_empty() {
+            let join_fut = tokio::task::spawn_blocking(move || {
+                for handle in joins {
+                    let _ = handle.join();
+                }
+            });
+            tokio::pin!(join_fut);
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    joined = &mut join_fut => {
+                        let _ = joined;
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        self.note_nested_bounds(
+                            session,
+                            request,
+                            started,
+                            timeout,
+                            &mut bounds_error,
+                        );
+                    }
+                }
+            }
+        }
+        // Park detaches JoinHandles. Resume cannot restore them. Cancel any
+        // still-running recorded child so it cannot keep writing the shared
+        // workspace after the parent completes, then wait until those
+        // children leave `running` (in-flight bash observes cancel). Do not
+        // return while a child is still active: a 2s grace would let
+        // `sleep N && write` finish after parent cancel/timeout.
+        for child in &session.children {
+            if self
+                .engine
+                .registry
+                .run_is_active(&child.run_id)
+                .unwrap_or(false)
+            {
+                let _ = self.engine.registry.request_cancel(&child.run_id);
+            }
+        }
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            self.note_nested_bounds(session, request, started, timeout, &mut bounds_error);
+            let any_active = session.children.iter().any(|child| {
+                self.engine
+                    .registry
+                    .run_is_active(&child.run_id)
+                    .unwrap_or(false)
+            });
+            if !any_active {
+                break;
+            }
+            interval.tick().await;
+        }
+        match bounds_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn note_nested_bounds(
+        &self,
+        session: &super::session::RunSession,
+        request: &RunRequest,
+        started: tokio::time::Instant,
+        timeout: Option<Duration>,
+        bounds_error: &mut Option<RunError>,
+    ) {
+        if bounds_error.is_some() {
+            return;
+        }
+        if let Err(error) = check_bounds(
+            self.engine,
+            &session.run_id,
+            request,
+            started,
+            timeout,
+            &session.parent_run_id,
+        ) {
+            for child in &session.children {
+                let _ = self.engine.registry.request_cancel(&child.run_id);
+            }
+            *bounds_error = Some(error);
+        }
     }
 
     async fn export_spans(&self, session: &mut super::session::RunSession, success: bool) {

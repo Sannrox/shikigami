@@ -578,6 +578,81 @@ pub trait WorkspacePort: Send + Sync {
     fn cleanup(&self, ws: &MaterializedWorkspace) -> Result<(), WorkspaceError>;
 }
 
+/// Honor `ws.cleanup` even when the Engine port is not the adapter that
+/// materialized the tree (nested `worktree=true` resume uses the parent port).
+pub fn apply_cleanup(ws: &MaterializedWorkspace) -> Result<(), WorkspaceError> {
+    match &ws.cleanup {
+        WorkspaceCleanup::None => Ok(()),
+        WorkspaceCleanup::RemoveDir => {
+            if ws.path.exists() {
+                let _ = std::fs::remove_dir_all(&ws.path);
+            }
+            Ok(())
+        }
+        WorkspaceCleanup::RemoveGitWorktree { repo, branch } => {
+            let _ = git_no_hooks(repo)
+                .args(["worktree", "remove", "--force"])
+                .arg(&ws.path)
+                .output();
+            let _ = git_no_hooks(repo).args(["branch", "-D", branch]).output();
+            Ok(())
+        }
+    }
+}
+
+/// Resume tag for a `git-worktree` checkpoint. Infers the parent repo from
+/// the live worktree; falls back to `fallback_repo` (usually settings root).
+pub fn git_worktree_cleanup(
+    workspace: &Path,
+    run_id: &str,
+    branch_prefix: &str,
+    fallback_repo: &Path,
+) -> WorkspaceCleanup {
+    let branch = format!("{branch_prefix}{run_id}");
+    let repo = git_common_repo(workspace).unwrap_or_else(|| {
+        std::fs::canonicalize(fallback_repo).unwrap_or_else(|_| fallback_repo.to_path_buf())
+    });
+    WorkspaceCleanup::RemoveGitWorktree { repo, branch }
+}
+
+fn git_no_hooks(repo: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        &repo.to_string_lossy(),
+    ]);
+    cmd
+}
+
+fn git_common_repo(worktree: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .current_dir(worktree)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let dir = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        worktree.join(raw)
+    };
+    let dir = std::fs::canonicalize(dir).ok()?;
+    if dir.file_name().is_some_and(|name| name == ".git") {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        Some(dir)
+    }
+}
+
 pub fn from_config(config: &Config) -> Result<Box<dyn WorkspacePort>, WorkspaceError> {
     match config.workspace.adapter.as_str() {
         "directory" => Ok(Box::new(DirectoryWorkspace {
@@ -696,10 +771,7 @@ impl WorkspacePort for DirectoryWorkspace {
     }
 
     fn cleanup(&self, ws: &MaterializedWorkspace) -> Result<(), WorkspaceError> {
-        if matches!(ws.cleanup, WorkspaceCleanup::RemoveDir) && ws.path.exists() {
-            let _ = std::fs::remove_dir_all(&ws.path);
-        }
-        Ok(())
+        apply_cleanup(ws)
     }
 }
 
@@ -743,21 +815,14 @@ impl WorkspacePort for GitWorktreeWorkspace {
         }
         // Create branch from HEAD and add worktree.
         let repo = std::fs::canonicalize(&self.repo).unwrap_or_else(|_| self.repo.clone());
-        let status = Command::new("git")
-            .args([
-                "-C",
-                &repo.to_string_lossy(),
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-            ])
+        let status = git_no_hooks(&repo)
+            .args(["worktree", "add", "-b", &branch])
             .arg(&path)
             .output()?;
         if !status.status.success() {
             // Retry without -b if branch exists: worktree add path branch
-            let status2 = Command::new("git")
-                .args(["-C", &repo.to_string_lossy(), "worktree", "add"])
+            let status2 = git_no_hooks(&repo)
+                .args(["worktree", "add"])
                 .arg(&path)
                 .arg(&branch)
                 .output()?;
@@ -778,22 +843,7 @@ impl WorkspacePort for GitWorktreeWorkspace {
     }
 
     fn cleanup(&self, ws: &MaterializedWorkspace) -> Result<(), WorkspaceError> {
-        if let WorkspaceCleanup::RemoveGitWorktree { repo, branch } = &ws.cleanup {
-            let _ = Command::new("git")
-                .args([
-                    "-C",
-                    &repo.to_string_lossy(),
-                    "worktree",
-                    "remove",
-                    "--force",
-                ])
-                .arg(&ws.path)
-                .output();
-            let _ = Command::new("git")
-                .args(["-C", &repo.to_string_lossy(), "branch", "-D", branch])
-                .output();
-        }
-        Ok(())
+        apply_cleanup(ws)
     }
 }
 
@@ -1075,5 +1125,82 @@ mod snapshot_tests {
             std::fs::read_to_string(dst.join("weird\\name.txt")).unwrap(),
             "keep"
         );
+    }
+}
+
+#[cfg(test)]
+mod git_worktree_tests {
+    use super::*;
+    use crate::config::Config;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_does_not_run_post_checkout_hook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet", "-b", "main"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "test@example.invalid"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.name", "Test"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.join("README"), "ok\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "--quiet", "-m", "init"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let hook = repo.join(".git/hooks/post-checkout");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho hooked > \"$(dirname \"$0\")/../../HOOKED\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut config = Config::default();
+        config.workspace.adapter = "git-worktree".into();
+        config.workspace.root = repo.to_string_lossy().into();
+        let port = from_config(&config).unwrap();
+        let runs = dir.path().join("runs");
+        let ws = port.materialize("child-1", &runs).unwrap();
+        assert!(
+            !repo.join("HOOKED").exists(),
+            "git worktree add must not run repository hooks"
+        );
+        apply_cleanup(&ws).unwrap();
     }
 }

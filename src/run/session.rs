@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::checkpoint::{self, Checkpoint, ParkKind, ParkedState};
+use crate::checkpoint::{self, Checkpoint, ChildRunRecord, ParkKind, ParkedState};
 use crate::content::{
     ContentCapabilitiesV1, ContentCheckpointBinding, ContentCheckpointV1, ContentDisclosureState,
     ContentError, ContentMessageV1, ContentModelTurnV1, ContentResolver, ContentTerminalCheckpoint,
@@ -50,7 +50,25 @@ pub(super) struct RunSession {
     pub prompt_start_turns: Option<u32>,
     /// Plan write-jail is still active for this attempt.
     pub plan_jail: bool,
+    /// Root nested tools are enabled for this attempt (restored on resume).
+    pub nested: bool,
+    /// Nested children started by this attempt.
+    pub children: Vec<ChildRunRecord>,
+    pub nested_depth: u32,
+    pub parent_run_id: String,
+    pub nested_profile: String,
+    /// Spawn-time tools.mode for nested children (restored on resume).
+    pub tools_mode: String,
+    /// Spawn-time enabled tool names for nested children (restored on resume).
+    pub tools_enabled: Vec<String>,
     pub spans: RunSpanTrace,
+    /// `wait=false` child threads for this attempt. Terminal completion joins
+    /// them off the async executor. Session-host park detaches the handles;
+    /// resume cannot recover them from a checkpoint. Unattended park
+    /// `request_cancel`s children because the CLI process is about to exit.
+    /// Terminal parent completion still `request_cancel`s any recorded child
+    /// that is still running.
+    background_joins: Vec<std::thread::JoinHandle<()>>,
 }
 
 struct ContentSession {
@@ -100,8 +118,24 @@ impl RunSession {
             ask_allow_call_id: None,
             prompt_start_turns: None,
             plan_jail: false,
+            nested: false,
+            children: Vec::new(),
+            nested_depth: 0,
+            parent_run_id: String::new(),
+            nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
             spans: RunSpanTrace::disabled(),
+            background_joins: Vec::new(),
         }
+    }
+
+    pub(super) fn push_background_child(&mut self, handle: std::thread::JoinHandle<()>) {
+        self.background_joins.push(handle);
+    }
+
+    pub(super) fn take_background_joins(&mut self) -> Vec<std::thread::JoinHandle<()>> {
+        std::mem::take(&mut self.background_joins)
     }
 
     /// Keep the parked approval wait durable across saves after a resume.
@@ -133,6 +167,16 @@ impl RunSession {
             .checkpoint_state(&self.run_id)
             .is_some_and(|checkpoint| checkpoint.approval_park.is_some())
             .then(|| park.clone())
+    }
+
+    /// True when this transaction created a park or `save_recoverable`
+    /// would persist an inherited approval/ask park. Nested worktree
+    /// cleanup uses this so a cancel during resume cannot reap a still
+    /// parked isolated tree.
+    pub(super) fn keeps_parked_workspace(&self, pending_park: bool) -> bool {
+        pending_park
+            || self.open_resumed_approval_park().is_some()
+            || self.resumed_ask_park.is_some()
     }
 
     pub fn set_content(
@@ -644,6 +688,13 @@ impl RunSession {
             content: next_content_binding.clone(),
             prompt_start_turns: self.prompt_start_turns,
             plan_jail: self.plan_jail,
+            nested: self.nested,
+            children: self.children.clone(),
+            nested_depth: self.nested_depth,
+            parent_run_id: self.parent_run_id.clone(),
+            nested_profile: self.nested_profile.clone(),
+            tools_mode: self.tools_mode.clone(),
+            tools_enabled: self.tools_enabled.clone(),
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {

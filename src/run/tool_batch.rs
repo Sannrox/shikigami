@@ -30,6 +30,9 @@ pub(super) enum ToolBatchOutcome {
 
 fn plan_jail_deny(call: &ToolCall, workspace: &std::path::Path) -> Option<String> {
     if !tools::plan_jail_allows(&call.name, &call.args_json) {
+        if call.name == "child_run" {
+            return Some("plan jail: child_run worktree=true is denied".into());
+        }
         return Some(format!(
             "plan jail: mutating tools may only write `{}`",
             tools::PLAN_JAIL_PATH
@@ -190,7 +193,14 @@ impl<'a> DurableToolBatch<'a> {
         // Parallel path only when every call is parallel-safe (reads/`web_fetch`),
         // no execution-checkpoint tools, and no pre/post_tool or on_park hooks.
         let batch_outcomes: Vec<(usize, ToolCall, Result<ToolOutput, String>)> = if can_parallel {
-            check_bounds(self.engine, &session.run_id, request, started, timeout)?;
+            check_bounds(
+                self.engine,
+                &session.run_id,
+                request,
+                started,
+                timeout,
+                &session.parent_run_id,
+            )?;
             let sem = Arc::new(Semaphore::new(concurrency));
             let mut set = JoinSet::new();
             let turn_number = session.turns;
@@ -205,6 +215,14 @@ impl<'a> DurableToolBatch<'a> {
                 set.spawn(async move {
                     let _permit = sem.acquire().await.expect("semaphore");
                     let stable_call_id = stable_tool_call_id(&call, turn_number, i);
+                    if !tools.is_enabled(&call.name) {
+                        // Same pre-authorize gate as the serial path: a
+                        // read-only explore child must not redeem a
+                        // parent/plane permit for parallel-safe tools
+                        // outside its allow-list (`web_fetch`).
+                        let err = format!("tool not enabled: {}", call.name);
+                        return (i, call, Err(err));
+                    }
                     if let Err(e) = gov
                         .authorize_tool_with_id(
                             &handle,
@@ -242,7 +260,26 @@ impl<'a> DurableToolBatch<'a> {
                 if already_answered(session, call, index) {
                     continue;
                 }
-                check_bounds(self.engine, &session.run_id, request, started, timeout)?;
+                check_bounds(
+                    self.engine,
+                    &session.run_id,
+                    request,
+                    started,
+                    timeout,
+                    &session.parent_run_id,
+                )?;
+                if !tools.is_enabled(&call.name) {
+                    // Deny before authorize so a read-only explore child
+                    // (or a parent with nested off) cannot redeem a
+                    // parent/plane permit for `child_run` / writes.
+                    out.push((
+                        index,
+                        call.clone(),
+                        Err(format!("tool not enabled: {}", call.name)),
+                    ));
+                    continue;
+                }
+                let nested = matches!(call.name.as_str(), "child_run" | "child_status");
                 let stable_call_id = stable_tool_call_id(call, session.turns, index);
                 let conversation_id = conversation_tool_call_id(call, session.turns, index);
                 let ask_granted = session
@@ -256,7 +293,7 @@ impl<'a> DurableToolBatch<'a> {
                 }
                 if request.session_wait
                     && !session.plan_jail
-                    && tools::mutates_workspace(&call.name)
+                    && super::nested::session_ask_park(&call.name, &call.args_json)
                     && self.engine.governance.session_asks_mutating_tools()
                     && !ask_granted
                 {
@@ -478,9 +515,46 @@ impl<'a> DurableToolBatch<'a> {
                 {
                     self.engine.governance.clear_approval_park(handle).await?;
                 }
-                match tools.execute(&call.name, &call.args_json).await {
+                let executed = if nested {
+                    match super::nested::execute_child_tool(
+                        self.engine,
+                        session,
+                        request,
+                        tools.as_ref(),
+                        call,
+                        started,
+                        timeout,
+                    )
+                    .await
+                    {
+                        Ok(output) => Ok(output),
+                        Err(error)
+                            if matches!(error, RunError::Cancelled | RunError::TimedOut(_)) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    match super::supervision::run_until_cancelled(
+                        self.engine,
+                        &session.run_id,
+                        request,
+                        started,
+                        timeout,
+                        &session.parent_run_id,
+                        tools.execute(&call.name, &call.args_json),
+                    )
+                    .await
+                    {
+                        Ok(Ok(output)) => Ok(output),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(error) => return Err(error),
+                    }
+                };
+                match executed {
                     Ok(o) => out.push((index, call.clone(), Ok(o))),
-                    Err(e) => out.push((index, call.clone(), Err(e.to_string()))),
+                    Err(e) => out.push((index, call.clone(), Err(e))),
                 }
             }
             out

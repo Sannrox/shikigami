@@ -480,33 +480,7 @@ fn env_nonempty(name: &str) -> bool {
     std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false)
 }
 
-/// Replace known secret values (from env) with `[REDACTED]` in a text line.
-pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
-    let mut out = line.to_string();
-    let mut secrets = Vec::new();
-    if let Some(name) = &config.governance.token_env
-        && let Ok(v) = std::env::var(name)
-        && !v.is_empty()
-    {
-        if let Some(stripped) = v.strip_prefix("Bearer ") {
-            secrets.push(stripped.to_string());
-        }
-        secrets.push(v);
-    }
-    if let Ok(v) = std::env::var(&config.model.api_key_env)
-        && !v.is_empty()
-    {
-        secrets.push(v);
-    }
-    // Longest first so partial overlaps redact fully.
-    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    for s in secrets {
-        if s.len() >= 8 {
-            out = out.replace(&s, "[REDACTED]");
-        }
-    }
-    out
-}
+pub use crate::config::redact_secrets_in_line;
 
 #[cfg(test)]
 mod tests {
@@ -942,9 +916,35 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_nested_when_selected() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.run.nested = true;
+        config.run.nested_max_depth = 2;
+        config.run.nested_max_children = 3;
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert!(
+            report.lines.iter().any(|line| {
+                line.contains("nested:")
+                    && line.contains("depth<=2")
+                    && line.contains("children<=3")
+            }),
+            "expected nested doctor line: {:?}",
+            report.lines
+        );
+        assert!(
+            report.to_json_value().get("nested").is_none(),
+            "nested must stay in lines, not the JSON schema"
+        );
+    }
+
+    #[test]
     fn example_tomls_have_no_inline_secrets() {
         let examples = [
             include_str!("../examples/local-run.toml"),
+            include_str!("../examples/cliproxy-http.toml"),
             include_str!("../examples/governed-sekai-chisei.toml"),
         ];
         for body in examples {
