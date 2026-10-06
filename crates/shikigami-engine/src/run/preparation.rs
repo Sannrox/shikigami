@@ -299,6 +299,35 @@ pub(super) async fn prepare(
             },
         )?;
         session.revalidate_content().await?;
+        if let Some(prompt) = request.resume_prompt.clone() {
+            session.append_content_user_text(prompt).await?;
+        }
+        if request.resume_ask == Some(super::AskDecision::Deny) {
+            let call_id = resumed_park
+                .as_ref()
+                .map(|park| {
+                    if park.tool_call_id.is_empty() {
+                        park.allow_call_id.clone()
+                    } else {
+                        park.tool_call_id.clone()
+                    }
+                })
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| RunError::Message("ask deny is missing a tool call id".into()))?;
+            session
+                .append_content_tool_text(call_id, "permission denied".into())
+                .await?;
+        }
+        if request.resume_plan == Some(super::PlanDecision::Reject) {
+            let call_id = resumed_park
+                .as_ref()
+                .map(|park| park.tool_call_id.clone())
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| RunError::Message("plan reject is missing a tool call id".into()))?;
+            session
+                .append_content_tool_text(call_id, "plan rejected".into())
+                .await?;
+        }
     }
     let handle = engine
         .governance

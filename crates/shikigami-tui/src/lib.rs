@@ -81,6 +81,7 @@ struct PendingPermission {
 struct QueuedPrompt {
     display: String,
     send: String,
+    parts: Vec<Value>,
 }
 
 struct Shared {
@@ -116,6 +117,8 @@ struct Shared {
     resume_ids: Option<Vec<String>>,
     /// Last OSC 52 clipboard payload written by `/copy` or Ctrl+Y.
     last_osc52: Option<String>,
+    /// Staged ACP prompt parts from `/attach` (bytes stay in the prompt, not the workspace).
+    pending_parts: Vec<Value>,
 }
 
 impl Shared {
@@ -144,6 +147,7 @@ impl Shared {
             slash_selected: 0,
             resume_ids: None,
             last_osc52: None,
+            pending_parts: Vec::new(),
         }
     }
 
@@ -267,9 +271,11 @@ impl Shared {
         if trimmed.is_empty() {
             return;
         }
+        let parts = prompt_parts(trimmed, std::mem::take(&mut self.pending_parts));
         self.queued = Some(QueuedPrompt {
-            display: trimmed.to_string(),
+            display: prompt_display(trimmed, &parts),
             send: trimmed.to_string(),
+            parts,
         });
     }
 
@@ -561,10 +567,15 @@ impl TuiSession {
 
     #[cfg(test)]
     async fn spawn_prompt(&self, text: String) -> Result<(), String> {
-        self.spawn_prompt_with(text.clone(), text).await
+        self.spawn_prompt_with(text.clone(), text, Vec::new()).await
     }
 
-    async fn spawn_prompt_with(&self, display: String, send: String) -> Result<(), String> {
+    async fn spawn_prompt_with(
+        &self,
+        display: String,
+        send: String,
+        parts: Vec<Value>,
+    ) -> Result<(), String> {
         {
             let mut shared = self.lock_shared();
             if shared.busy {
@@ -581,6 +592,11 @@ impl TuiSession {
         let session_id = self.session_id();
         self.host.arm_cancel(&session_id).await;
 
+        let prompt = if parts.is_empty() {
+            json!([{"type": "text", "text": send}])
+        } else {
+            Value::Array(parts)
+        };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({
             "jsonrpc": "2.0",
@@ -588,7 +604,7 @@ impl TuiSession {
             "method": "session/prompt",
             "params": {
                 "sessionId": session_id,
-                "prompt": [{"type": "text", "text": send}]
+                "prompt": prompt
             }
         });
         let host = Arc::clone(&self.host);
@@ -630,7 +646,11 @@ impl TuiSession {
             }
         };
         match queued {
-            Some(QueuedPrompt { display, send }) => self.spawn_prompt_with(display, send).await,
+            Some(QueuedPrompt {
+                display,
+                send,
+                parts,
+            }) => self.spawn_prompt_with(display, send, parts).await,
             None => Ok(()),
         }
     }
@@ -687,6 +707,10 @@ impl TuiSession {
                 hint: "copy last assistant".into(),
             },
             SlashCommand {
+                name: "attach".into(),
+                hint: "add prompt file".into(),
+            },
+            SlashCommand {
                 name: "exit".into(),
                 hint: "quit".into(),
             },
@@ -723,6 +747,47 @@ impl TuiSession {
             .into_iter()
             .filter(|cmd| cmd.name.starts_with(query))
             .collect()
+    }
+
+    fn stage_attach(&self, args: &str) -> KeyResult {
+        let mut shared = self.lock_shared();
+        let path_arg = args.trim();
+        if path_arg.is_empty() {
+            shared
+                .transcript
+                .push(TranscriptLine::System("attach requires a path".into()));
+            shared.status = "error".into();
+            shared.dirty = true;
+            return KeyResult::Continue;
+        }
+        let path = {
+            let candidate = std::path::Path::new(path_arg);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.cwd.join(candidate)
+            }
+        };
+        match acp_part_for_path(&path) {
+            Ok(part) => {
+                let label = part_label(&part).unwrap_or_else(|| "attachment".into());
+                shared.pending_parts.push(part);
+                shared.transcript.push(TranscriptLine::System(format!(
+                    "attached {} ({label})",
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("file")
+                )));
+                shared.status = "ready".into();
+                shared.dirty = true;
+            }
+            Err(err) => {
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
+        }
+        KeyResult::Continue
     }
 
     fn copy_last_assistant(&self) {
@@ -843,6 +908,7 @@ impl TuiSession {
                 self.copy_last_assistant();
                 KeyResult::Continue
             }
+            "attach" => self.stage_attach(args),
             "compact" => KeyResult::Compact,
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
@@ -863,7 +929,13 @@ impl TuiSession {
                         } else {
                             format!("{}\n\n{args}", pack.body)
                         };
-                        KeyResult::Prompt { display, send }
+                        let pending = std::mem::take(&mut self.lock_shared().pending_parts);
+                        let parts = prompt_parts(&send, pending);
+                        KeyResult::Prompt {
+                            display: prompt_display(&display, &parts),
+                            send,
+                            parts,
+                        }
                     }
                     None => {
                         let mut shared = self.lock_shared();
@@ -912,6 +984,7 @@ impl TuiSession {
         shared.show_plan = false;
         shared.permission = None;
         shared.queued = None;
+        shared.pending_parts.clear();
         shared.status = "ready".into();
         shared.scroll_back = 0;
         shared.dock_scroll = 0;
@@ -1124,7 +1197,7 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
-const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /copy  /exit  /quit  /skill:name  /help";
+const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /copy  /attach  /exit  /quit  /skill:name  /help";
 
 /// Static busy marker in the slash-list slot above the composer.
 const RUNNING_MARKER: &str = "running";
@@ -1148,6 +1221,85 @@ fn cap_bytes(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+fn prompt_parts(text: &str, pending: Vec<Value>) -> Vec<Value> {
+    let mut parts = vec![json!({"type": "text", "text": text})];
+    parts.extend(pending);
+    parts
+}
+
+fn prompt_display(text: &str, parts: &[Value]) -> String {
+    let labels: Vec<String> = parts.iter().filter_map(part_label).collect();
+    if labels.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}  {}", labels.join(" "))
+    }
+}
+
+fn part_label(part: &Value) -> Option<String> {
+    match part.get("type").and_then(|value| value.as_str())? {
+        "image" | "audio" => part
+            .get("mimeType")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        "resource" => part
+            .get("resource")
+            .and_then(|resource| resource.get("mimeType"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn acp_part_for_path(path: &std::path::Path) -> Result<Value, String> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|error| format!("attach failed  {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("attach path must be a regular file".into());
+    }
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let (kind, mime) = match ext.as_str() {
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "gif" => ("image", "image/gif"),
+        "webp" => ("image", "image/webp"),
+        "wav" => ("audio", "audio/wav"),
+        "mp3" => ("audio", "audio/mpeg"),
+        "m4a" => ("audio", "audio/mp4"),
+        "ogg" => ("audio", "audio/ogg"),
+        "pdf" => ("resource", "application/pdf"),
+        _ => return Err(format!("unsupported attach type `{ext}`")),
+    };
+    // ADR 0006 part bound; check metadata before allocating the payload.
+    const MAX_ATTACH_BYTES: u64 = 8 * 1024 * 1024;
+    if metadata.len() > MAX_ATTACH_BYTES {
+        return Err("attach exceeds 8MiB".into());
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("attach failed  {error}"))?;
+    if bytes.len() as u64 > MAX_ATTACH_BYTES {
+        return Err("attach exceeds 8MiB".into());
+    }
+    match kind {
+        "resource" => Ok(json!({
+            "type": "resource",
+            "resource": {
+                "uri": path.display().to_string(),
+                "mimeType": mime,
+                "blob": base64_encode(&bytes)
+            }
+        })),
+        _ => Ok(json!({
+            "type": kind,
+            "mimeType": mime,
+            "data": base64_encode(&bytes)
+        })),
+    }
 }
 
 fn base64_encode(input: &[u8]) -> String {
@@ -1848,8 +2000,12 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
         };
         match handle_event(&session, ev) {
             KeyResult::Quit => break,
-            KeyResult::Prompt { display, send } => {
-                if let Err(err) = session.spawn_prompt_with(display, send).await {
+            KeyResult::Prompt {
+                display,
+                send,
+                parts,
+            } => {
+                if let Err(err) = session.spawn_prompt_with(display, send, parts).await {
                     let mut shared = session.lock_shared();
                     shared.transcript.push(TranscriptLine::System(err));
                     shared.status = "error".into();
@@ -1883,7 +2039,11 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
 enum KeyResult {
     Continue,
     Quit,
-    Prompt { display: String, send: String },
+    Prompt {
+        display: String,
+        send: String,
+        parts: Vec<Value>,
+    },
     Compact,
     NewSession,
     LoadSession(String),
@@ -2082,12 +2242,29 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 session.lock_shared().take_input();
                 return result;
             }
-            let text = session.lock_shared().take_input();
+            let (text, pending) = {
+                let mut shared = session.lock_shared();
+                let text = shared.take_input();
+                let pending = std::mem::take(&mut shared.pending_parts);
+                (text, pending)
+            };
             let trimmed = text.trim();
-            if !trimmed.is_empty() {
+            if trimmed.is_empty() {
+                if !pending.is_empty() {
+                    let mut shared = session.lock_shared();
+                    shared.pending_parts = pending;
+                    shared
+                        .transcript
+                        .push(TranscriptLine::System("prompt requires a text part".into()));
+                    shared.status = "error".into();
+                    shared.dirty = true;
+                }
+            } else {
+                let parts = prompt_parts(trimmed, pending);
                 return KeyResult::Prompt {
-                    display: trimmed.to_string(),
+                    display: prompt_display(trimmed, &parts),
                     send: trimmed.to_string(),
+                    parts,
                 };
             }
         }
@@ -3405,7 +3582,7 @@ mod tests {
         assert_eq!(session.lock_shared().input, "hi\n\n");
         type_text(&session, "there");
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            KeyResult::Prompt { display, send } => {
+            KeyResult::Prompt { display, send, .. } => {
                 assert_eq!(display, "hi\n\nthere");
                 assert_eq!(send, "hi\n\nthere");
             }
@@ -3592,7 +3769,7 @@ mod tests {
 
         type_text(&session, "/hello");
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            KeyResult::Prompt { display, send } => {
+            KeyResult::Prompt { display, send, .. } => {
                 assert_eq!(display, "/hello");
                 assert_eq!(send, "/hello");
             }
@@ -3624,6 +3801,7 @@ mod tests {
         assert!(text.contains("/new"), "{text}");
         assert!(text.contains("/resume"), "{text}");
         assert!(text.contains("/copy"), "{text}");
+        assert!(text.contains("/attach"), "{text}");
         assert!(text.contains("/exit"), "{text}");
         assert!(text.contains("/quit"), "{text}");
         assert!(
@@ -3633,6 +3811,101 @@ mod tests {
                 .iter()
                 .any(|line| matches!(line, TranscriptLine::System(_))),
             "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_attach_sends_acp_image_part() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let png = b"\x89PNG UNIQUE-TUI-401-IMAGE";
+        std::fs::write(cwd.join("shot.png"), png).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        assert!(
+            session
+                .slash_catalog()
+                .iter()
+                .any(|cmd| cmd.name == "attach")
+        );
+        type_text(&session, "/attach shot.png");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        let staged = session.lock_shared().pending_parts.clone();
+        assert_eq!(staged.len(), 1, "{staged:?}");
+        assert_eq!(staged[0]["type"], "image");
+        assert_eq!(staged[0]["mimeType"], "image/png");
+        type_text(&session, "inspect");
+        match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            KeyResult::Prompt {
+                display,
+                send,
+                parts,
+            } => {
+                assert_eq!(send, "inspect");
+                assert!(display.contains("image/png"), "{display}");
+                assert!(!display.contains("UNIQUE-TUI-401-IMAGE"), "{display}");
+                assert_eq!(parts[0]["type"], "text");
+                assert_eq!(parts[1]["type"], "image");
+                session
+                    .spawn_prompt_with(display, send, parts)
+                    .await
+                    .unwrap();
+                let stop = session.wait_prompt().await;
+                assert_eq!(
+                    stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+                    Some(&json!("end_turn"))
+                );
+            }
+            other => panic!("expected prompt, got {other:?}"),
+        }
+        let leaked = std::fs::read_dir(&cwd)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                let path = entry.path();
+                path.file_name().and_then(|name| name.to_str()) != Some("shot.png")
+                    && std::fs::read(&path)
+                        .ok()
+                        .is_some_and(|bytes| bytes.windows(png.len()).any(|window| window == png))
+            });
+        assert!(!leaked, "attachment bytes copied into the workspace");
+    }
+
+    #[tokio::test]
+    async fn slash_attach_rejects_oversize_file_before_staging() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let huge = cwd.join("huge.png");
+        std::fs::write(&huge, vec![0u8; 8 * 1024 * 1024 + 1]).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"unused"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        type_text(&session, "/attach huge.png");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        let shared = session.lock_shared();
+        assert!(
+            shared.pending_parts.is_empty(),
+            "{:?}",
+            shared.pending_parts
+        );
+        let system: Vec<&str> = shared
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                TranscriptLine::System(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            system.iter().any(|text| text.contains("8MiB")),
+            "{system:?}"
         );
     }
 
@@ -3841,7 +4114,7 @@ mod tests {
             vec!["skill:demo"]
         );
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            KeyResult::Prompt { display, send } => {
+            KeyResult::Prompt { display, send, .. } => {
                 assert_eq!(display, "/skill:demo");
                 assert!(send.contains("prefer tests first"), "{send}");
             }
@@ -3860,13 +4133,51 @@ mod tests {
         let session = TuiSession::start(host, &cwd).await.unwrap();
         type_text(&session, "/skill:demo extra");
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            KeyResult::Prompt { display, send } => {
+            KeyResult::Prompt { display, send, .. } => {
                 assert_eq!(display, "/skill:demo extra");
                 assert!(send.contains("prefer tests first"), "{send}");
                 assert!(send.contains("extra"), "{send}");
             }
             other => panic!("expected skill prompt, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn slash_skill_includes_staged_attachments() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        let skill_dir = cwd.join(".shikigami/skills/demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "prefer tests first\n").unwrap();
+        let png = b"\x89PNG UNIQUE-TUI-401-SKILL";
+        std::fs::write(cwd.join("shot.png"), png).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        type_text(&session, "/attach shot.png");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        type_text(&session, "/skill:demo");
+        match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            KeyResult::Prompt {
+                display,
+                send,
+                parts,
+            } => {
+                assert!(display.contains("/skill:demo"), "{display}");
+                assert!(display.contains("image/png"), "{display}");
+                assert!(send.contains("prefer tests first"), "{send}");
+                assert_eq!(parts[0]["type"], "text");
+                assert_eq!(parts[1]["type"], "image");
+                assert_eq!(parts[1]["mimeType"], "image/png");
+            }
+            other => panic!("expected skill prompt with attachment, got {other:?}"),
+        }
+        assert!(
+            session.lock_shared().pending_parts.is_empty(),
+            "staged parts must be consumed by /skill:"
+        );
     }
 
     #[tokio::test]
@@ -3880,7 +4191,7 @@ mod tests {
         let session = TuiSession::start(host, &cwd).await.unwrap();
         type_text(&session, "/skill:verify-change");
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            KeyResult::Prompt { display, send } => {
+            KeyResult::Prompt { display, send, .. } => {
                 assert_eq!(display, "/skill:verify-change");
                 assert!(send.contains("run make validate"), "{send}");
             }

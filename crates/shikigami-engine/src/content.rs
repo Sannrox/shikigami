@@ -18,7 +18,7 @@ use tokio::sync::watch;
 
 use crate::checkpoint::{self, Checkpoint};
 use crate::model::{TokenUsage, ToolCall};
-use crate::run::{RunResult, RunTermination};
+use crate::run::{AskDecision, PlanDecision, RunResult, RunTermination};
 
 pub const CONTENT_SCHEMA_VERSION: u32 = 1;
 pub const CONTENT_TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
@@ -312,6 +312,17 @@ pub struct ContentRunRequestV1 {
     pub resume_run_id: Option<String>,
     pub logical_operation_id: Option<String>,
     pub restore_snapshot: Option<String>,
+    /// ACP/TUI session host: no-tool assistant waits; mutating tools ask=park.
+    /// Unattended `run_content` leaves this false.
+    pub session_wait: bool,
+    /// Follow-up user prompt when resuming a `ParkKind::PromptWait` content run.
+    pub resume_prompt: Option<String>,
+    /// Allow or deny a `ParkKind::Ask` mutating tool on resume.
+    pub resume_ask: Option<AskDecision>,
+    /// Accept or reject a `ParkKind::Plan` park on resume.
+    pub resume_plan: Option<PlanDecision>,
+    /// Operator answer when resuming a parked run (from `escalate`).
+    pub resume_answer: Option<String>,
 }
 
 impl ContentRunRequestV1 {
@@ -332,6 +343,11 @@ impl ContentRunRequestV1 {
             resume_run_id: None,
             logical_operation_id: None,
             restore_snapshot: None,
+            session_wait: false,
+            resume_prompt: None,
+            resume_ask: None,
+            resume_plan: None,
+            resume_answer: None,
         }
     }
 }
@@ -431,6 +447,11 @@ impl ContentProcessRequestV1 {
             resume_run_id: self.resume_run_id,
             logical_operation_id: None,
             restore_snapshot: None,
+            session_wait: false,
+            resume_prompt: None,
+            resume_ask: None,
+            resume_plan: None,
+            resume_answer: None,
         })
     }
 }
@@ -970,7 +991,8 @@ pub(crate) fn tool_arguments_pointer(part_id: &str) -> String {
     .expect("tool argument pointer is serializable")
 }
 
-pub(crate) fn tool_arguments_part_id(args_json: &str) -> Option<String> {
+/// Part id stored in content-run `ToolCall.args_json` instead of the JSON arguments.
+pub fn tool_arguments_part_id(args_json: &str) -> Option<String> {
     serde_json::from_str::<ToolArgumentsPointer>(args_json)
         .ok()
         .map(|pointer| pointer.shikigami_content_arguments_part_id)

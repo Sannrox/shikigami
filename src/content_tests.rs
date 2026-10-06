@@ -511,6 +511,165 @@ async fn content_resume_restores_cursor_without_repeating_tool_result() {
 }
 
 #[tokio::test]
+async fn content_session_wait_follow_up_appends_user_text() {
+    let directory = tempdir().unwrap();
+    let state = StateRoot::new(directory.path().join("state"));
+    let resolver = Arc::new(MemoryResolver::new());
+    let messages = mixed_messages(resolver.as_ref());
+    let first = Harness::from_config(
+        local_config(&directory, r#"[{"content":"first"}]"#),
+        state.clone(),
+    )
+    .unwrap();
+    let mut request = ContentRunRequestV1::new("inspect", messages.clone(), resolver.clone());
+    request.keep_workspace = true;
+    request.session_wait = true;
+    let parked = first.run_content(request).await.unwrap();
+    assert_eq!(parked.run.summary, "first");
+    assert_eq!(
+        parked.run.park.as_ref().unwrap().kind,
+        crate::checkpoint::ParkKind::PromptWait
+    );
+
+    let second = Harness::from_config(
+        local_config(
+            &directory,
+            r#"[{"content":"must-not-replay"},{"content":"second"}]"#,
+        ),
+        state,
+    )
+    .unwrap();
+    let mut follow = ContentRunRequestV1::new("inspect", messages, resolver.clone());
+    follow.keep_workspace = true;
+    follow.session_wait = true;
+    follow.resume_run_id = Some(parked.run.run_id.clone());
+    follow.resume_prompt = Some("more".into());
+    let continued = second.run_content(follow).await.unwrap();
+    assert_eq!(continued.run.summary, "second");
+    let last_user = continued
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .expect("follow-up user message");
+    let payload = resolver
+        .resolve(last_user.parts.first().expect("follow-up part"))
+        .await
+        .unwrap();
+    match payload {
+        ResolvedContent::Text(text) => assert_eq!(text, "more"),
+        other => panic!("expected follow-up text, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn content_session_wait_report_follow_up_reaches_the_model() {
+    let directory = tempdir().unwrap();
+    let state = StateRoot::new(directory.path().join("state"));
+    let resolver = Arc::new(MemoryResolver::new());
+    let messages = mixed_messages(resolver.as_ref());
+    let first = Harness::from_config(
+        local_config(
+            &directory,
+            r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#,
+        ),
+        state.clone(),
+    )
+    .unwrap();
+    let mut request = ContentRunRequestV1::new("inspect", messages.clone(), resolver.clone());
+    request.keep_workspace = true;
+    request.session_wait = true;
+    let parked = first.run_content(request).await.unwrap();
+    assert_eq!(
+        parked.run.park.as_ref().unwrap().kind,
+        crate::checkpoint::ParkKind::PromptWait
+    );
+    let checkpoint = Checkpoint::load(&state.runs_dir(), &parked.run.run_id).unwrap();
+    let sidecar = load_sidecar(
+        &state.runs_dir(),
+        &parked.run.run_id,
+        checkpoint.content.as_ref().expect("content binding"),
+    )
+    .unwrap();
+    assert!(
+        sidecar.terminal.is_none(),
+        "session-wait report must not finalize the content sidecar"
+    );
+
+    let second = Harness::from_config(
+        local_config(
+            &directory,
+            r#"[{"content":"must-not-replay"},{"content":"second"}]"#,
+        ),
+        state,
+    )
+    .unwrap();
+    let mut follow = ContentRunRequestV1::new("inspect", messages, resolver.clone());
+    follow.keep_workspace = true;
+    follow.session_wait = true;
+    follow.resume_run_id = Some(parked.run.run_id.clone());
+    follow.resume_prompt = Some("more".into());
+    let continued = second.run_content(follow).await.unwrap();
+    assert_eq!(continued.run.summary, "second");
+}
+
+#[tokio::test]
+async fn content_session_wait_ask_deny_appends_tool_text() {
+    let directory = tempdir().unwrap();
+    let state = StateRoot::new(directory.path().join("state"));
+    let resolver = Arc::new(MemoryResolver::new());
+    let messages = mixed_messages(resolver.as_ref());
+    let first = Harness::from_config(
+        local_config(
+            &directory,
+            r#"[{"tool_calls":[{"id":"write-1","name":"write_file","args_json":"{\"path\":\"x.txt\",\"content\":\"x\"}"}]}]"#,
+        ),
+        state.clone(),
+    )
+    .unwrap();
+    let mut request = ContentRunRequestV1::new("write", messages.clone(), resolver.clone());
+    request.keep_workspace = true;
+    request.session_wait = true;
+    let parked = first.run_content(request).await.unwrap();
+    assert_eq!(
+        parked.run.park.as_ref().unwrap().kind,
+        crate::checkpoint::ParkKind::Ask
+    );
+
+    let second = Harness::from_config(
+        local_config(
+            &directory,
+            r#"[
+                {"tool_calls":[{"id":"write-1","name":"write_file","args_json":"{\"path\":\"x.txt\",\"content\":\"x\"}"}]},
+                {"content":"denied-then-ok"}
+            ]"#,
+        ),
+        state,
+    )
+    .unwrap();
+    let mut deny = ContentRunRequestV1::new("write", messages, resolver.clone());
+    deny.keep_workspace = true;
+    deny.session_wait = true;
+    deny.resume_run_id = Some(parked.run.run_id.clone());
+    deny.resume_ask = Some(crate::run::AskDecision::Deny);
+    let continued = second.run_content(deny).await.unwrap();
+    assert_eq!(continued.run.summary, "denied-then-ok");
+    let denied = continued
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .expect("denied tool result");
+    let payload = resolver
+        .resolve(denied.parts.first().expect("denied part"))
+        .await
+        .unwrap();
+    match payload {
+        ResolvedContent::Text(text) => assert_eq!(text, "permission denied"),
+        other => panic!("expected permission denied text, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn failed_result_storage_leaves_local_effect_in_doubt_on_resume() {
     let directory = tempdir().unwrap();
     let state = StateRoot::new(directory.path().join("state"));

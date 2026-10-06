@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ACP `session/prompt` accepts image, audio, and PDF (`resource`) parts under
+  existing `run_content` bounds. `initialize` advertises
+  `promptCapabilities` only for kinds the selected adapter can read.
+  Unsupported types fail closed. Omit attachments for today's text host.
+  Stdio inbound frames are 32MiB so inline attachments fit after base64;
+  MCP stdio stays 1MiB. TUI `/attach path` sends the same ACP parts, including
+  on `/skill:name`. See [ADR 0017](docs/decisions/0017-acp-attachments.md).
 - ACP `session/new` accepts catalog `mode` (`low` / `medium` / `high` /
   `ultra`). Mapping lives in `[session.modes]`. A later `session/prompt` that
   names a different mode is refused. Omit `mode` for today's spawn. See
