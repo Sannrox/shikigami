@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: `/resume` opens a dim list of persisted sessions for this cwd (short
   session id, newest first). Enter loads via `session/load`; Esc dismisses;
   load failure stays on the current session.
+- TUI: `/copy` (Ctrl+Y while idle) copies the last assistant transcript line
+  to the terminal clipboard via OSC 52.
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
