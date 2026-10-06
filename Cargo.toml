@@ -3,12 +3,14 @@ members = [
     "crates/shikigami-cli",
     "crates/shikigami-tui",
     "crates/shikigami-types",
+    "crates/shikigami-plane-intake",
 ]
 default-members = [
     ".",
     "crates/shikigami-cli",
     "crates/shikigami-tui",
     "crates/shikigami-types",
+    "crates/shikigami-plane-intake",
 ]
 resolver = "2"
 
@@ -36,6 +38,7 @@ model-http = ["dep:reqwest"]
 
 [dependencies]
 shikigami-types = { path = "crates/shikigami-types" }
+shikigami-plane-intake = { path = "crates/shikigami-plane-intake" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

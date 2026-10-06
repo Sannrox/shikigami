@@ -4,7 +4,8 @@
 
 `shikigami` is a Rust 2024 crate for a local-first headless agent harness.
 Source code lives in `src/`: `src/lib.rs` exports the public API,
-`crates/shikigami-cli` is a thin CLI host, `src/harness.rs` wires settings to
+`crates/shikigami-cli` is a thin CLI host, `crates/shikigami-plane-intake`
+owns the plane-claim port, `src/harness.rs` wires settings to
 ports, `src/run/` owns the turn loop (preparation, the durable run transaction,
 resume validation + deep `RunSession` checkpoints), `src/governance/` holds
 governance adapters (`none`, `local`, `http-callback`/`host-authz`,

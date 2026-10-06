@@ -2205,6 +2205,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shikigami-plane-intake",
  "shikigami-types",
  "tempfile",
  "thiserror",
@@ -2228,6 +2229,14 @@ dependencies = [
  "shikigami-tui",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "shikigami-plane-intake"
+version = "1.1.1"
+dependencies = [
+ "async-trait",
+ "thiserror",
 ]
 
 [[package]]
