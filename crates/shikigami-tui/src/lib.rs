@@ -643,6 +643,10 @@ impl TuiSession {
     fn slash_catalog(&self) -> Vec<SlashCommand> {
         let mut out = vec![
             SlashCommand {
+                name: "help".into(),
+                hint: "keys and slash commands".into(),
+            },
+            SlashCommand {
                 name: "compact".into(),
                 hint: "shrink conversation history".into(),
             },
@@ -719,6 +723,14 @@ impl TuiSession {
 
     fn slash_run(&self, name: &str, args: &str) -> KeyResult {
         match name {
+            "help" => {
+                let mut shared = self.lock_shared();
+                shared
+                    .transcript
+                    .push(TranscriptLine::System(HELP_TEXT.into()));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             "compact" => KeyResult::Compact,
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
@@ -949,6 +961,8 @@ fn composer_inner(shared: &Shared) -> String {
 fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
+
+const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /exit  /quit  /skill:name  /help";
 
 fn slash_visible(shared: &Shared) -> bool {
     !shared.busy
@@ -3075,6 +3089,40 @@ mod tests {
             }
             other => panic!("expected prompt, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn slash_help_writes_system_block_and_stays_idle() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        assert!(session.slash_catalog().iter().any(|cmd| cmd.name == "help"));
+        type_text(&session, "/help");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().input.is_empty());
+        assert!(!session.lock_shared().busy);
+        assert!(session.overlay_text().is_none());
+        let text = session.transcript_text();
+        assert!(text.contains("Enter"), "{text}");
+        assert!(text.contains("Shift+Enter"), "{text}");
+        assert!(text.contains("Ctrl-C"), "{text}");
+        assert!(text.contains("/compact"), "{text}");
+        assert!(text.contains("/new"), "{text}");
+        assert!(text.contains("/exit"), "{text}");
+        assert!(text.contains("/quit"), "{text}");
+        assert!(
+            session
+                .lock_shared()
+                .transcript
+                .iter()
+                .any(|line| matches!(line, TranscriptLine::System(_))),
+            "{text}"
+        );
     }
 
     #[tokio::test]
