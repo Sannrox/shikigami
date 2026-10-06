@@ -15,7 +15,7 @@ use tokio::io::{BufReader, stdin, stdout};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::checkpoint::{Checkpoint, ParkedState, is_safe_run_id};
-use crate::events::{ChannelSink, EventSink, HarnessEvent};
+use crate::events::{AsyncChannelRx, AsyncChannelSink, EventSink, HarnessEvent};
 use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
@@ -270,9 +270,8 @@ impl AcpHost {
             let harness = self
                 .harness_for_cwd(&cwd)
                 .map_err(|e| rpc_error(-32603, e))?;
-            let (sink, events) = ChannelSink::pair();
+            let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
-            let events = Arc::new(std::sync::Mutex::new(events));
 
             let mut request = if let Some(run_id) = resume_run_id.clone() {
                 match Checkpoint::load(&harness.state.runs_dir(), &run_id) {
@@ -342,7 +341,7 @@ impl AcpHost {
             request.cancel = Some(cancel_rx);
 
             let stop = self
-                .drive_prompt(&session_id, harness, request, client, sink, events)
+                .drive_prompt(&session_id, harness, request, client, sink, &mut events)
                 .await?;
             Ok(json!({ "stopReason": stop }))
         }
@@ -358,7 +357,7 @@ impl AcpHost {
         mut request: RunRequest,
         client: &dyn AcpClient,
         sink: Arc<dyn EventSink>,
-        events: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HarnessEvent>>>,
+        events: &mut AsyncChannelRx,
     ) -> Result<&'static str, Value> {
         loop {
             if let Some(run_id) = request.resume_run_id.clone() {
@@ -369,7 +368,7 @@ impl AcpHost {
                 &harness,
                 request.clone(),
                 Arc::clone(&sink),
-                &events,
+                events,
                 session_id,
                 client,
             )
@@ -871,7 +870,7 @@ async fn run_and_forward(
     harness: &Harness,
     request: RunRequest,
     sink: Arc<dyn EventSink>,
-    events: &Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HarnessEvent>>>,
+    events: &mut AsyncChannelRx,
     session_id: &str,
     client: &dyn AcpClient,
 ) -> (Result<crate::run::RunResult, HarnessError>, Option<String>) {
@@ -883,33 +882,15 @@ async fn run_and_forward(
     let mut held = Vec::new();
     let run_fut = harness.run_with_events(request, Some(sink));
     tokio::pin!(run_fut);
-    loop {
+    let result = loop {
         tokio::select! {
-            result = &mut run_fut => {
-                let (mut updates, event_run_id) = drain_updates(session_id, events);
-                held.append(&mut updates);
-                if let Some(id) = event_run_id.clone() {
-                    seen_run_id = Some(id.clone());
-                    persist_session_run(host, session_id, &id).await;
-                }
-                let run_id = result
-                    .as_ref()
-                    .ok()
-                    .map(|run| run.run_id.clone())
-                    .or(event_run_id)
-                    .or(seen_run_id);
-                if let Some(run_id) = run_id.as_deref() {
-                    persist_session_run(host, session_id, run_id).await;
-                    fill_assistant_content(&mut held, harness, run_id);
-                }
-                let send = send_updates(client, held).await.map_err(update_error);
-                if let Err(error) = send {
-                    return (Err(error), run_id);
-                }
-                return (result, run_id);
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                let (mut updates, event_run_id) = drain_updates(session_id, events);
+            result = &mut run_fut => break result,
+            event = events.recv() => {
+                let Some(first) = event else {
+                    break (&mut run_fut).await;
+                };
+                let (mut updates, event_run_id) =
+                    drain_event_batch(session_id, Some(first), events);
                 held.append(&mut updates);
                 if let Some(id) = event_run_id.clone() {
                     seen_run_id = Some(id.clone());
@@ -938,7 +919,28 @@ async fn run_and_forward(
                 }
             }
         }
+    };
+    let (mut updates, event_run_id) = drain_updates(session_id, events);
+    held.append(&mut updates);
+    if let Some(id) = event_run_id.clone() {
+        seen_run_id = Some(id.clone());
+        persist_session_run(host, session_id, &id).await;
     }
+    let run_id = result
+        .as_ref()
+        .ok()
+        .map(|run| run.run_id.clone())
+        .or(event_run_id)
+        .or(seen_run_id);
+    if let Some(run_id) = run_id.as_deref() {
+        persist_session_run(host, session_id, run_id).await;
+        fill_assistant_content(&mut held, harness, run_id);
+    }
+    let send = send_updates(client, held).await.map_err(update_error);
+    if let Err(error) = send {
+        return (Err(error), run_id);
+    }
+    (result, run_id)
 }
 
 fn update_error(error: Value) -> HarnessError {
@@ -952,9 +954,12 @@ fn update_error(error: Value) -> HarnessError {
 }
 
 fn fill_assistant_content(updates: &mut [Value], harness: &Harness, run_id: &str) {
-    let Ok(checkpoint) = Checkpoint::load(&harness.state.runs_dir(), run_id) else {
-        return;
-    };
+    apply_assistant_content(updates, || {
+        Checkpoint::load(&harness.state.runs_dir(), run_id)
+    });
+}
+
+fn apply_assistant_content<E>(updates: &mut [Value], load: impl FnOnce() -> Result<Checkpoint, E>) {
     let chunk_count = updates
         .iter()
         .filter(|update| update["update"]["sessionUpdate"] == "agent_message_chunk")
@@ -962,6 +967,9 @@ fn fill_assistant_content(updates: &mut [Value], harness: &Harness, run_id: &str
     if chunk_count == 0 {
         return;
     }
+    let Ok(checkpoint) = load() else {
+        return;
+    };
     let mut assistants: Vec<&str> = checkpoint
         .messages
         .iter()
@@ -1055,72 +1063,88 @@ fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value
     updates
 }
 
-fn drain_updates(
+fn drain_updates(session_id: &str, events: &mut AsyncChannelRx) -> (Vec<Value>, Option<String>) {
+    drain_event_batch(session_id, None, events)
+}
+
+fn drain_event_batch(
     session_id: &str,
-    events: &Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HarnessEvent>>>,
+    first: Option<HarnessEvent>,
+    events: &mut AsyncChannelRx,
 ) -> (Vec<Value>, Option<String>) {
     let mut updates = Vec::new();
     let mut run_id = None;
-    let events = events.lock().unwrap_or_else(|e| e.into_inner());
-    while let Ok(event) = events.try_recv() {
-        match &event {
-            HarnessEvent::ToolStart { run_id: id, .. }
-            | HarnessEvent::ToolEnd { run_id: id, .. }
-            | HarnessEvent::RunFinished { run_id: id, .. }
-                if !id.is_empty() =>
-            {
-                run_id = Some(id.clone());
-            }
-            _ => {}
-        }
-        let update = match event {
-            HarnessEvent::ModelTurn {
-                turn,
-                content_preview,
-            } => json!({
-                "sessionId": session_id,
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": { "type": "text", "text": content_preview },
-                    "messageId": format!("turn-{turn}")
-                }
-            }),
-            HarnessEvent::ToolStart {
-                name,
-                call_id,
-                args_json,
-                ..
-            } => json!({
-                "sessionId": session_id,
-                "update": {
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": call_id,
-                    "title": name,
-                    "kind": "other",
-                    "status": "pending",
-                    "rawInput": json_raw_input(Some(&args_json))
-                }
-            }),
-            HarnessEvent::ToolEnd {
-                name: _,
-                ok,
-                detail,
-                call_id,
-                ..
-            } => json!({
-                "sessionId": session_id,
-                "update": {
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": call_id,
-                    "status": if ok { "completed" } else { "failed" },
-                    "content": [{ "type": "content", "content": { "type": "text", "text": detail } }]
-                }
-            }),
-            _ => continue,
-        };
-        updates.push(update);
+    if let Some(event) = first {
+        consume_event(session_id, event, &mut updates, &mut run_id);
+    }
+    while let Some(event) = events.try_recv() {
+        consume_event(session_id, event, &mut updates, &mut run_id);
     }
     (updates, run_id)
+}
+
+fn consume_event(
+    session_id: &str,
+    event: HarnessEvent,
+    updates: &mut Vec<Value>,
+    run_id: &mut Option<String>,
+) {
+    match &event {
+        HarnessEvent::ToolStart { run_id: id, .. }
+        | HarnessEvent::ToolEnd { run_id: id, .. }
+        | HarnessEvent::RunFinished { run_id: id, .. }
+            if !id.is_empty() =>
+        {
+            *run_id = Some(id.clone());
+        }
+        _ => {}
+    }
+    let update = match event {
+        HarnessEvent::ModelTurn {
+            turn,
+            content_preview,
+        } => json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": content_preview },
+                "messageId": format!("turn-{turn}")
+            }
+        }),
+        HarnessEvent::ToolStart {
+            name,
+            call_id,
+            args_json,
+            ..
+        } => json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": call_id,
+                "title": name,
+                "kind": "other",
+                "status": "pending",
+                "rawInput": json_raw_input(Some(&args_json))
+            }
+        }),
+        HarnessEvent::ToolEnd {
+            name: _,
+            ok,
+            detail,
+            call_id,
+            ..
+        } => json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call_id,
+                "status": if ok { "completed" } else { "failed" },
+                "content": [{ "type": "content", "content": { "type": "text", "text": detail } }]
+            }
+        }),
+        _ => return,
+    };
+    updates.push(update);
 }
 
 async fn send_updates(client: &dyn AcpClient, updates: Vec<Value>) -> Result<(), Value> {
@@ -2669,5 +2693,155 @@ mod tests {
             Some(r#"{"path":"a.txt","content":"a"}"#)
         );
         assert_eq!(info.display_call_id.as_deref(), Some("tool-1-0-call-a"));
+    }
+
+    #[test]
+    fn run_and_forward_does_not_poll_on_a_timer() {
+        let src = include_str!("acp.rs");
+        let start = src
+            .find("async fn run_and_forward(")
+            .expect("run_and_forward");
+        let body = src[start..]
+            .split("\nfn ")
+            .next()
+            .expect("run_and_forward body");
+        assert!(
+            !body.contains("from_millis(20)"),
+            "run_and_forward must wait on events, not a 20ms poll"
+        );
+        assert!(
+            !body.contains("time::sleep"),
+            "run_and_forward must not sleep-poll idle gaps"
+        );
+    }
+
+    #[test]
+    fn fill_assistant_content_skips_checkpoint_when_batch_has_no_chunks() {
+        apply_assistant_content(&mut [], || -> Result<Checkpoint, ()> {
+            panic!("empty batch must not load a checkpoint");
+        });
+        let mut tool_only = vec![json!({
+            "sessionId": "sess",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-1-0",
+                "title": "bash",
+                "kind": "other",
+                "status": "pending"
+            }
+        })];
+        apply_assistant_content(&mut tool_only, || -> Result<Checkpoint, ()> {
+            panic!("tool-only batch must not load a checkpoint");
+        });
+        assert_eq!(tool_only[0]["update"]["sessionUpdate"], "tool_call");
+
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let runs = host.harness.state.runs_dir();
+        let mut checkpoint = parked_ask_checkpoint(&runs, "run-1");
+        checkpoint.messages[1].content = "from-disk".into();
+        checkpoint.messages[1].tool_calls.clear();
+        std::fs::create_dir_all(&checkpoint.workspace).unwrap();
+        checkpoint.save(&runs).unwrap();
+
+        let mut empty: [Value; 0] = [];
+        fill_assistant_content(&mut empty, &host.harness, "run-1");
+
+        let mut chunk = vec![json!({
+            "sessionId": "sess",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "preview" },
+                "messageId": "turn-1"
+            }
+        })];
+        fill_assistant_content(&mut chunk, &host.harness, "run-1");
+        assert_eq!(chunk[0]["update"]["content"]["text"], "from-disk");
+    }
+
+    #[test]
+    fn burst_tool_events_then_model_chunk_stay_ordered_and_bounded() {
+        let (sink, mut rx) = AsyncChannelSink::bounded(8);
+        sink.emit(HarnessEvent::ToolStart {
+            name: "write_file".into(),
+            args_json: r#"{"path":"a.txt"}"#.into(),
+            run_id: "run-1".into(),
+            turn: 1,
+            call_id: "tool-1-0".into(),
+        });
+        sink.emit(HarnessEvent::ToolEnd {
+            name: "write_file".into(),
+            ok: true,
+            detail: "wrote a".into(),
+            run_id: "run-1".into(),
+            turn: 1,
+            call_id: "tool-1-0".into(),
+        });
+        sink.emit(HarnessEvent::ToolStart {
+            name: "write_file".into(),
+            args_json: r#"{"path":"b.txt"}"#.into(),
+            run_id: "run-1".into(),
+            turn: 1,
+            call_id: "tool-1-1".into(),
+        });
+        sink.emit(HarnessEvent::ToolEnd {
+            name: "write_file".into(),
+            ok: true,
+            detail: "wrote b".into(),
+            run_id: "run-1".into(),
+            turn: 1,
+            call_id: "tool-1-1".into(),
+        });
+        sink.emit(HarnessEvent::ModelTurn {
+            turn: 2,
+            content_preview: "done".into(),
+        });
+        let (updates, run_id) = drain_updates("sess", &mut rx);
+        assert_eq!(run_id.as_deref(), Some("run-1"));
+        let kinds: Vec<&str> = updates
+            .iter()
+            .map(|update| update["update"]["sessionUpdate"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "tool_call",
+                "tool_call_update",
+                "tool_call",
+                "tool_call_update",
+                "agent_message_chunk"
+            ]
+        );
+        assert_eq!(updates[0]["update"]["toolCallId"], "tool-1-0");
+        assert_eq!(updates[2]["update"]["toolCallId"], "tool-1-1");
+        assert_eq!(updates[4]["update"]["content"]["text"], "done");
+
+        let capacity = 4;
+        let (sink, mut rx) = AsyncChannelSink::bounded(capacity);
+        for turn in 0..20u32 {
+            sink.emit(HarnessEvent::ModelTurn {
+                turn,
+                content_preview: format!("t{turn}"),
+            });
+        }
+        let (overflowed, _) = drain_updates("sess", &mut rx);
+        assert!(
+            overflowed.len() <= capacity,
+            "forwarder channel grew to {}",
+            overflowed.len()
+        );
+        assert!(
+            overflowed
+                .iter()
+                .all(|update| update["update"]["sessionUpdate"] == "agent_message_chunk"),
+            "{overflowed:?}"
+        );
+        assert_eq!(
+            overflowed
+                .last()
+                .and_then(|u| u["update"]["content"]["text"].as_str()),
+            Some("t19"),
+            "{overflowed:?}"
+        );
     }
 }
