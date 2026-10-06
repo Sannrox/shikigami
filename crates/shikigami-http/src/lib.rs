@@ -1,5 +1,7 @@
 //! OpenAI-compatible HTTP model adapter.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use shikigami_engine::config::Config;
@@ -10,7 +12,8 @@ use shikigami_engine::tools::ToolDef;
 
 /// OpenAI-compatible chat-completions adapter for ungoverned runs.
 pub struct HttpModel {
-    client: reqwest::Client,
+    client: Arc<reqwest::Client>,
+    adapter: String,
     base_url: String,
     model: String,
     api_key: String,
@@ -19,6 +22,10 @@ pub struct HttpModel {
 
 impl HttpModel {
     pub fn from_config(config: &Config) -> Result<Self, ModelError> {
+        Self::from_config_reusing(config, None)
+    }
+
+    fn from_config_reusing(config: &Config, parent: Option<&Self>) -> Result<Self, ModelError> {
         let base_url = config
             .model
             .base_url
@@ -31,14 +38,27 @@ impl HttpModel {
         let api_key = std::env::var(&config.model.api_key_env).map_err(|_| {
             ModelError::Message(format!("missing API key env {}", config.model.api_key_env))
         })?;
+        let adapter = config.model.adapter.clone();
         let model = effective_model_name(config);
+        let client = match parent {
+            Some(parent)
+                if parent.adapter == adapter
+                    && parent.base_url == base_url
+                    && parent.model == model
+                    && parent.api_key == api_key =>
+            {
+                Arc::clone(&parent.client)
+            }
+            _ => Arc::new(reqwest::Client::new()),
+        };
         let mut digest_payload = format!("http\n{base_url}\n{model}").into_bytes();
         if let Some(path) = config.model.fallback.artifact_path.as_ref() {
             digest_payload.push(0xff);
             digest_payload.extend(std::fs::read(path)?);
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client,
+            adapter,
             base_url,
             // `auto` is the governed routing default. Preserve a useful
             // direct HTTP default when users switch adapters without adding a
@@ -65,7 +85,7 @@ impl ModelPort for HttpModel {
     }
 
     fn fresh_for_child(&self, config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
-        Ok(Box::new(Self::from_config(config)?))
+        Ok(Box::new(Self::from_config_reusing(config, Some(self))?))
     }
 
     async fn next_turn(
@@ -203,5 +223,109 @@ impl ModelPort for HttpModel {
             tool_calls,
             usage,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shikigami_engine::config::Config;
+
+    fn http_config(key_env: &str, key: &str) -> Config {
+        // SAFETY: unique env name per test; this process does not unset it.
+        unsafe {
+            std::env::set_var(key_env, key);
+        }
+        let mut config = Config::default();
+        config.model.adapter = "http".into();
+        config.model.api_key_env = key_env.into();
+        config.model.base_url = Some("https://api.openai.com/v1".into());
+        config
+    }
+
+    #[test]
+    fn fresh_for_child_reuses_http_client_when_credentials_match() {
+        let config = http_config("SHIKIGAMI_HTTP_TEST_KEY_SHARE", "share-key");
+        let parent = HttpModel::from_config(&config).unwrap();
+        let child = HttpModel::from_config_reusing(&config, Some(&parent)).unwrap();
+        assert!(
+            Arc::ptr_eq(&parent.client, &child.client),
+            "matching adapter/url/key/model must clone the parent HTTP client"
+        );
+        let boxed = parent.fresh_for_child(&config).unwrap();
+        assert_eq!(boxed.id(), "http");
+        assert_eq!(boxed.content_digest(), parent.content_digest);
+    }
+
+    #[test]
+    fn fresh_for_child_rebuilds_http_client_when_endpoint_changes() {
+        let config = http_config("SHIKIGAMI_HTTP_TEST_KEY_URL", "url-key");
+        let parent = HttpModel::from_config(&config).unwrap();
+        let mut other = config.clone();
+        other.model.base_url = Some("https://example.invalid/v1".into());
+        let child = HttpModel::from_config_reusing(&other, Some(&parent)).unwrap();
+        assert!(
+            !Arc::ptr_eq(&parent.client, &child.client),
+            "a different base_url must construct a new HTTP client"
+        );
+    }
+
+    #[test]
+    fn fresh_for_child_rebuilds_http_client_when_model_changes() {
+        let config = http_config("SHIKIGAMI_HTTP_TEST_KEY_MODEL", "model-key");
+        let parent = HttpModel::from_config(&config).unwrap();
+        let mut other = config.clone();
+        other.model.model = "gpt-4.1".into();
+        let child = HttpModel::from_config_reusing(&other, Some(&parent)).unwrap();
+        assert!(!Arc::ptr_eq(&parent.client, &child.client));
+    }
+
+    #[test]
+    fn fresh_for_child_rebuilds_http_client_when_api_key_changes() {
+        let env = "SHIKIGAMI_HTTP_TEST_KEY_CRED";
+        let config = http_config(env, "first-key");
+        let parent = HttpModel::from_config(&config).unwrap();
+        // SAFETY: this test owns `env` and immediately rebuilds from it.
+        unsafe {
+            std::env::set_var(env, "second-key");
+        }
+        let child = HttpModel::from_config_reusing(&config, Some(&parent)).unwrap();
+        assert!(!Arc::ptr_eq(&parent.client, &child.client));
+    }
+
+    #[test]
+    fn fresh_for_child_rebuilds_http_client_when_adapter_changes() {
+        let config = http_config("SHIKIGAMI_HTTP_TEST_KEY_ADAPTER", "adapter-key");
+        let parent = HttpModel::from_config(&config).unwrap();
+        let mut other = config.clone();
+        other.model.adapter = "plane".into();
+        other.model.fallback.enabled = true;
+        other.model.fallback.adapter = Some("http".into());
+        let child = HttpModel::from_config_reusing(&other, Some(&parent)).unwrap();
+        assert!(!Arc::ptr_eq(&parent.client, &child.client));
+    }
+
+    #[test]
+    fn nested_profile_overlay_still_reuses_http_client() {
+        let mut config = http_config("SHIKIGAMI_HTTP_TEST_KEY_NESTED", "nested-key");
+        config
+            .tools
+            .mcp_servers
+            .push(shikigami_engine::config::McpServerSettings::stdio(
+                "demo",
+                "mock",
+                Vec::new(),
+            ));
+        let parent = HttpModel::from_config(&config).unwrap();
+        config.tools.mode = shikigami_engine::config::PermissionMode::Read;
+        config.tools.enabled.clear();
+        config.tools.mcp_servers.clear();
+        config.run.nested = false;
+        config.events.adapter = "none".into();
+        let child = HttpModel::from_config_reusing(&config, Some(&parent)).unwrap();
+        assert!(
+            Arc::ptr_eq(&parent.client, &child.client),
+            "explore/plan overlays must not allocate a new HTTP client"
+        );
     }
 }

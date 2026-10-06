@@ -177,7 +177,8 @@ pub trait ModelPort: Send + Sync {
     /// Independent adapter for a nested child run.
     ///
     /// Scripted adapters start a new cursor so parent and child do not share
-    /// replay position. Stateless adapters may clone themselves.
+    /// replay position. HTTP adapters reuse the parent client when
+    /// adapter/url/key/model match. Stateless adapters may clone themselves.
     fn fresh_for_child(&self, config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
         let _ = config;
         Err(ModelError::Message(format!(
@@ -470,6 +471,25 @@ mod cost_tests {
         let child = parent.fresh_for_child(&config).unwrap();
         assert_eq!(child.id(), "scripted");
         assert_eq!(child.content_digest(), parent.content_digest());
+    }
+
+    #[tokio::test]
+    async fn fresh_for_child_does_not_share_script_cursor() {
+        let mut config = Config::default();
+        config.model.script_json = Some(r#"[{"content":"one"},{"content":"two"}]"#.into());
+        let parent = ScriptedModel::from_config(&config).unwrap();
+        let first = parent.next_turn("", &[], &[]).await.unwrap();
+        assert_eq!(first.content, "one");
+        let child = parent.fresh_for_child(&config).unwrap();
+        let child_first = child.next_turn("", &[], &[]).await.unwrap();
+        assert_eq!(
+            child_first.content, "one",
+            "child must start at the first scripted turn"
+        );
+        let parent_second = parent.next_turn("", &[], &[]).await.unwrap();
+        assert_eq!(parent_second.content, "two");
+        let child_second = child.next_turn("", &[], &[]).await.unwrap();
+        assert_eq!(child_second.content, "two");
     }
 
     #[test]
