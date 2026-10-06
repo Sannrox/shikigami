@@ -141,6 +141,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/run/` | Thin `Engine` interface over deep run admission and supervision (including cancel/timeout bounds), host-local Run preparation, the Run artifact lifecycle, the durable run transaction, durable model turns (including compaction), durable tool batches (including call identity), resume validation, and `RunSession` checkpoints |
 | `src/replay.rs` | Versioned replay manifest/evidence admission, canonical bindings, observation-only authority, ordered comparison, and read-only export from retained artifacts |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |
+| `crates/shikigami-plane-intake` | `PlaneIntakePort` and claim values shared by the sekai adapter and plane serve |
 | `src/plane_intake.rs`, `src/plane_intake/` | Claimed-work mapping plus thin `run_plane_serve` over private deep plane serve loop and claimed-run transaction (including one lease-safe fenced RPC retry protocol) |
 | `src/fallback.rs` | Fail-closed local-model fallback admission: typed grant, fence, selection, evidence identity, and reconciliation (not a new port) |
 | `src/evidence_queue.rs` | Bounded durable spool for signed delayed evidence: identities, conflict, retention, and redacted observability |
@@ -176,7 +177,8 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `model-http` | on | OpenAI-compatible HTTP model |
 
 Workspace members: `shikigami` (library), `shikigami-cli` (binary),
-`shikigami-tui` (interactive host), `shikigami-types` (identity/digest/atomic).
+`shikigami-tui` (interactive host), `shikigami-types` (identity/digest/atomic),
+`shikigami-plane-intake` (claim port and values).
 CLI and TUI features forward onto the library. `cargo run --bin shikigami`
 and `cargo test --workspace` stay the contributor commands.
 
