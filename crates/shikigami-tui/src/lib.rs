@@ -112,6 +112,8 @@ struct Shared {
     /// Esc hid the `/` list; cleared once the draft no longer starts with `/`.
     slash_dismissed: bool,
     slash_selected: usize,
+    /// Full session ids for the `/resume` picker, newest first.
+    resume_ids: Option<Vec<String>>,
 }
 
 impl Shared {
@@ -138,6 +140,7 @@ impl Shared {
             dirty: true,
             slash_dismissed: false,
             slash_selected: 0,
+            resume_ids: None,
         }
     }
 
@@ -429,6 +432,15 @@ struct SlashCommand {
     hint: String,
 }
 
+struct SessionBackup {
+    transcript: Vec<TranscriptLine>,
+    plan: Option<Plan>,
+    show_plan: bool,
+    queued: Option<QueuedPrompt>,
+    scroll_back: u16,
+    dock_scroll: u16,
+}
+
 struct TuiSession {
     host: Arc<AcpHost>,
     client: TuiClient,
@@ -662,6 +674,10 @@ impl TuiSession {
                 name: "new".into(),
                 hint: "start a new session".into(),
             },
+            SlashCommand {
+                name: "resume".into(),
+                hint: "load a persisted session".into(),
+            },
         ];
         for id in shikigami::context::list_skill_ids(&self.cwd, self.host.context_settings()) {
             out.push(SlashCommand {
@@ -683,6 +699,36 @@ impl TuiSession {
             .into_iter()
             .filter(|cmd| cmd.name.starts_with(query))
             .collect()
+    }
+
+    fn overlay_cmds(&self) -> Vec<SlashCommand> {
+        let ids = self.lock_shared().resume_ids.clone();
+        if let Some(ids) = ids {
+            return ids
+                .iter()
+                .map(|id| SlashCommand {
+                    name: short_session_id(id).to_string(),
+                    hint: String::new(),
+                })
+                .collect();
+        }
+        self.slash_matches()
+    }
+
+    fn open_resume_picker(&self) -> KeyResult {
+        let ids = self.host.session_ids_for_cwd(&self.cwd);
+        let mut shared = self.lock_shared();
+        if ids.is_empty() {
+            shared
+                .transcript
+                .push(TranscriptLine::System("no sessions".into()));
+            shared.resume_ids = None;
+        } else {
+            shared.resume_ids = Some(ids);
+            shared.slash_selected = 0;
+        }
+        shared.dirty = true;
+        KeyResult::Continue
     }
 
     fn slash_enter(&self, input: &str) -> Option<KeyResult> {
@@ -734,6 +780,7 @@ impl TuiSession {
             "compact" => KeyResult::Compact,
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
+            "resume" => self.open_resume_picker(),
             other => {
                 let Some(id) = other.strip_prefix("skill:") else {
                     return KeyResult::Continue;
@@ -804,6 +851,50 @@ impl TuiSession {
         shared.dock_scroll = 0;
         shared.dirty = true;
         Ok(())
+    }
+
+    async fn load_session(&self, session_id: &str) {
+        let backup = {
+            let mut shared = self.lock_shared();
+            let backup = SessionBackup {
+                transcript: std::mem::take(&mut shared.transcript),
+                plan: shared.plan.take(),
+                show_plan: shared.show_plan,
+                queued: shared.queued.take(),
+                scroll_back: shared.scroll_back,
+                dock_scroll: shared.dock_scroll,
+            };
+            shared.show_plan = false;
+            shared.scroll_back = 0;
+            shared.dock_scroll = 0;
+            shared.resume_ids = None;
+            shared.slash_selected = 0;
+            shared.dirty = true;
+            backup
+        };
+        match self
+            .call("session/load", json!({ "sessionId": session_id }))
+            .await
+        {
+            Ok(_) => {
+                *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
+                let mut shared = self.lock_shared();
+                shared.status = "ready".into();
+                shared.dirty = true;
+            }
+            Err(err) => {
+                let mut shared = self.lock_shared();
+                shared.transcript = backup.transcript;
+                shared.plan = backup.plan;
+                shared.show_plan = backup.show_plan;
+                shared.queued = backup.queued;
+                shared.scroll_back = backup.scroll_back;
+                shared.dock_scroll = backup.dock_scroll;
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -962,10 +1053,11 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
-const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /exit  /quit  /skill:name  /help";
+const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /exit  /quit  /skill:name  /help";
 
 fn slash_visible(shared: &Shared) -> bool {
-    !shared.busy
+    shared.resume_ids.is_none()
+        && !shared.busy
         && shared.permission.is_none()
         && !shared.show_plan
         && !shared.slash_dismissed
@@ -985,7 +1077,11 @@ fn slash_name_args(input: &str) -> (&str, &str) {
 }
 
 fn slash_row_text(cmd: &SlashCommand, name_w: usize) -> String {
-    format!("  {:<name_w$}  {}", cmd.name, cmd.hint)
+    if cmd.hint.is_empty() {
+        format!("  {}", cmd.name)
+    } else {
+        format!("  {:<name_w$}  {}", cmd.name, cmd.hint)
+    }
 }
 
 /// First visible catalog index and row count so selection can move past the cap.
@@ -1016,6 +1112,9 @@ fn status_line(session_id: &str, shared: &Shared, width: u16) -> String {
         parts.push("esc cancel".into());
     } else if shared.busy {
         parts.push("^c cancel".into());
+    } else if shared.resume_ids.is_some() {
+        parts.push("esc".into());
+        parts.push("^c quit".into());
     } else if slash_visible(shared) {
         parts.push("tab pick".into());
         parts.push("esc".into());
@@ -1626,6 +1725,7 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
                     shared.dirty = true;
                 }
             }
+            KeyResult::LoadSession(id) => session.load_session(&id).await,
             KeyResult::Continue => {}
         }
     }
@@ -1639,6 +1739,7 @@ enum KeyResult {
     Prompt { display: String, send: String },
     Compact,
     NewSession,
+    LoadSession(String),
 }
 
 fn handle_event(session: &TuiSession, ev: Event) -> KeyResult {
@@ -1724,7 +1825,11 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         return KeyResult::Continue;
     }
 
-    let slash_open = slash_visible(&session.lock_shared());
+    let (slash_open, resume_open) = {
+        let shared = session.lock_shared();
+        (slash_visible(&shared), shared.resume_ids.is_some())
+    };
+    let list_open = slash_open || resume_open;
     match key.code {
         KeyCode::PageUp => session.lock_shared().page_up(),
         KeyCode::PageDown => session.lock_shared().page_down(),
@@ -1732,15 +1837,15 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         KeyCode::Right => session.lock_shared().move_cursor(1),
         KeyCode::Home => session.lock_shared().set_cursor_start(),
         KeyCode::End => session.lock_shared().set_cursor_end(),
-        KeyCode::Up if slash_open => {
+        KeyCode::Up if list_open => {
             let mut shared = session.lock_shared();
             if shared.slash_selected > 0 {
                 shared.slash_selected -= 1;
                 shared.dirty = true;
             }
         }
-        KeyCode::Down if slash_open => {
-            let n = session.slash_matches().len();
+        KeyCode::Down if list_open => {
+            let n = session.overlay_cmds().len();
             let mut shared = session.lock_shared();
             if n > 0 && shared.slash_selected + 1 < n {
                 shared.slash_selected += 1;
@@ -1790,6 +1895,15 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                     shared.queue_follow_up();
                     return KeyResult::Continue;
                 }
+                if let Some(ids) = shared.resume_ids.take() {
+                    let idx = shared.slash_selected.min(ids.len().saturating_sub(1));
+                    shared.slash_selected = 0;
+                    shared.dirty = true;
+                    if let Some(id) = ids.get(idx).cloned() {
+                        return KeyResult::LoadSession(id);
+                    }
+                    return KeyResult::Continue;
+                }
             }
             let text = session.lock_shared().input.clone();
             if let Some(result) = session.slash_enter(&text) {
@@ -1807,7 +1921,10 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         }
         KeyCode::Esc => {
             let mut shared = session.lock_shared();
-            if slash_visible(&shared) {
+            if shared.resume_ids.take().is_some() {
+                shared.slash_selected = 0;
+                shared.dirty = true;
+            } else if slash_visible(&shared) {
                 shared.slash_dismissed = true;
                 shared.dirty = true;
             } else if shared.show_plan {
@@ -1846,18 +1963,9 @@ fn styled_lines(line: &TranscriptLine) -> Vec<Line<'static>> {
 
 fn draw(frame: &mut Frame, session: &TuiSession) {
     let (slash_cmds, slash_selected) = {
-        let shared = session.lock_shared();
-        if slash_visible(&shared) {
-            let query = slash_query(&shared.input);
-            let cmds: Vec<SlashCommand> = session
-                .slash_catalog()
-                .into_iter()
-                .filter(|cmd| cmd.name.starts_with(query))
-                .collect();
-            (cmds, shared.slash_selected)
-        } else {
-            (Vec::new(), 0)
-        }
+        let cmds = session.overlay_cmds();
+        let selected = session.lock_shared().slash_selected;
+        (cmds, selected)
     };
     let mut shared = session.lock_shared();
     let area = frame.area();
@@ -2057,6 +2165,8 @@ fn scroll_offset(body: &str, area: Rect) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, SystemTime};
+
     use shikigami::config::Config;
     use shikigami::state::StateRoot;
     use tempfile::tempdir;
@@ -3113,6 +3223,7 @@ mod tests {
         assert!(text.contains("Ctrl-C"), "{text}");
         assert!(text.contains("/compact"), "{text}");
         assert!(text.contains("/new"), "{text}");
+        assert!(text.contains("/resume"), "{text}");
         assert!(text.contains("/exit"), "{text}");
         assert!(text.contains("/quit"), "{text}");
         assert!(
@@ -3241,5 +3352,190 @@ mod tests {
         session.new_session().await.unwrap();
         assert_ne!(session.session_id(), before);
         assert!(session.transcript_text().is_empty());
+    }
+
+    fn write_session_file(
+        root: &Path,
+        session_id: &str,
+        cwd: &Path,
+        run_id: Option<&str>,
+        mtime: SystemTime,
+    ) {
+        let dir = root.join("state/acp-sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session_id}.json"));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "session_id": session_id,
+                "cwd": cwd.display().to_string(),
+                "run_id": run_id
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    fn touch_session(root: &Path, session_id: &str, mtime: SystemTime) {
+        let path = root
+            .join("state/acp-sessions")
+            .join(format!("{session_id}.json"));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    fn open_resume(session: &TuiSession) {
+        type_text(session, "/resume");
+        assert!(
+            session
+                .slash_catalog()
+                .iter()
+                .any(|cmd| cmd.name == "resume")
+        );
+        assert!(matches!(
+            handle_key(session, enter_key()),
+            KeyResult::Continue
+        ));
+    }
+
+    async fn two_cwd_sessions(dir: &tempfile::TempDir) -> (TuiSession, String, String) {
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = Arc::new(scripted_host(
+            dir.path(),
+            r#"[{"content":"hello"},{"content":"again"}]"#,
+        ));
+        let session = TuiSession::start(host, &cwd).await.unwrap();
+        session.spawn_prompt("hi".into()).await.unwrap();
+        let _ = session.wait_prompt().await;
+        let older = session.session_id();
+        session.new_session().await.unwrap();
+        let newer = session.session_id();
+        let now = SystemTime::now();
+        touch_session(dir.path(), &older, now - Duration::from_secs(60));
+        touch_session(dir.path(), &newer, now);
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        write_session_file(
+            dir.path(),
+            &format!("sess-{}", uuid::Uuid::new_v4()),
+            &other,
+            None,
+            now + Duration::from_secs(60),
+        );
+        (session, older, newer)
+    }
+
+    #[tokio::test]
+    async fn resume_lists_persisted_sessions_for_cwd() {
+        let dir = tempdir().unwrap();
+        let (session, older, newer) = two_cwd_sessions(&dir).await;
+        open_resume(&session);
+        let ids = session
+            .lock_shared()
+            .resume_ids
+            .clone()
+            .expect("resume picker");
+        assert_eq!(ids, vec![newer.clone(), older.clone()]);
+        let names: Vec<String> = session
+            .overlay_cmds()
+            .into_iter()
+            .map(|cmd| cmd.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                short_session_id(&newer).to_string(),
+                short_session_id(&older).to_string()
+            ]
+        );
+        let drawn = drawn_text(&session);
+        assert!(drawn.contains(short_session_id(&newer)), "{drawn}");
+        assert!(drawn.contains(short_session_id(&older)), "{drawn}");
+        assert!(!drawn.contains("acp-sessions"), "{drawn}");
+        assert!(
+            !drawn.contains(&session.cwd.display().to_string()),
+            "{drawn}"
+        );
+        assert!(names.iter().all(|name| name.len() <= 8));
+    }
+
+    #[tokio::test]
+    async fn resume_enter_loads_older_session() {
+        let dir = tempdir().unwrap();
+        let (session, older, newer) = two_cwd_sessions(&dir).await;
+        assert_eq!(session.session_id(), newer);
+        assert!(session.transcript_text().is_empty());
+        open_resume(&session);
+        handle_key(&session, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        match handle_key(&session, enter_key()) {
+            KeyResult::LoadSession(id) => {
+                assert_eq!(id, older);
+                session.load_session(&id).await;
+            }
+            other => panic!("expected load, got {other:?}"),
+        }
+        assert_eq!(session.session_id(), older);
+        assert!(session.lock_shared().resume_ids.is_none());
+        assert!(
+            session.transcript_text().contains("hello"),
+            "{}",
+            session.transcript_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_esc_keeps_current_session() {
+        let dir = tempdir().unwrap();
+        let (session, _, newer) = two_cwd_sessions(&dir).await;
+        open_resume(&session);
+        assert!(session.lock_shared().resume_ids.is_some());
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().resume_ids.is_none());
+        assert_eq!(session.session_id(), newer);
+        assert!(session.transcript_text().is_empty());
+        assert!(session.overlay_cmds().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_unknown_id_stays_on_current_session() {
+        let dir = tempdir().unwrap();
+        let (session, _, newer) = two_cwd_sessions(&dir).await;
+        session
+            .lock_shared()
+            .transcript
+            .push(TranscriptLine::System("keep-me".into()));
+        session.load_session("sess-missing").await;
+        assert_eq!(session.session_id(), newer);
+        let text = session.transcript_text();
+        assert!(text.contains("keep-me"), "{text}");
+        assert!(text.contains("unknown session"), "{text}");
+        assert!(session.lock_shared().resume_ids.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_empty_list_is_a_system_line() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        std::fs::remove_dir_all(dir.path().join("state/acp-sessions")).unwrap();
+        open_resume(&session);
+        assert!(session.lock_shared().resume_ids.is_none());
+        assert!(session.overlay_cmds().is_empty());
+        let text = session.transcript_text();
+        assert!(text.contains("no sessions"), "{text}");
+        assert!(!session.lock_shared().busy);
     }
 }
