@@ -11,6 +11,7 @@ use crate::config::{Config, NetworkSettings, SandboxSettings};
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
 use super::catalog::{BASH_HELPER_TOOLS, builtin_is_authorized, model_visible_builtin_definitions};
 use super::executor::{BashArgs, ToolExecutor};
+use super::handoff::{apply_handoff, format_handoff_summary};
 use super::todo::{TodoItem, apply_todo_write, format_todo_summary};
 use super::web_fetch::{
     WEB_FETCH_MAX_REDIRECTS, WebFetchArgs, WebFetcher, default_web_fetcher, validate_web_fetch_url,
@@ -210,6 +211,10 @@ impl ToolRegistry {
             }
             let summary = format_todo_summary(&items);
             return Ok(ToolOutput::Text(summary));
+        }
+        if name == "handoff" {
+            let brief = apply_handoff(args_json)?;
+            return Ok(ToolOutput::Text(format_handoff_summary(&brief)));
         }
         if name == "web_fetch" {
             let text = self.web_fetch(args_json).await?;

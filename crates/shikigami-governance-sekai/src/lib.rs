@@ -1451,6 +1451,7 @@ mod tests {
         assert!(!tool_authorization::requires_external_action("report"));
         assert!(!tool_authorization::requires_external_action("escalate"));
         assert!(!tool_authorization::requires_external_action("todo_write"));
+        assert!(!tool_authorization::requires_external_action("handoff"));
         assert!(tool_authorization::requires_external_action("bash"));
         assert!(tool_authorization::requires_external_action("write_file"));
         assert!(tool_authorization::requires_external_action("edit"));

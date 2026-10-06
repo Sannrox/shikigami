@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Coding default includes `handoff`: writes a brief event (`task` required;
+  optional `decisions` / `files` / `ignore`) a host may pass as the first
+  prompt of a fresh session. Does not start a session, child run, or plane
+  session.
 - [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as
   evolving process hosts; session wait (`end_turn`); ask=park; plan
   write-jail.

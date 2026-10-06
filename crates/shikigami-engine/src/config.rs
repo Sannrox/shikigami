@@ -249,7 +249,7 @@ pub enum PermissionMode {
     /// Use `enabled` if set, otherwise the safe coding default (no bash).
     #[default]
     Custom,
-    /// Read/search only (+ `todo_write`, report, escalate).
+    /// Read/search only (+ `todo_write`, `handoff`, report, escalate).
     Read,
     /// Read + write/edit (no bash).
     Workspace,
@@ -406,6 +406,7 @@ impl ToolsSettings {
             "glob".into(),
             "grep".into(),
             "todo_write".into(),
+            "handoff".into(),
             "report".into(),
             "escalate".into(),
         ]
@@ -419,6 +420,7 @@ impl ToolsSettings {
                 "glob".into(),
                 "grep".into(),
                 "todo_write".into(),
+                "handoff".into(),
                 "report".into(),
                 "escalate".into(),
             ],
@@ -1593,6 +1595,12 @@ unknown_thing = true
         assert_eq!(config.run.nested_max_depth, 1);
         assert_eq!(config.run.nested_max_children, 4);
         assert!(!ToolsSettings::default_coding_tools().contains(&"child_run".into()));
+    }
+
+    #[test]
+    fn coding_default_and_read_mode_include_handoff() {
+        assert!(ToolsSettings::default_coding_tools().contains(&"handoff".into()));
+        assert!(ToolsSettings::tools_for_mode(PermissionMode::Read).contains(&"handoff".into()));
     }
 
     #[test]

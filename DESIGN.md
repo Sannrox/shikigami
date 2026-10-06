@@ -128,7 +128,7 @@ create run id
 ```
 
 Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
-`multi_edit`, `apply_patch`, `glob`, `grep`, `todo_write`, `report`,
+`multi_edit`, `apply_patch`, `glob`, `grep`, `todo_write`, `handoff`, `report`,
 `escalate`. **`bash` is opt-in** via settings for safety.
 
 ## Module map

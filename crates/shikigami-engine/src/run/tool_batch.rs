@@ -712,6 +712,12 @@ impl<'a> DurableToolBatch<'a> {
                             },
                         );
                     }
+                    if call.name == "handoff"
+                        && let Some(event) =
+                            handoff_brief_event(session.is_content(), &call.args_json)
+                    {
+                        self.engine.emit(&session.run_id, event);
+                    }
                     session.spans.end_tool(&report_call_id, true);
                     self.engine.emit(
                         &session.run_id,
@@ -909,7 +915,7 @@ impl<'a> DurableToolBatch<'a> {
         session: &mut RunSession,
         handle: &RunHandle,
         out: &[(usize, ToolCall, Result<ToolOutput, String>)],
-    ) -> Result<Vec<(String, String, bool, String)>, RunError> {
+    ) -> Result<Vec<(String, String, bool, String, String)>, RunError> {
         if out.is_empty() {
             return Ok(Vec::new());
         }
@@ -995,7 +1001,13 @@ impl<'a> DurableToolBatch<'a> {
                 ok,
                 detail: detail.clone(),
             });
-            emissions.push((report_call_id, call.name.clone(), ok, detail));
+            emissions.push((
+                report_call_id,
+                call.name.clone(),
+                ok,
+                detail,
+                call.args_json.clone(),
+            ));
         }
         self.engine
             .governance
@@ -1015,7 +1027,7 @@ impl<'a> DurableToolBatch<'a> {
         call: &ToolCall,
         index: usize,
         conversation_id: String,
-        emissions: Vec<(String, String, bool, String)>,
+        emissions: Vec<(String, String, bool, String, String)>,
     ) -> Result<ToolBatchOutcome, RunError> {
         let reason = format!("ask:{}", call.name);
         let question = format!("Allow `{}`?", call.name);
@@ -1110,7 +1122,7 @@ impl<'a> DurableToolBatch<'a> {
         report_call_id: String,
         park: ApprovalPark,
         reason: String,
-        emissions: Vec<(String, String, bool, String)>,
+        emissions: Vec<(String, String, bool, String, String)>,
     ) -> Result<ToolBatchOutcome, RunError> {
         if park.approval_id.trim().is_empty() {
             return Err(RunError::Governance(GovernanceError::Message(
@@ -1175,9 +1187,9 @@ impl<'a> DurableToolBatch<'a> {
     async fn emit_prefix_tool_ends(
         &self,
         session: &mut RunSession,
-        emissions: Vec<(String, String, bool, String)>,
+        emissions: Vec<(String, String, bool, String, String)>,
     ) -> Result<(), RunError> {
-        for (prefix_call_id, name, ok, detail) in emissions {
+        for (prefix_call_id, name, ok, detail, args_json) in emissions {
             self.engine
                 .report_governance_tool_with_id(self.handle, &prefix_call_id, &name, ok, &detail)
                 .await?;
@@ -1190,6 +1202,12 @@ impl<'a> DurableToolBatch<'a> {
                         item_count: items.len(),
                     },
                 );
+            }
+            if name == "handoff"
+                && ok
+                && let Some(event) = handoff_brief_event(session.is_content(), &args_json)
+            {
+                self.engine.emit(&session.run_id, event);
             }
             session.spans.end_tool(&prefix_call_id, ok);
             self.engine.emit(
@@ -1286,6 +1304,24 @@ fn projected_detail(content_run: bool, detail: &str) -> String {
     crate::content::project_bounded_text(content_run, "bounded_content", detail)
 }
 
+fn project_brief_list(content_run: bool, items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| projected_detail(content_run, item))
+        .collect()
+}
+
+/// Per-call brief from that call's args. Content runs keep only projected text.
+fn handoff_brief_event(content_run: bool, args_json: &str) -> Option<HarnessEvent> {
+    let brief = tools::apply_handoff(args_json).ok()?;
+    Some(HarnessEvent::HandoffBrief {
+        task: projected_detail(content_run, &brief.task),
+        decisions: project_brief_list(content_run, &brief.decisions),
+        files: project_brief_list(content_run, &brief.files),
+        ignore: project_brief_list(content_run, &brief.ignore),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,5 +1404,57 @@ mod tests {
             1,
             &reused_batch
         ));
+    }
+
+    #[test]
+    fn handoff_brief_event_keeps_each_call_and_projects_content_runs() {
+        let first = r#"{"task":"first","decisions":["a"],"files":["a.rs"],"ignore":["tmp"]}"#;
+        let second = r#"{"task":"second","decisions":["b"],"files":["b.rs"],"ignore":["gen"]}"#;
+        match (
+            handoff_brief_event(false, first),
+            handoff_brief_event(false, second),
+        ) {
+            (
+                Some(HarnessEvent::HandoffBrief {
+                    task: task_a,
+                    decisions: decisions_a,
+                    files: files_a,
+                    ignore: ignore_a,
+                }),
+                Some(HarnessEvent::HandoffBrief {
+                    task: task_b,
+                    decisions: decisions_b,
+                    files: files_b,
+                    ignore: ignore_b,
+                }),
+            ) => {
+                assert_eq!(task_a, "first");
+                assert_eq!(decisions_a, vec!["a".to_string()]);
+                assert_eq!(files_a, vec!["a.rs".to_string()]);
+                assert_eq!(ignore_a, vec!["tmp".to_string()]);
+                assert_eq!(task_b, "second");
+                assert_eq!(decisions_b, vec!["b".to_string()]);
+                assert_eq!(files_b, vec!["b.rs".to_string()]);
+                assert_eq!(ignore_b, vec!["gen".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        match handoff_brief_event(true, first) {
+            Some(HarnessEvent::HandoffBrief {
+                task,
+                decisions,
+                files,
+                ignore,
+            }) => {
+                assert_eq!(task, projected_detail(true, "first"));
+                assert_eq!(decisions, vec![projected_detail(true, "a")]);
+                assert_eq!(files, vec![projected_detail(true, "a.rs")]);
+                assert_eq!(ignore, vec![projected_detail(true, "tmp")]);
+                assert!(!task.contains("first"), "{task}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(handoff_brief_event(false, r#"{}"#).is_none());
     }
 }
