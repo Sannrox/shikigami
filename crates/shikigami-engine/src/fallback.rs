@@ -296,8 +296,7 @@ impl FallbackAuthorization {
     }
 
     /// Seal a fixture envelope with the supported test MAC. Not a production issuer.
-    #[cfg(test)]
-    pub(crate) fn seal_test_hmac(&mut self) -> Result<(), FallbackDenial> {
+    pub fn seal_test_hmac(&mut self) -> Result<(), FallbackDenial> {
         self.signature_algorithm = TEST_HMAC_SHA256.into();
         self.binding_digest = self.compute_binding_digest()?;
         self.signature = self.test_hmac_signature()?;
@@ -322,7 +321,7 @@ impl FallbackAuthorization {
             && self.lease.generation > 0
     }
 
-    pub(crate) fn verify_signature(&self, allow_test: bool) -> Result<(), FallbackDenial> {
+    pub fn verify_signature(&self, allow_test: bool) -> Result<(), FallbackDenial> {
         if !self.required_ids_present()
             || self.binding_digest.is_empty()
             || self.signature.is_empty()
@@ -343,7 +342,7 @@ impl FallbackAuthorization {
     }
 }
 
-pub(crate) fn fence_matches(lease: &FallbackLease, fence: &LiveFence) -> bool {
+pub fn fence_matches(lease: &FallbackLease, fence: &LiveFence) -> bool {
     lease.effect_id == fence.effect_id
         && lease.owner == fence.owner
         && lease.fencing_token == fence.fencing_token

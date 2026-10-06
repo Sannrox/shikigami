@@ -6,6 +6,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+pub(crate) use shikigami_engine::governance;
+pub(crate) use shikigami_engine::{
+    checkpoint, config, content, digest, evidence_queue, fallback, model, prompts, tools,
+};
+pub(crate) use shikigami_plane_intake as plane_intake;
+
 use crate::checkpoint::{
     GovernanceCheckpoint, GovernanceEvidenceReference, StagedToolExecution, StagedToolReport,
 };
@@ -14,7 +20,7 @@ use crate::content::ContentModelTurnV1;
 use crate::model::{ChatMessage, ModelTurn};
 use crate::tools::ToolDef;
 
-use super::{
+use shikigami_engine::governance::{
     AvailableModel, ContentTurnContext, GovernanceError, GovernancePort, RunHandle, RunOutcome,
 };
 
@@ -33,7 +39,7 @@ mod plane_session;
 mod tool_authorization;
 
 use harvest_transaction::HarvestTransaction;
-pub(super) type PlaneClient = plane_session::PlaneClient;
+pub(crate) type PlaneClient = plane_session::PlaneClient;
 
 fn available_model(model: proto::chisei::AvailableModelRecord) -> AvailableModel {
     AvailableModel {
@@ -95,7 +101,7 @@ impl SekaiClaimClient {
         })
     }
 
-    pub(super) async fn connected_plane(
+    pub(crate) async fn connected_plane(
         &self,
     ) -> Result<
         tokio::sync::MutexGuard<'_, Option<PlaneClient>>,
@@ -556,7 +562,7 @@ impl SekaiChiseiGovernance {
         self.harvest_event_context_with_id(handle, None)
     }
 
-    pub(super) fn harvest_event_context_with_id(
+    pub(crate) fn harvest_event_context_with_id(
         &self,
         handle: &RunHandle,
         requested_event_id: Option<String>,
@@ -564,7 +570,7 @@ impl SekaiChiseiGovernance {
         self.harvest.event_context(handle, requested_event_id)
     }
 
-    pub(super) fn forget_harvest(&self, run_id: &str) {
+    pub(crate) fn forget_harvest(&self, run_id: &str) {
         self.harvest.forget(run_id);
     }
 
@@ -608,14 +614,14 @@ impl SekaiChiseiGovernance {
         self.harvest.recover_tool_executions(run_id)
     }
 
-    pub(super) fn host_harvest_operation_id(
+    pub(crate) fn host_harvest_operation_id(
         &self,
         handle: &RunHandle,
     ) -> Result<String, GovernanceError> {
         self.harvest.host_operation_id(handle)
     }
 
-    pub(super) fn pending_event_references(
+    pub(crate) fn pending_event_references(
         references: &[proto::chisei::OperationEvidenceReference],
     ) -> Vec<GovernanceEvidenceReference> {
         references
@@ -631,7 +637,7 @@ impl SekaiChiseiGovernance {
             .collect()
     }
 
-    pub(super) fn proto_event_references(
+    pub(crate) fn proto_event_references(
         references: &[GovernanceEvidenceReference],
     ) -> Vec<proto::chisei::OperationEvidenceReference> {
         references
@@ -647,14 +653,14 @@ impl SekaiChiseiGovernance {
             .collect()
     }
 
-    pub(super) async fn retry_pending_harvest_event(
+    pub(crate) async fn retry_pending_harvest_event(
         &self,
         handle: &RunHandle,
     ) -> Result<(), GovernanceError> {
         harvest_event_reporting::retry_pending(self, handle).await
     }
 
-    pub(super) async fn report_harvest_event(
+    pub(crate) async fn report_harvest_event(
         &self,
         handle: &RunHandle,
         kind: &str,
@@ -664,7 +670,7 @@ impl SekaiChiseiGovernance {
         harvest_event_reporting::report(self, handle, kind, attributes, references).await
     }
 
-    pub(super) async fn report_model_event(
+    pub(crate) async fn report_model_event(
         &self,
         handle: &RunHandle,
         ok: bool,
@@ -672,14 +678,14 @@ impl SekaiChiseiGovernance {
         harvest_event_reporting::report_model(self, handle, ok).await
     }
 
-    pub(super) async fn report_failed_model_event(
+    pub(crate) async fn report_failed_model_event(
         &self,
         handle: &RunHandle,
     ) -> Result<(), GovernanceError> {
         harvest_event_reporting::report_failed_model(self, handle).await
     }
 
-    pub(super) async fn report_tool_event(
+    pub(crate) async fn report_tool_event(
         &self,
         handle: &RunHandle,
         call_id: Option<&str>,
@@ -690,14 +696,14 @@ impl SekaiChiseiGovernance {
         harvest_event_reporting::report_tool(self, handle, call_id, name, ok, detail).await
     }
 
-    pub(super) async fn harvest_receipt(
+    pub(crate) async fn harvest_receipt(
         &self,
         handle: &RunHandle,
     ) -> Result<proto::chisei::GetOperationReceiptResponse, GovernanceError> {
         harvest_event_reporting::harvest_receipt(self, handle).await
     }
 
-    pub(super) fn arguments_digest(args_json: &str) -> String {
+    pub(crate) fn arguments_digest(args_json: &str) -> String {
         crate::digest::sha256_hex(args_json.as_bytes())
     }
 
@@ -711,7 +717,7 @@ impl SekaiChiseiGovernance {
         governed_run_admission::host_receipt_input(self, run_id, task, logical_operation_id)
     }
 
-    pub(super) async fn abort_uncheckpointed_receipt(
+    pub(crate) async fn abort_uncheckpointed_receipt(
         &self,
         handle: &RunHandle,
         reason: &str,

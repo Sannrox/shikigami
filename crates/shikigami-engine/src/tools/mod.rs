@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn registry_from_config_owns_effective_tool_bootstrap() {
         let dir = tempdir().unwrap();
-        let mut config = crate::Config::default();
+        let mut config = crate::config::Config::default();
         config.tools.enabled = vec!["bash".into(), "read_file".into()];
 
         let registry = ToolRegistry::from_config(dir.path(), &config).unwrap();

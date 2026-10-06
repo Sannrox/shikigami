@@ -14,7 +14,7 @@ use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
-pub(crate) mod framing;
+pub mod framing;
 mod protocol;
 
 use protocol::{Client as McpClient, Transport, attach_tools};

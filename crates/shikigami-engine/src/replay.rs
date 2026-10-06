@@ -469,7 +469,7 @@ pub enum ReplayError {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ReplayExecution {
+pub struct ReplayExecution {
     pub manifest_digest: String,
     pub source_run_id: String,
     pub logical_operation_id: Option<String>,
@@ -554,7 +554,7 @@ impl ReplayEvidenceBundle {
 }
 
 impl ReplayRequest {
-    pub(crate) fn admit(&self) -> Result<ReplayExecution, ReplayError> {
+    pub fn admit(&self) -> Result<ReplayExecution, ReplayError> {
         if self.manifest.schema_version != REPLAY_SCHEMA_VERSION {
             return Err(ReplayError::Invalid(format!(
                 "unsupported manifest schema version {}; expected {}",
@@ -634,7 +634,7 @@ impl ReplayBindings {
     }
 }
 
-pub(crate) fn replay_config(config: &Config) -> Config {
+pub fn replay_config(config: &Config) -> Config {
     let mut replay = config.clone();
     replay.tools.mode = PermissionMode::Custom;
     replay.tools.enabled = vec![
@@ -689,10 +689,7 @@ pub(crate) fn validate_runtime_bindings(
     Ok(())
 }
 
-pub(crate) fn validate_host_policy(
-    config: &Config,
-    bindings: &ReplayBindings,
-) -> Result<(), ReplayError> {
+pub fn validate_host_policy(config: &Config, bindings: &ReplayBindings) -> Result<(), ReplayError> {
     compare_binding(
         "policy_evidence",
         &bindings.policy_evidence_digest,

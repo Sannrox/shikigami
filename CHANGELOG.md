@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `shikigami-plane-intake` owns `PlaneIntakePort` and the claim values the
   sekai adapter and plane serve loop share. Mapping claimed work onto
   `RunRequest` and `run_plane_serve` stay in the library.
+- `shikigami-engine` owns the turn loop, ports, workspace jail, and
+  in-process adapters. `Harness` composition and the http-callback adapter
+  stay in the library.
+- `shikigami-http` owns the OpenAI-compatible HTTP model adapter.
+  Nested children construct a fresh model through `ModelPort::fresh_for_child`
+  so the engine does not instantiate host adapters.
+- `shikigami-governance-sekai` owns the sekai-chisei governance adapter and
+  its `PlaneIntakePort` implementation. `sekai-client` / tonic sit in that
+  crate.
 
 ### Added
 

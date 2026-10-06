@@ -348,7 +348,7 @@ impl RunRegistry {
         self.load_unlocked(run_id)
     }
 
-    pub(crate) fn run_is_active(&self, run_id: &str) -> Result<bool, RegistryError> {
+    pub fn run_is_active(&self, run_id: &str) -> Result<bool, RegistryError> {
         let run_lock = self.lock_for(run_id)?;
         let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
         let record = self.load_unlocked(run_id)?;

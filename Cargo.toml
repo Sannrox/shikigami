@@ -4,6 +4,9 @@ members = [
     "crates/shikigami-tui",
     "crates/shikigami-types",
     "crates/shikigami-plane-intake",
+    "crates/shikigami-engine",
+    "crates/shikigami-http",
+    "crates/shikigami-governance-sekai",
 ]
 default-members = [
     ".",
@@ -11,6 +14,9 @@ default-members = [
     "crates/shikigami-tui",
     "crates/shikigami-types",
     "crates/shikigami-plane-intake",
+    "crates/shikigami-engine",
+    "crates/shikigami-http",
+    "crates/shikigami-governance-sekai",
 ]
 resolver = "2"
 
@@ -33,16 +39,17 @@ publish.workspace = true
 
 [features]
 default = ["governance-sekai-chisei", "model-http"]
-governance-sekai-chisei = ["dep:futures-util", "dep:sekai-client"]
-model-http = ["dep:reqwest"]
+governance-sekai-chisei = ["dep:shikigami-governance-sekai"]
+model-http = ["dep:reqwest", "dep:shikigami-http", "shikigami-engine/model-http"]
 
 [dependencies]
-shikigami-types = { path = "crates/shikigami-types" }
+shikigami-engine = { path = "crates/shikigami-engine", default-features = false }
+shikigami-http = { path = "crates/shikigami-http", optional = true }
+shikigami-governance-sekai = { path = "crates/shikigami-governance-sekai", optional = true }
 shikigami-plane-intake = { path = "crates/shikigami-plane-intake" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = [
   "rt-multi-thread",
@@ -56,18 +63,10 @@ tokio = { version = "1", default-features = false, features = [
   "signal",
   "net",
 ] }
-toml = "1"
 uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-libc = "0.2"
-futures-util = { version = "0.3", optional = true }
-
-# Optional: sekai-chisei Rust SDK
-sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "1b4584c8194b74d9cbf37ffefc30820942a4b61d", version = "0.1.1", optional = true }
 
 # Optional: OpenAI-compatible HTTP model for local/ungoverned runs
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
-regex = "1.13.1"
 url = "2.5.8"
 
 [[test]]
@@ -82,7 +81,9 @@ harness = false
 
 [dev-dependencies]
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
 proptest = { version = "1", features = ["std"] }
+sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }

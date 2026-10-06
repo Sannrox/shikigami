@@ -4,17 +4,15 @@
 
 `shikigami` is a Rust 2024 crate for a local-first headless agent harness.
 Source code lives in `src/`: `src/lib.rs` exports the public API,
-`crates/shikigami-cli` is a thin CLI host, `crates/shikigami-plane-intake`
-owns the plane-claim port, `src/harness.rs` wires settings to
-ports, `src/run/` owns the turn loop (preparation, the durable run transaction,
-resume validation + deep `RunSession` checkpoints), `src/governance/` holds
-governance adapters (`none`, `local`, `http-callback`/`host-authz`,
-`sekai-chisei`), `src/tools/` implements workspace-jailed tools,
-`src/workspace.rs` materializes workspaces, `src/sandbox.rs` applies
-settings-selected OS isolation to spawned children, `src/model.rs` supplies
-ungoverned model turns, and `src/events.rs` sinks harness-local progress.
-Serve, MCP, plane intake, eval, hooks, replay, and metrics live in the matching
-`src/` modules; see [DESIGN.md](DESIGN.md) for the module map. The sekai-chisei
+`crates/shikigami-cli` is a thin CLI host, `crates/shikigami-engine` owns the
+turn loop, ports, workspace jail, and in-process adapters,
+`crates/shikigami-http` owns the OpenAI-compatible HTTP model adapter,
+`crates/shikigami-governance-sekai` owns the sekai-chisei governance adapter,
+`crates/shikigami-plane-intake` owns the plane-claim port, `src/harness.rs`
+wires settings to ports, `src/governance/` holds the host `http-callback` /
+`host-authz` adapter and wires `sekai-chisei`. Serve, MCP, plane intake, and
+eval live in the matching `src/` modules; see [DESIGN.md](DESIGN.md) for the
+module map. The sekai-chisei
 adapter consumes the versioned upstream `sekai-client` Rust facade and its
 canonical `sekai-proto` dependency; Shikigami does not carry a second protocol
 snapshot. Integration tests live in `tests/`. Optional host state defaults
