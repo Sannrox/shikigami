@@ -587,12 +587,14 @@ impl AcpHost {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Most recently persisted session for `cwd`, if any. Used by the TUI
-    /// continue-last-in-cwd path (`session/load`, fail closed → `session/new`).
-    pub fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
+    /// Persisted ACP session ids for `cwd`, newest mtime first.
+    pub fn session_ids_for_cwd(&self, cwd: &Path) -> Vec<String> {
         let dir = self.sessions_dir();
-        let mut best: Option<(std::time::SystemTime, String)> = None;
-        for entry in std::fs::read_dir(dir).ok()? {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in entries {
             let Ok(entry) = entry else {
                 continue;
             };
@@ -612,11 +614,16 @@ impl AcpHost {
             let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) else {
                 continue;
             };
-            if best.as_ref().is_none_or(|(known, _)| mtime >= *known) {
-                best = Some((mtime, persisted.session_id));
-            }
+            found.push((mtime, persisted.session_id));
         }
-        best.map(|(_, id)| id)
+        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Most recently persisted session for `cwd`, if any. Used by the TUI
+    /// continue-last-in-cwd path (`session/load`, fail closed → `session/new`).
+    pub fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
+        self.session_ids_for_cwd(cwd).into_iter().next()
     }
 
     async fn set_run_id(&self, session_id: &str, run_id: Option<String>) -> Result<(), String> {

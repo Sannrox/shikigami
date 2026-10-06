@@ -55,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paging. Permission arguments are not truncated.
 - TUI: `/help` writes a short system block of keys and slash names, then
   returns to the idle composer.
+- TUI: `/resume` opens a dim list of persisted sessions for this cwd (short
+  session id, newest first). Enter loads via `session/load`; Esc dismisses;
+  load failure stays on the current session.
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
