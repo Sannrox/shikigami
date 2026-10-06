@@ -514,6 +514,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
 
         let err =
@@ -565,6 +567,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
 
         let err =
@@ -2323,6 +2327,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_full_child_resume_keeps_spawn_tool_mode() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::Read;
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "approve full?"
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "edit", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = parent.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.nested_profile, "full");
+        assert_eq!(child_cp.tools_mode, "read");
+        assert_eq!(child_cp.park.as_ref().unwrap().kind, ParkKind::Escalate);
+
+        let mut resume_config = base_config(&dir);
+        resume_config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "already parked"},
+                {
+                    "tool_calls": [{
+                        "name": "write_file",
+                        "args_json": serde_json::json!({
+                            "path": "pwn.txt",
+                            "content": "no\n"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "resumed",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let resume_eng = engine(&dir, resume_config);
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(child_id.clone());
+        resume.resume_answer = Some("yes".into());
+        let resumed = resume_eng.run(resume).await.unwrap();
+        let child_after = Checkpoint::load(&resume_eng.state_runs, &child_id).unwrap();
+        assert!(!child_after.workspace.join("pwn.txt").exists());
+        assert!(
+            child_after
+                .messages
+                .iter()
+                .any(|message| { message.content.contains("tool not enabled: write_file") }),
+            "full child resume must keep spawn-time read tools: {:?}",
+            child_after.messages
+        );
+        assert_ne!(resumed.termination, RunTermination::Failed);
+    }
+
+    #[tokio::test]
     async fn nested_full_child_run_asks_on_parent_then_completes() {
         let dir = tempdir().unwrap();
         let mut config = base_config(&dir);
@@ -2941,6 +3022,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_parent_cancel_after_park_stops_detached_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 5 && printf late > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "slow",
+                        "wait": false
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": serde_json::json!({
+                        "reason": "need human",
+                        "question": "parent park"
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let asked = eng.run(req).await.unwrap();
+        assert_eq!(asked.park.as_ref().unwrap().kind, ParkKind::Ask);
+        let mut allow = RunRequest::new("");
+        allow.keep_workspace = true;
+        allow.session_wait = true;
+        allow.resume_run_id = Some(asked.run_id.clone());
+        allow.resume_ask = Some(AskDecision::Allow);
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(2), eng.run(allow))
+            .await
+            .expect("parent park must not wait for wait=false child")
+            .unwrap();
+        assert_eq!(parked.termination, RunTermination::Parked);
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::Escalate);
+        let mut resume_config = base_config(&dir);
+        resume_config.run.nested = true;
+        resume_config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        resume_config.model.script_json = Some(
+            serde_json::json!([
+                {"content": "turn 0"},
+                {"content": "turn 1"},
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 10"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "parent done",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let resume_eng = engine(&dir, resume_config);
+        let registry = Arc::clone(&resume_eng.registry);
+        let parent_id = parked.run_id.clone();
+        let cancel = tokio::spawn(async move {
+            for _ in 0..80 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                if registry.run_is_active(&parent_id).unwrap_or(false) {
+                    let _ = registry.cancel(&parent_id);
+                    return;
+                }
+            }
+        });
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.resume_run_id = Some(parked.run_id.clone());
+        resume.resume_answer = Some("yes".into());
+        let err = tokio::time::timeout(std::time::Duration::from_secs(4), resume_eng.run(resume))
+            .await
+            .expect("parent cancel must not wait for the child's sleep 5")
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::Cancelled),
+            "parent must cancel: {err}"
+        );
+        let _ = cancel.await;
+        for record in resume_eng.registry.list().unwrap() {
+            assert_ne!(
+                record.status, "running",
+                "cancel after park must wait until detached children stop: {record:?}"
+            );
+        }
+        // Past the pre-fix 2s grace: a still-active child would finish the write.
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(
+            !parked.workspace.join("late.txt").exists(),
+            "detached child must not write the shared workspace after parent bounds"
+        );
+    }
+
+    #[tokio::test]
     async fn nested_parent_cancel_stops_waited_child() {
         let dir = tempdir().unwrap();
         let mut config = base_config(&dir);
@@ -3474,6 +3687,207 @@ mod tests {
         assert!(
             !child_cp.workspace.exists(),
             "isolated worktree directory must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_worktree_child_cancel_removes_git_worktree() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        init_git_repo(&project);
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2 && printf late > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "slow",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let registry = Arc::clone(&eng.registry);
+        let state_runs = eng.state_runs.clone();
+        let project_for_cancel = project.clone();
+        let cancel = tokio::spawn(async move {
+            for _ in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let Ok(records) = registry.list() else {
+                    continue;
+                };
+                for record in records {
+                    let Ok(checkpoint) = Checkpoint::load(&state_runs, &record.run_id) else {
+                        continue;
+                    };
+                    if checkpoint.parent_run_id.is_empty() {
+                        continue;
+                    }
+                    let listed = git_worktree_list(&project_for_cancel);
+                    if listed.contains(&checkpoint.workspace.display().to_string()) {
+                        let _ = registry.cancel(&record.run_id);
+                        return;
+                    }
+                }
+            }
+        });
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = tokio::time::timeout(std::time::Duration::from_secs(4), eng.run(req))
+            .await
+            .expect("parent must finish after child cancel")
+            .unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(done.summary, "parent done");
+        let _ = cancel.await;
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let child_id = parent.children[0].run_id.clone();
+        let child_cp = Checkpoint::load(&eng.state_runs, &child_id).unwrap();
+        assert_eq!(child_cp.workspace_adapter, "git-worktree");
+        let listed = git_worktree_list(&project);
+        assert!(
+            !listed.contains(&child_id),
+            "cancel after materialize must git worktree remove: {listed}"
+        );
+        assert!(
+            !child_cp.workspace.exists(),
+            "isolated worktree directory must be gone after cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_worktree_parent_cancel_removes_git_worktree() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("project");
+        init_git_repo(&project);
+        let mut config = base_config(&dir);
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = project.to_string_lossy().into();
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2 && printf late > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [{
+                    "name": "child_run",
+                    "args_json": serde_json::json!({
+                        "profile": "full",
+                        "task": "slow",
+                        "worktree": true
+                    }).to_string()
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let registry = Arc::clone(&eng.registry);
+        let state_runs = eng.state_runs.clone();
+        let project_for_cancel = project.clone();
+        let cancel = tokio::spawn(async move {
+            for _ in 0..40 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let Ok(records) = registry.list() else {
+                    continue;
+                };
+                for record in records {
+                    let Ok(checkpoint) = Checkpoint::load(&state_runs, &record.run_id) else {
+                        continue;
+                    };
+                    if checkpoint.parent_run_id.is_empty() && !checkpoint.children.is_empty() {
+                        let child_id = &checkpoint.children[0].run_id;
+                        let Ok(child) = Checkpoint::load(&state_runs, child_id) else {
+                            continue;
+                        };
+                        let listed = git_worktree_list(&project_for_cancel);
+                        if listed.contains(&child.workspace.display().to_string()) {
+                            let _ = registry.cancel(&record.run_id);
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let err = tokio::time::timeout(std::time::Duration::from_secs(4), eng.run(req))
+            .await
+            .expect("parent cancel must not wait for the full child sleep")
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::Cancelled),
+            "parent must cancel: {err}"
+        );
+        let _ = cancel.await;
+        let listed = git_worktree_list(&project);
+        assert!(
+            listed.lines().filter(|line| !line.is_empty()).count() <= 1,
+            "parent cancel must leave only the primary checkout: {listed}"
         );
     }
 

@@ -775,7 +775,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Command::Tui => {
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
-            shikigami::tui::run(harness)
+            shikigami_tui::run(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }

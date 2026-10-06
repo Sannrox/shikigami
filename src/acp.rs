@@ -502,7 +502,7 @@ impl AcpHost {
         }
     }
 
-    pub(crate) async fn arm_cancel(&self, session_id: &str) {
+    pub async fn arm_cancel(&self, session_id: &str) {
         let mut sessions = self.sessions.lock().await;
         let Some(live) = sessions.get_mut(session_id) else {
             return;
@@ -551,7 +551,7 @@ impl AcpHost {
         }
     }
 
-    pub(crate) fn context_settings(&self) -> &crate::config::ContextSettings {
+    pub fn context_settings(&self) -> &crate::config::ContextSettings {
         &self.harness.config.context
     }
 
@@ -590,7 +590,7 @@ impl AcpHost {
 
     /// Most recently persisted session for `cwd`, if any. Used by the TUI
     /// continue-last-in-cwd path (`session/load`, fail closed → `session/new`).
-    pub(crate) fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
+    pub fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
         let dir = self.sessions_dir();
         let mut best: Option<(std::time::SystemTime, String)> = None;
         for entry in std::fs::read_dir(dir).ok()? {
@@ -2631,6 +2631,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         }
     }
 

@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::checkpoint::{self, Checkpoint};
 use crate::config::Config;
-use crate::harness::redact_secrets_in_line;
+use crate::config::redact_secrets_in_line;
 use crate::model::stable_tool_call_id;
 
 /// Transcript JSONL schema version (bump on breaking field renames/removals).
@@ -290,6 +290,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
         cp.save(&runs).unwrap();
 
@@ -358,6 +360,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
         cp.save(&runs).unwrap();
         let jsonl = export_run_transcript(&runs, "run-compact", &ExportOptions::default()).unwrap();
@@ -418,6 +422,8 @@ mod tests {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
         };
         cp.save(&runs).unwrap();
 

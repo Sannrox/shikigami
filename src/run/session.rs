@@ -57,6 +57,10 @@ pub(super) struct RunSession {
     pub nested_depth: u32,
     pub parent_run_id: String,
     pub nested_profile: String,
+    /// Spawn-time tools.mode for nested children (restored on resume).
+    pub tools_mode: String,
+    /// Spawn-time enabled tool names for nested children (restored on resume).
+    pub tools_enabled: Vec<String>,
     pub spans: RunSpanTrace,
     /// `wait=false` child threads for this attempt. Terminal completion joins
     /// them off the async executor. Session-host park detaches the handles;
@@ -119,6 +123,8 @@ impl RunSession {
             nested_depth: 0,
             parent_run_id: String::new(),
             nested_profile: String::new(),
+            tools_mode: String::new(),
+            tools_enabled: Vec::new(),
             spans: RunSpanTrace::disabled(),
             background_joins: Vec::new(),
         }
@@ -161,6 +167,16 @@ impl RunSession {
             .checkpoint_state(&self.run_id)
             .is_some_and(|checkpoint| checkpoint.approval_park.is_some())
             .then(|| park.clone())
+    }
+
+    /// True when this transaction created a park or `save_recoverable`
+    /// would persist an inherited approval/ask park. Nested worktree
+    /// cleanup uses this so a cancel during resume cannot reap a still
+    /// parked isolated tree.
+    pub(super) fn keeps_parked_workspace(&self, pending_park: bool) -> bool {
+        pending_park
+            || self.open_resumed_approval_park().is_some()
+            || self.resumed_ask_park.is_some()
     }
 
     pub fn set_content(
@@ -677,6 +693,8 @@ impl RunSession {
             nested_depth: self.nested_depth,
             parent_run_id: self.parent_run_id.clone(),
             nested_profile: self.nested_profile.clone(),
+            tools_mode: self.tools_mode.clone(),
+            tools_enabled: self.tools_enabled.clone(),
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {

@@ -8,3 +8,5 @@
 !proto/**
 !src/
 !src/**
+!crates/
+!crates/**

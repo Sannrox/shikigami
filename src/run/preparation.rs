@@ -89,6 +89,15 @@ pub(super) async fn prepare(
         })
         .unwrap_or_default();
     let nested_profile = super::nested::parse_profile(&stored_nested_profile).ok();
+    let stored_tools_mode = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.tools_mode.clone())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let stored_tools_enabled = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.tools_enabled.clone())
+        .unwrap_or_default();
     let resumed_park = resume_checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.park.clone());
@@ -148,10 +157,24 @@ pub(super) async fn prepare(
     );
 
     let explore = nested_profile == Some(super::ChildProfile::Explore);
-    let mut enabled = if explore {
+    let host_enabled = engine.config.tools.effective_enabled();
+    // `tools_mode` present means this checkpoint recorded spawn-time authority,
+    // including an empty effective set. Do not expand empty via the mode preset.
+    let spawn_enabled = if !stored_tools_mode.is_empty() {
+        stored_tools_enabled.clone()
+    } else if explore {
         crate::config::ToolsSettings::tools_for_mode(crate::config::PermissionMode::Read)
     } else {
-        engine.config.tools.effective_enabled()
+        host_enabled.clone()
+    };
+    // Nested resume must not union host tools onto spawn-time authority.
+    let mut enabled = if is_resume && !stored_parent_run_id.is_empty() {
+        spawn_enabled
+            .into_iter()
+            .filter(|name| host_enabled.iter().any(|host| host == name))
+            .collect()
+    } else {
+        spawn_enabled
     };
     if nested_tools {
         for name in ["child_run", "child_status"] {
@@ -160,7 +183,8 @@ pub(super) async fn prepare(
             }
         }
     }
-    let mut tools = ToolRegistry::from_config_enabled(&workspace.path, &engine.config, enabled)?;
+    let mut tools =
+        ToolRegistry::from_config_enabled(&workspace.path, &engine.config, enabled.clone())?;
     tools.set_todos(todos);
     if !explore && !plan_jail && !engine.config.tools.mcp_servers.is_empty() {
         crate::mcp::attach_mcp_servers(&mut tools, &engine.config).await?;
@@ -220,6 +244,20 @@ pub(super) async fn prepare(
     session.nested_depth = stored_nested_depth;
     session.parent_run_id = stored_parent_run_id;
     session.nested_profile = stored_nested_profile;
+    session.tools_mode = if !stored_tools_mode.is_empty() {
+        stored_tools_mode
+    } else if !session.parent_run_id.is_empty() {
+        engine.config.tools.mode.as_str().into()
+    } else {
+        String::new()
+    };
+    session.tools_enabled = if !stored_tools_enabled.is_empty() {
+        stored_tools_enabled
+    } else if !session.parent_run_id.is_empty() {
+        enabled.clone()
+    } else {
+        Vec::new()
+    };
     if let Some(content) = content {
         let (messages, capabilities, initial_message_count, terminal, usage) =
             if let Some(binding) = content_binding.as_ref() {

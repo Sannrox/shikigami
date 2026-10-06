@@ -10,6 +10,7 @@ WORKDIR /src
 # stage copies only the executable and empty operator-owned directories.
 COPY Cargo.toml Cargo.lock README.md LICENSE ./
 COPY src ./src
+COPY crates ./crates
 
 ENV CARGO_INCREMENTAL=0 \
     RUSTFLAGS=--remap-path-prefix=/src=/usr/src/shikigami \

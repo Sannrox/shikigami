@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- Cargo workspace: `shikigami` remains the embeddable library; `shikigami-cli`
+  owns the `shikigami` binary (clap); `shikigami-tui` owns the interactive
+  host (ratatui); `shikigami-types` owns identity, digest, and atomic-file
+  helpers. `tokio` is `default-features = false` with the features the library
+  calls.
+
 ### Added
 
 - [ADR 0014](docs/decisions/0014-usable-guest-hosts.md): ACP and TUI as
@@ -48,6 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Nested parent cancel/timeout waits until `wait=false` children are
+  inactive, including children whose JoinHandles were detached across
+  park/resume. A 2s grace no longer returns while a child can still
+  write the shared workspace.
+- Nested `worktree=true` children `git worktree remove` on cancel, fail,
+  and successful complete, not only on success. Parked plan worktrees stay
+  until a later non-park terminal.
+- Nested child resume keeps spawn-time `tools.mode` / enabled tools and
+  intersects them with the current host (never unions). A full or plan
+  child spawned under Read cannot write after resume on a WorkspaceExec
+  host. Explore was already pinned.
 - Nested plan Accept keeps the child's spawn-time plan-jail. A plan-profile
   child, or a full child of a still-jailed parent, cannot write the shared
   workspace (or attach MCP) after Accept while the parent remains jailed.
@@ -69,7 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under it, blank line between turns, `·` tool gutter with path-first
   fields. Ask and plan replace the composer; the transcript stays in view
   and pins to the composer when short. Visible draft while a turn runs;
-  input cursor and prompt history. Prompt errors land in the transcript;
+  input cursor and prompt history. The composer grows in place for
+  Shift+Enter / Alt+Enter newlines and bracketed paste (`>` on the first
+  line only). Prompt errors land in the transcript;
   stderr event JSON is discarded while the alt-screen is up. Redraws only
   on key, resize, or session update; crossterm events use a bounded
   channel. Typing `/` opens a command list (`/compact`, `/new`, `/exit`,

@@ -2194,30 +2194,63 @@ dependencies = [
 name = "shikigami"
 version = "1.1.1"
 dependencies = [
- "anyhow",
- "assert_cmd",
  "async-trait",
  "chrono",
- "clap",
- "crossterm 0.28.1",
  "futures-util",
  "libc",
- "predicates",
  "proptest",
- "ratatui",
  "regex",
  "reqwest",
  "sekai-client",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shikigami-types",
  "tempfile",
  "thiserror",
  "tokio",
  "toml",
- "unicode-width",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "shikigami-cli"
+version = "1.1.1"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "predicates",
+ "serde",
+ "serde_json",
+ "shikigami",
+ "shikigami-tui",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "shikigami-tui"
+version = "1.1.1"
+dependencies = [
+ "async-trait",
+ "crossterm 0.28.1",
+ "libc",
+ "ratatui",
+ "serde_json",
+ "shikigami",
+ "tempfile",
+ "tokio",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
+name = "shikigami-types"
+version = "1.1.1"
+dependencies = [
+ "sha2 0.11.0",
 ]
 
 [[package]]
