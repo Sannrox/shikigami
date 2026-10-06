@@ -624,6 +624,25 @@ fn compose_context(
         prompt.push_str(profile.as_str());
         prompt.push_str("). Report a structured summary; do not assume parent execute authority.");
     }
+    if let Some(extra) = engine.config.context.session_prompt.as_deref()
+        && !extra.trim().is_empty()
+    {
+        prompt.push_str("\n\n# Session mode\n\n");
+        prompt.push_str(extra);
+    }
+    if nested_profile.is_none()
+        && let Some(mode) = engine.config.session.selected.as_deref()
+    {
+        engine.emit(
+            run_id,
+            HarnessEvent::SessionMode {
+                mode: mode.to_string(),
+                model: crate::model::effective_model_name(&engine.config),
+                effort: engine.config.model.effort.clone(),
+                tools: engine.config.tools.effective_enabled(),
+            },
+        );
+    }
     engine.emit(
         run_id,
         HarnessEvent::Prompt {

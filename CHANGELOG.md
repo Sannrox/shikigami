@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ACP `session/new` accepts catalog `mode` (`low` / `medium` / `high` /
+  `ultra`). Mapping lives in `[session.modes]`. A later `session/prompt` that
+  names a different mode is refused. Omit `mode` for today's spawn. See
+  [ADR 0016](docs/decisions/0016-session-mode.md).
 - [ADR 0016](docs/decisions/0016-session-mode.md)–[0019](docs/decisions/0019-skill-context-boundaries.md):
   session mode frozen at first prompt; ACP prompt attachments fail closed;
   skills and MCP are the only extension surface; no skill-declared context

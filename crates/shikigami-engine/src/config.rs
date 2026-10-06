@@ -3,6 +3,7 @@
 //! Resolve: defaults → optional file → environment → CLI.
 //! Tenkai is not a runtime setting.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,9 @@ pub struct Config {
     pub tracing: TracingSettings,
     #[serde(default)]
     pub model: ModelSettings,
+    /// Named session-mode catalog mapping. Empty means inherit `[model]` / `[tools]`.
+    #[serde(default, skip_serializing_if = "SessionSettings::is_empty")]
+    pub session: SessionSettings,
     #[serde(default)]
     pub context: ContextSettings,
     #[serde(default)]
@@ -665,6 +669,10 @@ pub struct ModelSettings {
     pub base_url: Option<String>,
     #[serde(default = "default_model_name")]
     pub model: String,
+    /// Optional reasoning effort for a session mode mapping. Adapters that do
+    /// not speak effort ignore it; events still surface the selected value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// Env var holding API key for http adapter.
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
@@ -721,6 +729,7 @@ impl Default for ModelSettings {
             adapter: default_model_adapter(),
             base_url: None,
             model: default_model_name(),
+            effort: None,
             api_key_env: default_api_key_env(),
             script_json: None,
             input_usd_micros_per_mtok: None,
@@ -752,6 +761,47 @@ pub struct ContextSettings {
     /// Max bytes per skill body.
     #[serde(default = "default_max_rules_bytes")]
     pub max_skill_bytes: usize,
+    /// Extra system-prompt section applied when a session mode mapping sets `prompt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_prompt: Option<String>,
+}
+
+/// Fixed ACP session-mode names (ADR 0016).
+pub const SESSION_MODE_CATALOG: &[&str] = &["low", "medium", "high", "ultra"];
+
+/// Operator mapping from a catalog name to model, effort, prompt, and tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSettings {
+    #[serde(default)]
+    pub modes: BTreeMap<String, SessionModeMapping>,
+    /// Catalog name applied by `Config::apply_session_mode`. Runtime only.
+    #[serde(skip)]
+    pub selected: Option<String>,
+}
+
+/// One named mode. Omitted fields inherit the rest of the config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SessionModeMapping {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+impl SessionSettings {
+    pub fn is_catalog_name(name: &str) -> bool {
+        SESSION_MODE_CATALOG.contains(&name)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.modes.is_empty()
+    }
 }
 
 fn default_true() -> bool {
@@ -775,6 +825,7 @@ impl Default for ContextSettings {
             skills_root: None,
             skills: Vec::new(),
             max_skill_bytes: default_max_rules_bytes(),
+            session_prompt: None,
         }
     }
 }
@@ -791,6 +842,7 @@ impl Default for Config {
             events: EventsSettings::default(),
             tracing: TracingSettings::default(),
             model: ModelSettings::default(),
+            session: SessionSettings::default(),
             context: ContextSettings::default(),
             network: NetworkSettings::default(),
             sandbox: SandboxSettings::default(),
@@ -945,6 +997,50 @@ impl Config {
         resolution::load(path.as_ref())
     }
 
+    /// Overlay a catalog session mode onto this config. Unknown names fail closed.
+    /// Missing mapping rows inherit the current model, effort, prompt, and tools.
+    pub fn apply_session_mode(&mut self, mode: &str) -> Result<(), ConfigError> {
+        if !SessionSettings::is_catalog_name(mode) {
+            return Err(ConfigError::Invalid(format!(
+                "unknown session mode `{mode}`"
+            )));
+        }
+        self.session.selected = Some(mode.to_string());
+        let Some(mapping) = self.session.modes.get(mode).cloned() else {
+            return Ok(());
+        };
+        if let Some(model) = mapping.model.filter(|value| !value.trim().is_empty()) {
+            self.model.model = model;
+        }
+        if mapping.effort.is_some() {
+            self.model.effort = mapping.effort;
+        }
+        if mapping.prompt.is_some() {
+            self.context.session_prompt = mapping.prompt;
+        }
+        if let Some(tools) = mapping.tools {
+            if tools.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "session mode `{mode}` tools must not be empty"
+                )));
+            }
+            // Intersect with the host builtin set. MCP servers stay the host's
+            // additive attachment; they are not catalog names.
+            let host = self.tools.effective_enabled();
+            let intersection: Vec<String> = tools
+                .into_iter()
+                .filter(|tool| host.iter().any(|allowed| allowed == tool))
+                .collect();
+            if intersection.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "session mode `{mode}` tools do not intersect the host tool set"
+                )));
+            }
+            self.tools.enabled = intersection;
+        }
+        Ok(())
+    }
+
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -1067,6 +1163,18 @@ impl Config {
         match self.model.adapter.as_str() {
             "scripted" | "http" | "plane" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
+        }
+        for (name, mapping) in &self.session.modes {
+            if !SessionSettings::is_catalog_name(name) {
+                return Err(ConfigError::Invalid(format!(
+                    "unknown session mode `{name}`"
+                )));
+            }
+            if mapping.tools.as_ref().is_some_and(Vec::is_empty) {
+                return Err(ConfigError::Invalid(format!(
+                    "session mode `{name}` tools must not be empty"
+                )));
+            }
         }
         if let Some(adapter) = self.model.fallback.adapter.as_deref() {
             match adapter {
@@ -1601,6 +1709,93 @@ unknown_thing = true
     fn coding_default_and_read_mode_include_handoff() {
         assert!(ToolsSettings::default_coding_tools().contains(&"handoff".into()));
         assert!(ToolsSettings::tools_for_mode(PermissionMode::Read).contains(&"handoff".into()));
+    }
+
+    #[test]
+    fn session_mode_mapping_applies_and_rejects_unknown_names() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[model]
+model = "base-model"
+[session.modes.low]
+model = "model-low"
+effort = "low"
+tools = ["read_file", "report"]
+[session.modes.high]
+model = "model-high"
+effort = "high"
+prompt = "be thorough"
+"#,
+        )
+        .unwrap();
+        let (mut config, _) = Config::resolve(&path).unwrap();
+        config.validate().unwrap();
+        config.apply_session_mode("low").unwrap();
+        assert_eq!(config.model.model, "model-low");
+        assert_eq!(config.model.effort.as_deref(), Some("low"));
+        assert_eq!(config.tools.enabled, vec!["read_file", "report"]);
+
+        let (mut high, _) = Config::resolve(&path).unwrap();
+        high.apply_session_mode("high").unwrap();
+        assert_eq!(high.model.model, "model-high");
+        assert_eq!(high.context.session_prompt.as_deref(), Some("be thorough"));
+
+        let err = Config::default().apply_session_mode("rush").unwrap_err();
+        assert!(err.to_string().contains("unknown session mode"), "{err}");
+
+        let mut disjoint = Config::default();
+        disjoint.tools.enabled = vec!["read_file".into()];
+        disjoint.session.modes.insert(
+            "low".into(),
+            SessionModeMapping {
+                tools: Some(vec!["report".into()]),
+                ..SessionModeMapping::default()
+            },
+        );
+        let err = disjoint.apply_session_mode("low").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("do not intersect the host tool set"),
+            "{err}"
+        );
+
+        let mut expands = Config::default();
+        expands.session.modes.insert(
+            "low".into(),
+            SessionModeMapping {
+                tools: Some(vec!["bash".into()]),
+                ..SessionModeMapping::default()
+            },
+        );
+        let err = expands.apply_session_mode("low").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("do not intersect the host tool set"),
+            "{err}"
+        );
+
+        let mut empty_tools = Config::default();
+        empty_tools.session.modes.insert(
+            "low".into(),
+            SessionModeMapping {
+                tools: Some(Vec::new()),
+                ..SessionModeMapping::default()
+            },
+        );
+        let err = empty_tools.validate().unwrap_err();
+        assert!(err.to_string().contains("tools must not be empty"), "{err}");
+
+        let mut unknown = Config::default();
+        unknown
+            .session
+            .modes
+            .insert("rush".into(), SessionModeMapping::default());
+        let err = unknown.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown session mode"), "{err}");
     }
 
     #[test]

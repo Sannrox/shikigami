@@ -44,6 +44,17 @@ struct PersistedSession {
     session_id: String,
     cwd: String,
     run_id: Option<String>,
+    /// Frozen catalog name. Mapping overlay is current settings (ADR 0016).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    mode_frozen: bool,
+}
+
+impl PersistedSession {
+    fn mode_is_frozen(&self) -> bool {
+        self.mode_frozen || self.mode.is_some() || self.run_id.is_some()
+    }
 }
 
 #[derive(Clone)]
@@ -51,6 +62,8 @@ struct LiveSession {
     cwd: PathBuf,
     run_id: Option<String>,
     cancel: Option<watch::Sender<bool>>,
+    mode: Option<String>,
+    mode_frozen: bool,
 }
 
 /// In-process ACP agent. Stdio and tests share this.
@@ -134,16 +147,23 @@ impl AcpHost {
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .ok_or_else(|| rpc_error(-32602, "session/new requires absolute cwd"))?;
+        let mode = optional_mode(params)?;
         let session_id = format!("sess-{}", uuid::Uuid::new_v4());
         let live = LiveSession {
             cwd: cwd.clone(),
             run_id: None,
             cancel: None,
+            mode: mode.clone(),
+            mode_frozen: mode.is_some(),
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
         self.sessions.lock().await.insert(session_id.clone(), live);
-        Ok(json!({ "sessionId": session_id }))
+        let mut result = json!({ "sessionId": session_id });
+        if let Some(mode) = mode {
+            result["mode"] = json!(mode);
+        }
+        Ok(result)
     }
 
     async fn session_load(&self, params: &Value, client: &dyn AcpClient) -> Result<Value, Value> {
@@ -160,15 +180,19 @@ impl AcpHost {
                 cwd: live.cwd.clone(),
                 run_id: live.run_id.clone(),
                 cancel: None,
+                mode: live.mode.clone(),
+                mode_frozen: live.mode_frozen,
             }
         } else {
             let persisted = self
                 .load_persisted(session_id)
                 .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
             let live = LiveSession {
-                cwd: PathBuf::from(persisted.cwd),
-                run_id: persisted.run_id,
+                cwd: PathBuf::from(&persisted.cwd),
+                run_id: persisted.run_id.clone(),
                 cancel: None,
+                mode: persisted.mode.clone(),
+                mode_frozen: persisted.mode_is_frozen(),
             };
             self.sessions
                 .lock()
@@ -190,7 +214,7 @@ impl AcpHost {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .ok_or_else(|| rpc_error(-32602, "session/compact requires sessionId"))?;
-        let (cwd, run_id) = {
+        let (cwd, run_id, mode) = {
             let sessions = self.sessions.lock().await;
             let live = sessions
                 .get(session_id)
@@ -198,13 +222,13 @@ impl AcpHost {
             if live.cancel.is_some() {
                 return Err(rpc_error(-32000, "prompt already in flight"));
             }
-            (live.cwd.clone(), live.run_id.clone())
+            (live.cwd.clone(), live.run_id.clone(), live.mode.clone())
         };
         let Some(run_id) = run_id else {
             return Ok(json!({ "before": 0, "after": 0 }));
         };
         let harness = self
-            .harness_for_cwd(&cwd)
+            .harness_for_cwd(&cwd, mode.as_deref())
             .map_err(|e| rpc_error(-32603, e))?;
         let mut checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -231,7 +255,7 @@ impl AcpHost {
             return Ok(());
         };
         let harness = self
-            .harness_for_cwd(&live.cwd)
+            .harness_for_cwd(&live.cwd, live.mode.as_deref())
             .map_err(|e| rpc_error(-32603, e))?;
         let checkpoint = Checkpoint::load(&harness.state.runs_dir(), run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -250,11 +274,40 @@ impl AcpHost {
             .ok_or_else(|| rpc_error(-32602, "session/prompt requires sessionId"))?
             .to_string();
         let prompt_text = prompt_text(params.get("prompt").unwrap_or(&Value::Null))?;
-        let (cwd, resume_run_id, cancel_rx) = {
+        let requested_mode = optional_mode(params)?;
+        let (cwd, resume_run_id, cancel_rx, mode) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            if live.mode_frozen {
+                match (live.mode.as_deref(), requested_mode.as_deref()) {
+                    (Some(frozen), Some(named)) if frozen != named => {
+                        return Err(rpc_error(
+                            -32602,
+                            format!(
+                                "session mode `{frozen}` is frozen; start a new session to use `{named}`"
+                            ),
+                        ));
+                    }
+                    (None, Some(named)) => {
+                        return Err(rpc_error(
+                            -32602,
+                            format!(
+                                "session mode is frozen unset; start a new session to use `{named}`"
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+            } else {
+                if let Some(named) = requested_mode.as_deref() {
+                    live.mode = Some(named.to_string());
+                }
+                live.mode_frozen = true;
+                self.persist(&session_id, live)
+                    .map_err(|e| rpc_error(-32603, e))?;
+            }
             let rx = match live.cancel.as_ref() {
                 Some(tx) => tx.subscribe(),
                 None => {
@@ -263,12 +316,12 @@ impl AcpHost {
                     rx
                 }
             };
-            (live.cwd.clone(), live.run_id.clone(), rx)
+            (live.cwd.clone(), live.run_id.clone(), rx, live.mode.clone())
         };
 
         let outcome = async {
             let harness = self
-                .harness_for_cwd(&cwd)
+                .harness_for_cwd(&cwd, mode.as_deref())
                 .map_err(|e| rpc_error(-32603, e))?;
             let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
@@ -554,10 +607,13 @@ impl AcpHost {
         &self.harness.config.context
     }
 
-    fn harness_for_cwd(&self, cwd: &Path) -> Result<Harness, String> {
+    fn harness_for_cwd(&self, cwd: &Path, mode: Option<&str>) -> Result<Harness, String> {
         let mut config = self.harness.config.clone();
         config.workspace.adapter = "inplace".into();
         config.workspace.root = cwd.display().to_string();
+        if let Some(mode) = mode {
+            config.apply_session_mode(mode).map_err(|e| e.to_string())?;
+        }
         Harness::from_config(config, self.harness.state.clone()).map_err(|e| e.to_string())
     }
 
@@ -573,6 +629,8 @@ impl AcpHost {
             session_id: session_id.to_string(),
             cwd: live.cwd.display().to_string(),
             run_id: live.run_id.clone(),
+            mode: live.mode.clone(),
+            mode_frozen: live.mode_frozen,
         };
         std::fs::write(
             path,
@@ -1149,6 +1207,21 @@ fn consume_event(
                 "content": [{ "type": "content", "content": { "type": "text", "text": detail } }]
             }
         }),
+        HarnessEvent::SessionMode {
+            mode,
+            model,
+            effort,
+            tools,
+        } => json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "session_mode",
+                "mode": mode,
+                "model": model,
+                "effort": effort,
+                "tools": tools
+            }
+        }),
         _ => return,
     };
     updates.push(update);
@@ -1162,6 +1235,24 @@ async fn send_updates(client: &dyn AcpClient, updates: Vec<Value>) -> Result<(),
             .map_err(|e| rpc_error(-32603, e))?;
     }
     Ok(())
+}
+
+fn optional_mode(params: &Value) -> Result<Option<String>, Value> {
+    match params.get("mode") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let name = value
+                .as_str()
+                .ok_or_else(|| rpc_error(-32602, "mode must be a string"))?;
+            if name.is_empty() {
+                return Ok(None);
+            }
+            if !crate::config::SessionSettings::is_catalog_name(name) {
+                return Err(rpc_error(-32602, format!("unknown session mode `{name}`")));
+            }
+            Ok(Some(name.to_string()))
+        }
+    }
 }
 
 fn prompt_text(prompt: &Value) -> Result<String, Value> {
@@ -1502,6 +1593,10 @@ mod tests {
     use tempfile::tempdir;
 
     fn scripted_host(dir: &Path, script: &str) -> AcpHost {
+        scripted_host_with(dir, script, |_| {})
+    }
+
+    fn scripted_host_with(dir: &Path, script: &str, tweak: impl FnOnce(&mut Config)) -> AcpHost {
         let state = StateRoot::new(dir.join("state"));
         let mut config = Config::default();
         config.governance.adapter = "local".into();
@@ -1509,6 +1604,7 @@ mod tests {
         config.model.script_json = Some(script.into());
         config.events.adapter = "none".into();
         config.workspace.root = dir.join("ws").to_string_lossy().into();
+        tweak(&mut config);
         let harness = Harness::from_config(config, state).unwrap();
         AcpHost::new(harness)
     }
@@ -1541,6 +1637,41 @@ mod tests {
             .await
             .unwrap();
         rpc_ok(&created)["sessionId"].as_str().unwrap().to_string()
+    }
+
+    async fn init_and_new_mode(
+        host: &AcpHost,
+        client: &dyn AcpClient,
+        cwd: &Path,
+        mode: &str,
+        id: u64,
+    ) -> Value {
+        if id == 1 {
+            let init = host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": { "protocolVersion": 1, "capabilities": {} }
+                    }),
+                    client,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rpc_ok(&init)["protocolVersion"], 1);
+        }
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/new",
+                "params": { "cwd": cwd, "mcpServers": [], "mode": mode }
+            }),
+            client,
+        )
+        .await
+        .unwrap()
     }
 
     fn assert_initialize_speaks_v1(result: &Value) {
@@ -1710,6 +1841,201 @@ mod tests {
             .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
             .collect();
         assert_eq!(chunks.len(), 2, "{updates:?}");
+    }
+
+    #[tokio::test]
+    async fn session_new_modes_select_different_models_and_freeze() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
+            config.model.model = "base-model".into();
+            config.session.modes.insert(
+                "low".into(),
+                crate::config::SessionModeMapping {
+                    model: Some("model-low".into()),
+                    effort: Some("low".into()),
+                    tools: Some(vec!["read_file".into(), "report".into()]),
+                    prompt: None,
+                },
+            );
+            config.session.modes.insert(
+                "high".into(),
+                crate::config::SessionModeMapping {
+                    model: Some("model-high".into()),
+                    effort: Some("high".into()),
+                    tools: Some(vec!["read_file".into(), "report".into()]),
+                    prompt: Some("be thorough".into()),
+                },
+            );
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let low = init_and_new_mode(&host, &client, &cwd, "low", 1).await;
+        let low_id = rpc_ok(&low)["sessionId"].as_str().unwrap().to_string();
+        assert_eq!(rpc_ok(&low)["mode"], "low");
+        let high = init_and_new_mode(&host, &client, &cwd, "high", 2).await;
+        let high_id = rpc_ok(&high)["sessionId"].as_str().unwrap().to_string();
+        assert_eq!(rpc_ok(&high)["mode"], "high");
+
+        let low_prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": low_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&low_prompt)["stopReason"], "end_turn");
+        let high_prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": high_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&high_prompt)["stopReason"], "end_turn");
+
+        let updates = client.updates.lock().await;
+        let modes: Vec<_> = updates
+            .iter()
+            .filter(|u| u["update"]["sessionUpdate"] == "session_mode")
+            .cloned()
+            .collect();
+        assert_eq!(modes.len(), 2, "{updates:?}");
+        assert_eq!(modes[0]["update"]["mode"], "low");
+        assert_eq!(modes[0]["update"]["model"], "model-low");
+        assert_eq!(modes[0]["update"]["effort"], "low");
+        assert_eq!(modes[1]["update"]["mode"], "high");
+        assert_eq!(modes[1]["update"]["model"], "model-high");
+        assert_ne!(modes[0]["update"]["model"], modes[1]["update"]["model"]);
+        drop(updates);
+
+        let switched = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": low_id,
+                        "mode": "high",
+                        "prompt": [{"type":"text","text":"nope"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(switched["error"]["code"], -32602);
+        assert!(
+            switched["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("frozen"),
+            "{}",
+            switched["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_session_mode_matches_current_spawn() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let updates = client.updates.lock().await;
+        assert!(
+            updates
+                .iter()
+                .all(|u| u["update"]["sessionUpdate"] != "session_mode"),
+            "{updates:?}"
+        );
+        let unknown = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/new",
+                    "params": { "cwd": cwd, "mcpServers": [], "mode": "rush" }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown["error"]["code"], -32602);
+        assert!(
+            unknown["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown session mode"),
+            "{}",
+            unknown["error"]["message"]
+        );
+        let late_mode = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "mode": "high",
+                        "prompt": [{"type":"text","text":"nope"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(late_mode["error"]["code"], -32602);
+        assert!(
+            late_mode["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("frozen"),
+            "{}",
+            late_mode["error"]["message"]
+        );
     }
 
     #[tokio::test]
