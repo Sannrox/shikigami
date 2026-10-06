@@ -508,47 +508,16 @@ fn child_engine(
     profile: ChildProfile,
     worktree: bool,
 ) -> Result<Engine, RunError> {
-    let mut config = parent.config.clone();
-    match profile {
-        ChildProfile::Explore => {
-            config.tools.mode = crate::config::PermissionMode::Read;
-            config.tools.enabled.clear();
-            config.tools.mcp_servers.clear();
-            config.run.plan_jail = false;
-        }
-        ChildProfile::Plan => {
-            config.run.plan_jail = true;
-            config.tools.mcp_servers.clear();
-        }
-        ChildProfile::Full => {
-            config.run.plan_jail = session.plan_jail;
-            if session.plan_jail {
-                config.tools.mcp_servers.clear();
-            }
-        }
-    }
-    config.run.nested = false;
-    if worktree {
-        config.workspace.adapter = "git-worktree".into();
-        config.workspace.root = session.workspace.display().to_string();
-        config.workspace.snapshot = false;
-        if !std::path::Path::new(&config.workspace.root)
-            .join(".git")
-            .exists()
-        {
-            return Err(RunError::Message(
-                "child_run worktree=true requires a git checkout at the parent workspace".into(),
-            ));
-        }
-    } else {
-        // Share the parent's materialized tree so explore/plan/full see the
-        // same files as an ACP/TUI inplace session. Isolation is worktree=true.
-        config.workspace.adapter = "inplace".into();
-        config.workspace.root = session.workspace.display().to_string();
-        config.workspace.snapshot = false;
-    }
-    config.events.adapter = "none".into();
+    let config = child_config(
+        &parent.config,
+        &session.workspace,
+        session.plan_jail,
+        profile,
+        worktree,
+    )?;
     let workspace = workspace::from_config(&config).map_err(RunError::Workspace)?;
+    // HTTP adapters reuse the parent client when adapter/url/key/model match.
+    // Scripted adapters start an independent cursor.
     let model = parent.model.fresh_for_child(&config)?;
     let events = crate::events::from_config(&config, &parent.state_runs)
         .map_err(|error| RunError::Message(error.to_string()))?;
@@ -561,6 +530,53 @@ fn child_engine(
         parent.state_runs.clone(),
         Arc::clone(&parent.registry),
     ))
+}
+
+fn child_config(
+    parent: &crate::config::Config,
+    workspace: &std::path::Path,
+    plan_jail: bool,
+    profile: ChildProfile,
+    worktree: bool,
+) -> Result<crate::config::Config, RunError> {
+    let mut config = parent.clone();
+    match profile {
+        ChildProfile::Explore => {
+            config.tools.mode = crate::config::PermissionMode::Read;
+            config.tools.enabled.clear();
+            config.tools.mcp_servers.clear();
+            config.run.plan_jail = false;
+        }
+        ChildProfile::Plan => {
+            config.run.plan_jail = true;
+            config.tools.mcp_servers.clear();
+        }
+        ChildProfile::Full => {
+            config.run.plan_jail = plan_jail;
+            if plan_jail {
+                config.tools.mcp_servers.clear();
+            }
+        }
+    }
+    config.run.nested = false;
+    if worktree {
+        config.workspace.adapter = "git-worktree".into();
+        config.workspace.root = workspace.display().to_string();
+        config.workspace.snapshot = false;
+        if !workspace.join(".git").exists() {
+            return Err(RunError::Message(
+                "child_run worktree=true requires a git checkout at the parent workspace".into(),
+            ));
+        }
+    } else {
+        // Share the parent's materialized tree so explore/plan/full see the
+        // same files as an ACP/TUI inplace session. Isolation is worktree=true.
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = workspace.display().to_string();
+        config.workspace.snapshot = false;
+    }
+    config.events.adapter = "none".into();
+    Ok(config)
 }
 
 fn summary_json(profile: ChildProfile, result: &RunResult) -> String {
@@ -588,7 +604,20 @@ fn summary_json(profile: ChildProfile, result: &RunResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChildProfile, parse_profile, session_ask_park};
+    use std::path::Path;
+
+    use super::{ChildProfile, child_config, parse_profile, session_ask_park};
+    use crate::config::{Config, McpServerSettings, PermissionMode};
+
+    fn parent_with_mcp() -> Config {
+        let mut config = Config::default();
+        config.run.nested = true;
+        config
+            .tools
+            .mcp_servers
+            .push(McpServerSettings::stdio("demo", "mock", Vec::new()));
+        config
+    }
 
     #[test]
     fn parse_profile_trims_and_session_ask_uses_it() {
@@ -612,5 +641,71 @@ mod tests {
         ));
         assert!(!session_ask_park("child_status", r#"{"run_id":"x"}"#));
         assert!(session_ask_park("write_file", r#"{"path":"ok.txt"}"#));
+    }
+
+    #[test]
+    fn child_config_explore_is_read_only_and_clears_mcp() {
+        let parent = parent_with_mcp();
+        let child = child_config(
+            &parent,
+            Path::new("parent-ws"),
+            false,
+            ChildProfile::Explore,
+            false,
+        )
+        .unwrap();
+        assert_eq!(child.tools.mode, PermissionMode::Read);
+        assert!(child.tools.enabled.is_empty());
+        assert!(child.tools.mcp_servers.is_empty());
+        assert!(!child.run.plan_jail);
+        assert!(!child.run.nested);
+        assert_eq!(child.events.adapter, "none");
+        assert_eq!(child.workspace.adapter, "inplace");
+        assert_eq!(child.model.adapter, parent.model.adapter);
+    }
+
+    #[test]
+    fn child_config_plan_jails_and_clears_mcp() {
+        let parent = parent_with_mcp();
+        let child = child_config(
+            &parent,
+            Path::new("parent-ws"),
+            false,
+            ChildProfile::Plan,
+            false,
+        )
+        .unwrap();
+        assert!(child.run.plan_jail);
+        assert!(child.tools.mcp_servers.is_empty());
+        assert!(!child.run.nested);
+        assert_eq!(child.events.adapter, "none");
+        assert_eq!(child.tools.mode, parent.tools.mode);
+    }
+
+    #[test]
+    fn child_config_full_keeps_mcp_unless_parent_jailed() {
+        let parent = parent_with_mcp();
+        let child = child_config(
+            &parent,
+            Path::new("parent-ws"),
+            false,
+            ChildProfile::Full,
+            false,
+        )
+        .unwrap();
+        assert!(!child.run.plan_jail);
+        assert_eq!(child.tools.mcp_servers.len(), 1);
+        assert!(!child.run.nested);
+
+        let jailed = child_config(
+            &parent,
+            Path::new("parent-ws"),
+            true,
+            ChildProfile::Full,
+            false,
+        )
+        .unwrap();
+        assert!(jailed.run.plan_jail);
+        assert!(jailed.tools.mcp_servers.is_empty());
     }
 }
