@@ -11,7 +11,8 @@ Library embed (`Harness`) is the advanced in-process path and retains its CI
 contract proof ([embedding.md](embedding.md), `examples/embed_smoke.rs`). The
 MCP server is the process-host path for stdio clients — **not** a multi-tenant
 control plane, and **not** part of the 1.0 library freeze surface. Tenkai
-delivers the binary only.
+delivers the binary only. Skills plus MCP are the extension surface; there is
+no plugin loader ([ADR 0018](decisions/0018-skills-mcp-extension.md)).
 
 ## Server (`shikigami mcp`)
 

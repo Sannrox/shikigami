@@ -71,7 +71,10 @@ fail-closed. `http-callback` and sekai-chisei stay brokered. Clients that cannot
 answer `session/request_permission` cannot complete a mutating prompt.
 
 Content parts reuse `run_content` bounds. This host concatenates `text` prompt
-parts; it does not add a multimodal stack.
+parts; it does not add a multimodal stack. Prompt attachments are
+[ADR 0017](decisions/0017-acp-attachments.md) (not yet on the wire). Session
+mode is [ADR 0016](decisions/0016-session-mode.md) (honored by
+[#372](https://github.com/Sannrox/shikigami/issues/372)).
 
 ## Proof
 

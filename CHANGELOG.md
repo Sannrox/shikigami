@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [ADR 0016](docs/decisions/0016-session-mode.md)–[0019](docs/decisions/0019-skill-context-boundaries.md):
+  session mode frozen at first prompt; ACP prompt attachments fail closed;
+  skills and MCP are the only extension surface; no skill-declared context
+  boundaries. See [guest-session-surfaces.md](docs/research/guest-session-surfaces.md).
 - Coding default includes `handoff`: writes a brief event (`task` required;
   optional `decisions` / `files` / `ignore`) a host may pass as the first
   prompt of a fresh session. Does not start a session, child run, or plane

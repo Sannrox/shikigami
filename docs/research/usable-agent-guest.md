@@ -96,10 +96,19 @@ Protocol first, then TUI over that protocol, then in-guest intelligence.
 | 2 | Ask=park + structured escalate | Shared protocol for ACP, TUI, CLI resume. May share the ACP ADR if host-agnostic. |
 | 3 | Design Discussion: nested child runs | Reopens [#90](https://github.com/Sannrox/shikigami/issues/90) for post-1.0. Typed explore / plan-jail / full. Optional worktree. Background spawn. Sequential with other `src/run/` work. |
 | 4 | Feature: plan write-jail | Default off. May fold into (3). |
-| 5 | [#330](https://github.com/Sannrox/shikigami/issues/330) then progressive skill load | Do not expand #330’s scope. Overflow compact belongs in that research pass. |
+| 5 | [#330](https://github.com/Sannrox/shikigami/issues/330) then progressive skill load | Closed as [ADR 0019](../decisions/0019-skill-context-boundaries.md): no skill-level boundary. Overflow compact is host policy. Progressive skill load stays later. |
 
 ACP host implementation can proceed in parallel with #330 *research*.
 Nested-run, plan-jail, and #330 *implementation* collide on `src/run/`.
+
+## Later
+
+2026-10-06: [#330](https://github.com/Sannrox/shikigami/issues/330) closed
+as no skill-declared boundary
+([ADR 0019](../decisions/0019-skill-context-boundaries.md)). Session mode,
+ACP attachments, and the skills+MCP extension surface are
+[ADR 0016](../decisions/0016-session-mode.md)–[0018](../decisions/0018-skills-mcp-extension.md).
+See [guest-session-surfaces.md](guest-session-surfaces.md).
 
 ## Alternatives
 
