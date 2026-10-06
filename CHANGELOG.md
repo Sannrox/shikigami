@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host (ratatui); `shikigami-types` owns identity, digest, and atomic-file
   helpers. `tokio` is `default-features = false` with the features the library
   calls.
+- `shikigami-plane-intake` owns `PlaneIntakePort` and the claim values the
+  sekai adapter and plane serve loop share. Mapping claimed work onto
+  `RunRequest` and `run_plane_serve` stay in the library.
 
 ### Added
 
