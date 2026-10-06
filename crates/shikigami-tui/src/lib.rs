@@ -77,6 +77,11 @@ struct PendingPermission {
     tx: oneshot::Sender<Value>,
 }
 
+struct QueuedPrompt {
+    display: String,
+    send: String,
+}
+
 struct Shared {
     transcript: Vec<TranscriptLine>,
     permission: Option<PendingPermission>,
@@ -84,6 +89,8 @@ struct Shared {
     show_plan: bool,
     status: String,
     busy: bool,
+    /// One follow-up to send after the in-flight prompt finishes.
+    queued: Option<QueuedPrompt>,
     input: String,
     cursor: usize,
     history: Vec<String>,
@@ -109,6 +116,7 @@ impl Shared {
             show_plan: false,
             status: "ready".into(),
             busy: false,
+            queued: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -233,6 +241,25 @@ impl Shared {
         self.slash_selected = 0;
         self.dirty = true;
         text
+    }
+
+    /// Store or replace the one-slot follow-up from the current draft.
+    fn queue_follow_up(&mut self) {
+        let text = self.take_input();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.queued = Some(QueuedPrompt {
+            display: trimmed.to_string(),
+            send: trimmed.to_string(),
+        });
+    }
+
+    fn drop_queue(&mut self) {
+        if self.queued.take().is_some() {
+            self.dirty = true;
+        }
     }
 
     fn sync_slash_dismissed(&mut self) {
@@ -466,10 +493,10 @@ impl TuiSession {
         let host = Arc::clone(&self.host);
         let client = self.client.clone();
         let shared = Arc::clone(&self.client.shared);
+        // Stay busy until wait_prompt reaps this handle so Enter cannot spawn over it.
         let task = tokio::spawn(async move {
             let resp = host.handle(msg, &client).await;
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
-            state.busy = false;
             apply_prompt_result(&mut state, resp.as_ref());
             state.dirty = true;
             resp
@@ -480,9 +507,30 @@ impl TuiSession {
 
     async fn wait_prompt(&self) -> Option<Value> {
         let task = self.prompt.lock().unwrap_or_else(|e| e.into_inner()).take();
-        match task {
+        let resp = match task {
             Some(task) => task.await.ok().flatten(),
             None => None,
+        };
+        let mut shared = self.lock_shared();
+        shared.busy = false;
+        shared.dirty = true;
+        resp
+    }
+
+    /// Send the queued follow-up after `wait_prompt` unless that turn was cancelled.
+    async fn drain_queued_prompt(&self, last: Option<&Value>) -> Result<(), String> {
+        let queued = {
+            let mut shared = self.lock_shared();
+            if prompt_cancelled(last) {
+                shared.drop_queue();
+                None
+            } else {
+                shared.queued.take()
+            }
+        };
+        match queued {
+            Some(QueuedPrompt { display, send }) => self.spawn_prompt_with(display, send).await,
+            None => Ok(()),
         }
     }
 
@@ -500,6 +548,7 @@ impl TuiSession {
             let _ = host.handle(msg, &client).await;
         });
         let mut shared = self.lock_shared();
+        shared.drop_queue();
         if let Some(pending) = shared.permission.take() {
             let _ = pending.tx.send(json!({
                 "outcome": { "outcome": "cancelled" }
@@ -666,6 +715,7 @@ impl TuiSession {
         shared.plan = None;
         shared.show_plan = false;
         shared.permission = None;
+        shared.queued = None;
         shared.status = "ready".into();
         shared.scroll_back = 0;
         shared.dirty = true;
@@ -889,6 +939,12 @@ fn status_line(session_id: &str, shared: &Shared, width: u16) -> String {
     }
     if shared.plan.is_some() {
         parts.push("^p plan".into());
+    }
+    if let Some(queued) = shared.queued.as_ref() {
+        parts.push(format!(
+            "queued  {}",
+            truncate_one_line(&queued.display, 32)
+        ));
     }
     if shared
         .transcript
@@ -1311,6 +1367,12 @@ fn merge_text(lines: &mut Vec<TranscriptLine>, kind: TranscriptLine, text: Strin
     }
 }
 
+fn prompt_cancelled(resp: Option<&Value>) -> bool {
+    resp.and_then(|v| v.pointer("/result/stopReason"))
+        .and_then(|v| v.as_str())
+        == Some("cancelled")
+}
+
 fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
     if let Some(reason) = resp
         .and_then(|v| v.pointer("/result/stopReason"))
@@ -1427,7 +1489,13 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
             guard.as_ref().is_some_and(|task| task.is_finished())
         };
         if finished {
-            let _ = session.wait_prompt().await;
+            let last = session.wait_prompt().await;
+            if let Err(err) = session.drain_queued_prompt(last.as_ref()).await {
+                let mut shared = session.lock_shared();
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
             session.lock_shared().dirty = true;
             continue;
         }
@@ -1602,8 +1670,12 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 session.lock_shared().insert_char('\n');
                 return KeyResult::Continue;
             }
-            if session.lock_shared().busy {
-                return KeyResult::Continue;
+            {
+                let mut shared = session.lock_shared();
+                if shared.busy {
+                    shared.queue_follow_up();
+                    return KeyResult::Continue;
+                }
             }
             let text = session.lock_shared().input.clone();
             if let Some(result) = session.slash_enter(&text) {
@@ -1627,6 +1699,8 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             } else if shared.show_plan {
                 shared.show_plan = false;
                 shared.dirty = true;
+            } else {
+                shared.drop_queue();
             }
         }
         _ => {}
@@ -2047,20 +2121,199 @@ mod tests {
         assert!(!cwd.join("ok.txt").exists());
     }
 
-    #[tokio::test]
-    async fn enter_while_busy_keeps_draft() {
-        let dir = tempdir().unwrap();
+    async fn start_session(dir: &tempfile::TempDir, script: &str) -> TuiSession {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
-        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
-        session.lock_shared().busy = true;
-        session.lock_shared().input = "follow up".into();
-        session.lock_shared().cursor = 9;
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(handle_key(&session, key), KeyResult::Continue));
-        assert_eq!(session.lock_shared().input, "follow up");
-        assert_eq!(session.prompt_text(), "> follow up");
+        let host = Arc::new(scripted_host(dir.path(), script));
+        TuiSession::start(host, &cwd).await.unwrap()
+    }
+
+    fn enter_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn user_prompts(session: &TuiSession) -> Vec<String> {
+        session
+            .lock_shared()
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                TranscriptLine::User(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn queued_display(session: &TuiSession) -> Option<String> {
+        session
+            .lock_shared()
+            .queued
+            .as_ref()
+            .map(|queued| queued.display.clone())
+    }
+
+    async fn spawn_then_queue(session: &TuiSession, text: &str) {
+        session.spawn_prompt("write".into()).await.unwrap();
+        type_text(session, text);
+        assert!(matches!(
+            handle_key(session, enter_key()),
+            KeyResult::Continue
+        ));
+    }
+
+    #[tokio::test]
+    async fn enter_while_busy_queues_follow_up_without_second_prompt() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        assert_eq!(session.lock_shared().input, "");
+        assert_eq!(session.prompt_text(), "> ");
+        assert_eq!(queued_display(&session).as_deref(), Some("follow up"));
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        assert!(
+            session
+                .prompt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        );
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(footer.contains("queued  follow up"), "{footer}");
+        let err = session.spawn_prompt("too soon".into()).await.unwrap_err();
+        assert!(err.contains("already in flight"), "{err}");
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn enter_while_busy_replaces_queued_follow_up() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "first").await;
+        type_text(&session, "second");
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        assert_eq!(queued_display(&session).as_deref(), Some("second"));
+        assert_eq!(session.lock_shared().input, "");
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(footer.contains("queued  second"), "{footer}");
+        assert!(!footer.contains("queued  first"), "{footer}");
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn esc_drops_queued_follow_up() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        assert_eq!(queued_display(&session).as_deref(), Some("follow up"));
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(queued_display(&session).is_none());
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(!footer.contains("queued"), "{footer}");
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn esc_hides_plan_before_dropping_queue() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        {
+            let mut shared = session.lock_shared();
+            shared.plan = Some(Plan {
+                entries: vec![PlanEntry {
+                    content: "inspect".into(),
+                    status: "pending".into(),
+                }],
+            });
+            shared.show_plan = true;
+        }
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(handle_key(&session, esc), KeyResult::Continue));
+        assert!(!session.lock_shared().show_plan);
+        assert_eq!(queued_display(&session).as_deref(), Some("follow up"));
+        assert!(matches!(handle_key(&session, esc), KeyResult::Continue));
+        assert!(queued_display(&session).is_none());
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn finish_drains_queued_follow_up_into_session_prompt() {
+        let dir = tempdir().unwrap();
+        let session = start_session(
+            &dir,
+            r#"[{"content":"first reply"},{"content":"queued reply"}]"#,
+        )
+        .await;
+        spawn_then_queue(&session, "follow up").await;
+        let first = session.wait_prompt().await;
+        assert_eq!(
+            first.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+            Some(&json!("end_turn"))
+        );
+        session.drain_queued_prompt(first.as_ref()).await.unwrap();
+        let second = session.wait_prompt().await;
+        assert_eq!(
+            second
+                .as_ref()
+                .and_then(|v| v.pointer("/result/stopReason")),
+            Some(&json!("end_turn"))
+        );
+        assert!(queued_display(&session).is_none());
+        assert_eq!(
+            user_prompts(&session),
+            vec!["write".to_string(), "follow up".to_string()]
+        );
+        let text = session.transcript_text();
+        assert!(text.contains("first reply"), "{text}");
+        assert!(text.contains("queued reply"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_queued_follow_up_without_sending() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        spawn_then_queue(&session, "follow up").await;
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(handle_key(&session, ctrl_c), KeyResult::Continue));
+        assert!(queued_display(&session).is_none());
+        let stop = session.wait_prompt().await;
+        session.drain_queued_prompt(stop.as_ref()).await.unwrap();
+        assert!(queued_display(&session).is_none());
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        assert!(
+            session
+                .prompt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        );
+        assert!(!session.transcript_text().contains("you  follow up"));
+    }
+
+    #[tokio::test]
+    async fn slash_while_busy_is_a_character_not_a_list() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.spawn_prompt("write".into()).await.unwrap();
+        type_text(&session, "/compact");
+        assert_eq!(session.lock_shared().input, "/compact");
+        assert!(!slash_visible(&session.lock_shared()));
+        assert!(session.slash_matches().is_empty());
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        assert_eq!(queued_display(&session).as_deref(), Some("/compact"));
+        assert_eq!(session.lock_shared().input, "");
+        let _ = session.wait_prompt().await;
     }
 
     #[tokio::test]
