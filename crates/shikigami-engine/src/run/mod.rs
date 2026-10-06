@@ -2974,6 +2974,292 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_wait_false_batch_starts_children_concurrently() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "explored",
+                        "success": true
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "a",
+                            "wait": false
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "b",
+                            "wait": false
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "c",
+                            "wait": false
+                        }).to_string()
+                    }
+                ]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 3);
+        assert_eq!(super::nested::last_background_batch_wait(), 3);
+        assert!(!tools::is_parallel_safe_tool("child_run"));
+        let running = parent
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "tool"
+                    && serde_json::from_str::<serde_json::Value>(&message.content)
+                        .ok()
+                        .is_some_and(|payload| payload["status"] == "running")
+            })
+            .count();
+        assert_eq!(running, 3, "each wait=false child must report running");
+    }
+
+    #[tokio::test]
+    async fn nested_wait_false_batch_honors_fan_out_cap() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.run.nested_max_children = 2;
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "explored",
+                        "success": true
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "one",
+                            "wait": false
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "two",
+                            "wait": false
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "three",
+                            "wait": false
+                        }).to_string()
+                    }
+                ]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 2);
+        assert_eq!(super::nested::last_background_batch_wait(), 2);
+        assert!(
+            parent.messages.iter().any(|message| {
+                message.role == "tool" && message.content.contains("fan-out cap")
+            }),
+            "third wait=false child_run must fail closed: {:?}",
+            parent.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_wait_false_mixed_with_write_stays_serial() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        let read = serde_json::json!({"path": "marker.txt"}).to_string();
+        let report = serde_json::json!({"summary": "saw it", "success": true}).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {"tool_calls":[{"name":"read_file","args_json": read}]},
+                {"tool_calls":[{"name":"report","args_json": report}]}
+            ])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [
+                    {
+                        "name": "write_file",
+                        "args_json": serde_json::json!({
+                            "path": "marker.txt",
+                            "content": "from-parent\n"
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "scout",
+                            "wait": false
+                        }).to_string()
+                    }
+                ]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(
+            super::nested::last_background_batch_wait(),
+            1,
+            "write + child_run must not share a nested start-wait"
+        );
+        let child_cp = Checkpoint::load(&eng.state_runs, &parent.children[0].run_id).unwrap();
+        assert!(
+            child_cp
+                .messages
+                .iter()
+                .any(|message| message.content.contains("from-parent")),
+            "serial write then child_run must materialize before the child reads: {:?}",
+            child_cp.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_wait_true_batch_stays_serial() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            serde_json::json!([{
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "explored",
+                        "success": true
+                    }).to_string()
+                }]
+            }])
+            .to_string(),
+        );
+        let parent_script = serde_json::json!([
+            {
+                "tool_calls": [
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "one"
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "two"
+                        }).to_string()
+                    }
+                ]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let eng = engine_nested(&dir, config, &parent_script);
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert_eq!(done.summary, "parent done");
+        let parent = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert_eq!(parent.children.len(), 2);
+        let summaries = parent
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .filter_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())
+            .filter(|payload| payload["summary"] == "explored")
+            .count();
+        assert_eq!(
+            summaries, 2,
+            "wait=true children must complete serially in the calling turn: {:?}",
+            parent.messages
+        );
+    }
+
+    #[tokio::test]
     async fn nested_unattended_park_finalizes_background_child() {
         let dir = tempdir().unwrap();
         let mut config = base_config(&dir);

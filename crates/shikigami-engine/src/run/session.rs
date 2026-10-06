@@ -67,7 +67,7 @@ pub(super) struct RunSession {
     /// them from a checkpoint. Unattended park `request_cancel`s children
     /// because the CLI process is about to exit. Terminal parent completion
     /// still `request_cancel`s any recorded child that is still running.
-    background_joins: Vec<tokio::task::JoinHandle<()>>,
+    background_joins: Vec<(String, tokio::task::JoinHandle<()>)>,
 }
 
 struct ContentSession {
@@ -129,12 +129,36 @@ impl RunSession {
         }
     }
 
-    pub(super) fn push_background_child(&mut self, handle: tokio::task::JoinHandle<()>) {
-        self.background_joins.push(handle);
+    pub(super) fn push_background_child_id(
+        &mut self,
+        child_id: impl Into<String>,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        self.background_joins.push((child_id.into(), handle));
+    }
+
+    pub(super) fn background_child_finished(&self, child_id: &str) -> bool {
+        self.background_joins
+            .iter()
+            .any(|(id, handle)| id == child_id && handle.is_finished())
+    }
+
+    pub(super) fn take_background_child(
+        &mut self,
+        child_id: &str,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let pos = self
+            .background_joins
+            .iter()
+            .position(|(id, _)| id == child_id)?;
+        Some(self.background_joins.remove(pos).1)
     }
 
     pub(super) fn take_background_joins(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
         std::mem::take(&mut self.background_joins)
+            .into_iter()
+            .map(|(_, handle)| handle)
+            .collect()
     }
 
     /// Keep the parked approval wait durable across saves after a resume.

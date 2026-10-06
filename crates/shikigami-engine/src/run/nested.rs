@@ -48,6 +48,22 @@ pub(super) fn background_spawns() -> u32 {
     BACKGROUND_SPAWNS.load(Ordering::SeqCst)
 }
 
+#[cfg(test)]
+thread_local! {
+    static LAST_BACKGROUND_BATCH_WAIT: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn last_background_batch_wait() -> u32 {
+    LAST_BACKGROUND_BATCH_WAIT.with(std::cell::Cell::get)
+}
+
+fn note_background_batch_wait(_size: u32) {
+    #[cfg(test)]
+    LAST_BACKGROUND_BATCH_WAIT.with(|cell| cell.set(_size));
+}
+
 fn background_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     static CELL: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     if let Some(runtime) = CELL.get() {
@@ -130,6 +146,17 @@ pub(super) fn session_ask_park(name: &str, args_json: &str) -> bool {
     )
 }
 
+/// Background `child_run` that may share a start-wait with peers.
+///
+/// `wait=true` stays serial (full `Engine::run` completion). `worktree=true`
+/// stays serial: `git worktree add` mutates the parent checkout.
+pub(super) fn child_run_allows_concurrent_start(args_json: &str) -> bool {
+    let Ok(args) = serde_json::from_str::<ChildRunArgs>(args_json) else {
+        return false;
+    };
+    !args.wait && !args.worktree
+}
+
 pub(super) fn nested_tools_enabled(
     engine: &Engine,
     request: &RunRequest,
@@ -200,15 +227,70 @@ pub(super) async fn execute_child_tool(
     }
 }
 
-async fn child_run(
+pub(super) struct QueuedBackgroundChild {
+    child_id: String,
+    profile: ChildProfile,
+}
+
+/// Reserve a fan-out slot and queue `Engine::run` without waiting for start.
+pub(super) fn queue_wait_false_child_run(
+    engine: &Engine,
+    session: &mut RunSession,
+    request: &RunRequest,
+    tools: &ToolRegistry,
+    call: &ToolCall,
+) -> Result<QueuedBackgroundChild, RunError> {
+    if !nested_tools_enabled(
+        engine,
+        request,
+        session.is_content(),
+        session.nested_depth,
+        &session.parent_run_id,
+        session.nested,
+    ) {
+        return Err(RunError::Message(format!(
+            "tool not enabled: {}",
+            call.name
+        )));
+    }
+    if call.name != "child_run" {
+        return Err(RunError::Message(format!(
+            "internal nested dispatch for `{}`",
+            call.name
+        )));
+    }
+    let prepared = prepare_child_run(engine, session, request, tools, &call.args_json)?;
+    if prepared.args.wait {
+        session.children.pop();
+        let _ = session.save(tools);
+        return Err(RunError::Message(
+            "internal: wait=true child_run cannot queue as background".into(),
+        ));
+    }
+    let child_id = prepared.child_id.clone();
+    let profile = prepared.profile;
+    let handle = spawn_or_rollback(session, tools, prepared)?;
+    // Own the JoinHandle on the session before returning so a later `?`
+    // in the parent batch cannot drop the blocking worker.
+    session.push_background_child_id(child_id.clone(), handle);
+    Ok(QueuedBackgroundChild { child_id, profile })
+}
+
+struct PreparedChild {
+    args: ChildRunArgs,
+    profile: ChildProfile,
+    child_id: String,
+    child_request: RunRequest,
+    child_engine: Engine,
+}
+
+fn prepare_child_run(
     engine: &Engine,
     session: &mut RunSession,
     request: &RunRequest,
     tools: &ToolRegistry,
     args_json: &str,
-    started: tokio::time::Instant,
-    timeout: Option<std::time::Duration>,
-) -> Result<ToolOutput, RunError> {
+) -> Result<PreparedChild, RunError> {
     if session.is_content() {
         return Err(RunError::Message(
             "bounded content runs do not start nested children".into(),
@@ -250,27 +332,58 @@ async fn child_run(
         session.children.pop();
         return Err(error);
     }
-    if !args.wait {
-        // Shared runtime + blocking worker so this recursive Engine::run
-        // path does not have to be `Send` through tokio::spawn. Queueing
-        // the job is enough to report toward `running`; a Builder failure
-        // still rolls back the fan-out slot.
-        let handle = match spawn_background_child(child_engine, child_request) {
-            Ok(handle) => handle,
-            Err(error) => {
-                session.children.pop();
-                let _ = session.save(tools);
-                return Err(error);
-            }
-        };
+    Ok(PreparedChild {
+        args,
+        profile,
+        child_id,
+        child_request,
+        child_engine,
+    })
+}
+
+fn spawn_or_rollback(
+    session: &mut RunSession,
+    tools: &ToolRegistry,
+    prepared: PreparedChild,
+) -> Result<tokio::task::JoinHandle<()>, RunError> {
+    // Shared runtime + blocking worker so this recursive Engine::run
+    // path does not have to be `Send` through tokio::spawn. Queueing
+    // the job is enough to report toward `running`; a Builder failure
+    // still rolls back the fan-out slot.
+    match spawn_background_child(prepared.child_engine, prepared.child_request) {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            session.children.pop();
+            let _ = session.save(tools);
+            Err(error)
+        }
+    }
+}
+
+async fn child_run(
+    engine: &Engine,
+    session: &mut RunSession,
+    request: &RunRequest,
+    tools: &ToolRegistry,
+    args_json: &str,
+    started: tokio::time::Instant,
+    timeout: Option<std::time::Duration>,
+) -> Result<ToolOutput, RunError> {
+    let prepared = prepare_child_run(engine, session, request, tools, args_json)?;
+    if !prepared.args.wait {
+        let child_id = prepared.child_id.clone();
+        let profile = prepared.profile;
+        let handle = spawn_or_rollback(session, tools, prepared)?;
         return wait_for_background_child_start(
             engine, session, request, tools, handle, &child_id, profile, started, timeout,
         )
         .await;
     }
+    let child_id = prepared.child_id.clone();
+    let profile = prepared.profile;
     // Wait while still honoring parent cancel/timeout. A durable
     // `shikigami cancel <parent>` marker is not the child's run id.
-    let mut child_fut = Box::pin(child_engine.run(child_request));
+    let mut child_fut = Box::pin(prepared.child_engine.run(prepared.child_request));
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let result = loop {
@@ -325,6 +438,30 @@ async fn child_run(
     }
 }
 
+fn background_running_output(child_id: &str, profile: ChildProfile) -> ToolOutput {
+    ToolOutput::Text(
+        json!({
+            "run_id": child_id,
+            "profile": profile.as_str(),
+            "status": "running",
+        })
+        .to_string(),
+    )
+}
+
+fn background_cancelled_before_start_output(child_id: &str, profile: ChildProfile) -> ToolOutput {
+    ToolOutput::Text(
+        json!({
+            "run_id": child_id,
+            "profile": profile.as_str(),
+            "termination": "cancelled",
+            "success": false,
+            "summary": "child_run cancelled before start",
+        })
+        .to_string(),
+    )
+}
+
 /// Wait until `registry.start` wrote a row, or the worker exited.
 ///
 /// Returning `running` at runtime-build lets a pre-start cancel leave the
@@ -341,35 +478,50 @@ async fn wait_for_background_child_start(
     started: tokio::time::Instant,
     timeout: Option<std::time::Duration>,
 ) -> Result<ToolOutput, RunError> {
+    session.push_background_child_id(child_id, handle);
+    let queued = vec![(
+        0,
+        crate::model::ToolCall {
+            id: String::new(),
+            name: "child_run".into(),
+            args_json: String::new(),
+        },
+        QueuedBackgroundChild {
+            child_id: child_id.into(),
+            profile,
+        },
+    )];
+    let mut outcomes = wait_for_queued_background_children(
+        engine, session, request, tools, queued, started, timeout,
+    )
+    .await?;
+    match outcomes.pop() {
+        Some((_, _, Ok(output))) => Ok(output),
+        Some((_, _, Err(detail))) => Err(RunError::Message(detail)),
+        None => Err(RunError::Message(
+            "internal: background child start produced no outcome".into(),
+        )),
+    }
+}
+
+/// Poll every queued `wait=false` child until it is `running` or cancelled
+/// before start. Parent cancel/timeout aborts the batch after requesting
+/// cancel on each still-pending child.
+pub(super) async fn wait_for_queued_background_children(
+    engine: &Engine,
+    session: &mut RunSession,
+    request: &RunRequest,
+    tools: &ToolRegistry,
+    mut queued: Vec<(usize, crate::model::ToolCall, QueuedBackgroundChild)>,
+    started: tokio::time::Instant,
+    timeout: Option<std::time::Duration>,
+) -> Result<Vec<(usize, crate::model::ToolCall, Result<ToolOutput, String>)>, RunError> {
+    note_background_batch_wait(queued.len() as u32);
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
+    let mut out = Vec::with_capacity(queued.len());
+    while !queued.is_empty() {
         interval.tick().await;
-        if Checkpoint::load(&engine.state_runs, child_id).is_ok() {
-            session.push_background_child(handle);
-            return Ok(ToolOutput::Text(
-                json!({
-                    "run_id": child_id,
-                    "profile": profile.as_str(),
-                    "status": "running",
-                })
-                .to_string(),
-            ));
-        }
-        if handle.is_finished() {
-            let _ = handle.await;
-            rollback_unstarted_child(session, tools, child_id);
-            return Ok(ToolOutput::Text(
-                json!({
-                    "run_id": child_id,
-                    "profile": profile.as_str(),
-                    "termination": "cancelled",
-                    "success": false,
-                    "summary": "child_run cancelled before start",
-                })
-                .to_string(),
-            ));
-        }
         if let Err(error) = check_bounds(
             engine,
             &session.run_id,
@@ -378,20 +530,81 @@ async fn wait_for_background_child_start(
             timeout,
             &session.parent_run_id,
         ) {
-            let _ = engine.registry.request_cancel(child_id);
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-            while !handle.is_finished() && tokio::time::Instant::now() < deadline {
-                interval.tick().await;
-            }
-            if handle.is_finished() {
-                let _ = handle.await;
-                rollback_unstarted_child(session, tools, child_id);
-            } else {
-                session.push_background_child(handle);
-            }
-            return Err(error);
+            return settle_pending_on_parent_bound(
+                engine,
+                session,
+                tools,
+                queued,
+                error,
+                &mut interval,
+            )
+            .await;
         }
+        let mut still = Vec::new();
+        for (index, call, child) in queued {
+            if Checkpoint::load(&engine.state_runs, &child.child_id).is_ok() {
+                out.push((
+                    index,
+                    call,
+                    Ok(background_running_output(&child.child_id, child.profile)),
+                ));
+            } else if session.background_child_finished(&child.child_id) {
+                if let Some(handle) = session.take_background_child(&child.child_id) {
+                    let _ = handle.await;
+                }
+                rollback_unstarted_child(session, tools, &child.child_id);
+                out.push((
+                    index,
+                    call,
+                    Ok(background_cancelled_before_start_output(
+                        &child.child_id,
+                        child.profile,
+                    )),
+                ));
+            } else {
+                still.push((index, call, child));
+            }
+        }
+        queued = still;
     }
+    Ok(out)
+}
+
+async fn settle_pending_on_parent_bound(
+    engine: &Engine,
+    session: &mut RunSession,
+    tools: &ToolRegistry,
+    queued: Vec<(usize, crate::model::ToolCall, QueuedBackgroundChild)>,
+    error: RunError,
+    interval: &mut tokio::time::Interval,
+) -> Result<Vec<(usize, crate::model::ToolCall, Result<ToolOutput, String>)>, RunError> {
+    for (_, _, child) in &queued {
+        let _ = engine.registry.request_cancel(&child.child_id);
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut pending = queued;
+    while !pending.is_empty() && tokio::time::Instant::now() < deadline {
+        interval.tick().await;
+        let mut still = Vec::new();
+        for (index, call, child) in pending {
+            if Checkpoint::load(&engine.state_runs, &child.child_id).is_ok() {
+                if session.background_child_finished(&child.child_id)
+                    && let Some(handle) = session.take_background_child(&child.child_id)
+                {
+                    let _ = handle.await;
+                }
+            } else if session.background_child_finished(&child.child_id) {
+                if let Some(handle) = session.take_background_child(&child.child_id) {
+                    let _ = handle.await;
+                }
+                rollback_unstarted_child(session, tools, &child.child_id);
+            } else {
+                still.push((index, call, child));
+            }
+        }
+        pending = still;
+    }
+    Err(error)
 }
 
 fn reap_nested_worktree(engine: &Engine, child_id: &str) {
@@ -630,7 +843,10 @@ fn summary_json(profile: ChildProfile, result: &RunResult) -> String {
 mod tests {
     use std::path::Path;
 
-    use super::{ChildProfile, Engine, RunRequest, child_config, parse_profile, session_ask_park};
+    use super::{
+        ChildProfile, Engine, RunRequest, child_config, child_run_allows_concurrent_start,
+        parse_profile, session_ask_park,
+    };
     use crate::config::{Config, McpServerSettings, PermissionMode};
 
     #[test]
@@ -672,6 +888,26 @@ mod tests {
         ));
         assert!(!session_ask_park("child_status", r#"{"run_id":"x"}"#));
         assert!(session_ask_park("write_file", r#"{"path":"ok.txt"}"#));
+    }
+
+    #[test]
+    fn wait_false_without_worktree_allows_concurrent_start() {
+        assert!(child_run_allows_concurrent_start(
+            r#"{"profile":"explore","task":"scout","wait":false}"#
+        ));
+        assert!(child_run_allows_concurrent_start(
+            r#"{"profile":"full","task":"edit","wait":false}"#
+        ));
+        assert!(!child_run_allows_concurrent_start(
+            r#"{"profile":"explore","task":"scout"}"#
+        ));
+        assert!(!child_run_allows_concurrent_start(
+            r#"{"profile":"explore","task":"scout","wait":true}"#
+        ));
+        assert!(!child_run_allows_concurrent_start(
+            r#"{"profile":"explore","task":"scout","wait":false,"worktree":true}"#
+        ));
+        assert!(!child_run_allows_concurrent_start("not-json"));
     }
 
     #[test]

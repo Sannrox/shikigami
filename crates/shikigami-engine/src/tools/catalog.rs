@@ -401,7 +401,10 @@ pub fn must_be_exclusive_batch(name: &str) -> bool {
 /// Tools safe to run concurrently with each other (workspace reads plus
 /// `web_fetch`; no workspace mutation).
 ///
-/// Write tools, bash, todo_write, handoff, report/escalate stay serial for the whole batch.
+/// Write tools, bash, todo_write, handoff, report/escalate, and `child_run`
+/// stay serial for the whole batch. Isolated `wait=false` `child_run`s may
+/// share a nested start-wait under `nested_max_children` without being
+/// globally parallel-safe (that would overlap children with writes).
 pub fn is_parallel_safe_tool(name: &str) -> bool {
     matches!(name, "read_file" | "glob" | "grep" | "web_fetch")
 }
@@ -535,6 +538,8 @@ mod tests {
         );
         assert!(!must_be_exclusive_batch("handoff"));
         assert!(!is_parallel_safe_tool("handoff"));
+        assert!(!is_parallel_safe_tool("child_run"));
+        assert!(!is_parallel_safe_tool("child_status"));
         assert_eq!(
             replay_tool_authority("handoff"),
             ReplayToolAuthority::Denied

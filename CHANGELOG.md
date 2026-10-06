@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Nested `wait=false` children share one runtime instead of one OS thread
   and runtime each. Fan-out and join/cancel semantics are unchanged.
+- Isolated `wait=false` `child_run`s in one tool batch start concurrently
+  under `nested_max_children`. `wait=true` stays serial. Mixing `child_run`
+  with workspace-mutating tools keeps the whole batch serial.
 - Cargo workspace: `shikigami` remains the embeddable library; `shikigami-cli`
   owns the `shikigami` binary (clap); `shikigami-tui` owns the interactive
   host (ratatui); `shikigami-types` owns identity, digest, and atomic-file
