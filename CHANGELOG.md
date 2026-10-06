@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nested `wait=false` start waits on a registry start signal instead of a
+  20ms `Checkpoint::load` poll. Slot claims in one start-wait share one
+  parent checkpoint save.
 - Nested `wait=false` children share one runtime instead of one OS thread
   and runtime each. Fan-out and join/cancel semantics are unchanged.
 - Isolated `wait=false` `child_run`s in one tool batch start concurrently

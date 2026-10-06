@@ -50,8 +50,8 @@ fn plan_jail_deny(call: &ToolCall, workspace: &std::path::Path) -> Option<String
 /// Isolated `wait=false` `child_run`s may share one start-wait under
 /// `nested_max_children`. Workspace-mutating tools, `wait=true`, and
 /// `worktree=true` keep the whole batch serial. Parallel-safe reads may
-/// share the isolated batch; they still execute through the serial
-/// checkpoint protocol, then the queued children wait together.
+/// share the isolated batch through the serial checkpoint protocol.
+/// Reserved children launch (one parent save) before a later read runs.
 fn batch_can_concurrent_child_starts(
     calls: &[ToolCall],
     session_wait: bool,
@@ -348,139 +348,19 @@ impl<'a> DurableToolBatch<'a> {
                 super::nested::QueuedBackgroundChild,
             )> = Vec::new();
             let mut out = Vec::with_capacity(turn.tool_calls.len());
-            for (index, call) in turn.tool_calls.iter().enumerate() {
-                if already_answered(session, call, index) {
-                    continue;
-                }
-                if let Err(error) = check_bounds(
-                    self.engine,
-                    &session.run_id,
-                    request,
-                    started,
-                    timeout,
-                    &session.parent_run_id,
-                ) {
-                    flush_pending_background_children(
-                        self.engine,
-                        session,
-                        request,
-                        tools.as_ref(),
-                        &mut pending_background,
-                        &mut out,
-                        started,
-                        timeout,
-                    )
-                    .await?;
-                    return Err(error);
-                }
-                if !tools.is_enabled(&call.name) {
-                    // Deny before authorize so a read-only explore child
-                    // (or a parent with nested off) cannot redeem a
-                    // parent/plane permit for `child_run` / writes.
-                    out.push((
-                        index,
-                        call.clone(),
-                        Err(format!("tool not enabled: {}", call.name)),
-                    ));
-                    continue;
-                }
-                let nested = matches!(call.name.as_str(), "child_run" | "child_status");
-                let stable_call_id = stable_tool_call_id(call, session.turns, index);
-                let conversation_id = conversation_tool_call_id(call, session.turns, index);
-                let ask_granted = session
-                    .ask_allow_call_id()
-                    .is_some_and(|token| token == stable_call_id || token == conversation_id);
-                if session.plan_jail
-                    && let Some(denied) = plan_jail_deny(call, &session.workspace)
-                {
-                    out.push((index, call.clone(), Err(denied)));
-                    continue;
-                }
-                if request.session_wait
-                    && !session.plan_jail
-                    && super::nested::session_ask_park(&call.name, &call.args_json)
-                    && self.engine.governance.session_asks_mutating_tools()
-                    && !ask_granted
-                {
-                    flush_pending_background_children(
-                        self.engine,
-                        session,
-                        request,
-                        tools.as_ref(),
-                        &mut pending_background,
-                        &mut out,
-                        started,
-                        timeout,
-                    )
-                    .await?;
-                    let emissions = self.persist_completed_prefix(session, handle, &out).await?;
-                    return self
-                        .park_for_ask(
-                            session,
-                            pending_park,
-                            call,
-                            index,
-                            conversation_id,
-                            emissions,
-                        )
-                        .await;
-                }
-                // One-shot grant: consume when this approved call is attempted,
-                // including hook and authorization rejection paths.
-                if ask_granted {
-                    session.set_ask_allow_call_id(None);
-                    session.clear_resumed_ask_park();
-                }
-                // Pre-tool hooks are an execution-authorization boundary, not
-                // a durable projection. They must inspect the exact transient
-                // arguments that authorization and the host tool will receive.
-                if let Err(e) = hooks::run_hooks(
-                    &self.engine.config.hooks,
-                    HookEvent::PreTool,
-                    json!({
-                        "run_id": session.run_id,
-                        "tool": call.name,
-                        "args_json": call.args_json,
-                    }),
-                )
-                .await
-                {
-                    if self
-                        .engine
-                        .governance
-                        .checkpoint_state(&session.run_id)
-                        .and_then(|checkpoint| checkpoint.approval_park)
-                        .is_some_and(|park| park.call_id == stable_call_id)
-                    {
-                        self.engine.governance.clear_approval_park(handle).await?;
+            let batch = async {
+                for (index, call) in turn.tool_calls.iter().enumerate() {
+                    if already_answered(session, call, index) {
+                        continue;
                     }
-                    out.push((index, call.clone(), Err(e)));
-                    continue;
-                }
-                let approval_park = self
-                    .engine
-                    .governance
-                    .checkpoint_state(&session.run_id)
-                    .and_then(|checkpoint| checkpoint.approval_park)
-                    .filter(|park| park.call_id == stable_call_id);
-                let parked_call_bound = approval_park.as_ref().map_or(Ok(()), |park| {
-                    bind_parked_call(park, &call.name, &call.args_json)
-                });
-                let requires_claim = self
-                    .engine
-                    .governance
-                    .tool_requires_execution_checkpoint(&call.name);
-                if parked_call_bound.is_ok() && approval_park.is_some() && requires_claim {
-                    // Parked resume: if the exclusive claim already exists,
-                    // refuse after bind and before Authorizing save or plane
-                    // redeem. Do not take a new claim yet — authorize may
-                    // still return pending. The permit path claims below.
-                    if self
-                        .engine
-                        .registry
-                        .tool_execution_is_claimed(&session.run_id, &stable_call_id)
-                        .unwrap_or(true)
-                    {
+                    if let Err(error) = check_bounds(
+                        self.engine,
+                        &session.run_id,
+                        request,
+                        started,
+                        timeout,
+                        &session.parent_run_id,
+                    ) {
                         flush_pending_background_children(
                             self.engine,
                             session,
@@ -492,66 +372,37 @@ impl<'a> DurableToolBatch<'a> {
                             timeout,
                         )
                         .await?;
-                        return Err(GovernanceError::Message(format!(
-                            "host effect refused, not claimed exclusively: tool call `{stable_call_id}` in run {} is already claimed by another execution attempt",
-                            session.run_id
-                        ))
-                        .into());
+                        return Err(error);
                     }
-                }
-                if parked_call_bound.is_ok() && requires_claim {
-                    let durable_args = if session.is_content() {
-                        session
-                            .durable_content_tool_arguments(index)
-                            .ok_or_else(|| {
-                                RunError::Message(
-                                    "durable content tool arguments are missing".into(),
-                                )
-                            })?
-                    } else {
-                        call.args_json.clone()
-                    };
-                    self.engine
-                        .governance
-                        .stage_tool_execution(
-                            handle,
-                            StagedToolExecution {
-                                call_id: stable_call_id.clone(),
-                                name: call.name.clone(),
-                                args_json: durable_args,
-                                status: ToolExecutionStatus::Authorizing,
-                            },
-                        )
-                        .await?;
-                    session.save(tools.as_ref())?;
-                }
-                let authorization = match parked_call_bound {
-                    Ok(()) => {
-                        self.engine
-                            .governance
-                            .authorize_tool_with_id(
-                                handle,
-                                &stable_call_id,
-                                &call.name,
-                                &call.args_json,
-                            )
-                            .await
+                    if !tools.is_enabled(&call.name) {
+                        // Deny before authorize so a read-only explore child
+                        // (or a parent with nested off) cannot redeem a
+                        // parent/plane permit for `child_run` / writes.
+                        out.push((
+                            index,
+                            call.clone(),
+                            Err(format!("tool not enabled: {}", call.name)),
+                        ));
+                        continue;
                     }
-                    Err(error) => Err(error),
-                };
-                if let Err(e) = authorization {
-                    if let GovernanceError::RequireApproval {
-                        approval_id,
-                        authorization_id,
-                        request_digest,
-                        expires_at_ms,
-                        deadline_ms,
-                        reason,
-                    } = e
+                    let nested = matches!(call.name.as_str(), "child_run" | "child_status");
+                    let stable_call_id = stable_tool_call_id(call, session.turns, index);
+                    let conversation_id = conversation_tool_call_id(call, session.turns, index);
+                    let ask_granted = session
+                        .ask_allow_call_id()
+                        .is_some_and(|token| token == stable_call_id || token == conversation_id);
+                    if session.plan_jail
+                        && let Some(denied) = plan_jail_deny(call, &session.workspace)
                     {
-                        // Wait for already-queued wait=false starts so their
-                        // tool results are in `out` before this park. Resume
-                        // must see those calls as answered.
+                        out.push((index, call.clone(), Err(denied)));
+                        continue;
+                    }
+                    if request.session_wait
+                        && !session.plan_jail
+                        && super::nested::session_ask_park(&call.name, &call.args_json)
+                        && self.engine.governance.session_asks_mutating_tools()
+                        && !ask_granted
+                    {
                         flush_pending_background_children(
                             self.engine,
                             session,
@@ -565,194 +416,74 @@ impl<'a> DurableToolBatch<'a> {
                         .await?;
                         let emissions =
                             self.persist_completed_prefix(session, handle, &out).await?;
-                        if !emissions.is_empty() {
-                            let durable_args = if session.is_content() {
-                                session
-                                    .durable_content_tool_arguments(index)
-                                    .ok_or_else(|| {
-                                        RunError::Message(
-                                            "durable content tool arguments are missing".into(),
-                                        )
-                                    })?
-                            } else {
-                                call.args_json.clone()
-                            };
-                            self.engine
-                                .governance
-                                .stage_tool_execution(
-                                    handle,
-                                    StagedToolExecution {
-                                        call_id: stable_call_id.clone(),
-                                        name: call.name.clone(),
-                                        args_json: durable_args,
-                                        status: ToolExecutionStatus::Authorizing,
-                                    },
-                                )
-                                .await?;
-                        }
-                        return self
-                            .park_for_approval(
+                        return Ok(Some(
+                            self.park_for_ask(
                                 session,
                                 pending_park,
                                 call,
                                 index,
-                                stable_call_id.clone(),
-                                ApprovalPark {
-                                    approval_id,
-                                    call_id: stable_call_id,
-                                    tool_name: call.name.clone(),
-                                    authorization_id,
-                                    request_digest,
-                                    arguments_digest: park_arguments_digest(&call.args_json),
-                                    expires_at_ms,
-                                    parked_at_ms: now_unix_ms(),
-                                    deadline_ms,
-                                },
-                                reason,
+                                conversation_id,
                                 emissions,
                             )
-                            .await;
+                            .await?,
+                        ));
                     }
-                    if self
+                    // One-shot grant: consume when this approved call is attempted,
+                    // including hook and authorization rejection paths.
+                    if ask_granted {
+                        session.set_ask_allow_call_id(None);
+                        session.clear_resumed_ask_park();
+                    }
+                    // Pre-tool hooks are an execution-authorization boundary, not
+                    // a durable projection. They must inspect the exact transient
+                    // arguments that authorization and the host tool will receive.
+                    if let Err(e) = hooks::run_hooks(
+                        &self.engine.config.hooks,
+                        HookEvent::PreTool,
+                        json!({
+                            "run_id": session.run_id,
+                            "tool": call.name,
+                            "args_json": call.args_json,
+                        }),
+                    )
+                    .await
+                    {
+                        if self
+                            .engine
+                            .governance
+                            .checkpoint_state(&session.run_id)
+                            .and_then(|checkpoint| checkpoint.approval_park)
+                            .is_some_and(|park| park.call_id == stable_call_id)
+                        {
+                            self.engine.governance.clear_approval_park(handle).await?;
+                        }
+                        out.push((index, call.clone(), Err(e)));
+                        continue;
+                    }
+                    let approval_park = self
                         .engine
                         .governance
                         .checkpoint_state(&session.run_id)
                         .and_then(|checkpoint| checkpoint.approval_park)
-                        .is_some_and(|park| park.call_id == stable_call_id)
-                    {
-                        if matches!(e, GovernanceError::Denied(_)) {
-                            self.engine.governance.clear_approval_park(handle).await?;
-                        } else {
-                            return Err(e.into());
-                        }
-                    }
-                    out.push((index, call.clone(), Err(e.to_string())));
-                    continue;
-                }
-                if requires_claim {
-                    self.engine
-                        .registry
-                        .claim_tool_execution(&session.run_id, &stable_call_id)
-                        .map_err(|error| {
-                            GovernanceError::Message(format!(
-                                "host effect refused, not claimed exclusively: {error}"
-                            ))
-                        })?;
-                    self.engine
+                        .filter(|park| park.call_id == stable_call_id);
+                    let parked_call_bound = approval_park.as_ref().map_or(Ok(()), |park| {
+                        bind_parked_call(park, &call.name, &call.args_json)
+                    });
+                    let requires_claim = self
+                        .engine
                         .governance
-                        .mark_tool_execution_started(handle, &stable_call_id)
-                        .await?;
-                    session.save(tools.as_ref())?;
-                }
-                // Clear the park only after the exclusive claim (when required)
-                // and the durable `Started` save, so a crash in this window
-                // keeps the parked approval.
-                if self
-                    .engine
-                    .governance
-                    .checkpoint_state(&session.run_id)
-                    .and_then(|checkpoint| checkpoint.approval_park)
-                    .is_some_and(|park| park.call_id == stable_call_id)
-                {
-                    self.engine.governance.clear_approval_park(handle).await?;
-                }
-                let executed = if nested {
-                    if let Some(sem) = nested_sem.as_ref()
-                        && call.name == "child_run"
-                        && super::nested::child_run_allows_concurrent_start(&call.args_json)
-                    {
-                        let permit = match sem.try_acquire() {
-                            Ok(permit) => permit,
-                            Err(_) => {
-                                let max_children =
-                                    self.engine.config.run.nested_max_children.max(1);
-                                out.push((
-                                    index,
-                                    call.clone(),
-                                    Err(format!(
-                                        "nested fan-out cap ({max_children}) refuses another child_run"
-                                    )),
-                                ));
-                                continue;
-                            }
-                        };
-                        match super::nested::queue_wait_false_child_run(
-                            self.engine,
-                            session,
-                            request,
-                            tools.as_ref(),
-                            call,
-                        ) {
-                            Ok(queued) => {
-                                permit.forget();
-                                pending_background.push((index, call.clone(), queued));
-                                continue;
-                            }
-                            Err(error)
-                                if matches!(error, RunError::Cancelled | RunError::TimedOut(_)) =>
-                            {
-                                flush_pending_background_children(
-                                    self.engine,
-                                    session,
-                                    request,
-                                    tools.as_ref(),
-                                    &mut pending_background,
-                                    &mut out,
-                                    started,
-                                    timeout,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-                            Err(error) => Err(error.to_string()),
-                        }
-                    } else {
-                        match super::nested::execute_child_tool(
-                            self.engine,
-                            session,
-                            request,
-                            tools.as_ref(),
-                            call,
-                            started,
-                            timeout,
-                        )
-                        .await
+                        .tool_requires_execution_checkpoint(&call.name);
+                    if parked_call_bound.is_ok() && approval_park.is_some() && requires_claim {
+                        // Parked resume: if the exclusive claim already exists,
+                        // refuse after bind and before Authorizing save or plane
+                        // redeem. Do not take a new claim yet — authorize may
+                        // still return pending. The permit path claims below.
+                        if self
+                            .engine
+                            .registry
+                            .tool_execution_is_claimed(&session.run_id, &stable_call_id)
+                            .unwrap_or(true)
                         {
-                            Ok(output) => Ok(output),
-                            Err(error)
-                                if matches!(error, RunError::Cancelled | RunError::TimedOut(_)) =>
-                            {
-                                flush_pending_background_children(
-                                    self.engine,
-                                    session,
-                                    request,
-                                    tools.as_ref(),
-                                    &mut pending_background,
-                                    &mut out,
-                                    started,
-                                    timeout,
-                                )
-                                .await?;
-                                return Err(error);
-                            }
-                            Err(error) => Err(error.to_string()),
-                        }
-                    }
-                } else {
-                    match super::supervision::run_until_cancelled(
-                        self.engine,
-                        &session.run_id,
-                        request,
-                        started,
-                        timeout,
-                        &session.parent_run_id,
-                        tools.execute(&call.name, &call.args_json),
-                    )
-                    .await
-                    {
-                        Ok(Ok(output)) => Ok(output),
-                        Ok(Err(error)) => Err(error.to_string()),
-                        Err(error) => {
                             flush_pending_background_children(
                                 self.engine,
                                 session,
@@ -764,27 +495,343 @@ impl<'a> DurableToolBatch<'a> {
                                 timeout,
                             )
                             .await?;
-                            return Err(error);
+                            return Err(GovernanceError::Message(format!(
+                            "host effect refused, not claimed exclusively: tool call `{stable_call_id}` in run {} is already claimed by another execution attempt",
+                            session.run_id
+                        ))
+                        .into());
                         }
                     }
-                };
-                match executed {
-                    Ok(o) => out.push((index, call.clone(), Ok(o))),
-                    Err(e) => out.push((index, call.clone(), Err(e))),
+                    if parked_call_bound.is_ok() && requires_claim {
+                        let durable_args = if session.is_content() {
+                            session
+                                .durable_content_tool_arguments(index)
+                                .ok_or_else(|| {
+                                    RunError::Message(
+                                        "durable content tool arguments are missing".into(),
+                                    )
+                                })?
+                        } else {
+                            call.args_json.clone()
+                        };
+                        self.engine
+                            .governance
+                            .stage_tool_execution(
+                                handle,
+                                StagedToolExecution {
+                                    call_id: stable_call_id.clone(),
+                                    name: call.name.clone(),
+                                    args_json: durable_args,
+                                    status: ToolExecutionStatus::Authorizing,
+                                },
+                            )
+                            .await?;
+                        session.save(tools.as_ref())?;
+                    }
+                    let authorization = match parked_call_bound {
+                        Ok(()) => {
+                            self.engine
+                                .governance
+                                .authorize_tool_with_id(
+                                    handle,
+                                    &stable_call_id,
+                                    &call.name,
+                                    &call.args_json,
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(e) = authorization {
+                        if let GovernanceError::RequireApproval {
+                            approval_id,
+                            authorization_id,
+                            request_digest,
+                            expires_at_ms,
+                            deadline_ms,
+                            reason,
+                        } = e
+                        {
+                            // Wait for already-queued wait=false starts so their
+                            // tool results are in `out` before this park. Resume
+                            // must see those calls as answered.
+                            flush_pending_background_children(
+                                self.engine,
+                                session,
+                                request,
+                                tools.as_ref(),
+                                &mut pending_background,
+                                &mut out,
+                                started,
+                                timeout,
+                            )
+                            .await?;
+                            let emissions =
+                                self.persist_completed_prefix(session, handle, &out).await?;
+                            if !emissions.is_empty() {
+                                let durable_args = if session.is_content() {
+                                    session.durable_content_tool_arguments(index).ok_or_else(
+                                        || {
+                                            RunError::Message(
+                                                "durable content tool arguments are missing".into(),
+                                            )
+                                        },
+                                    )?
+                                } else {
+                                    call.args_json.clone()
+                                };
+                                self.engine
+                                    .governance
+                                    .stage_tool_execution(
+                                        handle,
+                                        StagedToolExecution {
+                                            call_id: stable_call_id.clone(),
+                                            name: call.name.clone(),
+                                            args_json: durable_args,
+                                            status: ToolExecutionStatus::Authorizing,
+                                        },
+                                    )
+                                    .await?;
+                            }
+                            return Ok(Some(
+                                self.park_for_approval(
+                                    session,
+                                    pending_park,
+                                    call,
+                                    index,
+                                    stable_call_id.clone(),
+                                    ApprovalPark {
+                                        approval_id,
+                                        call_id: stable_call_id,
+                                        tool_name: call.name.clone(),
+                                        authorization_id,
+                                        request_digest,
+                                        arguments_digest: park_arguments_digest(&call.args_json),
+                                        expires_at_ms,
+                                        parked_at_ms: now_unix_ms(),
+                                        deadline_ms,
+                                    },
+                                    reason,
+                                    emissions,
+                                )
+                                .await?,
+                            ));
+                        }
+                        if self
+                            .engine
+                            .governance
+                            .checkpoint_state(&session.run_id)
+                            .and_then(|checkpoint| checkpoint.approval_park)
+                            .is_some_and(|park| park.call_id == stable_call_id)
+                        {
+                            if matches!(e, GovernanceError::Denied(_)) {
+                                self.engine.governance.clear_approval_park(handle).await?;
+                            } else {
+                                return Err(e.into());
+                            }
+                        }
+                        out.push((index, call.clone(), Err(e.to_string())));
+                        continue;
+                    }
+                    if requires_claim {
+                        self.engine
+                            .registry
+                            .claim_tool_execution(&session.run_id, &stable_call_id)
+                            .map_err(|error| {
+                                GovernanceError::Message(format!(
+                                    "host effect refused, not claimed exclusively: {error}"
+                                ))
+                            })?;
+                        self.engine
+                            .governance
+                            .mark_tool_execution_started(handle, &stable_call_id)
+                            .await?;
+                        session.save(tools.as_ref())?;
+                    }
+                    // Clear the park only after the exclusive claim (when required)
+                    // and the durable `Started` save, so a crash in this window
+                    // keeps the parked approval.
+                    if self
+                        .engine
+                        .governance
+                        .checkpoint_state(&session.run_id)
+                        .and_then(|checkpoint| checkpoint.approval_park)
+                        .is_some_and(|park| park.call_id == stable_call_id)
+                    {
+                        self.engine.governance.clear_approval_park(handle).await?;
+                    }
+                    let executed = if nested {
+                        if let Some(sem) = nested_sem.as_ref()
+                            && call.name == "child_run"
+                            && super::nested::child_run_allows_concurrent_start(&call.args_json)
+                        {
+                            let permit = match sem.try_acquire() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    let max_children =
+                                        self.engine.config.run.nested_max_children.max(1);
+                                    out.push((
+                                    index,
+                                    call.clone(),
+                                    Err(format!(
+                                        "nested fan-out cap ({max_children}) refuses another child_run"
+                                    )),
+                                ));
+                                    continue;
+                                }
+                            };
+                            match super::nested::queue_wait_false_child_run(
+                                self.engine,
+                                session,
+                                request,
+                                call,
+                            ) {
+                                Ok(queued) => {
+                                    permit.forget();
+                                    pending_background.push((index, call.clone(), queued));
+                                    continue;
+                                }
+                                Err(error)
+                                    if matches!(
+                                        error,
+                                        RunError::Cancelled | RunError::TimedOut(_)
+                                    ) =>
+                                {
+                                    flush_pending_background_children(
+                                        self.engine,
+                                        session,
+                                        request,
+                                        tools.as_ref(),
+                                        &mut pending_background,
+                                        &mut out,
+                                        started,
+                                        timeout,
+                                    )
+                                    .await?;
+                                    return Err(error);
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
+                        } else {
+                            flush_pending_background_children(
+                                self.engine,
+                                session,
+                                request,
+                                tools.as_ref(),
+                                &mut pending_background,
+                                &mut out,
+                                started,
+                                timeout,
+                            )
+                            .await?;
+                            match super::nested::execute_child_tool(
+                                self.engine,
+                                session,
+                                request,
+                                tools.as_ref(),
+                                call,
+                                started,
+                                timeout,
+                            )
+                            .await
+                            {
+                                Ok(output) => Ok(output),
+                                Err(error)
+                                    if matches!(
+                                        error,
+                                        RunError::Cancelled | RunError::TimedOut(_)
+                                    ) =>
+                                {
+                                    flush_pending_background_children(
+                                        self.engine,
+                                        session,
+                                        request,
+                                        tools.as_ref(),
+                                        &mut pending_background,
+                                        &mut out,
+                                        started,
+                                        timeout,
+                                    )
+                                    .await?;
+                                    return Err(error);
+                                }
+                                Err(error) => Err(error.to_string()),
+                            }
+                        }
+                    } else {
+                        flush_pending_background_children(
+                            self.engine,
+                            session,
+                            request,
+                            tools.as_ref(),
+                            &mut pending_background,
+                            &mut out,
+                            started,
+                            timeout,
+                        )
+                        .await?;
+                        match super::supervision::run_until_cancelled(
+                            self.engine,
+                            &session.run_id,
+                            request,
+                            started,
+                            timeout,
+                            &session.parent_run_id,
+                            tools.execute(&call.name, &call.args_json),
+                        )
+                        .await
+                        {
+                            Ok(Ok(output)) => Ok(output),
+                            Ok(Err(error)) => Err(error.to_string()),
+                            Err(error) => {
+                                flush_pending_background_children(
+                                    self.engine,
+                                    session,
+                                    request,
+                                    tools.as_ref(),
+                                    &mut pending_background,
+                                    &mut out,
+                                    started,
+                                    timeout,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
+                        }
+                    };
+                    match executed {
+                        Ok(o) => out.push((index, call.clone(), Ok(o))),
+                        Err(e) => out.push((index, call.clone(), Err(e))),
+                    }
+                }
+                flush_pending_background_children(
+                    self.engine,
+                    session,
+                    request,
+                    tools.as_ref(),
+                    &mut pending_background,
+                    &mut out,
+                    started,
+                    timeout,
+                )
+                .await?;
+                Ok(None)
+            };
+            match batch.await {
+                Ok(None) => out,
+                Ok(Some(outcome)) => return Ok(outcome),
+                Err(error) => {
+                    let had_unlaunched = super::nested::abandon_queued_background_children(
+                        self.engine,
+                        session,
+                        pending_background.drain(..).map(|(_, _, child)| child),
+                    );
+                    if had_unlaunched {
+                        let _ = session.save(tools.as_ref());
+                    }
+                    return Err(error);
                 }
             }
-            flush_pending_background_children(
-                self.engine,
-                session,
-                request,
-                tools.as_ref(),
-                &mut pending_background,
-                &mut out,
-                started,
-                timeout,
-            )
-            .await?;
-            out
         };
 
         // The execution phase above completes every call in the

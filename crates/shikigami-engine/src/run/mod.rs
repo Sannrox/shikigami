@@ -2908,6 +2908,197 @@ mod tests {
         );
     }
 
+    fn wait_false_start_harness(
+        dir: &tempfile::TempDir,
+        parent_id: &str,
+    ) -> (
+        Engine,
+        super::session::RunSession,
+        crate::tools::ToolRegistry,
+        RunRequest,
+    ) {
+        let mut config = base_config(dir);
+        config.run.nested = true;
+        let eng = engine(dir, config);
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let tools = crate::tools::ToolRegistry::from_config(&ws, &eng.config).unwrap();
+        let mut session = super::session::RunSession::new(
+            eng.state_runs.clone(),
+            Arc::clone(&eng.governance),
+            parent_id,
+            "delegate",
+            ws,
+            "inplace",
+            true,
+            vec![],
+            0,
+        );
+        session.nested = true;
+        let mut request = RunRequest::new("delegate");
+        request.keep_workspace = true;
+        (eng, session, tools, request)
+    }
+
+    fn queue_test_background_child(
+        session: &mut super::session::RunSession,
+        registry: &Arc<crate::registry::RunRegistry>,
+        child_id: &str,
+        start_delay: Option<Duration>,
+        exit_immediately: bool,
+    ) -> (usize, ToolCall, super::nested::QueuedBackgroundChild) {
+        session.children.push(crate::checkpoint::ChildRunRecord {
+            run_id: child_id.into(),
+            profile: "explore".into(),
+            task: "scout".into(),
+        });
+        let start_rx = registry.watch_start(child_id).unwrap();
+        let handle = if exit_immediately {
+            tokio::spawn(async {})
+        } else {
+            let registry = Arc::clone(registry);
+            let child_id = child_id.to_owned();
+            tokio::spawn(async move {
+                if let Some(delay) = start_delay {
+                    tokio::time::sleep(delay).await;
+                }
+                registry.start(&child_id, "scout", None, None).unwrap();
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            })
+        };
+        session.push_background_child_id(child_id, handle);
+        (
+            session.children.len() - 1,
+            ToolCall {
+                id: String::new(),
+                name: "child_run".into(),
+                args_json: String::new(),
+            },
+            super::nested::QueuedBackgroundChild::testing(
+                child_id,
+                ChildProfile::Explore,
+                start_rx,
+                exit_immediately,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn nested_wait_false_start_wait_is_notify_driven() {
+        let dir = tempdir().unwrap();
+        let (eng, mut session, tools, request) = wait_false_start_harness(&dir, "parent-notify");
+        let delay = Duration::from_millis(80);
+        let queued = vec![
+            queue_test_background_child(
+                &mut session,
+                &eng.registry,
+                "child-start-a",
+                Some(delay),
+                false,
+            ),
+            queue_test_background_child(
+                &mut session,
+                &eng.registry,
+                "child-start-b",
+                Some(delay),
+                false,
+            ),
+        ];
+        let loads_a = crate::checkpoint::checkpoint_load_count_for("child-start-a");
+        let loads_b = crate::checkpoint::checkpoint_load_count_for("child-start-b");
+        let saves = crate::checkpoint::checkpoint_save_count_for("parent-notify");
+        let started = tokio::time::Instant::now();
+        let outcomes = tokio::time::timeout(
+            Duration::from_secs(1),
+            super::nested::wait_for_queued_background_children(
+                &eng,
+                &mut session,
+                &request,
+                &tools,
+                queued,
+                started,
+                None,
+            ),
+        )
+        .await
+        .expect("start wait must resolve on registry notify without a child checkpoint")
+        .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        for (_, _, outcome) in &outcomes {
+            let crate::tools::ToolOutput::Text(text) = outcome.as_ref().expect("start outcome")
+            else {
+                panic!("expected text start payload: {outcome:?}");
+            };
+            let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(payload["status"], "running");
+        }
+        assert_eq!(
+            crate::checkpoint::checkpoint_load_count_for("child-start-a") - loads_a,
+            0,
+            "start wait must not Checkpoint::load child-start-a"
+        );
+        assert_eq!(
+            crate::checkpoint::checkpoint_load_count_for("child-start-b") - loads_b,
+            0,
+            "start wait must not Checkpoint::load child-start-b"
+        );
+        assert_eq!(
+            crate::checkpoint::checkpoint_save_count_for("parent-notify") - saves,
+            1,
+            "queued wait=false slot claims must share one parent save"
+        );
+        assert!(Checkpoint::load(&eng.state_runs, "child-start-a").is_err());
+        assert!(Checkpoint::load(&eng.state_runs, "child-start-b").is_err());
+        for id in ["child-start-a", "child-start-b"] {
+            if let Some(handle) = session.take_background_child(id) {
+                handle.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_wait_false_failed_start_surfaces_without_grace_hang() {
+        let dir = tempdir().unwrap();
+        let (eng, mut session, tools, request) = wait_false_start_harness(&dir, "parent-fail");
+        let queued = vec![queue_test_background_child(
+            &mut session,
+            &eng.registry,
+            "child-fail-start",
+            None,
+            true,
+        )];
+        let started = tokio::time::Instant::now();
+        let outcomes = tokio::time::timeout(
+            Duration::from_millis(500),
+            super::nested::wait_for_queued_background_children(
+                &eng,
+                &mut session,
+                &request,
+                &tools,
+                queued,
+                started,
+                None,
+            ),
+        )
+        .await
+        .expect("failed start must surface without waiting out parent-bound grace")
+        .unwrap();
+        let crate::tools::ToolOutput::Text(text) = outcomes[0].2.as_ref().expect("start outcome")
+        else {
+            panic!("expected text start payload: {:?}", outcomes[0].2);
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["termination"], "cancelled");
+        assert_eq!(payload["success"], false);
+        assert!(
+            payload["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("cancelled before start")),
+            "{payload}"
+        );
+        assert!(session.children.is_empty());
+    }
+
     #[tokio::test]
     async fn nested_background_children_share_one_runtime() {
         let dir = tempdir().unwrap();
