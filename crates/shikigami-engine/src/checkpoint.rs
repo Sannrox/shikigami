@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -14,6 +16,35 @@ use crate::tools::TodoItem;
 
 pub const CHECKPOINT_VERSION: u32 = 1;
 pub const CHECKPOINT_FILENAME: &str = "checkpoint.json";
+
+#[cfg(test)]
+static CHECKPOINT_LOAD_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static CHECKPOINT_SAVE_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_checkpoint_id(ids: &Mutex<Vec<String>>, run_id: &str) {
+    if let Ok(mut ids) = ids.lock() {
+        ids.push(run_id.to_owned());
+    }
+}
+
+#[cfg(test)]
+fn checkpoint_id_count(ids: &Mutex<Vec<String>>, run_id: &str) -> usize {
+    ids.lock()
+        .map(|ids| ids.iter().filter(|id| id.as_str() == run_id).count())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub fn checkpoint_load_count_for(run_id: &str) -> usize {
+    checkpoint_id_count(&CHECKPOINT_LOAD_IDS, run_id)
+}
+
+#[cfg(test)]
+pub fn checkpoint_save_count_for(run_id: &str) -> usize {
+    checkpoint_id_count(&CHECKPOINT_SAVE_IDS, run_id)
+}
 
 /// Why a run is parked. Missing values deserialize as escalate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +325,8 @@ impl Checkpoint {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        #[cfg(test)]
+        note_checkpoint_id(&CHECKPOINT_SAVE_IDS, &self.run_id);
         let raw = serde_json::to_string_pretty(self)?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, raw)?;
@@ -330,6 +363,8 @@ impl Checkpoint {
         state_runs: &Path,
         run_id: &str,
     ) -> Result<(Self, String), CheckpointError> {
+        #[cfg(test)]
+        note_checkpoint_id(&CHECKPOINT_LOAD_IDS, run_id);
         let raw = Self::read(state_runs, run_id)?;
         let checkpoint = Self::parse(&raw, run_id)?;
         let digest = crate::digest::sha256_prefixed(&raw);

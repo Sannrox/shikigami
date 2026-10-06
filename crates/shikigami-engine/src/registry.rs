@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::events::HarnessEvent;
 use crate::model::{CostEstimate, TokenUsage};
@@ -93,6 +94,8 @@ pub struct RunRegistry {
     runs_root: PathBuf,
     cancel_root: PathBuf,
     run_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Same-process start waiters for nested `wait=false` children.
+    start_signals: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
 }
 
 impl RunRegistry {
@@ -109,6 +112,7 @@ impl RunRegistry {
             runs_root: state_root.as_ref().join("runs"),
             cancel_root: state_root.as_ref().join("run-controls"),
             run_locks: Arc::new(Mutex::new(HashMap::new())),
+            start_signals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -207,7 +211,45 @@ impl RunRegistry {
             let _ = self.remove_owner_unlocked(run_id);
             return Err(error);
         }
+        self.notify_started(run_id);
         Ok(())
+    }
+
+    /// Subscribe to a durable `start()` for `run_id`. The receiver is `true`
+    /// once this process has written the run record, including if `start`
+    /// already happened.
+    pub(crate) fn watch_start(&self, run_id: &str) -> Result<watch::Receiver<bool>, RegistryError> {
+        validate_run_id(run_id)?;
+        let mut signals = self.start_signals.lock().map_err(|_| RegistryError::Lock)?;
+        Ok(match signals.get(run_id) {
+            Some(tx) => tx.subscribe(),
+            None => {
+                let (tx, rx) = watch::channel(false);
+                signals.insert(run_id.to_owned(), tx);
+                rx
+            }
+        })
+    }
+
+    pub(crate) fn clear_start_signal(&self, run_id: &str) {
+        if let Ok(mut signals) = self.start_signals.lock() {
+            signals.remove(run_id);
+        }
+    }
+
+    fn notify_started(&self, run_id: &str) {
+        let Ok(mut signals) = self.start_signals.lock() else {
+            return;
+        };
+        match signals.get(run_id) {
+            Some(tx) => {
+                let _ = tx.send(true);
+            }
+            None => {
+                let (tx, _) = watch::channel(true);
+                signals.insert(run_id.to_owned(), tx);
+            }
+        }
     }
 
     /// Atomically claim exclusive execution of one durable-effect tool call
@@ -323,6 +365,7 @@ impl RunRegistry {
         record.last_heartbeat_at_ms = now_ms();
         self.clear_cancel_unlocked(&result.run_id)?;
         self.write(&record)?;
+        self.clear_start_signal(&result.run_id);
         self.remove_owner_unlocked(&result.run_id)
     }
 
@@ -339,6 +382,7 @@ impl RunRegistry {
         record.last_heartbeat_at_ms = now_ms();
         self.clear_cancel_unlocked(run_id)?;
         self.write(&record)?;
+        self.clear_start_signal(run_id);
         self.remove_owner_unlocked(run_id)
     }
 
@@ -499,6 +543,7 @@ impl RunRegistry {
         // A stale owner lease means no live process can safely be using the
         // run anymore, so its crashed state is eligible for cleanup.
         self.clear_cancel_unlocked(run_id)?;
+        self.clear_start_signal(run_id);
         fs::remove_dir_all(self.run_dir(run_id)?)?;
         Ok(())
     }
@@ -695,6 +740,21 @@ fn event_call_id(event: &HarnessEvent) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn start_notifies_in_process_watchers() {
+        let dir = tempdir().unwrap();
+        let registry = RunRegistry::new(dir.path()).unwrap();
+        let rx = registry.watch_start("run-1").unwrap();
+        assert!(!*rx.borrow());
+        registry.start("run-1", "task", None, None).unwrap();
+        assert!(*rx.borrow());
+        let late = registry.watch_start("run-1").unwrap();
+        assert!(
+            *late.borrow(),
+            "a watcher created after start must see the durable record"
+        );
+    }
 
     #[test]
     fn records_runs_and_control_markers_without_task_text() {
