@@ -1232,6 +1232,95 @@ mod tests {
             .expect("parent child_run tool payload")
     }
 
+    fn run_record_generation(path: &std::path::Path) -> Option<u64> {
+        let meta = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(meta.ino())
+        }
+        #[cfg(not(unix))]
+        {
+            Some(
+                meta.modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos() as u64,
+            )
+        }
+    }
+
+    fn list_run_record_ids(runs_root: &std::path::Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(runs_root) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .join(crate::registry::RUN_RECORD_FILENAME)
+                    .is_file()
+            })
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect()
+    }
+
+    /// Count atomic `run.json` replaces per already-active run id.
+    async fn count_run_record_writes(
+        runs_root: &std::path::Path,
+        run_ids: &[String],
+        window: Duration,
+    ) -> std::collections::HashMap<String, usize> {
+        let mut last: std::collections::HashMap<String, Option<u64>> = run_ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    run_record_generation(
+                        &runs_root
+                            .join(id)
+                            .join(crate::registry::RUN_RECORD_FILENAME),
+                    ),
+                )
+            })
+            .collect();
+        let mut writes: std::collections::HashMap<String, usize> =
+            run_ids.iter().map(|id| (id.clone(), 0)).collect();
+        let end = tokio::time::Instant::now() + window;
+        while tokio::time::Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            for id in run_ids {
+                let generation = run_record_generation(
+                    &runs_root
+                        .join(id)
+                        .join(crate::registry::RUN_RECORD_FILENAME),
+                );
+                if last.get(id) != Some(&generation) {
+                    *writes.get_mut(id).expect("tracked run id") += 1;
+                    last.insert(id.clone(), generation);
+                }
+            }
+        }
+        writes
+    }
+
+    async fn wait_for_run_records(runs_root: &std::path::Path, min: usize) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let ids = list_run_record_ids(runs_root);
+            if ids.len() >= min {
+                return ids;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {min} run records"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
     async fn session_wait_parks_prompt_wait_on_no_tool() {
         let dir = tempdir().unwrap();
@@ -3151,6 +3240,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_bounds_does_not_rewrite_the_run_record() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(r#"[{"content":"unused"}]"#.into());
+        let eng = engine(&dir, config);
+        eng.registry.start("run-1", "task", None, None).unwrap();
+        let req = RunRequest::new("task");
+        let started = tokio::time::Instant::now();
+        let path = eng
+            .registry
+            .run_dir("run-1")
+            .unwrap()
+            .join(crate::registry::RUN_RECORD_FILENAME);
+        let before = std::fs::read(&path).unwrap();
+        let gen_before = run_record_generation(&path);
+        for _ in 0..20 {
+            supervision::check_bounds(&eng, "run-1", &req, started, None, "").unwrap();
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "check_bounds must not heartbeat/rewrite run.json"
+        );
+        assert_eq!(run_record_generation(&path), gen_before);
+    }
+
+    #[tokio::test]
+    async fn nested_wait_true_does_not_heartbeat_run_records_at_poll_rate() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "slow", "parent done"),
+        );
+        let runs_root = eng.registry.runs_root().to_path_buf();
+        let sampler = tokio::spawn(async move {
+            let ids = wait_for_run_records(&runs_root, 2).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            count_run_record_writes(&runs_root, &ids, Duration::from_millis(500)).await
+        });
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        let done = tokio::time::timeout(Duration::from_secs(5), eng.run(req))
+            .await
+            .expect("nested wait=true run must finish")
+            .unwrap();
+        assert_eq!(done.termination, RunTermination::Completed);
+        assert_eq!(done.summary, "parent done");
+        let writes = sampler.await.expect("write sampler");
+        assert!(
+            writes.len() >= 2,
+            "parent and child must both have run records: {writes:?}"
+        );
+        for (run_id, count) in &writes {
+            assert!(
+                *count <= 2,
+                "run {run_id} rewrote run.json {count} times in 500ms; 50ms check_bounds heartbeat is ~20 Hz"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn nested_parent_cancel_stops_waited_child() {
         let dir = tempdir().unwrap();
         let mut config = base_config(&dir);
@@ -3284,6 +3459,64 @@ mod tests {
             !done.workspace.join("late.txt").exists(),
             "cancelled waited child must not keep writing the shared workspace"
         );
+    }
+
+    #[tokio::test]
+    async fn nested_parent_timeout_stops_waited_child() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": serde_json::json!({
+                            "command": "sleep 2 && printf done > late.txt"
+                        }).to_string()
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "slept",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine_nested(
+            &dir,
+            config,
+            &child_run_then_report("full", "slow", "parent done"),
+        );
+        let mut req = RunRequest::new("delegate");
+        req.keep_workspace = true;
+        req.timeout = Some(Duration::from_millis(200));
+        let err = tokio::time::timeout(Duration::from_secs(3), eng.run(req))
+            .await
+            .expect("parent timeout must not wait for the full child sleep")
+            .unwrap_err();
+        assert!(
+            matches!(err, RunError::TimedOut(_)),
+            "parent must time out while waiting on a child: {err}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        for record in eng.registry.list().unwrap() {
+            assert_ne!(
+                record.status, "running",
+                "timed-out wait=true parent must finalize children: {record:?}"
+            );
+            if let Some(workspace) = &record.workspace {
+                assert!(
+                    !std::path::Path::new(workspace).join("late.txt").exists(),
+                    "timed-out waited child must not keep writing the shared workspace"
+                );
+            }
+        }
     }
 
     #[tokio::test]
