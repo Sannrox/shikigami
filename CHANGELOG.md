@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: wheel scroll pages the transcript like PageUp/PageDown. Overflowing
   ask/plan docks scroll first; at the top or bottom they resume transcript
   paging. Permission arguments are not truncated.
+- TUI: `/help` writes a short system block of keys and slash names, then
+  returns to the idle composer.
 - Session hosts: no-tool assistant waits (`ParkKind::PromptWait`); a session
   `report` also waits so follow-ups keep the conversation; ungoverned
   mutating tools ask=park (`ParkKind::Ask`); ACP maps `escalate` parks through
