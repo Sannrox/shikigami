@@ -1,16 +1,33 @@
-[package]
-name = "shikigami"
+[workspace]
+members = [
+    "crates/shikigami-cli",
+    "crates/shikigami-tui",
+    "crates/shikigami-types",
+]
+default-members = [
+    ".",
+    "crates/shikigami-cli",
+    "crates/shikigami-tui",
+    "crates/shikigami-types",
+]
+resolver = "2"
+
+[workspace.package]
 version = "1.1.1"
 edition = "2024"
 license = "Apache-2.0"
-readme = "README.md"
-description = "Open-source local-first headless agent harness with pluggable governance adapters."
 repository = "https://github.com/Sannrox/shikigami"
 publish = false
 
-[[bin]]
+[package]
 name = "shikigami"
-path = "src/bin/shikigami.rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+description = "Open-source local-first headless agent harness with pluggable governance adapters."
+repository.workspace = true
+publish.workspace = true
 
 [features]
 default = ["governance-sekai-chisei", "model-http"]
@@ -18,20 +35,24 @@ governance-sekai-chisei = ["dep:futures-util", "dep:sekai-client"]
 model-http = ["dep:reqwest"]
 
 [dependencies]
-anyhow = "1"
+shikigami-types = { path = "crates/shikigami-types" }
 async-trait = "0.1"
-clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "io-std", "fs", "sync", "signal", "net"] }
-crossterm = "0.28"
-ratatui = { version = "0.30", default-features = false, features = [
-  "crossterm_0_28",
-  "unstable-rendered-line-info",
+tokio = { version = "1", default-features = false, features = [
+  "rt-multi-thread",
+  "macros",
+  "process",
+  "time",
+  "io-util",
+  "io-std",
+  "fs",
+  "sync",
+  "signal",
+  "net",
 ] }
-unicode-width = "0.2"
 toml = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -57,10 +78,8 @@ path = "tests/mcp_governed_action.rs"
 harness = false
 
 [dev-dependencies]
-assert_cmd = "2"
 async-trait = "0.1"
 libc = "0.2"
-predicates = "3"
 proptest = { version = "1", features = ["std"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }

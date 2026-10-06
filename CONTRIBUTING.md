@@ -82,7 +82,7 @@ before changing boundaries.
 2. **No second policy brain** — do not reimplement budgets/policy in-core.
 3. **No tenkai runtime config** — delivery is packaging, not process settings.
 4. **Fail closed when required** — governed profiles must not silently degrade.
-5. **Library-first** — keep `src/bin/shikigami.rs` thin; put logic in the library.
+5. **Library-first** — keep `crates/shikigami-cli` thin; put logic in the library.
 6. **Runs, not “a shikigami”** — naming for units of work.
 
 Project Skills for repeated workflows live under `.agents/skills/`. Repository

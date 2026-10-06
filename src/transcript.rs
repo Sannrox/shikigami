@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::checkpoint::{self, Checkpoint};
 use crate::config::Config;
-use crate::harness::redact_secrets_in_line;
+use crate::config::redact_secrets_in_line;
 use crate::model::stable_tool_call_id;
 
 /// Transcript JSONL schema version (bump on breaking field renames/removals).

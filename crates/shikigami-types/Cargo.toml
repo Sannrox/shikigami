@@ -1,0 +1,11 @@
+[package]
+name = "shikigami-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Stable identity, digest, and atomic-file helpers for shikigami."
+
+[dependencies]
+sha2 = "0.11"

@@ -53,7 +53,6 @@ pub mod state;
 pub mod tools;
 pub mod tracing_export;
 pub mod transcript;
-pub mod tui;
 pub mod worker_lifecycle;
 pub mod workspace;
 

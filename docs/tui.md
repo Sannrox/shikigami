@@ -44,7 +44,7 @@ when state changes. Stderr event JSON is discarded while the alt-screen is up.
 
 ## Proof
 
-Deterministic in-process tests in `src/tui.rs` drive the ACP mapping without a
+Deterministic in-process tests in `crates/shikigami-tui` drive the ACP mapping without a
 TTY: mutating-tool park → permission dock → resume; continue-last-in-cwd
 load and fail-closed new session; plan dock from a `session/update`.
 
