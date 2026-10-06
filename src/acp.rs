@@ -3,10 +3,12 @@
 //! Evolving surface, same rank as `shikigami mcp`. Not freeze-core.
 //! See [ADR 0014](../docs/decisions/0014-usable-guest-hosts.md).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -15,11 +17,17 @@ use tokio::io::{BufReader, stdin, stdout};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::checkpoint::{Checkpoint, ParkedState, is_safe_run_id};
+use crate::content::{
+    ContentDisclosureState, ContentMessageV1, ContentPartDescriptor, ContentPartKind,
+    ContentProvenanceV1, ContentResolver, ContentRunRequestV1, ContentToStore,
+    MAX_CONTENT_AGGREGATE_BYTES, MAX_CONTENT_PART_BYTES, MAX_CONTENT_PARTS, ResolvedContent,
+    sha256_digest,
+};
 use crate::events::{AsyncChannelRx, AsyncChannelSink, EventSink, HarnessEvent};
 use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
-use crate::model::ChatMessage;
+use crate::model::{ChatMessage, ModelPort};
 use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
     compact_messages,
@@ -29,6 +37,10 @@ use crate::run::{
 /// of 1 or 2 so v2-capable clients can connect, and always replies with this
 /// value. Success is not an agreement to speak v2.
 const PROTOCOL_VERSION: u32 = 1;
+
+/// Stdio inbound frame bound. Content parts cap at 16MiB aggregate; inline
+/// base64 expands 4/3, plus the JSON-RPC envelope. MCP stdio stays at 1MiB.
+const MAX_ACP_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 type PendingPermissions = HashMap<u64, (String, oneshot::Sender<Value>)>;
 
@@ -64,6 +76,142 @@ struct LiveSession {
     cancel: Option<watch::Sender<bool>>,
     mode: Option<String>,
     mode_frozen: bool,
+    /// In-memory payload custody for a content session. Not persisted.
+    content: Option<SessionContent>,
+}
+
+#[derive(Clone)]
+struct SessionContent {
+    task: String,
+    messages: Vec<ContentMessageV1>,
+    resolver: Arc<SessionContentStore>,
+}
+
+struct SessionContentStore {
+    values: std::sync::Mutex<HashMap<String, (ContentPartKind, Vec<u8>)>>,
+}
+
+impl SessionContentStore {
+    fn new() -> Self {
+        Self {
+            values: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn insert(
+        &self,
+        part_id: &str,
+        kind: ContentPartKind,
+        media_type: &str,
+        payload: &[u8],
+        session_id: &str,
+    ) -> Result<ContentPartDescriptor, Value> {
+        if payload.len() as u64 > MAX_CONTENT_PART_BYTES {
+            return Err(rpc_error(
+                -32602,
+                "attachment exceeds the content part size bound",
+            ));
+        }
+        let reference = format!("acp-{part_id}");
+        self.values
+            .lock()
+            .map_err(|_| rpc_error(-32603, "content store lock poisoned"))?
+            .insert(reference.clone(), (kind, payload.to_vec()));
+        Ok(ContentPartDescriptor {
+            part_id: part_id.into(),
+            kind,
+            media_type: media_type.into(),
+            byte_length: payload.len() as u64,
+            sha256_digest: sha256_digest(payload),
+            reference,
+            provenance: ContentProvenanceV1 {
+                source: "acp".into(),
+                source_id: session_id.into(),
+                source_version: "v1".into(),
+                observed_at_ms: now_ms(),
+            },
+            disclosure_state: ContentDisclosureState::Accepted,
+            disclosure_reason: String::new(),
+        })
+    }
+
+    fn text(&self, reference: &str) -> Option<String> {
+        let (kind, bytes) = self.values.lock().ok()?.get(reference).cloned()?;
+        if kind == ContentPartKind::Text {
+            String::from_utf8(bytes).ok()
+        } else {
+            None
+        }
+    }
+}
+
+#[async_trait]
+impl ContentResolver for SessionContentStore {
+    fn id(&self) -> &str {
+        "acp-session-v1"
+    }
+
+    async fn resolve(
+        &self,
+        descriptor: &ContentPartDescriptor,
+    ) -> Result<ResolvedContent, crate::content::ContentError> {
+        let (kind, bytes) = self
+            .values
+            .lock()
+            .map_err(|_| {
+                crate::content::ContentError::Resolver("content store lock poisoned".into())
+            })?
+            .get(&descriptor.reference)
+            .cloned()
+            .ok_or_else(|| {
+                crate::content::ContentError::Resolver(
+                    "attachment payload is no longer in session memory".into(),
+                )
+            })?;
+        if kind == ContentPartKind::Text {
+            String::from_utf8(bytes)
+                .map(ResolvedContent::Text)
+                .map_err(|_| {
+                    crate::content::ContentError::Resolver(
+                        "text attachment is not valid utf-8".into(),
+                    )
+                })
+        } else {
+            Ok(ResolvedContent::Bytes(bytes))
+        }
+    }
+
+    async fn store(
+        &self,
+        content: ContentToStore,
+    ) -> Result<ContentPartDescriptor, crate::content::ContentError> {
+        let bytes = content.payload.as_bytes().to_vec();
+        let reference = format!("acp-{}", content.part_id);
+        self.values
+            .lock()
+            .map_err(|_| {
+                crate::content::ContentError::Resolver("content store lock poisoned".into())
+            })?
+            .insert(reference.clone(), (content.kind, bytes.clone()));
+        Ok(ContentPartDescriptor {
+            part_id: content.part_id,
+            kind: content.kind,
+            media_type: content.media_type,
+            byte_length: bytes.len() as u64,
+            sha256_digest: sha256_digest(&bytes),
+            reference,
+            provenance: content.provenance,
+            disclosure_state: ContentDisclosureState::Accepted,
+            disclosure_reason: String::new(),
+        })
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// In-process ACP agent. Stdio and tests share this.
@@ -125,11 +273,7 @@ impl AcpHost {
             "protocolVersion": PROTOCOL_VERSION,
             "agentCapabilities": {
                 "loadSession": true,
-                "promptCapabilities": {
-                    "image": false,
-                    "audio": false,
-                    "embeddedContext": false
-                }
+                "promptCapabilities": prompt_capabilities(self.harness.model_port())
             },
             "agentInfo": {
                 "name": PRODUCT,
@@ -155,6 +299,7 @@ impl AcpHost {
             cancel: None,
             mode: mode.clone(),
             mode_frozen: mode.is_some(),
+            content: None,
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -182,6 +327,7 @@ impl AcpHost {
                 cancel: None,
                 mode: live.mode.clone(),
                 mode_frozen: live.mode_frozen,
+                content: live.content.clone(),
             }
         } else {
             let persisted = self
@@ -193,6 +339,7 @@ impl AcpHost {
                 cancel: None,
                 mode: persisted.mode.clone(),
                 mode_frozen: persisted.mode_is_frozen(),
+                content: None,
             };
             self.sessions
                 .lock()
@@ -233,6 +380,7 @@ impl AcpHost {
         let mut checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
         let keep = harness.config.run.compact_keep_tail.max(2) as usize;
+        // Content sidecar stays on the 32-part contract; this cut is ChatMessage history.
         let before = checkpoint.messages.len();
         let after = if let Some((_, after)) = compact_messages(&mut checkpoint.messages, 0, keep) {
             checkpoint
@@ -259,11 +407,22 @@ impl AcpHost {
             .map_err(|e| rpc_error(-32603, e))?;
         let checkpoint = Checkpoint::load(&harness.state.runs_dir(), run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
-        send_updates(
-            client,
-            conversation_updates(session_id, &checkpoint.messages),
-        )
-        .await
+        if checkpoint.content.is_some() && live.content.is_none() {
+            return Err(rpc_error(
+                -32603,
+                "content payload is no longer in session memory",
+            ));
+        }
+        let updates = if let (Some(binding), Some(content)) =
+            (checkpoint.content.as_ref(), live.content.as_ref())
+        {
+            let sidecar = crate::content::load_sidecar(&harness.state.runs_dir(), run_id, binding)
+                .map_err(|_| rpc_error(-32603, "session content sidecar is unreadable"))?;
+            content_conversation_updates(session_id, &sidecar.messages, content.resolver.as_ref())
+        } else {
+            conversation_updates(session_id, &checkpoint.messages)
+        };
+        send_updates(client, updates).await
     }
 
     async fn session_prompt(&self, params: &Value, client: &dyn AcpClient) -> Result<Value, Value> {
@@ -273,9 +432,9 @@ impl AcpHost {
             .and_then(|v| v.as_str())
             .ok_or_else(|| rpc_error(-32602, "session/prompt requires sessionId"))?
             .to_string();
-        let prompt_text = prompt_text(params.get("prompt").unwrap_or(&Value::Null))?;
+        let parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
         let requested_mode = optional_mode(params)?;
-        let (cwd, resume_run_id, cancel_rx, mode) = {
+        let (cwd, resume_run_id, cancel_rx, mode, existing_content) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
                 .get_mut(&session_id)
@@ -316,7 +475,13 @@ impl AcpHost {
                     rx
                 }
             };
-            (live.cwd.clone(), live.run_id.clone(), rx, live.mode.clone())
+            (
+                live.cwd.clone(),
+                live.run_id.clone(),
+                rx,
+                live.mode.clone(),
+                live.content.clone(),
+            )
         };
 
         let outcome = async {
@@ -325,80 +490,74 @@ impl AcpHost {
                 .map_err(|e| rpc_error(-32603, e))?;
             let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
-
-            let mut request = if let Some(run_id) = resume_run_id.clone() {
-                match Checkpoint::load(&harness.state.runs_dir(), &run_id) {
-                    Ok(checkpoint) if checkpoint.is_prompt_wait() => {
-                        let mut request = RunRequest::new("");
-                        request.resume_run_id = Some(run_id);
-                        request.resume_prompt = Some(prompt_text.clone());
-                        request
-                    }
-                    Ok(checkpoint)
-                        if checkpoint.is_ask_park()
-                            || checkpoint.is_escalate_park()
-                            || checkpoint.is_plan_park() =>
-                    {
-                        let info = park_info_from_checkpoint(&checkpoint)
-                            .map_err(|e| rpc_error(-32603, e))?;
-                        let (outcome, answer) =
-                            request_permission(&session_id, &info, client, Some(&cancel_rx))
-                                .await?;
-                        if outcome == PermissionOutcome::Cancelled {
-                            persist_prompt_wait(&harness.state.runs_dir(), &run_id)
-                                .map_err(|e| rpc_error(-32603, e))?;
-                            return Ok(json!({ "stopReason": "cancelled" }));
-                        }
-                        let mut request = RunRequest::new("");
-                        request.resume_run_id = Some(run_id);
-                        if checkpoint.is_ask_park() {
-                            request.resume_ask = Some(match outcome {
-                                PermissionOutcome::Allow => AskDecision::Allow,
-                                PermissionOutcome::Deny => AskDecision::Deny,
-                                PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
-                            });
-                        } else if checkpoint.is_plan_park() {
-                            request.resume_plan = Some(match outcome {
-                                PermissionOutcome::Allow => PlanDecision::Accept,
-                                PermissionOutcome::Deny => PlanDecision::Reject,
-                                PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
-                            });
-                        } else {
-                            request.resume_answer = Some(answer);
-                        }
-                        request
-                    }
-                    Ok(checkpoint)
-                        if checkpoint
-                            .park
-                            .as_ref()
-                            .is_some_and(|park| park.kind == ParkKind::Approval) =>
-                    {
-                        return Err(rpc_error(
-                            -32603,
-                            "governed approval parks are not mapped on ACP yet",
-                        ));
-                    }
-                    Ok(_) => {
-                        return Err(rpc_error(-32603, "session run is not waiting for a prompt"));
-                    }
-                    Err(_) => {
-                        return Err(rpc_error(-32603, "session run checkpoint is unreadable"));
+            // Attachments ride the first session/prompt of a session. Later
+            // prompts are text follow-ups on the same run (Issue #401).
+            if parsed.has_attachments() && resume_run_id.is_some() {
+                return Err(rpc_error(
+                    -32602,
+                    "attachments cannot be added to an existing session run",
+                ));
+            }
+            let mut drive = if parsed.has_attachments() {
+                let kinds = harness.model_port().content_kinds();
+                parsed.require_supported(kinds)?;
+                let store = Arc::new(SessionContentStore::new());
+                let messages = parsed.messages(&store, &session_id)?;
+                let content = SessionContent {
+                    task: parsed.text.clone(),
+                    messages: messages.clone(),
+                    resolver: Arc::clone(&store),
+                };
+                {
+                    let mut sessions = self.sessions.lock().await;
+                    if let Some(live) = sessions.get_mut(&session_id) {
+                        live.content = Some(content.clone());
                     }
                 }
+                // Content v1 denies escalate parking and skips ChatMessage
+                // auto-compact. Attachment sessions inherit that 32-part sidecar bound.
+                let mut request = ContentRunRequestV1::new(parsed.text.clone(), messages, store);
+                request.keep_workspace = true;
+                request.session_wait = true;
+                request.cancel = Some(cancel_rx);
+                PromptDrive::Content(request)
+            } else if let Some(run_id) = resume_run_id.clone() {
+                match resume_prompt_drive(
+                    &harness,
+                    &session_id,
+                    run_id,
+                    &parsed.text,
+                    existing_content,
+                    cancel_rx,
+                    client,
+                )
+                .await?
+                {
+                    ResumeOutcome::Drive(drive) => *drive,
+                    ResumeOutcome::Done(value) => return Ok(value),
+                }
             } else {
-                RunRequest::new(prompt_text.clone())
+                let mut request = RunRequest::new(parsed.text.clone());
+                request.keep_workspace = true;
+                request.session_wait = true;
+                request.cancel = Some(cancel_rx);
+                PromptDrive::Text(request)
             };
-            request.keep_workspace = true;
-            request.session_wait = true;
-            request.cancel = Some(cancel_rx);
 
             let stop = self
-                .drive_prompt(&session_id, harness, request, client, sink, &mut events)
+                .drive_prompt(&session_id, harness, &mut drive, client, sink, &mut events)
                 .await?;
             Ok(json!({ "stopReason": stop }))
         }
         .await;
+        if outcome.is_err() {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(live) = sessions.get_mut(&session_id)
+                && live.run_id.is_none()
+            {
+                live.content = None;
+            }
+        }
         self.clear_cancel(&session_id).await;
         outcome
     }
@@ -407,19 +566,19 @@ impl AcpHost {
         &self,
         session_id: &str,
         harness: Harness,
-        mut request: RunRequest,
+        drive: &mut PromptDrive,
         client: &dyn AcpClient,
         sink: Arc<dyn EventSink>,
         events: &mut AsyncChannelRx,
     ) -> Result<&'static str, Value> {
         loop {
-            if let Some(run_id) = request.resume_run_id.clone() {
+            if let Some(run_id) = drive.resume_run_id() {
                 let _ = self.set_run_id(session_id, Some(run_id)).await;
             }
             let (result, forwarded_run_id) = run_and_forward(
                 self,
                 &harness,
-                request.clone(),
+                drive.clone(),
                 Arc::clone(&sink),
                 events,
                 session_id,
@@ -432,7 +591,7 @@ impl AcpHost {
                     self.retain_cancelled_run(
                         session_id,
                         &harness,
-                        request.resume_run_id.clone().or(forwarded_run_id),
+                        drive.resume_run_id().or(forwarded_run_id),
                     )
                     .await;
                     return Ok("cancelled");
@@ -466,74 +625,68 @@ impl AcpHost {
                 Some(ParkKind::Ask) => {
                     let park = park.expect("park");
                     let (outcome, _) =
-                        request_permission(session_id, park, client, request.cancel.as_ref())
-                            .await?;
-                    let mut next = RunRequest::new("");
-                    next.keep_workspace = true;
-                    next.session_wait = true;
-                    next.resume_run_id = Some(result.run_id.clone());
-                    next.cancel = request.cancel.clone();
+                        request_permission(session_id, park, client, drive.cancel()).await?;
                     match outcome {
                         PermissionOutcome::Cancelled => {
-                            persist_prompt_wait(&harness.state.runs_dir(), &result.run_id)
-                                .map_err(|e| rpc_error(-32603, e))?;
+                            persist_prompt_wait_for_drive(
+                                &harness.state.runs_dir(),
+                                &result.run_id,
+                                drive,
+                            )
+                            .await
+                            .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
                         PermissionOutcome::Allow => {
-                            next.resume_ask = Some(AskDecision::Allow);
+                            drive.resume_ask(result.run_id.clone(), AskDecision::Allow);
                         }
                         PermissionOutcome::Deny => {
-                            next.resume_ask = Some(AskDecision::Deny);
+                            drive.resume_ask(result.run_id.clone(), AskDecision::Deny);
                         }
                     }
-                    request = next;
                 }
                 Some(ParkKind::Plan) => {
                     let park = park.expect("park");
                     let (outcome, _) =
-                        request_permission(session_id, park, client, request.cancel.as_ref())
-                            .await?;
-                    let mut next = RunRequest::new("");
-                    next.keep_workspace = true;
-                    next.session_wait = true;
-                    next.resume_run_id = Some(result.run_id.clone());
-                    next.cancel = request.cancel.clone();
+                        request_permission(session_id, park, client, drive.cancel()).await?;
                     match outcome {
                         PermissionOutcome::Cancelled => {
-                            persist_prompt_wait(&harness.state.runs_dir(), &result.run_id)
-                                .map_err(|e| rpc_error(-32603, e))?;
+                            persist_prompt_wait_for_drive(
+                                &harness.state.runs_dir(),
+                                &result.run_id,
+                                drive,
+                            )
+                            .await
+                            .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
                         PermissionOutcome::Allow => {
-                            next.resume_plan = Some(PlanDecision::Accept);
+                            drive.resume_plan(result.run_id.clone(), PlanDecision::Accept);
                         }
                         PermissionOutcome::Deny => {
-                            next.resume_plan = Some(PlanDecision::Reject);
+                            drive.resume_plan(result.run_id.clone(), PlanDecision::Reject);
                         }
                     }
-                    request = next;
                 }
                 Some(ParkKind::Escalate) => {
                     let park = park.expect("park");
                     let (outcome, answer) =
-                        request_permission(session_id, park, client, request.cancel.as_ref())
-                            .await?;
-                    let mut next = RunRequest::new("");
-                    next.keep_workspace = true;
-                    next.session_wait = true;
-                    next.resume_run_id = Some(result.run_id.clone());
-                    next.cancel = request.cancel.clone();
+                        request_permission(session_id, park, client, drive.cancel()).await?;
                     match outcome {
                         PermissionOutcome::Cancelled => {
-                            persist_prompt_wait(&harness.state.runs_dir(), &result.run_id)
-                                .map_err(|e| rpc_error(-32603, e))?;
+                            persist_prompt_wait_for_drive(
+                                &harness.state.runs_dir(),
+                                &result.run_id,
+                                drive,
+                            )
+                            .await
+                            .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
                         PermissionOutcome::Allow | PermissionOutcome::Deny => {
-                            next.resume_answer = Some(answer);
+                            drive.resume_answer(result.run_id.clone(), answer);
                         }
                     }
-                    request = next;
                 }
                 Some(ParkKind::Approval) => {
                     return Err(rpc_error(
@@ -702,7 +855,15 @@ impl AcpHost {
         let Some(run_id) = run_id else {
             return;
         };
-        if persist_prompt_wait(&harness.state.runs_dir(), &run_id).is_ok() {
+        let store = session_content_store(self, session_id).await;
+        if persist_prompt_wait_with_resolver(
+            &harness.state.runs_dir(),
+            &run_id,
+            store.as_deref().map(|store| store as &dyn ContentResolver),
+        )
+        .await
+        .is_ok()
+        {
             let _ = self.set_run_id(session_id, Some(run_id)).await;
         }
     }
@@ -764,6 +925,44 @@ fn json_raw_input(args_json: Option<&str>) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
+fn resolve_content_park_args(info: &mut crate::run::ParkInfo, store: &SessionContentStore) {
+    let Some(raw) = info.args_json.as_deref() else {
+        return;
+    };
+    let Some(part_id) = crate::content::tool_arguments_part_id(raw) else {
+        return;
+    };
+    if let Some(text) = store.text(&format!("acp-{part_id}")) {
+        info.args_json = Some(text);
+    }
+}
+
+fn resolved_content_tool_args(
+    call: &crate::model::ToolCall,
+    message: &ContentMessageV1,
+    store: &SessionContentStore,
+) -> Option<String> {
+    crate::content::tool_arguments_part_id(&call.args_json).and_then(|part_id| {
+        message
+            .parts
+            .iter()
+            .find(|part| part.part_id == part_id)
+            .and_then(|part| store.text(&part.reference))
+    })
+}
+
+fn content_tool_raw_input(
+    call: &crate::model::ToolCall,
+    message: &ContentMessageV1,
+    store: &SessionContentStore,
+) -> Value {
+    json_raw_input(
+        resolved_content_tool_args(call, message, store)
+            .as_deref()
+            .or(Some(call.args_json.as_str())),
+    )
+}
+
 fn conversation_call_id(call: &crate::model::ToolCall, turn: u32, index: usize) -> String {
     if call.id.is_empty() {
         format!("tool-{turn}-{index}")
@@ -818,6 +1017,104 @@ fn persist_prompt_wait(runs_dir: &Path, run_id: &str) -> Result<(), String> {
         allow_call_id: String::new(),
         plan_digest: String::new(),
     });
+    checkpoint.save(runs_dir).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn persist_prompt_wait_for_drive(
+    runs_dir: &Path,
+    run_id: &str,
+    drive: &PromptDrive,
+) -> Result<(), String> {
+    persist_prompt_wait_with_resolver(runs_dir, run_id, drive.content_resolver()).await
+}
+
+async fn persist_prompt_wait_with_resolver(
+    runs_dir: &Path,
+    run_id: &str,
+    resolver: Option<&dyn ContentResolver>,
+) -> Result<(), String> {
+    persist_prompt_wait(runs_dir, run_id)?;
+    let Some(resolver) = resolver else {
+        return Ok(());
+    };
+    close_content_outstanding_calls(runs_dir, run_id, resolver).await
+}
+
+async fn close_content_outstanding_calls(
+    runs_dir: &Path,
+    run_id: &str,
+    resolver: &dyn ContentResolver,
+) -> Result<(), String> {
+    let mut checkpoint = Checkpoint::load(runs_dir, run_id).map_err(|e| e.to_string())?;
+    let Some(binding) = checkpoint.content.clone() else {
+        return Ok(());
+    };
+    let mut sidecar =
+        crate::content::load_sidecar(runs_dir, run_id, &binding).map_err(|e| e.to_string())?;
+    let Some(assistant_idx) = sidecar
+        .messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return Ok(());
+    };
+    let turn = sidecar.completed_turns;
+    let batch = sidecar.messages[assistant_idx].tool_calls.clone();
+    let answered: HashSet<String> = sidecar.messages[assistant_idx + 1..]
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.tool_call_id.clone())
+        .collect();
+    let mut used_ids: HashSet<String> = sidecar
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .map(|part| part.part_id.clone())
+        .collect();
+    let mut added = false;
+    for (index, call) in batch.iter().enumerate() {
+        let conversation_id = conversation_call_id(call, turn, index);
+        if answered.contains(&conversation_id)
+            || (!call.id.is_empty() && answered.contains(&call.id))
+        {
+            continue;
+        }
+        let mut part_id = format!("shikigami-cancel-{turn}-{index}");
+        let mut suffix = 1u32;
+        while !used_ids.insert(part_id.clone()) {
+            part_id = format!("shikigami-cancel-{turn}-{index}-{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
+        let descriptor = resolver
+            .store(ContentToStore {
+                part_id,
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                payload: ResolvedContent::Text("cancelled".into()),
+                provenance: ContentProvenanceV1 {
+                    source: "session".into(),
+                    source_id: conversation_id.clone(),
+                    source_version: "v1".into(),
+                    observed_at_ms: now_ms(),
+                },
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        sidecar.messages.push(ContentMessageV1 {
+            role: "tool".into(),
+            parts: vec![descriptor],
+            tool_call_id: conversation_id,
+            tool_calls: Vec::new(),
+        });
+        added = true;
+    }
+    if !added {
+        return Ok(());
+    }
+    let binding = crate::content::save_sidecar(runs_dir, &sidecar, Some(&binding))
+        .map_err(|e| e.to_string())?;
+    checkpoint.content = Some(binding);
     checkpoint.save(runs_dir).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -930,22 +1227,207 @@ async fn persist_session_run(host: &AcpHost, session_id: &str, run_id: &str) {
     let _ = host.set_run_id(session_id, Some(run_id.to_string())).await;
 }
 
+#[derive(Clone)]
+enum PromptDrive {
+    Text(RunRequest),
+    Content(ContentRunRequestV1),
+}
+
+impl PromptDrive {
+    fn resume_run_id(&self) -> Option<String> {
+        match self {
+            Self::Text(request) => request.resume_run_id.clone(),
+            Self::Content(request) => request.resume_run_id.clone(),
+        }
+    }
+
+    fn cancel(&self) -> Option<&watch::Receiver<bool>> {
+        match self {
+            Self::Text(request) => request.cancel.as_ref(),
+            Self::Content(request) => request.cancel.as_ref(),
+        }
+    }
+
+    fn content_resolver(&self) -> Option<&dyn ContentResolver> {
+        match self {
+            Self::Text(_) => None,
+            Self::Content(request) => Some(request.resolver.as_ref()),
+        }
+    }
+
+    fn apply_resume(&mut self, run_id: String) {
+        match self {
+            Self::Text(request) => {
+                request.keep_workspace = true;
+                request.session_wait = true;
+                request.resume_run_id = Some(run_id);
+                request.resume_prompt = None;
+                request.resume_ask = None;
+                request.resume_plan = None;
+                request.resume_answer = None;
+            }
+            Self::Content(request) => {
+                request.keep_workspace = true;
+                request.session_wait = true;
+                request.resume_run_id = Some(run_id);
+                request.resume_prompt = None;
+                request.resume_ask = None;
+                request.resume_plan = None;
+                request.resume_answer = None;
+            }
+        }
+    }
+
+    fn resume_ask(&mut self, run_id: String, decision: AskDecision) {
+        self.apply_resume(run_id);
+        match self {
+            Self::Text(request) => request.resume_ask = Some(decision),
+            Self::Content(request) => request.resume_ask = Some(decision),
+        }
+    }
+
+    fn resume_plan(&mut self, run_id: String, decision: PlanDecision) {
+        self.apply_resume(run_id);
+        match self {
+            Self::Text(request) => request.resume_plan = Some(decision),
+            Self::Content(request) => request.resume_plan = Some(decision),
+        }
+    }
+
+    fn resume_answer(&mut self, run_id: String, answer: String) {
+        self.apply_resume(run_id);
+        match self {
+            Self::Text(request) => request.resume_answer = Some(answer),
+            Self::Content(request) => request.resume_answer = Some(answer),
+        }
+    }
+}
+
+enum ResumeOutcome {
+    Drive(Box<PromptDrive>),
+    Done(Value),
+}
+
+async fn resume_prompt_drive(
+    harness: &Harness,
+    session_id: &str,
+    run_id: String,
+    prompt_text: &str,
+    existing_content: Option<SessionContent>,
+    cancel_rx: watch::Receiver<bool>,
+    client: &dyn AcpClient,
+) -> Result<ResumeOutcome, Value> {
+    let checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
+        .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
+    let content_run = checkpoint.content.is_some();
+    if content_run && existing_content.is_none() {
+        return Err(rpc_error(
+            -32603,
+            "content payload is no longer in session memory",
+        ));
+    }
+    let content_store = existing_content
+        .as_ref()
+        .map(|content| Arc::clone(&content.resolver));
+    let mut drive = if let Some(content) = existing_content {
+        let mut request = ContentRunRequestV1::new(
+            content.task.clone(),
+            content.messages.clone(),
+            content.resolver,
+        );
+        request.keep_workspace = true;
+        request.session_wait = true;
+        request.resume_run_id = Some(run_id.clone());
+        request.cancel = Some(cancel_rx.clone());
+        PromptDrive::Content(request)
+    } else {
+        let mut request = RunRequest::new("");
+        request.keep_workspace = true;
+        request.session_wait = true;
+        request.resume_run_id = Some(run_id.clone());
+        request.cancel = Some(cancel_rx.clone());
+        PromptDrive::Text(request)
+    };
+    if checkpoint.is_prompt_wait() {
+        match &mut drive {
+            PromptDrive::Text(request) => request.resume_prompt = Some(prompt_text.to_string()),
+            PromptDrive::Content(request) => request.resume_prompt = Some(prompt_text.to_string()),
+        }
+        return Ok(ResumeOutcome::Drive(Box::new(drive)));
+    }
+    if checkpoint.is_ask_park() || checkpoint.is_escalate_park() || checkpoint.is_plan_park() {
+        let mut info = park_info_from_checkpoint(&checkpoint).map_err(|e| rpc_error(-32603, e))?;
+        if let Some(store) = content_store.as_deref() {
+            resolve_content_park_args(&mut info, store);
+        }
+        let (outcome, answer) =
+            request_permission(session_id, &info, client, Some(&cancel_rx)).await?;
+        if outcome == PermissionOutcome::Cancelled {
+            persist_prompt_wait_for_drive(&harness.state.runs_dir(), &run_id, &drive)
+                .await
+                .map_err(|e| rpc_error(-32603, e))?;
+            return Ok(ResumeOutcome::Done(json!({ "stopReason": "cancelled" })));
+        }
+        if checkpoint.is_ask_park() {
+            drive.resume_ask(
+                run_id,
+                match outcome {
+                    PermissionOutcome::Allow => AskDecision::Allow,
+                    PermissionOutcome::Deny => AskDecision::Deny,
+                    PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
+                },
+            );
+        } else if checkpoint.is_plan_park() {
+            drive.resume_plan(
+                run_id,
+                match outcome {
+                    PermissionOutcome::Allow => PlanDecision::Accept,
+                    PermissionOutcome::Deny => PlanDecision::Reject,
+                    PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
+                },
+            );
+        } else {
+            drive.resume_answer(run_id, answer);
+        }
+        return Ok(ResumeOutcome::Drive(Box::new(drive)));
+    }
+    if checkpoint
+        .park
+        .as_ref()
+        .is_some_and(|park| park.kind == ParkKind::Approval)
+    {
+        return Err(rpc_error(
+            -32603,
+            "governed approval parks are not mapped on ACP yet",
+        ));
+    }
+    Err(rpc_error(-32603, "session run is not waiting for a prompt"))
+}
+
 async fn run_and_forward(
     host: &AcpHost,
     harness: &Harness,
-    request: RunRequest,
+    drive: PromptDrive,
     sink: Arc<dyn EventSink>,
     events: &mut AsyncChannelRx,
     session_id: &str,
     client: &dyn AcpClient,
 ) -> (Result<crate::run::RunResult, HarnessError>, Option<String>) {
-    let known_run_id = request.resume_run_id.clone();
+    let known_run_id = drive.resume_run_id();
     let mut seen_run_id = known_run_id.clone();
     if let Some(id) = known_run_id.as_deref() {
         persist_session_run(host, session_id, id).await;
     }
     let mut held = Vec::new();
-    let run_fut = harness.run_with_events(request, Some(sink));
+    let run_fut = async {
+        match drive {
+            PromptDrive::Text(request) => harness.run_with_events(request, Some(sink)).await,
+            PromptDrive::Content(request) => harness
+                .run_content_with_events(request, Some(sink))
+                .await
+                .map(|result| result.run),
+        }
+    };
     tokio::pin!(run_fut);
     let result = loop {
         tokio::select! {
@@ -963,7 +1445,8 @@ async fn run_and_forward(
                 }
                 let run_id = event_run_id.as_deref().or(known_run_id.as_deref());
                 if let Some(run_id) = run_id {
-                    fill_assistant_content(&mut held, harness, run_id);
+                    let store = session_content_store(host, session_id).await;
+                    fill_content_live_updates(&mut held, harness, run_id, store.as_deref());
                     if let Err(error) = send_updates(client, std::mem::take(&mut held))
                         .await
                         .map_err(update_error)
@@ -976,7 +1459,13 @@ async fn run_and_forward(
                             .map(|run| run.run_id.clone())
                             .or(seen_run_id);
                         if let Some(id) = run_id.as_deref() {
-                            let _ = persist_prompt_wait(&harness.state.runs_dir(), id);
+                            let store = session_content_store(host, session_id).await;
+                            let _ = persist_prompt_wait_with_resolver(
+                                &harness.state.runs_dir(),
+                                id,
+                                store.as_deref().map(|store| store as &dyn ContentResolver),
+                            )
+                            .await;
                             persist_session_run(host, session_id, id).await;
                         }
                         return (Err(error), run_id);
@@ -999,7 +1488,8 @@ async fn run_and_forward(
         .or(seen_run_id);
     if let Some(run_id) = run_id.as_deref() {
         persist_session_run(host, session_id, run_id).await;
-        fill_assistant_content(&mut held, harness, run_id);
+        let store = session_content_store(host, session_id).await;
+        fill_content_live_updates(&mut held, harness, run_id, store.as_deref());
     }
     let send = send_updates(client, held).await.map_err(update_error);
     if let Err(error) = send {
@@ -1018,13 +1508,80 @@ fn update_error(error: Value) -> HarnessError {
     ))
 }
 
-fn fill_assistant_content(updates: &mut [Value], harness: &Harness, run_id: &str) {
-    apply_assistant_content(updates, || {
-        Checkpoint::load(&harness.state.runs_dir(), run_id)
-    });
+async fn session_content_store(
+    host: &AcpHost,
+    session_id: &str,
+) -> Option<Arc<SessionContentStore>> {
+    host.sessions.lock().await.get(session_id).and_then(|live| {
+        live.content
+            .as_ref()
+            .map(|content| Arc::clone(&content.resolver))
+    })
 }
 
-fn apply_assistant_content<E>(updates: &mut [Value], load: impl FnOnce() -> Result<Checkpoint, E>) {
+fn fill_content_live_updates(
+    updates: &mut [Value],
+    harness: &Harness,
+    run_id: &str,
+    store: Option<&SessionContentStore>,
+) {
+    fill_assistant_content(updates, harness, run_id, store);
+    fill_content_tool_updates(updates, harness, run_id, store);
+}
+
+fn fill_assistant_content(
+    updates: &mut [Value],
+    harness: &Harness,
+    run_id: &str,
+    store: Option<&SessionContentStore>,
+) {
+    apply_assistant_content(
+        updates,
+        || Checkpoint::load(&harness.state.runs_dir(), run_id),
+        |checkpoint| content_assistant_texts(harness, run_id, checkpoint, store),
+    );
+}
+
+fn content_assistant_texts(
+    harness: &Harness,
+    run_id: &str,
+    checkpoint: &Checkpoint,
+    store: Option<&SessionContentStore>,
+) -> Option<Vec<String>> {
+    let binding = checkpoint.content.as_ref()?;
+    let sidecar = crate::content::load_sidecar(&harness.state.runs_dir(), run_id, binding).ok()?;
+    let store = store?;
+    Some(
+        sidecar
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .map(|message| {
+                assistant_visible_text(&message.parts, |reference| store.text(reference))
+            })
+            .collect(),
+    )
+}
+
+fn assistant_visible_text(
+    parts: &[ContentPartDescriptor],
+    text: impl Fn(&str) -> Option<String>,
+) -> String {
+    parts
+        .iter()
+        .filter(|part| {
+            part.kind == ContentPartKind::Text && part.provenance.source != "model-tool-arguments"
+        })
+        .filter_map(|part| text(&part.reference))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn apply_assistant_content<E>(
+    updates: &mut [Value],
+    load: impl FnOnce() -> Result<Checkpoint, E>,
+    content_texts: impl FnOnce(&Checkpoint) -> Option<Vec<String>>,
+) {
     let chunk_count = updates
         .iter()
         .filter(|update| update["update"]["sessionUpdate"] == "agent_message_chunk")
@@ -1035,15 +1592,28 @@ fn apply_assistant_content<E>(updates: &mut [Value], load: impl FnOnce() -> Resu
     let Ok(checkpoint) = load() else {
         return;
     };
-    let mut assistants: Vec<&str> = checkpoint
+    let owned = content_texts(&checkpoint);
+    let fallback: Vec<&str> = checkpoint
         .messages
         .iter()
         .rev()
         .filter(|message| message.role == "assistant")
         .map(|message| message.content.as_str())
         .take(chunk_count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .collect();
-    assistants.reverse();
+    let content_refs: Vec<&str> = owned
+        .as_ref()
+        .map(|texts| texts.iter().map(String::as_str).collect())
+        .unwrap_or_else(|| fallback.to_vec());
+    let assistants = if owned.is_some() {
+        let start = content_refs.len().saturating_sub(chunk_count);
+        content_refs[start..].to_vec()
+    } else {
+        fallback
+    };
     let mut index = 0usize;
     for update in updates.iter_mut() {
         if update["update"]["sessionUpdate"] == "agent_message_chunk" {
@@ -1053,6 +1623,179 @@ fn apply_assistant_content<E>(updates: &mut [Value], load: impl FnOnce() -> Resu
             index += 1;
         }
     }
+}
+
+/// Harness events stay projected (ADR 0006). The ACP client that owns the
+/// session store gets the same resolved tool args and results as session/load.
+fn fill_content_tool_updates(
+    updates: &mut [Value],
+    harness: &Harness,
+    run_id: &str,
+    store: Option<&SessionContentStore>,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let has_tools = updates.iter().any(|update| {
+        matches!(
+            update["update"]["sessionUpdate"].as_str(),
+            Some("tool_call" | "tool_call_update")
+        )
+    });
+    if !has_tools {
+        return;
+    }
+    let Ok(checkpoint) = Checkpoint::load(&harness.state.runs_dir(), run_id) else {
+        return;
+    };
+    let Some(binding) = checkpoint.content.as_ref() else {
+        return;
+    };
+    let Ok(sidecar) = crate::content::load_sidecar(&harness.state.runs_dir(), run_id, binding)
+    else {
+        return;
+    };
+    let mut raw_by_id = HashMap::new();
+    let mut result_by_id = HashMap::new();
+    let mut turn = 0u32;
+    let mut call_ids = HashMap::new();
+    for message in &sidecar.messages {
+        match message.role.as_str() {
+            "assistant" => {
+                turn = turn.saturating_add(1);
+                for (index, call) in message.tool_calls.iter().enumerate() {
+                    let stable = stable_call_id(call, turn, index);
+                    let conversation = conversation_call_id(call, turn, index);
+                    call_ids.insert(conversation, stable.clone());
+                    if !call.id.is_empty() {
+                        call_ids.insert(call.id.clone(), stable.clone());
+                    }
+                    if let Some(raw) = resolved_content_tool_args(call, message, store) {
+                        raw_by_id.insert(stable, json_raw_input(Some(&raw)));
+                    }
+                }
+            }
+            "tool" => {
+                let call_id = call_ids
+                    .get(&message.tool_call_id)
+                    .cloned()
+                    .unwrap_or_else(|| message.tool_call_id.clone());
+                let text =
+                    assistant_visible_text(&message.parts, |reference| store.text(reference));
+                result_by_id.insert(call_id, text);
+            }
+            _ => {}
+        }
+    }
+    for update in updates {
+        let kind = update["update"]["sessionUpdate"]
+            .as_str()
+            .map(str::to_owned);
+        let id = update["update"]["toolCallId"].as_str().map(str::to_owned);
+        let Some(id) = id else {
+            continue;
+        };
+        match kind.as_deref() {
+            Some("tool_call") => {
+                if let Some(raw) = raw_by_id.get(&id) {
+                    update["update"]["rawInput"] = raw.clone();
+                }
+            }
+            Some("tool_call_update") => {
+                if let Some(text) = result_by_id.get(&id) {
+                    update["update"]["content"] = json!([{
+                        "type": "content",
+                        "content": { "type": "text", "text": text }
+                    }]);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn content_conversation_updates(
+    session_id: &str,
+    messages: &[ContentMessageV1],
+    store: &SessionContentStore,
+) -> Vec<Value> {
+    let mut updates = Vec::new();
+    let mut turn = 0u32;
+    let mut call_ids = HashMap::new();
+    for message in messages {
+        match message.role.as_str() {
+            "user" => {
+                let text =
+                    assistant_visible_text(&message.parts, |reference| store.text(reference));
+                if !text.is_empty() {
+                    updates.push(json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "user_message_chunk",
+                            "content": { "type": "text", "text": text }
+                        }
+                    }));
+                }
+            }
+            "assistant" => {
+                turn = turn.saturating_add(1);
+                let text =
+                    assistant_visible_text(&message.parts, |reference| store.text(reference));
+                if !text.is_empty() {
+                    updates.push(json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": text },
+                            "messageId": format!("turn-{turn}")
+                        }
+                    }));
+                }
+                for (index, call) in message.tool_calls.iter().enumerate() {
+                    let stable = stable_call_id(call, turn, index);
+                    let conversation = conversation_call_id(call, turn, index);
+                    call_ids.insert(conversation, stable.clone());
+                    if !call.id.is_empty() {
+                        call_ids.insert(call.id.clone(), stable.clone());
+                    }
+                    updates.push(json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": stable,
+                            "title": call.name,
+                            "kind": "other",
+                            "status": "pending",
+                            "rawInput": content_tool_raw_input(call, message, store)
+                        }
+                    }));
+                }
+            }
+            "tool" => {
+                let call_id = call_ids
+                    .get(&message.tool_call_id)
+                    .cloned()
+                    .unwrap_or_else(|| message.tool_call_id.clone());
+                let text =
+                    assistant_visible_text(&message.parts, |reference| store.text(reference));
+                let failed = text == "permission denied" || text == "cancelled";
+                updates.push(json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": call_id,
+                        "status": if failed { "failed" } else { "completed" },
+                        "content": [{
+                            "type": "content",
+                            "content": { "type": "text", "text": text }
+                        }]
+                    }
+                }));
+            }
+            _ => {}
+        }
+    }
+    updates
 }
 
 fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value> {
@@ -1176,6 +1919,14 @@ fn consume_event(
                 "messageId": format!("turn-{turn}")
             }
         }),
+        HarnessEvent::ContentTurn { turn, .. } => json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "" },
+                "messageId": format!("turn-{turn}")
+            }
+        }),
         HarnessEvent::ToolStart {
             name,
             call_id,
@@ -1255,22 +2006,368 @@ fn optional_mode(params: &Value) -> Result<Option<String>, Value> {
     }
 }
 
-fn prompt_text(prompt: &Value) -> Result<String, Value> {
+struct ParsedPrompt {
+    text: String,
+    attachments: Vec<StagedAttachment>,
+}
+
+struct StagedAttachment {
+    kind: ContentPartKind,
+    media_type: String,
+    payload: Vec<u8>,
+}
+
+impl ParsedPrompt {
+    fn has_attachments(&self) -> bool {
+        !self.attachments.is_empty()
+    }
+
+    fn require_supported(&self, kinds: &[ContentPartKind]) -> Result<(), Value> {
+        for attachment in &self.attachments {
+            if !kinds.contains(&attachment.kind) {
+                return Err(rpc_error(
+                    -32602,
+                    format!(
+                        "selected adapter cannot read {} attachments",
+                        content_kind_name(attachment.kind)
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn messages(
+        &self,
+        store: &SessionContentStore,
+        session_id: &str,
+    ) -> Result<Vec<ContentMessageV1>, Value> {
+        let mut parts = Vec::new();
+        let mut index = 0u32;
+        if !self.text.is_empty() {
+            parts.push(store.insert(
+                &format!("text-{index}"),
+                ContentPartKind::Text,
+                "text/plain",
+                self.text.as_bytes(),
+                session_id,
+            )?);
+            index += 1;
+        }
+        for attachment in &self.attachments {
+            parts.push(store.insert(
+                &format!("part-{index}"),
+                attachment.kind,
+                &attachment.media_type,
+                &attachment.payload,
+                session_id,
+            )?);
+            index += 1;
+        }
+        if parts.is_empty() {
+            return Err(rpc_error(-32602, "session/prompt requires a text part"));
+        }
+        Ok(vec![ContentMessageV1 {
+            role: "user".into(),
+            parts,
+            tool_call_id: String::new(),
+            tool_calls: Vec::new(),
+        }])
+    }
+}
+
+fn parse_prompt(prompt: &Value) -> Result<ParsedPrompt, Value> {
     let Some(parts) = prompt.as_array() else {
         return Err(rpc_error(-32602, "session/prompt requires prompt parts"));
     };
+    if parts.len() > MAX_CONTENT_PARTS {
+        return Err(rpc_error(
+            -32602,
+            "session/prompt exceeds the content part count bound",
+        ));
+    }
     let mut text = String::new();
+    let mut attachments = Vec::new();
+    let mut aggregate = 0u64;
     for part in parts {
-        if part.get("type").and_then(|t| t.as_str()) == Some("text")
-            && let Some(chunk) = part.get("text").and_then(|t| t.as_str())
-        {
-            text.push_str(chunk);
+        let part_type = part
+            .get("type")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| rpc_error(-32602, "prompt part requires type"))?;
+        match part_type {
+            "text" => {
+                let chunk = part
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .ok_or_else(|| rpc_error(-32602, "text prompt part requires text"))?;
+                text.push_str(chunk);
+                add_prompt_bytes(&mut aggregate, chunk.len() as u64)?;
+            }
+            "image" | "audio" => {
+                let staged = staged_inline_part(part, part_type)?;
+                add_prompt_bytes(&mut aggregate, staged.payload.len() as u64)?;
+                attachments.push(staged);
+            }
+            "resource" => {
+                let staged = staged_resource_part(part)?;
+                add_prompt_bytes(&mut aggregate, staged.payload.len() as u64)?;
+                attachments.push(staged);
+            }
+            "video" => {
+                return Err(rpc_error(-32602, "unsupported prompt part type `video`"));
+            }
+            other => {
+                return Err(rpc_error(
+                    -32602,
+                    format!("unsupported prompt part type `{other}`"),
+                ));
+            }
         }
     }
     if text.is_empty() {
         return Err(rpc_error(-32602, "session/prompt requires a text part"));
     }
-    Ok(text)
+    Ok(ParsedPrompt { text, attachments })
+}
+
+fn add_prompt_bytes(aggregate: &mut u64, bytes: u64) -> Result<(), Value> {
+    *aggregate = aggregate.saturating_add(bytes);
+    if *aggregate > MAX_CONTENT_AGGREGATE_BYTES {
+        return Err(rpc_error(
+            -32602,
+            "attachments exceed the content aggregate bound",
+        ));
+    }
+    Ok(())
+}
+
+fn staged_inline_part(part: &Value, part_type: &str) -> Result<StagedAttachment, Value> {
+    let mime = part
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| rpc_error(-32602, format!("{part_type} prompt part requires mimeType")))?;
+    let kind = match part_type {
+        "image" => ContentPartKind::Image,
+        "audio" => ContentPartKind::Audio,
+        _ => unreachable!("inline part type"),
+    };
+    if !content_media_type_ok(kind, mime) {
+        return Err(rpc_error(
+            -32602,
+            format!("unsupported {part_type} media type `{mime}`"),
+        ));
+    }
+    let payload = inline_payload(part, part_type)?;
+    Ok(StagedAttachment {
+        kind,
+        media_type: mime.to_ascii_lowercase(),
+        payload,
+    })
+}
+
+fn staged_resource_part(part: &Value) -> Result<StagedAttachment, Value> {
+    let resource = part
+        .get("resource")
+        .ok_or_else(|| rpc_error(-32602, "resource prompt part requires resource"))?;
+    let mime = resource
+        .get("mimeType")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| rpc_error(-32602, "resource prompt part requires mimeType"))?;
+    let kind = resource_kind(mime)?;
+    let payload = if let Some(blob) = resource.get("blob").and_then(|v| v.as_str()) {
+        decode_base64(blob)?
+    } else if let Some(text) = resource.get("text").and_then(|v| v.as_str()) {
+        text.as_bytes().to_vec()
+    } else if let Some(uri) = resource.get("uri").and_then(|v| v.as_str()) {
+        read_host_file(uri)?
+    } else {
+        return Err(rpc_error(
+            -32602,
+            "resource prompt part requires blob, text, or a host path uri",
+        ));
+    };
+    if payload.len() as u64 > MAX_CONTENT_PART_BYTES {
+        return Err(rpc_error(
+            -32602,
+            "attachment exceeds the content part size bound",
+        ));
+    }
+    Ok(StagedAttachment {
+        kind,
+        media_type: mime.to_ascii_lowercase(),
+        payload,
+    })
+}
+
+fn inline_payload(part: &Value, part_type: &str) -> Result<Vec<u8>, Value> {
+    if let Some(data) = part.get("data").and_then(|v| v.as_str()) {
+        let bytes = decode_base64(data)?;
+        if bytes.len() as u64 > MAX_CONTENT_PART_BYTES {
+            return Err(rpc_error(
+                -32602,
+                "attachment exceeds the content part size bound",
+            ));
+        }
+        return Ok(bytes);
+    }
+    if let Some(uri) = part.get("uri").and_then(|v| v.as_str()) {
+        return read_host_file(uri);
+    }
+    Err(rpc_error(
+        -32602,
+        format!("{part_type} prompt part requires data or a host path uri"),
+    ))
+}
+
+fn resource_kind(mime: &str) -> Result<ContentPartKind, Value> {
+    let mime = mime.to_ascii_lowercase();
+    if content_media_type_ok(ContentPartKind::Document, &mime) {
+        Ok(ContentPartKind::Document)
+    } else if content_media_type_ok(ContentPartKind::Image, &mime) {
+        Ok(ContentPartKind::Image)
+    } else if content_media_type_ok(ContentPartKind::Audio, &mime) {
+        Ok(ContentPartKind::Audio)
+    } else {
+        Err(rpc_error(
+            -32602,
+            format!("unsupported prompt attachment media type `{mime}`"),
+        ))
+    }
+}
+
+fn content_media_type_ok(kind: ContentPartKind, mime: &str) -> bool {
+    let mime = mime.trim().to_ascii_lowercase();
+    match kind {
+        ContentPartKind::Text => matches!(
+            mime.as_str(),
+            "text/plain" | "text/markdown" | "application/json"
+        ),
+        ContentPartKind::Image => {
+            matches!(
+                mime.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        }
+        ContentPartKind::Audio => {
+            matches!(
+                mime.as_str(),
+                "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/ogg"
+            )
+        }
+        ContentPartKind::Document => {
+            matches!(
+                mime.as_str(),
+                "application/pdf" | "text/plain" | "text/markdown"
+            )
+        }
+    }
+}
+
+fn content_kind_name(kind: ContentPartKind) -> &'static str {
+    match kind {
+        ContentPartKind::Text => "text",
+        ContentPartKind::Image => "image",
+        ContentPartKind::Audio => "audio",
+        ContentPartKind::Document => "document",
+    }
+}
+
+fn read_host_file(uri: &str) -> Result<Vec<u8>, Value> {
+    let path = Path::new(uri);
+    if !path.is_absolute() {
+        return Err(rpc_error(
+            -32602,
+            "attachment uri must be an absolute host path",
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| rpc_error(-32602, format!("attachment path cannot be read: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(rpc_error(-32602, "attachment path must be a regular file"));
+    }
+    if metadata.len() > MAX_CONTENT_PART_BYTES {
+        return Err(rpc_error(
+            -32602,
+            "attachment exceeds the content part size bound",
+        ));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| rpc_error(-32602, format!("attachment path cannot be read: {error}")))?;
+    if bytes.len() as u64 > MAX_CONTENT_PART_BYTES {
+        return Err(rpc_error(
+            -32602,
+            "attachment exceeds the content part size bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, Value> {
+    let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() {
+        return Err(rpc_error(-32602, "attachment data is empty"));
+    }
+    decode_base64_compact(&compact)
+        .ok_or_else(|| rpc_error(-32602, "attachment data is not valid base64"))
+}
+
+fn decode_base64_compact(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    if !input.len().is_multiple_of(4) {
+        return None;
+    }
+    if let Some(pad_at) = input.bytes().position(|b| b == b'=') {
+        if !input.as_bytes()[pad_at..].iter().all(|&b| b == b'=') {
+            return None;
+        }
+        let pad = input.len() - pad_at;
+        if pad > 2 || pad_at % 4 < 2 {
+            return None;
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    for chunk in input.as_bytes().chunks(4) {
+        let pad = chunk.iter().filter(|b| **b == b'=').count();
+        if pad > 2 {
+            return None;
+        }
+        let mut sextets = [0u8; 4];
+        for (i, byte) in chunk.iter().enumerate() {
+            if *byte == b'=' {
+                if i < 2 {
+                    return None;
+                }
+                continue;
+            }
+            sextets[i] = value(*byte)?;
+        }
+        out.push((sextets[0] << 2) | (sextets[1] >> 4));
+        if pad < 2 {
+            out.push((sextets[1] << 4) | (sextets[2] >> 2));
+        }
+        if pad < 1 {
+            out.push((sextets[2] << 6) | sextets[3]);
+        }
+    }
+    Some(out)
+}
+
+fn prompt_capabilities(model: &dyn ModelPort) -> Value {
+    let kinds = model.content_kinds();
+    json!({
+        "image": kinds.contains(&ContentPartKind::Image),
+        "audio": kinds.contains(&ContentPartKind::Audio),
+        "embeddedContext": kinds.contains(&ContentPartKind::Document),
+    })
 }
 
 fn rpc_error(code: i64, message: impl Into<String>) -> Value {
@@ -1304,7 +2401,7 @@ pub async fn run_stdio(harness: Harness) -> Result<(), String> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdin());
         loop {
-            let msg = match framing::read(&mut reader).await {
+            let msg = match framing::read_limited(&mut reader, MAX_ACP_FRAME_BYTES).await {
                 Ok(m) => m,
                 Err(e) if e == "eof" => break,
                 Err(_) => break,
@@ -1565,6 +2662,35 @@ fn rpc_ok(resp: &Value) -> &Value {
 }
 
 #[cfg(test)]
+struct CapturePermissionClient {
+    updates: Mutex<Vec<Value>>,
+    permissions: Mutex<Vec<Value>>,
+    permission: PermissionOutcome,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl AcpClient for CapturePermissionClient {
+    async fn notify(&self, _method: &str, params: Value) -> Result<(), String> {
+        self.updates.lock().await.push(params);
+        Ok(())
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        if method != "session/request_permission" {
+            return Err(format!("unexpected agent request {method}"));
+        }
+        self.permissions.lock().await.push(params);
+        let outcome = match self.permission {
+            PermissionOutcome::Allow => "allow",
+            PermissionOutcome::Deny => "deny",
+            PermissionOutcome::Cancelled => "cancelled",
+        };
+        Ok(json!({ "outcome": { "outcome": outcome, "optionId": outcome } }))
+    }
+}
+
+#[cfg(test)]
 struct MalformedPermissionClient {
     updates: Mutex<Vec<Value>>,
 }
@@ -1591,6 +2717,63 @@ mod tests {
     use crate::config::Config;
     use crate::state::StateRoot;
     use tempfile::tempdir;
+
+    fn encode_base64(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let a = chunk[0];
+            let b = chunk.get(1).copied().unwrap_or(0);
+            let c = chunk.get(2).copied().unwrap_or(0);
+            out.push(TABLE[(a >> 2) as usize] as char);
+            out.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(TABLE[(c & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn decode_base64_rejects_misplaced_padding() {
+        assert_eq!(
+            decode_base64_compact(&encode_base64(b"a")).as_deref(),
+            Some(b"a".as_slice())
+        );
+        assert_eq!(
+            decode_base64_compact(&encode_base64(b"ab")).as_deref(),
+            Some(b"ab".as_slice())
+        );
+        assert_eq!(
+            decode_base64_compact(&encode_base64(b"abc")).as_deref(),
+            Some(b"abc".as_slice())
+        );
+        assert_eq!(decode_base64_compact("YQ=A"), None);
+        assert_eq!(decode_base64_compact("YQ==Yg=="), None);
+        assert_eq!(decode_base64_compact("===="), None);
+    }
+
+    #[test]
+    fn acp_stdio_frame_fits_content_aggregate_as_base64() {
+        let encoded = (crate::content::MAX_CONTENT_AGGREGATE_BYTES as usize)
+            .saturating_mul(4)
+            .div_ceil(3);
+        assert!(
+            MAX_ACP_FRAME_BYTES >= encoded + 64 * 1024,
+            "ACP stdio bound {MAX_ACP_FRAME_BYTES} cannot carry {encoded} base64 bytes plus envelope"
+        );
+        const {
+            assert!(MAX_ACP_FRAME_BYTES > framing::MAX_FRAME_BYTES);
+        }
+    }
 
     fn scripted_host(dir: &Path, script: &str) -> AcpHost {
         scripted_host_with(dir, script, |_| {})
@@ -1675,19 +2858,28 @@ mod tests {
     }
 
     fn assert_initialize_speaks_v1(result: &Value) {
+        assert_initialize_speaks_v1_with_prompt(result, true, true, true);
+    }
+
+    fn assert_initialize_speaks_v1_with_prompt(
+        result: &Value,
+        image: bool,
+        audio: bool,
+        embedded: bool,
+    ) {
         assert_eq!(result["protocolVersion"], 1);
         assert_eq!(result["agentCapabilities"]["loadSession"], true);
         assert_eq!(
             result["agentCapabilities"]["promptCapabilities"]["image"],
-            false
+            image
         );
         assert_eq!(
             result["agentCapabilities"]["promptCapabilities"]["audio"],
-            false
+            audio
         );
         assert_eq!(
             result["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
-            false
+            embedded
         );
         assert_eq!(result["authMethods"], json!([]));
         assert_eq!(result["agentInfo"]["name"], crate::identity::PRODUCT);
@@ -2036,6 +3228,864 @@ mod tests {
             "{}",
             late_mode["error"]["message"]
         );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_passes_supported_image_and_pdf() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"saw-image"}]"#, |config| {
+            config.events.adapter = "jsonl".into();
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-IMAGE";
+        let pdf = b"%PDF UNIQUE-ACP-401-DOCUMENT";
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)},
+                            {
+                                "type":"resource",
+                                "resource": {
+                                    "uri": "attachment://doc.pdf",
+                                    "mimeType": "application/pdf",
+                                    "blob": encode_base64(pdf)
+                                }
+                            }
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let updates = client.updates.lock().await;
+        let texts: Vec<&str> = updates
+            .iter()
+            .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
+            .filter_map(|u| u["update"]["content"]["text"].as_str())
+            .collect();
+        assert!(
+            texts.contains(&"saw-image"),
+            "expected content turn text, got {texts:?}"
+        );
+        drop(updates);
+
+        let state = dir.path().join("state");
+        assert_no_payload_bytes(&state, png);
+        assert_no_payload_bytes(&cwd, png);
+        assert_no_payload_bytes(&state, pdf);
+        assert_no_payload_bytes(&cwd, pdf);
+
+        let runs = host.harness.state.runs_dir();
+        let run_id = std::fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .expect("content run directory");
+        let checkpoint = Checkpoint::load(&runs, &run_id).unwrap();
+        assert!(
+            checkpoint.content.is_some(),
+            "attachment prompt must use a content run"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_content_assistant_text() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-LOAD";
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let replay = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let loaded = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
+                }),
+                &replay,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&loaded)["sessionId"], session_id);
+        let updates = replay.updates.lock().await;
+        let texts: Vec<&str> = updates
+            .iter()
+            .filter(|update| update["update"]["sessionUpdate"] == "agent_message_chunk")
+            .filter_map(|update| update["update"]["content"]["text"].as_str())
+            .collect();
+        assert!(
+            texts.contains(&"saw-image"),
+            "load must replay content assistant text, got {texts:?}"
+        );
+        assert!(
+            updates.iter().any(|update| {
+                update["update"]["sessionUpdate"] == "user_message_chunk"
+                    && update["update"]["content"]["text"] == "inspect"
+            }),
+            "load must replay the user text: {updates:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_content_tool_arguments() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+              {"content":"wrote it"}
+            ]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-TOOL-ARGS";
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"write"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let replay = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let loaded = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
+                }),
+                &replay,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&loaded)["sessionId"], session_id);
+        let updates = replay.updates.lock().await;
+        let raw = updates
+            .iter()
+            .find(|update| {
+                update["update"]["sessionUpdate"] == "tool_call"
+                    && update["update"]["title"] == "write_file"
+            })
+            .map(|update| &update["update"]["rawInput"]);
+        assert_eq!(
+            raw.and_then(|value| value.get("path"))
+                .and_then(|v| v.as_str()),
+            Some("ok.txt"),
+            "load must replay resolved tool arguments, got {updates:?}"
+        );
+        assert!(
+            raw.is_some_and(|value| value.get("shikigami_content_arguments_part_id").is_none()),
+            "load must not replay the content argument pointer: {raw:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_live_content_tool_arguments() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+              {"content":"wrote it"}
+            ]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-LIVE-TOOL";
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"write"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt}");
+        let updates = client.updates.lock().await;
+        let raw = updates
+            .iter()
+            .find(|update| {
+                update["update"]["sessionUpdate"] == "tool_call"
+                    && update["update"]["title"] == "write_file"
+            })
+            .map(|update| &update["update"]["rawInput"]);
+        assert_eq!(
+            raw.and_then(|value| value.get("path"))
+                .and_then(|v| v.as_str()),
+            Some("ok.txt"),
+            "live tool_call must show resolved arguments, got {updates:?}"
+        );
+        assert!(
+            raw.is_some_and(|value| value.get("shikigami_content_arguments_part_id").is_none()),
+            "live tool_call must not show the content argument pointer: {raw:?}"
+        );
+        let ended = updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "tool_call_update");
+        let detail = ended
+            .and_then(|update| update["update"]["content"][0]["content"]["text"].as_str())
+            .unwrap_or("");
+        assert!(
+            ended.is_some(),
+            "live tool_call_update missing, got {updates:?}"
+        );
+        assert!(
+            !detail.starts_with("bounded_content "),
+            "live tool result must not stay projected, got {ended:?}"
+        );
+        assert!(
+            !detail.is_empty(),
+            "live tool result must restore sidecar text, got {ended:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_rejects_misplaced_base64_padding() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": "YQ=A"}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt["error"]["code"], -32602, "{prompt}");
+        assert!(
+            prompt["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("valid base64"),
+            "{}",
+            prompt["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn content_ask_resume_resolves_tool_arguments() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+              {"content":"wrote it"}
+            ]"#,
+        );
+        let malformed = MalformedPermissionClient {
+            updates: Mutex::new(Vec::new()),
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &malformed, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-ASK-ARGS";
+        let first = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"write"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &malformed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first["error"]["code"], -32602, "{first}");
+        let retry = CapturePermissionClient {
+            updates: Mutex::new(Vec::new()),
+            permissions: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let second = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"retry"}]
+                    }
+                }),
+                &retry,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&second)["stopReason"], "end_turn", "{second}");
+        let permissions = retry.permissions.lock().await;
+        let raw = permissions
+            .first()
+            .map(|params| &params["toolCall"]["rawInput"]);
+        assert_eq!(
+            raw.and_then(|value| value.get("path"))
+                .and_then(|v| v.as_str()),
+            Some("ok.txt"),
+            "resumed ask must show resolved arguments, got {permissions:?}"
+        );
+        assert!(
+            raw.is_some_and(|value| value.get("shikigami_content_arguments_part_id").is_none()),
+            "resumed ask must not show the content argument pointer: {raw:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_attachment_prompt_does_not_keep_content_state() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let blob = encode_base64(&vec![0u8; 8 * 1024 * 1024]);
+        let failed = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": blob},
+                            {"type":"image","mimeType":"image/png","data": blob}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed["error"]["code"], -32602, "{failed}");
+        assert!(
+            failed["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("aggregate")),
+            "{failed}"
+        );
+        let sessions = host.sessions.lock().await;
+        let live = sessions.get(&session_id).expect("session");
+        assert!(live.run_id.is_none(), "{:?}", live.run_id);
+        assert!(
+            live.content.is_none(),
+            "failed attach must drop content state"
+        );
+        drop(sessions);
+        let follow = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&follow)["stopReason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn session_load_fails_closed_without_content_store() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-LOST";
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        host.sessions.lock().await.remove(&session_id);
+        let loaded = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(loaded["error"]["code"], -32603);
+        assert!(
+            loaded["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no longer in session memory"),
+            "{}",
+            loaded["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_content_follow_up_reaches_the_model() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[{"content":"saw-image"},{"content":"saw-follow-up"}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-FOLLOW";
+        let first = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&first)["stopReason"], "end_turn");
+        client.updates.lock().await.clear();
+        let follow = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"more"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&follow)["stopReason"], "end_turn");
+        let updates = client.updates.lock().await;
+        let texts: Vec<&str> = updates
+            .iter()
+            .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
+            .filter_map(|u| u["update"]["content"]["text"].as_str())
+            .collect();
+        assert!(
+            texts.contains(&"saw-follow-up"),
+            "expected follow-up content turn, got {texts:?}"
+        );
+        assert!(
+            !texts.contains(&"saw-image"),
+            "staged assistant must not replay, got {texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_content_follow_up_after_report() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]},
+              {"content":"again"}
+            ]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-401-REPORT";
+        let first = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"go"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&first)["stopReason"], "end_turn", "{first}");
+        client.updates.lock().await.clear();
+        let follow = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"more"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&follow)["stopReason"], "end_turn", "{follow}");
+        let updates = client.updates.lock().await;
+        let texts: Vec<&str> = updates
+            .iter()
+            .filter(|update| update["update"]["sessionUpdate"] == "agent_message_chunk")
+            .filter_map(|update| update["update"]["content"]["text"].as_str())
+            .collect();
+        assert!(
+            texts.contains(&"again"),
+            "report must not finalize an attachment session, got {texts:?} follow={follow}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_fails_closed_on_unsupported_attachment() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let video = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"see this"},
+                            {"type":"video","mimeType":"video/mp4","data": encode_base64(b"ftyp")}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(video["error"]["code"], -32602);
+        assert!(
+            video["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported prompt part type `video`"),
+            "{}",
+            video["error"]["message"]
+        );
+
+        let unknown = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"see this"},
+                            {"type":"widget","data":"nope"}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown["error"]["code"], -32602);
+        assert!(
+            unknown["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported prompt part type `widget`"),
+            "{}",
+            unknown["error"]["message"]
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_attachments_match_text_host() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let runs = host.harness.state.runs_dir();
+        let run_id = std::fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .expect("text run directory");
+        let checkpoint = Checkpoint::load(&runs, &run_id).unwrap();
+        assert!(
+            checkpoint.content.is_none(),
+            "text-only prompt must keep the ordinary run path"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_plane_adapter_keeps_prompt_capabilities_false() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.model.adapter = "plane".into();
+        config.events.adapter = "none".into();
+        let host = AcpHost::new(Harness::from_config(config, state).unwrap());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let init = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": 1, "capabilities": {} }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_initialize_speaks_v1_with_prompt(rpc_ok(&init), false, false, false);
+
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let created = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": { "cwd": cwd, "mcpServers": [] }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let session_id = rpc_ok(&created)["sessionId"].as_str().unwrap().to_string();
+        let denied = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"image","mimeType":"image/png","data": encode_base64(b"\x89PNG")}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied["error"]["code"], -32602);
+        assert!(
+            denied["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot read image"),
+            "{}",
+            denied["error"]["message"]
+        );
+    }
+
+    fn assert_no_payload_bytes(root: &Path, needle: &[u8]) {
+        fn walk(path: &Path, needle: &[u8]) {
+            if path.is_dir() {
+                let Ok(entries) = std::fs::read_dir(path) else {
+                    return;
+                };
+                for entry in entries.filter_map(|entry| entry.ok()) {
+                    walk(&entry.path(), needle);
+                }
+                return;
+            }
+            let Ok(bytes) = std::fs::read(path) else {
+                return;
+            };
+            assert!(
+                !bytes.windows(needle.len()).any(|window| window == needle),
+                "payload bytes leaked into {}",
+                path.display()
+            );
+        }
+        walk(root, needle);
     }
 
     #[tokio::test]
@@ -3049,10 +5099,58 @@ mod tests {
     }
 
     #[test]
-    fn fill_assistant_content_skips_checkpoint_when_batch_has_no_chunks() {
-        apply_assistant_content(&mut [], || -> Result<Checkpoint, ()> {
-            panic!("empty batch must not load a checkpoint");
+    fn assistant_visible_text_skips_tool_argument_descriptors() {
+        let parts = vec![
+            ContentPartDescriptor {
+                part_id: "t".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: 5,
+                sha256_digest: "sha256:x".into(),
+                reference: "acp-t".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "model".into(),
+                    source_id: "turn-1".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            },
+            ContentPartDescriptor {
+                part_id: "args".into(),
+                kind: ContentPartKind::Text,
+                media_type: "text/plain".into(),
+                byte_length: 16,
+                sha256_digest: "sha256:y".into(),
+                reference: "acp-args".into(),
+                provenance: ContentProvenanceV1 {
+                    source: "model-tool-arguments".into(),
+                    source_id: "turn-1-call-0".into(),
+                    source_version: "v1".into(),
+                    observed_at_ms: 1,
+                },
+                disclosure_state: ContentDisclosureState::Accepted,
+                disclosure_reason: String::new(),
+            },
+        ];
+        let text = assistant_visible_text(&parts, |reference| match reference {
+            "acp-t" => Some("hello".into()),
+            "acp-args" => Some(r#"{"path":"secret"}"#.into()),
+            _ => None,
         });
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn fill_assistant_content_skips_checkpoint_when_batch_has_no_chunks() {
+        apply_assistant_content(
+            &mut [],
+            || -> Result<Checkpoint, ()> {
+                panic!("empty batch must not load a checkpoint");
+            },
+            |_| None,
+        );
         let mut tool_only = vec![json!({
             "sessionId": "sess",
             "update": {
@@ -3063,9 +5161,13 @@ mod tests {
                 "status": "pending"
             }
         })];
-        apply_assistant_content(&mut tool_only, || -> Result<Checkpoint, ()> {
-            panic!("tool-only batch must not load a checkpoint");
-        });
+        apply_assistant_content(
+            &mut tool_only,
+            || -> Result<Checkpoint, ()> {
+                panic!("tool-only batch must not load a checkpoint");
+            },
+            |_| None,
+        );
         assert_eq!(tool_only[0]["update"]["sessionUpdate"], "tool_call");
 
         let dir = tempdir().unwrap();
@@ -3078,7 +5180,7 @@ mod tests {
         checkpoint.save(&runs).unwrap();
 
         let mut empty: [Value; 0] = [];
-        fill_assistant_content(&mut empty, &host.harness, "run-1");
+        fill_assistant_content(&mut empty, &host.harness, "run-1", None);
 
         let mut chunk = vec![json!({
             "sessionId": "sess",
@@ -3088,7 +5190,7 @@ mod tests {
                 "messageId": "turn-1"
             }
         })];
-        fill_assistant_content(&mut chunk, &host.harness, "run-1");
+        fill_assistant_content(&mut chunk, &host.harness, "run-1", None);
         assert_eq!(chunk[0]["update"]["content"]["text"], "from-disk");
     }
 

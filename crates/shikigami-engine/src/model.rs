@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use crate::config::Config;
 use crate::content::{
-    ContentCapabilitiesV1, ContentMessageV1, ContentModelTurnV1, ResolvedContentPart,
-    validate_messages,
+    ContentCapabilitiesV1, ContentMessageV1, ContentModelTurnV1, ContentPartKind,
+    ResolvedContentPart, validate_messages,
 };
 use crate::tools::ToolDef;
 
@@ -172,6 +172,11 @@ pub trait ModelPort: Send + Sync {
             "model adapter `{}` does not support bounded content",
             self.id()
         )))
+    }
+
+    /// Kinds this adapter can read on a content turn. Empty means text-only.
+    fn content_kinds(&self) -> &'static [ContentPartKind] {
+        &[]
     }
 
     /// Independent adapter for a nested child run.
@@ -370,6 +375,15 @@ impl ModelPort for ScriptedModel {
             tool_calls: turn.tool_calls,
             usage: turn.usage,
         })
+    }
+
+    fn content_kinds(&self) -> &'static [ContentPartKind] {
+        &[
+            ContentPartKind::Text,
+            ContentPartKind::Image,
+            ContentPartKind::Audio,
+            ContentPartKind::Document,
+        ]
     }
 
     fn fresh_for_child(&self, config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {

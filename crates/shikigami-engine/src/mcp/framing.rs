@@ -37,12 +37,23 @@ pub async fn write_line<W: AsyncWrite + Unpin>(
 /// is skipped up to [`MAX_HEADER_BYTES`]. Both paths enforce
 /// [`MAX_FRAME_BYTES`] before allocating the body.
 pub async fn read<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, String> {
+    read_limited(reader, MAX_FRAME_BYTES).await
+}
+
+/// Same as [`read`], with a caller-chosen inbound body bound.
+///
+/// MCP stdio stays at [`MAX_FRAME_BYTES`]. ACP stdio uses a larger bound so
+/// inline prompt attachments fit under the content aggregate cap after base64.
+pub async fn read_limited<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+) -> Result<Value, String> {
     let mut skipped = 0usize;
     loop {
         let buffered = reader.fill_buf().await.map_err(|e| e.to_string())?;
         match buffered.first() {
             None => return Err("eof".into()),
-            Some(b'{') => return read_line(reader).await,
+            Some(b'{') => return read_line(reader, max_frame_bytes).await,
             Some(b' ' | b'\t' | b'\r' | b'\n') => {
                 skipped += 1;
                 if skipped > MAX_HEADER_BYTES {
@@ -52,15 +63,18 @@ pub async fn read<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, Stri
                 }
                 reader.consume(1);
             }
-            Some(_) => return read_content_length(reader).await,
+            Some(_) => return read_content_length(reader, max_frame_bytes).await,
         }
     }
 }
 
-async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, String> {
+async fn read_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+) -> Result<Value, String> {
     let mut line = Vec::new();
     let n = (&mut *reader)
-        .take((MAX_FRAME_BYTES + 1) as u64)
+        .take((max_frame_bytes as u64).saturating_add(1))
         .read_until(b'\n', &mut line)
         .await
         .map_err(|e| e.to_string())?;
@@ -68,8 +82,8 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, Str
         return Err("eof".into());
     }
     if line.last() != Some(&b'\n') {
-        return Err(if line.len() > MAX_FRAME_BYTES {
-            format!("mcp frame exceeds {MAX_FRAME_BYTES} bytes")
+        return Err(if line.len() > max_frame_bytes {
+            format!("mcp frame exceeds {max_frame_bytes} bytes")
         } else {
             "mcp unterminated frame".into()
         });
@@ -80,7 +94,10 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, Str
     serde_json::from_slice(&line).map_err(|e| e.to_string())
 }
 
-async fn read_content_length<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Value, String> {
+async fn read_content_length<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+) -> Result<Value, String> {
     let mut content_length = None;
     let mut header_bytes = 0usize;
     loop {
@@ -109,9 +126,9 @@ async fn read_content_length<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<
                 .trim()
                 .parse::<usize>()
                 .map_err(|_| "mcp invalid Content-Length".to_string())?;
-            if length > MAX_FRAME_BYTES {
+            if length > max_frame_bytes {
                 return Err(format!(
-                    "mcp Content-Length {length} exceeds {MAX_FRAME_BYTES} bytes"
+                    "mcp Content-Length {length} exceeds {max_frame_bytes} bytes"
                 ));
             }
             content_length = Some(length);
@@ -220,6 +237,49 @@ mod tests {
         let invalid = b"Content-Length: nope\r\n\r\n";
         let mut reader = BufReader::new(&invalid[..]);
         assert!(read(&mut reader).await.unwrap_err().contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn read_limited_accepts_frames_above_mcp_default() {
+        let message = json!({"pad": "x".repeat(MAX_FRAME_BYTES + 64)});
+        let mut line = serde_json::to_vec(&message).unwrap();
+        assert!(line.len() > MAX_FRAME_BYTES);
+        line.push(b'\n');
+
+        let mut reader = BufReader::new(line.as_slice());
+        assert!(read(&mut reader).await.unwrap_err().contains("exceeds"));
+
+        let mut reader = BufReader::new(line.as_slice());
+        assert_eq!(
+            read_limited(&mut reader, MAX_FRAME_BYTES * 2)
+                .await
+                .unwrap(),
+            message
+        );
+
+        let mut headers = format!("Content-Length: {}\r\n\r\n", line.len() - 1).into_bytes();
+        headers.extend_from_slice(&line[..line.len() - 1]);
+        let mut reader = BufReader::new(headers.as_slice());
+        assert!(read(&mut reader).await.unwrap_err().contains("exceeds"));
+        let mut reader = BufReader::new(headers.as_slice());
+        assert_eq!(
+            read_limited(&mut reader, MAX_FRAME_BYTES * 2)
+                .await
+                .unwrap(),
+            message
+        );
+    }
+
+    #[tokio::test]
+    async fn read_limited_rejects_at_custom_bound() {
+        let oversized = format!("{{\"pad\":\"{}\"}}\n", "x".repeat(2048));
+        let mut reader = BufReader::new(oversized.as_bytes());
+        assert!(
+            read_limited(&mut reader, 1024)
+                .await
+                .unwrap_err()
+                .contains("exceeds")
+        );
     }
 
     #[tokio::test]

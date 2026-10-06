@@ -182,6 +182,10 @@ impl Harness {
         model::effective_model_name(&self.config)
     }
 
+    pub(crate) fn model_port(&self) -> &dyn ModelPort {
+        &*self.model
+    }
+
     /// Return the effective model catalog for this harness.
     ///
     /// Sekai-Chisei is authoritative for governed availability. Ungoverned

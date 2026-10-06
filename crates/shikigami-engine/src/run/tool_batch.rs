@@ -951,7 +951,9 @@ impl<'a> DurableToolBatch<'a> {
         // A terminal marker is recoverable only when the same checkpoint also
         // contains the pending governance report. Preparation drains those
         // reports before transaction-level terminal recovery.
-        if let Some((success, summary)) = content_terminal_report {
+        if let Some((success, summary)) = content_terminal_report
+            && !request.session_wait
+        {
             session.mark_content_terminal(
                 success,
                 super::RunTermination::Completed,
