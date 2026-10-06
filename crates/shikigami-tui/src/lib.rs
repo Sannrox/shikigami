@@ -350,16 +350,29 @@ impl Shared {
         true
     }
 
-    fn page_transcript_up(&mut self) {
-        let page = self.transcript_h.max(1);
-        self.scroll_back = self.scroll_back.saturating_add(page);
+    fn scroll_transcript(&mut self, rows: u16, up: bool) {
+        self.scroll_back = if up {
+            self.scroll_back.saturating_add(rows)
+        } else {
+            self.scroll_back.saturating_sub(rows)
+        };
         self.dirty = true;
     }
 
+    fn page_transcript_up(&mut self) {
+        self.scroll_transcript(self.transcript_h.max(1), true);
+    }
+
     fn page_transcript_down(&mut self) {
-        let page = self.transcript_h.max(1);
-        self.scroll_back = self.scroll_back.saturating_sub(page);
-        self.dirty = true;
+        self.scroll_transcript(self.transcript_h.max(1), false);
+    }
+
+    fn line_up(&mut self) {
+        self.scroll_transcript(1, true);
+    }
+
+    fn line_down(&mut self) {
+        self.scroll_transcript(1, false);
     }
 
     fn page_up(&mut self) {
@@ -1930,6 +1943,21 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         }
         return KeyResult::Continue;
     }
+    if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
+        session.lock_shared().line_up();
+        return KeyResult::Continue;
+    }
+    // Ctrl+J is LF. Some terminals report it as Char('j')+CONTROL, Enter+CONTROL, or Char('\n').
+    if (ctrl
+        && matches!(
+            key.code,
+            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Enter
+        ))
+        || matches!(key.code, KeyCode::Char('\n'))
+    {
+        session.lock_shared().line_down();
+        return KeyResult::Continue;
+    }
 
     let asking = session.lock_shared().permission.is_some();
     if asking {
@@ -2756,6 +2784,70 @@ mod tests {
             KeyResult::Continue
         ));
         assert_eq!(session.lock_shared().scroll_back, 0);
+    }
+
+    fn ctrl_char(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    #[tokio::test]
+    async fn ctrl_jk_scrolls_transcript_one_row() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.lock_shared().transcript_h = 10;
+        type_text(&session, "hello");
+        assert!(matches!(
+            handle_key(&session, ctrl_char('k')),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 1);
+        assert!(matches!(
+            handle_key(&session, ctrl_char('k')),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 2);
+        assert!(matches!(
+            handle_key(&session, ctrl_char('j')),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 1);
+        assert_eq!(session.lock_shared().input, "hello");
+        assert!(matches!(
+            handle_key(&session, ctrl_char('j')),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 0);
+        assert!(matches!(
+            handle_key(&session, ctrl_char('j')),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 0);
+        assert_eq!(session.lock_shared().input, "hello");
+        assert!(matches!(
+            handle_key(
+                &session,
+                KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::CONTROL)
+            ),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "hello");
+        assert_eq!(session.lock_shared().scroll_back, 0);
+        assert!(matches!(
+            handle_key(
+                &session,
+                KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::NONE)
+            ),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "hello");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().scroll_back, 10);
+        session.spawn_prompt("next".into()).await.unwrap();
+        assert_eq!(session.lock_shared().scroll_back, 0);
+        let _ = session.wait_prompt().await;
     }
 
     #[tokio::test]

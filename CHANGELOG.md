@@ -56,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: wheel scroll pages the transcript like PageUp/PageDown. Overflowing
   ask/plan docks scroll first; at the top or bottom they resume transcript
   paging. Permission arguments are not truncated.
+- TUI: Ctrl+K / Ctrl+J move the transcript one visual row; PageUp/PageDown
+  stay page-sized. A new prompt still returns to the tail. Ctrl+J does not
+  insert a newline.
 - TUI: `/help` writes a short system block of keys and slash names, then
   returns to the idle composer.
 - TUI: `/resume` opens a dim list of persisted sessions for this cwd (short
