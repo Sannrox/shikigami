@@ -75,7 +75,8 @@ ignored, like `plane_live`.
   until implementation Issues land.
 - Freeze-core CLI remains `version`, `doctor`, `run`, `serve`.
 - Nested child runs are [ADR 0015](0015-nested-child-runs.md).
-- [#330](https://github.com/Sannrox/shikigami/issues/330) is unchanged.
+- Skill-declared context boundaries are
+  [ADR 0019](0019-skill-context-boundaries.md).
 
 ## Rejected alternatives
 

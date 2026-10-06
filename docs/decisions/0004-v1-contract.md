@@ -70,7 +70,9 @@ governance, and durable operational truth.
 Post-1.0, [ADR 0014](0014-usable-guest-hosts.md) accepts ACP and TUI as
 evolving process hosts (session wait, ask=park, plan write-jail).
 [ADR 0015](0015-nested-child-runs.md) accepts nested child **runs** inside
-one guest. Neither is freeze-core.
+one guest. [ADR 0016](0016-session-mode.md)–[0019](0019-skill-context-boundaries.md)
+accept session mode, ACP attachments, skills+MCP as the extension surface,
+and no skill-declared context boundary. None of these is freeze-core.
 
 ### Evidence considered
 

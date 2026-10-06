@@ -44,10 +44,11 @@ those are a different object.
 7. **Freeze-core behavior of a single run is unchanged.** New tool(s)
    and `RunResult` fields are additive.
 
-Implementation collides with plan write-jail and
-[#330](https://github.com/Sannrox/shikigami/issues/330) on `src/run/`.
-Land one at a time. ACP/TUI hosts ([ADR 0014](0014-usable-guest-hosts.md))
-may proceed if they only consume park and events.
+Implementation collided with plan write-jail on `src/run/`.
+[#330](https://github.com/Sannrox/shikigami/issues/330) closed as
+[ADR 0019](0019-skill-context-boundaries.md) with no run-loop change.
+ACP/TUI hosts ([ADR 0014](0014-usable-guest-hosts.md)) consume park and
+events.
 
 ## Consequences
 

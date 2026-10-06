@@ -19,6 +19,10 @@ Accepted decisions that must outlive a single PR.
 | [0013](0013-os-sandbox-adapter.md) | OS-level sandbox tiers for governed tool execution | Accepted |
 | [0014](0014-usable-guest-hosts.md) | Usable guest process hosts (ACP, TUI, session wait, ask=park) | Accepted |
 | [0015](0015-nested-child-runs.md) | Nested child runs as first-class Runs | Accepted |
+| [0016](0016-session-mode.md) | Session mode frozen at first prompt | Accepted |
+| [0017](0017-acp-attachments.md) | ACP prompt attachments, fail closed | Accepted |
+| [0018](0018-skills-mcp-extension.md) | Skills and MCP are the only extension surface | Accepted |
+| [0019](0019-skill-context-boundaries.md) | No skill-declared context boundaries | Accepted |
 
 ## When to write an ADR
 

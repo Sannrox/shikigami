@@ -30,9 +30,23 @@ Digests change when skill body changes.
 ## Security
 
 Skill bodies are model context only — never executed as code. Operators control
-the skills root and which ids are listed.
+the skills root and which ids are listed. Skills plus MCP are the extension
+surface; there is no plugin loader
+([ADR 0018](decisions/0018-skills-mcp-extension.md)).
 
 `shikigami tui` offers `/skill:name` from `skills_root` and
 `.agents/skills`. Configured `context.skills` is an allow-list; when it is
 empty the TUI lists packs that exist on disk. `/skill:name` sends the pack
 body as the prompt. Configured ids still load into the system prompt as above.
+
+## Context boundaries
+
+A skill pack cannot declare a compaction or reset seam
+([ADR 0019](decisions/0019-skill-context-boundaries.md)). Untrusted skill
+text must not drop the task, policy, or authority limits.
+
+Procedures that need a clean window are a new run or session. The host
+starts a fresh session and may pass a `handoff` brief as the first prompt.
+Nested `child_run` isolates a subtask inside one session. Host compact stays
+operator-owned: `compact_after_messages`, TUI `/compact`, ACP
+`session/compact`.
