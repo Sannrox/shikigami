@@ -1,6 +1,7 @@
 //! Nested child runs: a child is a first-class [`super::Engine`] Run.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +28,66 @@ struct ChildRunArgs {
 
 fn default_wait() -> bool {
     true
+}
+
+/// Process-wide runtime for `wait=false` children. `Engine` + `RunRequest`
+/// are Send and move onto a blocking worker; the `!Send` `Engine::run`
+/// future is built there and driven with `Handle::block_on`. Blocking
+/// materialize (including `git worktree add`) therefore cannot stall other
+/// children or spawn acknowledgement.
+static BACKGROUND_RUNTIME_BUILDS: AtomicU32 = AtomicU32::new(0);
+static BACKGROUND_SPAWNS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
+pub(super) fn background_runtime_builds() -> u32 {
+    BACKGROUND_RUNTIME_BUILDS.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(super) fn background_spawns() -> u32 {
+    BACKGROUND_SPAWNS.load(Ordering::SeqCst)
+}
+
+fn background_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    static CELL: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    if let Some(runtime) = CELL.get() {
+        return Ok(runtime);
+    }
+    static INIT: Mutex<()> = Mutex::new(());
+    let _guard = INIT.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(runtime) = CELL.get() {
+        return Ok(runtime);
+    }
+    // Shared multi-thread runtime: `Engine::run` stays on blocking workers
+    // so the future can remain `!Send`. JoinSet/heartbeat tasks share these
+    // workers instead of one current-thread runtime per child.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("shikigami-nested")
+        .build()
+        .map_err(|error| format!("runtime: {error}"))?;
+    BACKGROUND_RUNTIME_BUILDS.fetch_add(1, Ordering::SeqCst);
+    let _ = CELL.set(runtime);
+    CELL.get()
+        .ok_or_else(|| "runtime: worker exited before start".into())
+}
+
+/// Dispatch one background child onto the shared runtime. Runtime-build
+/// failure is reported before the caller records `running`, so the fan-out
+/// slot can roll back. The JoinHandle is returned as soon as the blocking
+/// job is queued, so parent cancel/timeout is observed in
+/// [`wait_for_background_child_start`].
+fn spawn_background_child(
+    engine: Engine,
+    request: RunRequest,
+) -> Result<tokio::task::JoinHandle<()>, RunError> {
+    BACKGROUND_SPAWNS.fetch_add(1, Ordering::SeqCst);
+    let runtime = background_runtime()
+        .map_err(|error| RunError::Message(format!("child_run background {error}")))?;
+    let handle = runtime.handle().clone();
+    Ok(runtime.spawn_blocking(move || {
+        let _ = handle.block_on(engine.run(request));
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,55 +251,18 @@ async fn child_run(
         return Err(error);
     }
     if !args.wait {
-        // Own OS thread + current-thread runtime so this recursive
-        // Engine::run path does not have to be `Send` through tokio::spawn.
-        // Wait only for the runtime to exist before reporting `running`,
-        // so a Builder failure can roll back the fan-out slot.
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-        let handle = match std::thread::Builder::new()
-            .name(format!("shikigami-child-{child_id}"))
-            .spawn(move || {
-                match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => {
-                        let _ = started_tx.send(Ok(()));
-                        let _ = rt.block_on(child_engine.run(child_request));
-                    }
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error.to_string()));
-                    }
-                }
-            }) {
+        // Shared runtime + blocking worker so this recursive Engine::run
+        // path does not have to be `Send` through tokio::spawn. Queueing
+        // the job is enough to report toward `running`; a Builder failure
+        // still rolls back the fan-out slot.
+        let handle = match spawn_background_child(child_engine, child_request) {
             Ok(handle) => handle,
             Err(error) => {
                 session.children.pop();
                 let _ = session.save(tools);
-                return Err(RunError::Message(format!(
-                    "child_run background spawn: {error}"
-                )));
+                return Err(error);
             }
         };
-        match started_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = handle.join();
-                session.children.pop();
-                let _ = session.save(tools);
-                return Err(RunError::Message(format!(
-                    "child_run background runtime: {error}"
-                )));
-            }
-            Err(_) => {
-                let _ = handle.join();
-                session.children.pop();
-                let _ = session.save(tools);
-                return Err(RunError::Message(
-                    "child_run background runtime: worker exited before start".into(),
-                ));
-            }
-        }
         return wait_for_background_child_start(
             engine, session, request, tools, handle, &child_id, profile, started, timeout,
         )
@@ -311,7 +335,7 @@ async fn wait_for_background_child_start(
     session: &mut RunSession,
     request: &RunRequest,
     tools: &ToolRegistry,
-    handle: std::thread::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<()>,
     child_id: &str,
     profile: ChildProfile,
     started: tokio::time::Instant,
@@ -333,7 +357,7 @@ async fn wait_for_background_child_start(
             ));
         }
         if handle.is_finished() {
-            let _ = handle.join();
+            let _ = handle.await;
             rollback_unstarted_child(session, tools, child_id);
             return Ok(ToolOutput::Text(
                 json!({
@@ -360,7 +384,7 @@ async fn wait_for_background_child_start(
                 interval.tick().await;
             }
             if handle.is_finished() {
-                let _ = handle.join();
+                let _ = handle.await;
                 rollback_unstarted_child(session, tools, child_id);
             } else {
                 session.push_background_child(handle);
@@ -606,8 +630,15 @@ fn summary_json(profile: ChildProfile, result: &RunResult) -> String {
 mod tests {
     use std::path::Path;
 
-    use super::{ChildProfile, child_config, parse_profile, session_ask_park};
+    use super::{ChildProfile, Engine, RunRequest, child_config, parse_profile, session_ask_park};
     use crate::config::{Config, McpServerSettings, PermissionMode};
+
+    #[test]
+    fn background_child_job_values_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Engine>();
+        assert_send::<RunRequest>();
+    }
 
     fn parent_with_mcp() -> Config {
         let mut config = Config::default();

@@ -62,13 +62,12 @@ pub(super) struct RunSession {
     /// Spawn-time enabled tool names for nested children (restored on resume).
     pub tools_enabled: Vec<String>,
     pub spans: RunSpanTrace,
-    /// `wait=false` child threads for this attempt. Terminal completion joins
-    /// them off the async executor. Session-host park detaches the handles;
-    /// resume cannot recover them from a checkpoint. Unattended park
-    /// `request_cancel`s children because the CLI process is about to exit.
-    /// Terminal parent completion still `request_cancel`s any recorded child
-    /// that is still running.
-    background_joins: Vec<std::thread::JoinHandle<()>>,
+    /// `wait=false` child tasks for this attempt. Terminal completion joins
+    /// them. Session-host park detaches the handles; resume cannot recover
+    /// them from a checkpoint. Unattended park `request_cancel`s children
+    /// because the CLI process is about to exit. Terminal parent completion
+    /// still `request_cancel`s any recorded child that is still running.
+    background_joins: Vec<tokio::task::JoinHandle<()>>,
 }
 
 struct ContentSession {
@@ -130,11 +129,11 @@ impl RunSession {
         }
     }
 
-    pub(super) fn push_background_child(&mut self, handle: std::thread::JoinHandle<()>) {
+    pub(super) fn push_background_child(&mut self, handle: tokio::task::JoinHandle<()>) {
         self.background_joins.push(handle);
     }
 
-    pub(super) fn take_background_joins(&mut self) -> Vec<std::thread::JoinHandle<()>> {
+    pub(super) fn take_background_joins(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
         std::mem::take(&mut self.background_joins)
     }
 
