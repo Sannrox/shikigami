@@ -3,7 +3,7 @@
 //! Evolving surface, same rank as `shikigami acp`. Not freeze-core.
 //! See [ADR 0014](../../../docs/decisions/0014-usable-guest-hosts.md).
 
-use std::io::{IsTerminal, stdin, stdout};
+use std::io::{self, IsTerminal, Write, stdin, stdout};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,6 +114,8 @@ struct Shared {
     slash_selected: usize,
     /// Full session ids for the `/resume` picker, newest first.
     resume_ids: Option<Vec<String>>,
+    /// Last OSC 52 clipboard payload written by `/copy` or Ctrl+Y.
+    last_osc52: Option<String>,
 }
 
 impl Shared {
@@ -141,6 +143,7 @@ impl Shared {
             slash_dismissed: false,
             slash_selected: 0,
             resume_ids: None,
+            last_osc52: None,
         }
     }
 
@@ -441,6 +444,8 @@ struct SessionBackup {
     dock_scroll: u16,
 }
 
+type OscWrite = fn(&[u8]) -> io::Result<()>;
+
 struct TuiSession {
     host: Arc<AcpHost>,
     client: TuiClient,
@@ -448,6 +453,7 @@ struct TuiSession {
     cwd: std::path::PathBuf,
     next_id: AtomicU64,
     prompt: Mutex<Option<JoinHandle<Option<Value>>>>,
+    osc_write: Mutex<OscWrite>,
 }
 
 impl TuiSession {
@@ -466,6 +472,7 @@ impl TuiSession {
             cwd: cwd.clone(),
             next_id: AtomicU64::new(1),
             prompt: Mutex::new(None),
+            osc_write: Mutex::new(osc_write_noop),
         };
         session
             .call(
@@ -663,6 +670,10 @@ impl TuiSession {
                 hint: "shrink conversation history".into(),
             },
             SlashCommand {
+                name: "copy".into(),
+                hint: "copy last assistant".into(),
+            },
+            SlashCommand {
                 name: "exit".into(),
                 hint: "quit".into(),
             },
@@ -699,6 +710,44 @@ impl TuiSession {
             .into_iter()
             .filter(|cmd| cmd.name.starts_with(query))
             .collect()
+    }
+
+    fn copy_last_assistant(&self) {
+        let text = {
+            let shared = self.lock_shared();
+            last_assistant(&shared.transcript).map(str::to_string)
+        };
+        let Some(text) = text else {
+            let mut shared = self.lock_shared();
+            shared
+                .transcript
+                .push(TranscriptLine::System("nothing to copy".into()));
+            shared.last_osc52 = None;
+            shared.dirty = true;
+            return;
+        };
+        let payload = cap_bytes(&text, OSC52_MAX_BYTES).to_string();
+        let seq = osc52_sequence(&payload);
+        let wrote = {
+            let write = *self.osc_write.lock().unwrap_or_else(|e| e.into_inner());
+            write(seq.as_bytes())
+        };
+        let mut shared = self.lock_shared();
+        match wrote {
+            Ok(()) => {
+                shared.last_osc52 = Some(payload);
+                shared.status = "copied".into();
+                shared.dirty = true;
+            }
+            Err(err) => {
+                shared.last_osc52 = None;
+                shared
+                    .transcript
+                    .push(TranscriptLine::System(format!("copy failed  {err}")));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
+        }
     }
 
     fn overlay_cmds(&self) -> Vec<SlashCommand> {
@@ -775,6 +824,10 @@ impl TuiSession {
                     .transcript
                     .push(TranscriptLine::System(HELP_TEXT.into()));
                 shared.dirty = true;
+                KeyResult::Continue
+            }
+            "copy" => {
+                self.copy_last_assistant();
                 KeyResult::Continue
             }
             "compact" => KeyResult::Compact,
@@ -921,6 +974,11 @@ impl TuiSession {
     fn prompt_text(&self) -> String {
         prompt_line(&self.lock_shared())
     }
+
+    #[cfg(test)]
+    fn fail_osc_write(&self) {
+        *self.osc_write.lock().unwrap_or_else(|e| e.into_inner()) = osc_write_fail;
+    }
 }
 
 fn line_text(line: &TranscriptLine) -> String {
@@ -1053,7 +1111,70 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
-const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /exit  /quit  /skill:name  /help";
+const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /copy  /exit  /quit  /skill:name  /help";
+
+/// Bound OSC 52 so a huge assistant reply cannot stall the TTY.
+const OSC52_MAX_BYTES: usize = 32 * 1024;
+
+fn last_assistant(transcript: &[TranscriptLine]) -> Option<&str> {
+    transcript.iter().rev().find_map(|line| match line {
+        TranscriptLine::Assistant(text) => Some(text.as_str()),
+        _ => None,
+    })
+}
+
+fn cap_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(a >> 2) as usize] as char);
+        out.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(c & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn osc52_sequence(payload: &str) -> String {
+    format!("\x1b]52;c;{}\x07", base64_encode(payload.as_bytes()))
+}
+
+fn osc_write_noop(_: &[u8]) -> io::Result<()> {
+    Ok(())
+}
+
+fn osc_write_stdout(bytes: &[u8]) -> io::Result<()> {
+    let mut out = stdout();
+    out.write_all(bytes)?;
+    out.flush()
+}
+
+#[cfg(test)]
+fn osc_write_fail(_: &[u8]) -> io::Result<()> {
+    Err(io::Error::other("osc52 write failed"))
+}
 
 fn slash_visible(shared: &Shared) -> bool {
     shared.resume_ids.is_none()
@@ -1661,6 +1782,7 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
     #[cfg(unix)]
     let _stderr = StderrSilence::apply();
     let mut terminal = Terminal::new(CrosstermBackend::new(out)).map_err(|e| e.to_string())?;
+    *session.osc_write.lock().unwrap_or_else(|e| e.into_inner()) = osc_write_stdout;
 
     let (tx, mut rx) = mpsc::channel(128);
     std::thread::spawn(move || {
@@ -1796,6 +1918,16 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
     }
     if ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O')) {
         session.lock_shared().toggle_last_tool();
+        return KeyResult::Continue;
+    }
+    if ctrl && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        let idle = {
+            let shared = session.lock_shared();
+            !shared.busy && shared.permission.is_none()
+        };
+        if idle {
+            session.copy_last_assistant();
+        }
         return KeyResult::Continue;
     }
 
@@ -3172,7 +3304,7 @@ mod tests {
                 .iter()
                 .map(|cmd| cmd.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["compact"]
+            vec!["compact", "copy"]
         );
         assert!(matches!(
             handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -3224,6 +3356,7 @@ mod tests {
         assert!(text.contains("/compact"), "{text}");
         assert!(text.contains("/new"), "{text}");
         assert!(text.contains("/resume"), "{text}");
+        assert!(text.contains("/copy"), "{text}");
         assert!(text.contains("/exit"), "{text}");
         assert!(text.contains("/quit"), "{text}");
         assert!(
@@ -3234,6 +3367,156 @@ mod tests {
                 .any(|line| matches!(line, TranscriptLine::System(_))),
             "{text}"
         );
+    }
+
+    fn ctrl_y() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)
+    }
+
+    async fn session_with_assistant(dir: &tempfile::TempDir, reply: &str) -> TuiSession {
+        let session = start_session(dir, &format!(r#"[{{"content":{}}}]"#, json!(reply))).await;
+        session.spawn_prompt("hi".into()).await.unwrap();
+        let _ = session.wait_prompt().await;
+        session
+    }
+
+    fn run_copy(session: &TuiSession) {
+        assert!(session.slash_catalog().iter().any(|cmd| cmd.name == "copy"));
+        type_text(session, "/copy");
+        assert!(matches!(
+            handle_key(session, enter_key()),
+            KeyResult::Continue
+        ));
+    }
+
+    #[tokio::test]
+    async fn slash_copy_records_last_assistant_as_osc52_payload() {
+        let dir = tempdir().unwrap();
+        let session = session_with_assistant(&dir, "last assistant reply").await;
+        run_copy(&session);
+        assert_eq!(
+            session.lock_shared().last_osc52.as_deref(),
+            Some("last assistant reply")
+        );
+        assert_eq!(session.lock_shared().status, "copied");
+        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        assert!(footer.contains("copied"), "{footer}");
+        let text = session.transcript_text();
+        assert!(text.contains("last assistant reply"), "{text}");
+        assert!(!text.contains("nothing to copy"), "{text}");
+        assert!(
+            !session
+                .lock_shared()
+                .transcript
+                .iter()
+                .any(|line| matches!(line, TranscriptLine::System(_))),
+            "{text}"
+        );
+        assert_eq!(
+            osc52_sequence("last assistant reply"),
+            format!(
+                "\x1b]52;c;{}\x07",
+                base64_encode("last assistant reply".as_bytes())
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_copy_without_assistant_is_a_system_line() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session
+            .lock_shared()
+            .transcript
+            .push(TranscriptLine::System("keep-me".into()));
+        session
+            .lock_shared()
+            .transcript
+            .push(TranscriptLine::User("hi".into()));
+        run_copy(&session);
+        assert!(session.lock_shared().last_osc52.is_none());
+        let text = session.transcript_text();
+        assert!(text.contains("keep-me"), "{text}");
+        assert!(text.contains("nothing to copy"), "{text}");
+        assert_ne!(session.lock_shared().status, "copied");
+    }
+
+    #[tokio::test]
+    async fn ctrl_y_while_idle_copies_last_assistant() {
+        let dir = tempdir().unwrap();
+        let session = session_with_assistant(&dir, "idle copy").await;
+        type_text(&session, "draft");
+        assert!(matches!(
+            handle_key(&session, ctrl_y()),
+            KeyResult::Continue
+        ));
+        assert_eq!(session.lock_shared().input, "draft");
+        assert_eq!(
+            session.lock_shared().last_osc52.as_deref(),
+            Some("idle copy")
+        );
+        assert_eq!(session.lock_shared().status, "copied");
+    }
+
+    #[tokio::test]
+    async fn ctrl_y_while_busy_does_not_copy() {
+        let dir = tempdir().unwrap();
+        let session = session_with_assistant(&dir, "previous").await;
+        session.spawn_prompt("again".into()).await.unwrap();
+        assert!(session.lock_shared().busy);
+        session.lock_shared().last_osc52 = None;
+        assert!(matches!(
+            handle_key(&session, ctrl_y()),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().last_osc52.is_none());
+        assert_ne!(session.lock_shared().status, "copied");
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn copy_caps_huge_assistant_payload() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        let huge = "x".repeat(OSC52_MAX_BYTES + 64);
+        session
+            .lock_shared()
+            .transcript
+            .push(TranscriptLine::Assistant(huge));
+        run_copy(&session);
+        let payload = session
+            .lock_shared()
+            .last_osc52
+            .clone()
+            .expect("capped payload");
+        assert_eq!(payload.len(), OSC52_MAX_BYTES);
+        assert!(payload.bytes().all(|b| b == b'x'));
+        assert_eq!(session.lock_shared().status, "copied");
+    }
+
+    #[tokio::test]
+    async fn copy_write_error_is_a_system_line() {
+        let dir = tempdir().unwrap();
+        let session = session_with_assistant(&dir, "secret reply").await;
+        session.fail_osc_write();
+        run_copy(&session);
+        assert!(session.lock_shared().last_osc52.is_none());
+        let text = session.transcript_text();
+        assert!(text.contains("copy failed"), "{text}");
+        assert!(text.contains("secret reply"), "{text}");
+        assert_eq!(session.lock_shared().status, "error");
+    }
+
+    #[test]
+    fn osc52_sequence_encodes_payload() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        assert_eq!(osc52_sequence("hi"), "\x1b]52;c;aGk=\x07");
+        assert_eq!(cap_bytes("éé", 3), "é");
+        assert_eq!(cap_bytes("abc", 8), "abc");
     }
 
     #[tokio::test]
