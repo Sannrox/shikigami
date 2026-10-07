@@ -2315,6 +2315,18 @@ fn read_host_file(uri: &str) -> Result<Vec<u8>, Value> {
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, Value> {
+    let encoded = input.chars().filter(|ch| !ch.is_whitespace());
+    let encoded_len: usize = encoded.clone().map(char::len_utf8).sum();
+    let padding = encoded.rev().take_while(|ch| *ch == '=').take(2).count();
+    // Count before allocating either the compact input or decoded payload.
+    // The decoder below still validates alphabet and padding placement.
+    let decoded_len = (encoded_len / 4 * 3).saturating_sub(padding);
+    if decoded_len as u64 > MAX_CONTENT_PART_BYTES {
+        return Err(rpc_error(
+            -32602,
+            "attachment exceeds the content part size bound",
+        ));
+    }
     let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
     if compact.is_empty() {
         return Err(rpc_error(-32602, "attachment data is empty"));
@@ -2771,6 +2783,59 @@ mod tests {
         assert_eq!(decode_base64_compact("YQ=A"), None);
         assert_eq!(decode_base64_compact("YQ==Yg=="), None);
         assert_eq!(decode_base64_compact("===="), None);
+    }
+
+    #[test]
+    fn base64_part_bound_accepts_padding_and_whitespace_at_limit() {
+        let cap = MAX_CONTENT_PART_BYTES as usize;
+        for size in [cap - 1, cap, cap + 1] {
+            let mut encoded = "AAAA".repeat(size / 3);
+            encoded.push_str(match size % 3 {
+                1 => "AA==",
+                2 => "AAA=",
+                _ => "",
+            });
+            encoded.push_str("\n \t");
+            let decoded = decode_base64(&encoded);
+            if size <= cap {
+                assert_eq!(decoded.unwrap().len(), size);
+            } else {
+                let error = decoded.unwrap_err();
+                assert_eq!(error["code"], -32602);
+                assert!(
+                    error["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("part size bound")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_inline_and_resource_payloads_fail_before_base64_decoding() {
+        let mut data = "AAAA".repeat(MAX_CONTENT_PART_BYTES as usize / 3 + 2);
+        data.replace_range(..1, "!");
+        for part in [
+            json!({"type":"image", "mimeType":"image/png", "data":data}),
+            json!({"type":"audio", "mimeType":"audio/wav", "data":data}),
+            json!({"type":"resource", "resource": {"mimeType":"application/pdf", "blob":data}}),
+        ] {
+            let error = match parse_prompt(&json!([
+                {"type":"text", "text":"inspect"}, part
+            ])) {
+                Ok(_) => panic!("oversized attachment admitted"),
+                Err(error) => error,
+            };
+            assert_eq!(error["code"], -32602);
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("part size bound"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

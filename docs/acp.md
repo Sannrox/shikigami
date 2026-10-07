@@ -96,3 +96,8 @@ Deterministic fake-client tests live in `src/acp.rs`. Live rusui stays ignored,
 like `plane_live`.
 
 Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md).
+
+Inline attachment `data` and resource `blob` base64 payloads are checked against
+the 8 MiB decoded part limit before compaction or decoding allocates buffers.
+Whitespace and final padding are accounted for, so valid payloads at the limit
+remain accepted.
