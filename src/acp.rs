@@ -810,12 +810,24 @@ impl AcpHost {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Persisted ACP session ids for `cwd`, newest mtime first.
+    /// Persisted ACP session ids for `cwd`, newest mtime first, omitting
+    /// content runs whose in-memory payload custody is no longer available.
     pub fn session_ids_for_cwd(&self, cwd: &Path) -> Vec<String> {
         let dir = self.sessions_dir();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
+        // The synchronous picker must not block the async session driver.
+        let live_content_ids: HashSet<_> = self
+            .sessions
+            .try_lock()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .filter_map(|(id, live)| live.content.as_ref().map(|_| id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
         for entry in entries {
             let Ok(entry) = entry else {
@@ -832,6 +844,13 @@ impl AcpHost {
                 continue;
             };
             if !same_cwd(Path::new(&persisted.cwd), cwd) {
+                continue;
+            }
+            if !live_content_ids.contains(&persisted.session_id)
+                && let Some(run_id) = persisted.run_id.as_deref()
+                && let Ok(checkpoint) = Checkpoint::load(&self.harness.state.runs_dir(), run_id)
+                && checkpoint.content.is_some()
+            {
                 continue;
             }
             let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) else {
@@ -3887,7 +3906,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let text_session = init_and_new(&host, &client, &cwd).await;
+        assert!(host.session_ids_for_cwd(&cwd).contains(&session_id));
+        let restarted = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let available = restarted.session_ids_for_cwd(&cwd);
+        assert!(!available.contains(&session_id), "{available:?}");
+        assert!(available.contains(&text_session), "{available:?}");
         host.sessions.lock().await.remove(&session_id);
+        assert!(!host.session_ids_for_cwd(&cwd).contains(&session_id));
         let loaded = host
             .handle(
                 json!({
@@ -3909,6 +3935,7 @@ mod tests {
             "{}",
             loaded["error"]["message"]
         );
+        assert!(!host.session_ids_for_cwd(&cwd).contains(&session_id));
     }
 
     #[tokio::test]
