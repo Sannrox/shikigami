@@ -83,7 +83,9 @@ content v1: no escalate parking, and the 32-part sidecar bound includes
 follow-up text. `session/compact` still cuts ChatMessage history.
 
 Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
-name a catalog mode; the mapping lives in `[session.modes]` settings. A later
+name a catalog mode; the mapping lives in `[session.modes]` settings. Invalid
+mappings return `-32602` before session creation or first-prompt freezing.
+A rejected first-prompt mode leaves the session available for a valid retry. A later
 `session/prompt` that names a different mode is refused. The selected mode,
 model, effort, and tool set are a `session/update` with
 `sessionUpdate: session_mode`. Omit `mode` and today's spawn is unchanged.
