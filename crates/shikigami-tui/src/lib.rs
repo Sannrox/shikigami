@@ -1067,13 +1067,26 @@ impl TuiSession {
     }
 }
 
+/// Keep untrusted text inert when ratatui writes it to the terminal.
+fn terminal_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_control() && ch != '\n' && ch != '\t' {
+                '\u{fffd}'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
 fn line_text(line: &TranscriptLine) -> String {
-    match line {
+    terminal_text(&match line {
         TranscriptLine::User(text) => format!("you  {text}"),
         TranscriptLine::Assistant(text) => text.clone(),
         TranscriptLine::Tool(tool) => format_tool(tool),
         TranscriptLine::System(text) => text.clone(),
-    }
+    })
 }
 
 fn format_tool(tool: &ToolLine) -> String {
@@ -1182,7 +1195,7 @@ fn format_plan(plan: &Plan) -> String {
 }
 
 fn composer_inner(shared: &Shared) -> String {
-    if let Some(pending) = shared.permission.as_ref() {
+    terminal_text(&if let Some(pending) = shared.permission.as_ref() {
         format!("{}\n> y allow\n  n deny", permission_dock(pending))
     } else if shared.show_plan
         && let Some(plan) = shared.plan.as_ref()
@@ -1190,7 +1203,7 @@ fn composer_inner(shared: &Shared) -> String {
         format_plan(plan)
     } else {
         prompt_line(shared)
-    }
+    })
 }
 
 fn prompt_line(shared: &Shared) -> String {
@@ -2415,8 +2428,10 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
             .take(slash_vis)
             .enumerate()
             .map(|(i, cmd)| {
-                let text =
-                    truncate_display(&slash_row_text(cmd, name_w), slash_area.width as usize);
+                let text = truncate_display(
+                    &terminal_text(&slash_row_text(cmd, name_w)),
+                    slash_area.width as usize,
+                );
                 if slash_start + i == selected {
                     Line::from(Span::styled(
                         text,
@@ -2490,11 +2505,11 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     frame.render_widget(Paragraph::new(rule_line(chunks[idx].width)), chunks[idx]);
     idx += 1;
     frame.render_widget(
-        Paragraph::new(status_line(
+        Paragraph::new(terminal_text(&status_line(
             &session.session_id(),
             &shared,
             chunks[idx].width,
-        ))
+        )))
         .style(dim_style()),
         chunks[idx],
     );
@@ -3322,6 +3337,47 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[tokio::test]
+    async fn untrusted_output_controls_are_inert_on_redraw() {
+        let dir = tempdir().unwrap();
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let session = TuiSession::start(host, dir.path()).await.unwrap();
+        let payload = "visible\x1b]52;c;Y2xpcA==\x07\x1b[2J\x1bPdata\x1b\\\x00\r\u{009b}end";
+        {
+            let mut shared = session.lock_shared();
+            shared.transcript = vec![
+                TranscriptLine::Assistant(payload.into()),
+                TranscriptLine::Tool(ToolLine {
+                    id: "tool".into(),
+                    title: payload.into(),
+                    status: "completed".into(),
+                    detail: payload.into(),
+                    expanded: true,
+                }),
+            ];
+        }
+        let drawn = drawn_text(&session);
+        assert!(drawn.contains("visible"));
+        assert!(drawn.contains('\u{fffd}'));
+        assert!(
+            !drawn
+                .chars()
+                .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+        );
+        install_permission(
+            &session,
+            serde_json::json!({"command": payload}).to_string(),
+        );
+        let drawn = drawn_text(&session);
+        assert!(drawn.contains("command"));
+        assert!(
+            !drawn
+                .chars()
+                .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+        );
+        assert_eq!(terminal_text("plain 雪\n\ttext"), "plain 雪\n\ttext");
     }
 
     fn tool_line_count(text: &str) -> usize {

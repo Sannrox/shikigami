@@ -37,6 +37,10 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 Continue-last-in-cwd is fail closed: an unknown or unreadable previous session
 starts `session/new`.
 
+Rendered transcript, permission, plan, command-list, and status text replaces
+control characters with visible `�` marks, preserving newlines and tabs.
+Escape sequences in model or tool output therefore remain inert.
+
 `/copy` uses OSC 52. Over SSH that can land clipboard contents on the local
 terminal; some terminals ignore OSC 52.
 
