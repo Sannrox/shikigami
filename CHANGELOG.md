@@ -120,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TUI renders control characters as visible replacement marks so assistant,
+  tool, and permission text cannot execute terminal escape sequences.
+
 - Nested parent cancel/timeout waits until `wait=false` children are
   inactive, including children whose JoinHandles were detached across
   park/resume. A 2s grace no longer returns while a child can still
