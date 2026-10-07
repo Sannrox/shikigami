@@ -292,6 +292,13 @@ impl AcpHost {
             .filter(|p| p.is_absolute())
             .ok_or_else(|| rpc_error(-32602, "session/new requires absolute cwd"))?;
         let mode = optional_mode(params)?;
+        if let Some(named) = mode.as_deref() {
+            self.harness
+                .config
+                .clone()
+                .apply_session_mode(named)
+                .map_err(|e| rpc_error(-32602, e.to_string()))?;
+        }
         let session_id = format!("sess-{}", uuid::Uuid::new_v4());
         let live = LiveSession {
             cwd: cwd.clone(),
@@ -461,6 +468,11 @@ impl AcpHost {
                 }
             } else {
                 if let Some(named) = requested_mode.as_deref() {
+                    self.harness
+                        .config
+                        .clone()
+                        .apply_session_mode(named)
+                        .map_err(|e| rpc_error(-32602, e.to_string()))?;
                     live.mode = Some(named.to_string());
                 }
                 live.mode_frozen = true;
@@ -3033,6 +3045,88 @@ mod tests {
             .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
             .collect();
         assert_eq!(chunks.len(), 2, "{updates:?}");
+    }
+
+    #[tokio::test]
+    async fn invalid_mode_mapping_does_not_create_session() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
+            config.session.modes.insert(
+                "low".into(),
+                crate::config::SessionModeMapping {
+                    tools: Some(vec!["not_a_host_tool".into()]),
+                    ..Default::default()
+                },
+            );
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let result = init_and_new_mode(&host, &client, dir.path(), "low", 1).await;
+        assert_eq!(result["error"]["code"], -32602, "{result}");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("intersect")
+        );
+        assert!(host.sessions.lock().await.is_empty());
+        assert!(host.session_ids_for_cwd(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_first_prompt_mode_leaves_session_unfrozen_for_retry() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
+            config.session.modes.insert(
+                "low".into(),
+                crate::config::SessionModeMapping {
+                    tools: Some(vec!["not_a_host_tool".into()]),
+                    ..Default::default()
+                },
+            );
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = json!({
+            "sessionId": session_id,
+            "mode": "low",
+            "prompt": [{"type": "text", "text": "hi"}]
+        });
+        let result = host.session_prompt(&prompt, &client).await.unwrap_err();
+        assert_eq!(result["code"], -32602, "{result}");
+        {
+            let sessions = host.sessions.lock().await;
+            let live = sessions.get(&session_id).unwrap();
+            assert!(!live.mode_frozen);
+            assert!(live.mode.is_none());
+            assert!(live.run_id.is_none());
+        }
+        let persisted = host.load_persisted(&session_id).unwrap();
+        assert!(!persisted.mode_is_frozen());
+        assert!(persisted.mode.is_none());
+        let result = host
+            .session_prompt(
+                &json!({
+                    "sessionId": session_id,
+                    "mode": "high",
+                    "prompt": [{"type": "text", "text": "hi"}]
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["stopReason"], "end_turn");
+        assert_eq!(
+            host.load_persisted(&session_id).unwrap().mode.as_deref(),
+            Some("high")
+        );
     }
 
     #[tokio::test]
