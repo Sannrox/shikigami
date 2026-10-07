@@ -120,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP checks inline attachment and resource-blob decoded size before base64
+  allocation, preserving the 8 MiB part limit.
+
 - TUI renders control characters as visible replacement marks so assistant,
   tool, and permission text cannot execute terminal escape sequences.
 - ACP rejects invalid session mode mappings before creating or freezing a
