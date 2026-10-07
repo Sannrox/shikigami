@@ -120,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TUI resume and continue-last selection omit content sessions after their
+  in-memory attachment store is lost, while text sessions remain listed.
+
 - ACP checks inline attachment and resource-blob decoded size before base64
   allocation, preserving the 8 MiB part limit.
 

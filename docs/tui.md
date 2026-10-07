@@ -35,7 +35,10 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 | Quit | Ctrl-C when idle, Ctrl-D when idle, or `/exit` / `/quit` |
 
 Continue-last-in-cwd is fail closed: an unknown or unreadable previous session
-starts `session/new`.
+starts `session/new`. Resume and continue-last selection omit attachment
+sessions when their in-memory content store is gone, including after restart.
+Text sessions remain resumable across restart; attachment sessions remain
+listed while their payload store is available in the current process.
 
 Rendered transcript, permission, plan, command-list, and status text replaces
 control characters with visible `�` marks, preserving newlines and tabs.
