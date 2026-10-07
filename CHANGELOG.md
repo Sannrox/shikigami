@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- HTTP model adapter reads image and PDF content turns and advertises
+  `promptCapabilities.image` and `embeddedContext`. Audio stays false.
+  Image parts are posted as `image_url` data URLs; PDFs as `file` `file_data`.
+  Plane intake stays text-only.
 - ACP `session/prompt` accepts image, audio, and PDF (`resource`) parts under
   existing `run_content` bounds. `initialize` advertises
   `promptCapabilities` only for kinds the selected adapter can read.

@@ -29,7 +29,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |
 
-`initialize` reply (`agentInfo.version` is the crate version). `promptCapabilities` is true only for kinds the selected adapter can read (scripted: image, audio, and embeddedContext; HTTP and plane: all false):
+`initialize` reply (`agentInfo.version` is the crate version). `promptCapabilities` is true only for kinds the selected adapter can read (scripted: image, audio, and embeddedContext; HTTP: image and embeddedContext; plane: all false):
 
 ```json
 {

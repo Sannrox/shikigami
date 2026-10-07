@@ -4065,6 +4065,89 @@ mod tests {
         );
     }
 
+    fn http_acp_host(dir: &std::path::Path) -> AcpHost {
+        let env = "SHIKIGAMI_ACP_HTTP_TEST_KEY";
+        // SAFETY: unique env name for this process; tests do not unset it.
+        unsafe {
+            std::env::set_var(env, "test-key");
+        }
+        let state = StateRoot::new(dir.join("state"));
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.model.adapter = "http".into();
+        config.model.api_key_env = env.into();
+        config.model.base_url = Some("https://example.invalid/v1".into());
+        config.events.adapter = "none".into();
+        config.workspace.root = dir.join("ws").to_string_lossy().into();
+        AcpHost::new(Harness::from_config(config, state).unwrap())
+    }
+
+    #[tokio::test]
+    async fn initialize_http_adapter_advertises_image_and_document() {
+        let dir = tempdir().unwrap();
+        let host = http_acp_host(dir.path());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let init = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": 1, "capabilities": {} }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_initialize_speaks_v1_with_prompt(rpc_ok(&init), true, false, true);
+
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let created = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": { "cwd": cwd, "mcpServers": [] }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let session_id = rpc_ok(&created)["sessionId"].as_str().unwrap().to_string();
+        let denied = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [
+                            {"type":"text","text":"inspect"},
+                            {"type":"audio","mimeType":"audio/wav","data": encode_base64(b"RIFF")}
+                        ]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied["error"]["code"], -32602);
+        assert!(
+            denied["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot read audio"),
+            "{}",
+            denied["error"]["message"]
+        );
+    }
+
     fn assert_no_payload_bytes(root: &Path, needle: &[u8]) {
         fn walk(path: &Path, needle: &[u8]) {
             if path.is_dir() {
