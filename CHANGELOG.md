@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- HTTP image/PDF turns reuse base64 data URLs from a bounded process cache
+  across follow-up prompts. Payload resolution and disclosure checks still
+  run on each call; cached encodings expire by eviction or process exit.
+
 - ACP attachments share decoded buffers across session storage and resolution.
   `ResolvedContent::Bytes` now holds `content::Bytes`; embedders constructing
   the variant from a `Vec<u8>` must convert with `.into()`. HTTP encoding

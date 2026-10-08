@@ -120,3 +120,19 @@ succeeded. Failed or parked runs print the report and exit `1`, matching
 
 See [ADR 0006](decisions/0006-bounded-content-parts.md) for authority and
 compatibility boundaries.
+
+## HTTP attachment encoding cache
+
+The HTTP adapter caches image and PDF data URLs by the digest of the actual
+resolved bytes and their MIME type. The cache is shared within the process,
+including across ACP adapter reconstruction. Each call still resolves and
+validates accepted payloads; redacted and omitted parts are not sent. Changing
+the bytes or MIME type produces a different encoding. JSON request construction
+still copies the cached string into the wire request.
+
+The cache retains at most 32 entries and 22,373,720 bytes of encoded URLs
+(one 16 MiB content history expanded as base64, plus bounded headers). Least
+recently used entries are evicted. Concurrent sessions share this budget, so
+an evicted attachment may be encoded again. Encodings are never persisted or
+logged, but may remain in process memory after a session ends until eviction
+or process exit. The host-owned decoded payload store retains its own policy.
