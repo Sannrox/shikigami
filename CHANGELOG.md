@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `multi_edit` and `apply_patch` locate every hunk in the original file and
+  reject overlapping spans (including patch context) with both hunk indexes.
+  Adjacent hunks succeed, independent of request order. Chained edits must be
+  merged into one hunk. Overlap failures emit the `overlap` journal outcome
+  and the typed `ToolError::EditOverlap` variant.
+
 - `edit` and `multi_edit` retry zero exact matches with a fixed normalization
   set for trailing whitespace, Unicode quotes, dashes, and spaces. Only unique
   matches succeed; unmatched lines retain their bytes. Normalized successes

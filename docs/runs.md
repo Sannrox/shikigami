@@ -99,12 +99,18 @@ Consistently CRLF
 files accept LF or CRLF edit fragments and retain CRLF when written, including
 untouched lines. Mixed-ending files are matched byte-for-byte without line-ending
 normalization. Path and plan-jail permissions still apply. A failed match writes
-nothing; `multi_edit` and `apply_patch` currently match hunks sequentially.
+nothing. For `multi_edit` and `apply_patch`, each `old` is matched against the
+file as read. All spans are located before replacements are assembled in one
+pass, so request order does not change the result. Patch context belongs to the
+span: overlapping or nested spans fail with both hunk indexes (zero-based)
+and a suggestion to merge nearby changes into one hunk. Adjacent spans succeed.
+Chained edits that depend on newly inserted text must be merged into one hunk;
+these batches now fail without writing. Files in `apply_patch` remain independent.
 
 Each completed edit-tool execution attempt emits an argument-free
 `edit_outcome` journal record. `edit_outcome` contains `tool`, `model`,
 `outcome`, and an optional `match_count` for match failures. Outcomes are
-`applied`, `applied_normalized`, `no_match`, `ambiguous`, `invalid_input`, `limit`, and `io`.
+`applied`, `applied_normalized`, `no_match`, `ambiguous`, `overlap`, `invalid_input`, `limit`, and `io`.
 `model` is the configured effective model alias, including `auto` when routing
 is delegated; it is not a claim about the provider model chosen by the plane.
 No path, `old`, `new`, context, tool arguments, or error text is stored in this
@@ -128,7 +134,7 @@ Compatibility: journal schema v1 gains the optional `edit_outcome` object and
 new event name; older records omit it. Readers should ignore unknown event
 names and optional fields. Live `HarnessEvent` consumers must handle the
 additive `EditOutcome` variant. `ToolError` now distinguishes structured
-`ApplyPatchMatch` and `ApplyPatchLimit` variants from invalid patch input.
+`ApplyPatchMatch`, `ApplyPatchLimit`, and `EditOverlap` variants from invalid patch input.
 
 ## HTTP control and intake
 
