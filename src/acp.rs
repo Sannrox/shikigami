@@ -2193,6 +2193,9 @@ fn staged_inline_part(part: &Value, part_type: &str) -> Result<StagedAttachment,
         ));
     }
     let payload = inline_payload(part, part_type)?;
+    if payload.is_empty() {
+        return Err(rpc_error(-32602, "attachment data is empty"));
+    }
     Ok(StagedAttachment {
         kind,
         media_type: mime.trim().to_ascii_lowercase(),
@@ -2221,6 +2224,9 @@ fn staged_resource_part(part: &Value) -> Result<StagedAttachment, Value> {
             "resource prompt part requires blob, text, or a host path uri",
         ));
     };
+    if payload.is_empty() {
+        return Err(rpc_error(-32602, "attachment data is empty"));
+    }
     if payload.len() as u64 > MAX_CONTENT_PART_BYTES {
         return Err(rpc_error(
             -32602,
@@ -3847,6 +3853,37 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let session_id = init_and_new(&host, &client, &cwd).await;
+        let empty_file = dir.path().join("empty");
+        std::fs::write(&empty_file, []).unwrap();
+        for attachment in [
+            json!({"type":"image", "mimeType":"image/png", "uri":empty_file}),
+            json!({"type":"resource", "resource":{"mimeType":"application/pdf", "uri":empty_file}}),
+            json!({"type":"resource", "resource":{"mimeType":"text/plain", "text":""}}),
+        ] {
+            let rejected = host
+                .handle(
+                    json!({
+                        "jsonrpc":"2.0", "id":2, "method":"session/prompt",
+                        "params":{"sessionId":session_id, "prompt":[
+                            {"type":"text", "text":"inspect"}, attachment
+                        ]}
+                    }),
+                    &client,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+            assert!(
+                rejected["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("empty")
+            );
+            let sessions = host.sessions.lock().await;
+            let live = sessions.get(&session_id).unwrap();
+            assert!(live.run_id.is_none());
+            assert!(live.content.is_none());
+        }
         let blob = encode_base64(&vec![0u8; 8 * 1024 * 1024]);
         let failed = host
             .handle(
