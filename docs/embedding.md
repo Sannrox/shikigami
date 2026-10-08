@@ -233,3 +233,11 @@ recovery.
 
 - **Breaking** embed API or doctor JSON key removals: call out under `### Changed` / `### Breaking` and bump the relevant schema version when applicable.
 - **Additive** fields with defaults: same settings `version` or same doctor `schema_version` is OK.
+
+## Upgrading the Rust library to 2.0
+
+`ResolvedContent::Bytes` now contains `content::Bytes`, replacing `Vec<u8>`.
+Update constructors and typed matches using the [content migration](content.md#upgrading-from-1x).
+Exhaustive event and tool-error matches must handle the new edit variants listed
+in the [2.0 upgrade notes](../CHANGELOG.md#200--2026-10-08). Persisted settings
+and journal schema numbers remain unchanged.

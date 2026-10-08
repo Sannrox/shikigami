@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [2.0.0] — 2026-10-08
+
+### Breaking changes and upgrade
+
+- The public `ResolvedContent::Bytes` payload changed from `Vec<u8>` to
+  `content::Bytes` (re-exported `bytes::Bytes`). This is a Rust source break,
+  so the workspace version advances from 1.1.1 to 2.0.0. Construct with
+  `ResolvedContent::Bytes(vec.into())`; when matching, bind `content::Bytes`,
+  borrow with `.as_ref()` for `&[u8]`, or use `.to_vec()` if an owned vector is
+  required. Cloning the buffer shares its allocation. See
+  [content migration](docs/content.md#upgrading-from-1x).
+- Exhaustive consumers of the public `HarnessEvent`, `EditOutcome`, and
+  `ToolError` enums must handle the new edit-outcome event, normalized/overlap
+  outcomes, and typed patch/overlap error variants. Journal readers must
+  accept the optional `edit_outcome` object and ignore unknown event names.
+- Settings and persisted journal schema versions remain 1. ACP invalid-mode
+  mappings now fail earlier with `-32602`; cross-version clients should follow
+  the [ACP compatibility guidance](docs/acp.md).
+
 ### Changed
 
 - `multi_edit` and `apply_patch` locate every hunk in the original file and

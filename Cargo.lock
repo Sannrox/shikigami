@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-cli"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-engine"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-governance-sekai"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-http"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-plane-intake"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "thiserror",
@@ -2289,7 +2289,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-tui"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "crossterm 0.28.1",
@@ -2306,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "shikigami-types"
-version = "1.1.1"
+version = "2.0.0"
 dependencies = [
  "sha2 0.11.0",
 ]
