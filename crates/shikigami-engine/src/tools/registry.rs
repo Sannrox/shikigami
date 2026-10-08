@@ -16,7 +16,7 @@ use super::todo::{TodoItem, apply_todo_write, format_todo_summary};
 use super::web_fetch::{
     WEB_FETCH_MAX_REDIRECTS, WebFetchArgs, WebFetcher, default_web_fetcher, validate_web_fetch_url,
 };
-use super::{ToolDef, ToolError, ToolOutput, parse};
+use super::{ExecutedTool, ToolDef, ToolError, ToolOutput, parse};
 
 /// External tool provider (e.g. MCP-backed tool).
 #[async_trait::async_trait]
@@ -194,8 +194,21 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, args_json: &str) -> Result<ToolOutput, ToolError> {
+        self.execute_for_run(name, args_json)
+            .await
+            .map(|executed| executed.output)
+    }
+
+    pub(crate) async fn execute_for_run(
+        &self,
+        name: &str,
+        args_json: &str,
+    ) -> Result<ExecutedTool, ToolError> {
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
-            return Ok(ToolOutput::Text(t.call(args_json).await?));
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(t.call(args_json).await?),
+                edit_outcome: None,
+            });
         }
         if !builtin_is_authorized(&self.executor.enabled, name) {
             return Err(ToolError::Disabled(name.into()));
@@ -210,15 +223,24 @@ impl ToolRegistry {
                 *guard = items.clone();
             }
             let summary = format_todo_summary(&items);
-            return Ok(ToolOutput::Text(summary));
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(summary),
+                edit_outcome: None,
+            });
         }
         if name == "handoff" {
             let brief = apply_handoff(args_json)?;
-            return Ok(ToolOutput::Text(format_handoff_summary(&brief)));
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(format_handoff_summary(&brief)),
+                edit_outcome: None,
+            });
         }
         if name == "web_fetch" {
             let text = self.web_fetch(args_json).await?;
-            return Ok(ToolOutput::Text(text));
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(text),
+                edit_outcome: None,
+            });
         }
         if BASH_HELPER_TOOLS.contains(&name) {
             let text = match name {
@@ -227,7 +249,10 @@ impl ToolRegistry {
                 "bash_job_logs" => self.bash_job_logs(args_json)?,
                 _ => unreachable!("BASH_HELPER_TOOLS names are exhaustive"),
             };
-            return Ok(ToolOutput::Text(text));
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(text),
+                edit_outcome: None,
+            });
         }
         self.executor.execute(name, args_json).await
     }

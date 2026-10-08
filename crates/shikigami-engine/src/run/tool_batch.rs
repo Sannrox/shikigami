@@ -777,7 +777,7 @@ impl<'a> DurableToolBatch<'a> {
                             started,
                             timeout,
                             &session.parent_run_id,
-                            tools.execute(&call.name, &call.args_json),
+                            tools.execute_for_run(&call.name, &call.args_json),
                         )
                         .await
                         {
@@ -787,7 +787,12 @@ impl<'a> DurableToolBatch<'a> {
                                     "edit" | "multi_edit" | "apply_patch"
                                 ) {
                                     let (outcome, match_count) = match &result {
-                                        Ok(_) => (tools::EditOutcome::Applied, None),
+                                        Ok(executed) => (
+                                            executed
+                                                .edit_outcome
+                                                .unwrap_or(tools::EditOutcome::Applied),
+                                            None,
+                                        ),
                                         Err(error) => error.edit_outcome(),
                                     };
                                     self.engine.emit(
@@ -804,7 +809,9 @@ impl<'a> DurableToolBatch<'a> {
                                         },
                                     );
                                 }
-                                result.map_err(|error| error.to_string())
+                                result
+                                    .map(|executed| executed.output)
+                                    .map_err(|error| error.to_string())
                             }
                             Err(error) => {
                                 flush_pending_background_children(

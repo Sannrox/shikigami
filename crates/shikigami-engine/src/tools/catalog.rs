@@ -1,5 +1,7 @@
 //! Builtin tool catalog and parallel/exclusive batch helpers.
 
+const NORMALIZED_EDIT_MATCHING: &str = "Exact matching runs first; only zero exact matches allow a unique normalized match. Normalization ignores trailing whitespace except CR, maps U+2018–U+201B/U+201C–U+201F to ASCII quotes, U+2010–U+2015/U+2212 to hyphen, and U+00A0/U+1680/U+2000–U+200A/U+202F/U+205F/U+3000 to space. Ambiguous matches fail without writing. Normalized success is reported; unmatched lines retain their bytes.";
+
 /// Catalog entry for a tool the registry can enable.
 #[derive(Debug, Clone)]
 pub struct ToolDef {
@@ -312,12 +314,16 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
         ),
         def(
             "edit",
-            "Replace exactly one occurrence of old with new in a file. LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed endings stay exact.",
+            &format!(
+                "Replace one unique occurrence of old with new in a file. LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed line endings stay exact. {NORMALIZED_EDIT_MATCHING}"
+            ),
             r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
         ),
         def(
             "multi_edit",
-            "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none). LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed endings stay exact.",
+            &format!(
+                "Apply multiple unique replacements to one file atomically (all succeed or none). LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed line endings stay exact. {NORMALIZED_EDIT_MATCHING}"
+            ),
             r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"}},"required":["old","new"]}},"required":["path","edits"]}"#,
         ),
         def(

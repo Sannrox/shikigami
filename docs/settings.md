@@ -270,8 +270,9 @@ run, or plane session; the host that sees `handoff_brief` decides what to
 do next. Skills cannot omit `task`.
 
 Coding default also includes `apply_patch` (structured multi-hunk patches with
-optional context; atomic across files). Prefer `edit` / `multi_edit` for exact
-single-site or multi-site replacements; use `apply_patch` when surrounding
+optional context; atomic across files). Prefer `edit` / `multi_edit` for unique
+single-site or multi-site replacements (exact first, then the fixed normalization
+fallback only when there is no exact match); use `apply_patch` when surrounding
 context is needed to disambiguate. Caps: 16 files, 32 hunks, 64KiB JSON payload.
 All three accept LF fragments for consistently CRLF files while preserving
 CRLF output. See [edit outcomes](runs.md#edit-tools-and-outcomes) for journal
