@@ -357,19 +357,24 @@ async fn edit_outcomes_are_redacted_and_attributed_in_the_run_journal() {
             "applied_normalized",
             "no_match",
             "ambiguous",
+            "overlap",
             "invalid_input",
             "limit",
             "io",
         ]
         .into_iter()
-        .filter(|outcome| name != "apply_patch" || *outcome != "applied_normalized")
-        {
+        .filter(|outcome| {
+            (name != "apply_patch" || *outcome != "applied_normalized")
+                && (name != "edit" || *outcome != "overlap")
+        }) {
             let dir = tempdir().unwrap();
             let workspace = dir.path().join("workspace");
             std::fs::create_dir(&workspace).unwrap();
             let path = workspace.join("secret-path.txt");
             match outcome {
-                "applied" | "invalid_input" => std::fs::write(&path, "secret-old\n").unwrap(),
+                "applied" | "invalid_input" | "overlap" => {
+                    std::fs::write(&path, "secret-old\n").unwrap()
+                }
                 "applied_normalized" => std::fs::write(&path, "secret–old\n").unwrap(),
                 "no_match" => std::fs::write(&path, "unmatched\n").unwrap(),
                 "ambiguous" => std::fs::write(&path, "secret-old\nsecret-old\n").unwrap(),
@@ -382,6 +387,14 @@ async fn edit_outcomes_are_redacted_and_attributed_in_the_run_journal() {
             let hunk = serde_json::json!({"old":"secret-old\n", "new":"secret-new\n"});
             let args = if outcome == "invalid_input" {
                 "not-json-secret".to_owned()
+            } else if outcome == "overlap" {
+                let hunks = serde_json::json!([hunk.clone(), hunk]);
+                if name == "multi_edit" {
+                    serde_json::json!({"path":"secret-path.txt", "edits":hunks}).to_string()
+                } else {
+                    serde_json::json!({"patches":[{"path":"secret-path.txt", "hunks":hunks}]})
+                        .to_string()
+                }
             } else {
                 match name {
                     "edit" => serde_json::json!({"path":"secret-path.txt", "old":"secret-old\n", "new":"secret-new\n"}),

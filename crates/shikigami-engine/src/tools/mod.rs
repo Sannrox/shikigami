@@ -81,6 +81,7 @@ pub enum EditOutcome {
     AppliedNormalized,
     NoMatch,
     Ambiguous,
+    Overlap,
     InvalidInput,
     Limit,
     Io,
@@ -108,6 +109,10 @@ pub enum ToolError {
     MultiEditMatch { index: usize, count: usize },
     #[error("multi_edit requires a non-empty edits array")]
     MultiEditEmpty,
+    #[error(
+        "edit hunks {first} and {second} overlap in the original file; merge nearby changes into one hunk"
+    )]
+    EditOverlap { first: usize, second: usize },
     #[error("apply_patch: {0}")]
     ApplyPatch(String),
     #[error("apply_patch: {0}")]
@@ -154,6 +159,7 @@ impl ToolError {
                 Some(*count),
             ),
             Self::FileTooLarge(_) | Self::ApplyPatchLimit(_) => (EditOutcome::Limit, None),
+            Self::EditOverlap { .. } => (EditOutcome::Overlap, None),
             Self::Io(_) => (EditOutcome::Io, None),
             _ => (EditOutcome::InvalidInput, None),
         }
@@ -852,7 +858,7 @@ mod tests {
                     {
                       "path": "a.txt",
                       "hunks": [
-                        {"context_before":"keep\n","old":"old1\n","new":"new1\n","context_after":"mid\n"},
+                        {"context_before":"keep\n","old":"old1\n","new":"new1\n"},
                         {"context_before":"mid\n","old":"old2\n","new":"new2\n","context_after":"footer\n"}
                       ]
                     },
@@ -1019,6 +1025,73 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
             original
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_edits_use_original_spans_and_reject_overlap() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["multi_edit", "apply_patch"]);
+        for name in ["multi_edit", "apply_patch"] {
+            let args = |hunks: serde_json::Value| {
+                if name == "multi_edit" {
+                    serde_json::json!({"path":"file.txt", "edits":hunks}).to_string()
+                } else {
+                    serde_json::json!({"patches":[{"path":"file.txt", "hunks":hunks}]}).to_string()
+                }
+            };
+            for (source, hunks, outcome) in [
+                (
+                    "original",
+                    serde_json::json!([{"old":"original", "new":"inserted"}, {"old":"inserted", "new":"wrong"}]),
+                    "missing",
+                ),
+                (
+                    "abcdef",
+                    serde_json::json!([{"old":"abc", "new":"x"}, {"old":"bc", "new":"y"}]),
+                    "overlap",
+                ),
+                (
+                    "abcdef",
+                    serde_json::json!([{"old":"def", "new":"x"}, {"old":"abc", "new":"y"}]),
+                    "success",
+                ),
+                (
+                    "abcdef",
+                    serde_json::json!([{"old":"abc", "new":"y"}, {"old":"def", "new":"x"}]),
+                    "success",
+                ),
+            ] {
+                std::fs::write(dir.path().join("file.txt"), source).unwrap();
+                let result = tools.execute(name, &args(hunks)).await;
+                if outcome == "success" {
+                    result.unwrap();
+                    assert_eq!(
+                        std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+                        "yx"
+                    );
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    if outcome == "overlap" {
+                        assert!(
+                            error.contains("0") && error.contains("1") && error.contains("merge"),
+                            "{name}: {error}"
+                        );
+                    }
+                    assert_eq!(
+                        std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+                        source,
+                        "{name}"
+                    );
+                }
+            }
+        }
+        std::fs::write(dir.path().join("file.txt"), "abc").unwrap();
+        let err = tools.execute("apply_patch", r#"{"patches":[{"path":"file.txt","hunks":[{"old":"a","new":"A","context_after":"b"},{"context_before":"b","old":"c","new":"C"}]}]}"#).await.unwrap_err();
+        assert!(err.to_string().contains("merge"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+            "abc"
         );
     }
 

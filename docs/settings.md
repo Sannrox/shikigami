@@ -273,7 +273,8 @@ Coding default also includes `apply_patch` (structured multi-hunk patches with
 optional context; atomic across files). Prefer `edit` / `multi_edit` for unique
 single-site or multi-site replacements (exact first, then the fixed normalization
 fallback only when there is no exact match); use `apply_patch` when surrounding
-context is needed to disambiguate. Caps: 16 files, 32 hunks, 64KiB JSON payload.
+context is needed to disambiguate. Each batch hunk matches the file as read;
+merge nearby changes into one hunk if their spans (including patch context) overlap. Caps: 16 files, 32 hunks, 64KiB JSON payload.
 All three accept LF fragments for consistently CRLF files while preserving
 CRLF output. See [edit outcomes](runs.md#edit-tools-and-outcomes) for journal
 records and per-model failure aggregation.

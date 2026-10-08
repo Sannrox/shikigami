@@ -139,7 +139,7 @@ impl NormalizedText {
     }
 }
 
-fn locate_edit(text: &str, old: &str) -> Result<EditMatch, usize> {
+fn locate_edit(text: &str, old: &str, allow_normalized: bool) -> Result<EditMatch, usize> {
     let count = text.matches(old).count();
     if count == 1
         && let Some(start) = text.find(old)
@@ -149,7 +149,7 @@ fn locate_edit(text: &str, old: &str) -> Result<EditMatch, usize> {
             normalized: false,
         });
     }
-    if count != 0 {
+    if count != 0 || !allow_normalized {
         return Err(count);
     }
     let normalized = NormalizedText::new(text);
@@ -180,6 +180,64 @@ fn locate_edit(text: &str, old: &str) -> Result<EditMatch, usize> {
         span: normalized.offsets[start]..original_end,
         normalized: true,
     })
+}
+
+struct PlannedEdit<'a> {
+    index: usize,
+    span: Range<usize>,
+    new: Cow<'a, str>,
+}
+
+enum EditPlanError {
+    Match { index: usize, count: usize },
+    Overlap { first: usize, second: usize },
+}
+
+// Both batch tools locate against the original file and reject intersecting
+// spans before assembling output. Patch context is part of its matched span.
+fn plan_edits<'a>(
+    text: &str,
+    hunks: &'a [EditHunk],
+    crlf: bool,
+    allow_normalized: bool,
+) -> Result<(Vec<PlannedEdit<'a>>, bool), EditPlanError> {
+    let mut planned = Vec::with_capacity(hunks.len());
+    let mut normalized = false;
+    for (index, hunk) in hunks.iter().enumerate() {
+        let old = edit_fragment(&hunk.old, crlf);
+        let found = locate_edit(text, old.as_ref(), allow_normalized)
+            .map_err(|count| EditPlanError::Match { index, count })?;
+        normalized |= found.normalized;
+        planned.push(PlannedEdit {
+            index,
+            span: found.span,
+            new: edit_fragment(&hunk.new, crlf),
+        });
+    }
+    planned.sort_by_key(|edit| (edit.span.start, edit.span.end));
+    for pair in planned.windows(2) {
+        let left = &pair[0];
+        let right = &pair[1];
+        if right.span.start < left.span.end || right.span.start == left.span.start {
+            return Err(EditPlanError::Overlap {
+                first: left.index.min(right.index),
+                second: left.index.max(right.index),
+            });
+        }
+    }
+    Ok((planned, normalized))
+}
+
+fn apply_edits(text: &str, planned: &[PlannedEdit<'_>]) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for edit in planned {
+        output.push_str(&text[cursor..edit.span.start]);
+        output.push_str(&edit.new);
+        cursor = edit.span.end;
+    }
+    output.push_str(&text[cursor..]);
+    output
 }
 
 // Only consistently CRLF files opt into LF matching. Mixed endings stay exact.
@@ -285,8 +343,8 @@ impl ToolExecutor {
         let (mut text, crlf) = lf_file_text(self.read_file(path)?);
         let old = edit_fragment(old, crlf);
         let new = edit_fragment(new, crlf);
-        let found =
-            locate_edit(&text, old.as_ref()).map_err(|count| ToolError::EditMatch { count })?;
+        let found = locate_edit(&text, old.as_ref(), true)
+            .map_err(|count| ToolError::EditMatch { count })?;
         text.replace_range(found.span, new.as_ref());
         self.write_file(path, &restore_line_endings(text, crlf))?;
         Ok(AppliedEdits {
@@ -303,16 +361,15 @@ impl ToolExecutor {
         if edits.is_empty() {
             return Err(ToolError::MultiEditEmpty);
         }
-        let (mut text, crlf) = lf_file_text(self.read_file(path)?);
-        let mut normalized = false;
-        for (index, hunk) in edits.iter().enumerate() {
-            let old = edit_fragment(&hunk.old, crlf);
-            let new = edit_fragment(&hunk.new, crlf);
-            let found = locate_edit(&text, old.as_ref())
-                .map_err(|count| ToolError::MultiEditMatch { index, count })?;
-            normalized |= found.normalized;
-            text.replace_range(found.span, new.as_ref());
-        }
+        let (text, crlf) = lf_file_text(self.read_file(path)?);
+        let (planned, normalized) =
+            plan_edits(&text, edits, crlf, true).map_err(|error| match error {
+                EditPlanError::Match { index, count } => ToolError::MultiEditMatch { index, count },
+                EditPlanError::Overlap { first, second } => {
+                    ToolError::EditOverlap { first, second }
+                }
+            })?;
+        let text = apply_edits(&text, &planned);
         self.write_file(path, &restore_line_endings(text, crlf))?;
         Ok(AppliedEdits {
             count: edits.len(),
@@ -356,27 +413,35 @@ impl ToolExecutor {
                     file.path
                 )));
             }
-            let (mut text, crlf) = lf_file_text(self.read_file(&path)?);
+            let (text, crlf) = lf_file_text(self.read_file(&path)?);
+            let mut hunks = Vec::with_capacity(file.hunks.len());
             for (index, hunk) in file.hunks.iter().enumerate() {
-                let before = hunk.context_before.as_deref().unwrap_or("");
-                let after = hunk.context_after.as_deref().unwrap_or("");
                 if hunk.old.is_empty() {
                     return Err(ToolError::ApplyPatch(format!(
                         "{} hunk {index}: old must not be empty",
                         file.path
                     )));
                 }
-                let needle =
-                    edit_fragment(&format!("{before}{}{after}", hunk.old), crlf).into_owned();
-                let count = text.matches(&needle).count();
-                if count != 1 {
-                    return Err(ToolError::ApplyPatchMatch { path, index, count });
-                }
-                let replacement =
-                    edit_fragment(&format!("{before}{}{after}", hunk.new), crlf).into_owned();
-                text = text.replacen(&needle, &replacement, 1);
-                applied += 1;
+                let before = hunk.context_before.as_deref().unwrap_or("");
+                let after = hunk.context_after.as_deref().unwrap_or("");
+                hunks.push(EditHunk {
+                    old: format!("{before}{}{after}", hunk.old),
+                    new: format!("{before}{}{after}", hunk.new),
+                });
             }
+            let (edits, _) =
+                plan_edits(&text, &hunks, crlf, false).map_err(|error| match error {
+                    EditPlanError::Match { index, count } => ToolError::ApplyPatchMatch {
+                        path: path.clone(),
+                        index,
+                        count,
+                    },
+                    EditPlanError::Overlap { first, second } => {
+                        ToolError::EditOverlap { first, second }
+                    }
+                })?;
+            let text = apply_edits(&text, &edits);
+            applied += hunks.len();
             let text = restore_line_endings(text, crlf);
             if text.len() as u64 > MAX_FILE_BYTES {
                 return Err(ToolError::FileTooLarge(path));
