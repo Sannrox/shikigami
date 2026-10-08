@@ -85,6 +85,11 @@ follow-up text. `session/compact` still cuts ChatMessage history.
 Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
 name a catalog mode; the mapping lives in `[session.modes]` settings. Invalid
 mappings return `-32602` before session creation or first-prompt freezing.
+Compatibility: before [#418](https://github.com/Sannrox/shikigami/pull/418),
+invalid mappings surfaced later as `-32603` on `session/prompt`, after session
+creation and potentially freezing. Clients spanning this change should accept
+both codes for this specific mapping error and handle rejection at either
+method; other `-32603` failures remain internal errors.
 A rejected first-prompt mode leaves the session available for a valid retry. A later
 `session/prompt` that names a different mode is refused. The selected mode,
 model, effort, and tool set are a `session/update` with

@@ -49,6 +49,23 @@ together with option 3.
 [#372](https://github.com/Sannrox/shikigami/issues/372) honors this
 contract on the ACP host. This ADR does not implement it.
 
+## ACP mapping errors and compatibility
+
+As implemented by [#405](https://github.com/Sannrox/shikigami/issues/405),
+an invalid operator mapping (for example, a mode whose tools do not intersect
+the host tool set) returns JSON-RPC `-32602` at `session/new`, before creating
+any session. A mode supplied on the first `session/prompt` is validated before
+freezing; rejection leaves the session unfrozen for a valid retry.
+
+Previously, session creation could succeed and mapping validation failed later
+on `session/prompt` with `-32603` from harness construction, potentially after
+freezing. That error code and timing changed in
+[#418](https://github.com/Sannrox/shikigami/pull/418). `-32603` is no longer the
+invalid-mapping signal; it remains an internal-error code for other failures.
+Clients supporting both versions should recognize both codes for this specific
+mapping error and handle rejection at either method. They should not classify
+all `-32603` errors as invalid mappings.
+
 ## Consequences
 
 - Hosts pick a stable name. Product and operators retune the mapping
