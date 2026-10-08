@@ -11,7 +11,7 @@ cap after base64. MCP Content-Length stays the MCP host at 1MiB. No network
 bind.
 
 ```bash
-shikigami --state ./state acp
+shikigami acp
 ```
 
 Credentials come from the environment, same as CLI. There is no ACP login.

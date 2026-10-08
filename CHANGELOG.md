@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- CLI default `--state` is the platform user-state directory keyed by cwd
+  (`XDG_STATE_HOME/shikigami/<encoded-cwd>` when set; otherwise macOS
+  Application Support, Windows `%LOCALAPPDATA%`, Unix `~/.local/state`).
+  `tui` / `acp` no longer need `--state` to keep harness files outside the
+  inplace workspace. `--state` / `SHIKIGAMI_STATE` still win. Embedders keep
+  `StateRoot::default_in` for cwd-local scratch. Project-local trees remain
+  available as `--state ./.shikigami-state`. Existing `.shikigami-state`
+  directories are not migrated. New state directories are created mode
+  `0700` on Unix.
+
 ## [2.0.0] — 2026-10-08
 
 ### Breaking changes and upgrade

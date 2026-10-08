@@ -10,13 +10,35 @@ Later sources override earlier ones where documented:
 1. Built-in defaults (`profile = local`, governance `none`, model `scripted`)
 2. Config file (first match):
    - `--config` / `SHIKIGAMI_CONFIG`
-   - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: `./.shikigami-state`)
+   - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: platform user-state directory keyed by cwd; see [cli.md](cli.md))
    - `./shikigami.toml` in the current working directory
 3. Environment variables
 4. CLI flags (where provided)
 
 Invalid adapter ids fail at resolve/validate time. Missing optional files are
 not errors.
+
+## Host state root
+
+`--state` / `SHIKIGAMI_STATE` select the harness scratch root (runs, journals,
+serve queue, metrics). When unset, the process host uses the platform
+user-state directory keyed by the current working directory:
+
+1. `$XDG_STATE_HOME/shikigami/<encoded-cwd>` when `XDG_STATE_HOME` is an absolute path (relative values are ignored)
+2. otherwise macOS: `~/Library/Application Support/shikigami/<encoded-cwd>`
+3. otherwise Windows: `%LOCALAPPDATA%\shikigami\<encoded-cwd>`
+4. otherwise Unix: `~/.local/state/shikigami/<encoded-cwd>`
+
+`<encoded-cwd>` is `--<canonical-cwd>--<fingerprint>`: `/`, `\`, and `:` become
+`-`, then a 16-character SHA-256 prefix of the canonical OS path bytes so
+`/tmp/a-b` and `/tmp/a/b` do not share a root. The readable prefix is truncated
+to keep the directory name within 255 bytes. That root sits outside an inplace
+workspace, so `tui` and `acp` do not need `--state`. Project-local scratch is
+`--state ./.shikigami-state`. Embedders that want a cwd-local root call
+`StateRoot::default_in`; CLI-like hosts call `StateRoot::user_default` or
+`StateRoot::resolve_host`. Missing or relative `HOME` / `USERPROFILE` /
+`LOCALAPPDATA` fail closed.
+New state directories are created mode `0700` on Unix.
 
 ## Profiles
 
@@ -170,9 +192,10 @@ today's spawn.
 | `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
 | `snapshot` | `false` | After first materialize, copy workspace to `state/runs/<id>/snapshots/initial` and keep that copy across resume. Resume never creates the directory. Directory walks and file copies do not follow symbolic links. Not supported with `inplace`. This is the only original-input proof `replay-export` accepts. |
 
-For `inplace`, place the harness **state** root (`--state` / `SHIKIGAMI_STATE`)
-**outside** `workspace.root`. Hosts must serialize concurrent runs against the
-same inplace root.
+For `inplace`, the harness **state** root must sit **outside** `workspace.root`.
+The process-host default (platform user-state directory keyed by cwd) already
+does. `--state` / `SHIKIGAMI_STATE` still win; a root inside the workspace fails
+closed. Hosts must serialize concurrent runs against the same inplace root.
 
 ### [sandbox]
 
@@ -426,7 +449,7 @@ hooks. See [hooks.md](hooks.md).
 
 | Variable | Purpose |
 | --- | --- |
-| `SHIKIGAMI_STATE` | State root directory |
+| `SHIKIGAMI_STATE` | State root directory (overrides the platform user-state default) |
 | `SHIKIGAMI_CONFIG` | Path to settings file |
 | `SHIKIGAMI_PROFILE` | Profile name |
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |

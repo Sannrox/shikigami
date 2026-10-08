@@ -10,8 +10,8 @@
 # `model` must be an id the gateway lists on GET /v1/models. Direct HTTP
 # `auto` still maps to gpt-4.1-mini; set an explicit id.
 #
-# For TUI over a project tree, set workspace.adapter = "inplace" and put
-# --state / SHIKIGAMI_STATE outside that tree.
+# For TUI over a project tree, set workspace.adapter = "inplace".
+# The CLI default state root is already outside cwd.
 version = 1
 
 [profile]

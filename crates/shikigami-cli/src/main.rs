@@ -39,6 +39,7 @@ enum ServeIntake {
     long_about = None
 )]
 struct Cli {
+    /// Host state root. Default: platform user-state directory keyed by cwd.
     #[arg(long, global = true, env = "SHIKIGAMI_STATE")]
     state: Option<PathBuf>,
 
@@ -265,26 +266,27 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
     let model = cli.model.as_deref();
-    let state = match cli.state {
-        Some(path) => StateRoot::new(path),
-        None => StateRoot::default_in(&cwd),
-    };
+
+    if let Command::Version { json } = &cli.command {
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "product": PRODUCT,
+                    "version": VERSION,
+                    "description": PRODUCT_DESCRIPTION,
+                }))?
+            );
+        } else {
+            human_println!("{PRODUCT} {VERSION}");
+        }
+        return Ok(());
+    }
+
+    let state = StateRoot::resolve_host(cli.state.as_deref(), &cwd)?;
 
     match cli.command {
-        Command::Version { json } => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "product": PRODUCT,
-                        "version": VERSION,
-                        "description": PRODUCT_DESCRIPTION,
-                    }))?
-                );
-            } else {
-                human_println!("{PRODUCT} {VERSION}");
-            }
-        }
+        Command::Version { .. } => unreachable!("version returns before host state is resolved"),
         Command::Doctor { json, models } => {
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             let report = harness.doctor_async().await;

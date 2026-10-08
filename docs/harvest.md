@@ -3,7 +3,7 @@
 When governance is `sekai-chisei`, a run **harvests** lifecycle facts into the
 control plane so postmortems do not depend on local harness state.
 
-Local checkpoints under `.shikigami-state/` remain **non-authoritative** for
+Local checkpoints under the host state root remain **non-authoritative** for
 governed truth. Offline adapters (`none`, `local`) never write to the plane.
 
 ## Object / event model

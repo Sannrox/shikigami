@@ -103,7 +103,7 @@ must not appear in harness process settings.
 | Operations, harvests, evidence, outcomes (when governed) | Governance plane |
 | Policy, budget, routing, approvals, eval | Governance plane |
 | Release/channel identity of the binary | Delivery system (e.g. tenkai) |
-| Host config, run scratch, workspace paths, local event logs | Shikigami (`.shikigami-state` / configured paths) |
+| Host config, run scratch, workspace paths, local event logs | Shikigami (platform user-state dir keyed by cwd, or `--state`) |
 
 Harness-local state is never a substitute for plane truth. If governance is
 required and unavailable, the run fails closed.
