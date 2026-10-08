@@ -2195,7 +2195,7 @@ fn staged_inline_part(part: &Value, part_type: &str) -> Result<StagedAttachment,
     let payload = inline_payload(part, part_type)?;
     Ok(StagedAttachment {
         kind,
-        media_type: mime.to_ascii_lowercase(),
+        media_type: mime.trim().to_ascii_lowercase(),
         payload: payload.into(),
     })
 }
@@ -2229,7 +2229,7 @@ fn staged_resource_part(part: &Value) -> Result<StagedAttachment, Value> {
     }
     Ok(StagedAttachment {
         kind,
-        media_type: mime.to_ascii_lowercase(),
+        media_type: mime.trim().to_ascii_lowercase(),
         payload: payload.into(),
     })
 }
@@ -3458,12 +3458,12 @@ mod tests {
                         "sessionId": session_id,
                         "prompt": [
                             {"type":"text","text":"inspect"},
-                            {"type":"image","mimeType":"image/png","data": encode_base64(png)},
+                            {"type":"image","mimeType":"  IMAGE/PNG \t","data": encode_base64(png)},
                             {
                                 "type":"resource",
                                 "resource": {
                                     "uri": "attachment://doc.pdf",
-                                    "mimeType": "application/pdf",
+                                    "mimeType": "\t APPLICATION/PDF ",
                                     "blob": encode_base64(pdf)
                                 }
                             }
