@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ACP attachments share decoded buffers across session storage and resolution.
+  `ResolvedContent::Bytes` now holds `content::Bytes`; embedders constructing
+  the variant from a `Vec<u8>` must convert with `.into()`. HTTP encoding
+  borrows resolved bytes; the canonical plane transport still owns its payload.
+
 - Nested parent finish waits on a registry idle signal instead of a 50ms
   `run_is_active` poll. Still-active children are still cancelled and
   observed idle.

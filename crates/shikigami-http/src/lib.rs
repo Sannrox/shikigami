@@ -410,7 +410,7 @@ fn encode_part(
         })),
         ContentPartKind::Image => {
             let bytes = resolved_bytes(descriptor, resolved)?;
-            let url = data_url(&descriptor.media_type, &bytes);
+            let url = data_url(&descriptor.media_type, bytes);
             Ok(serde_json::json!({
                 "type": "image_url",
                 "image_url": { "url": url },
@@ -423,7 +423,7 @@ fn encode_part(
                     "type": "file",
                     "file": {
                         "filename": format!("{}.pdf", descriptor.part_id),
-                        "file_data": data_url(&descriptor.media_type, &bytes),
+                        "file_data": data_url(&descriptor.media_type, bytes),
                     },
                 }))
             }
@@ -467,13 +467,13 @@ fn resolved_text(
     }
 }
 
-fn resolved_bytes(
+fn resolved_bytes<'a>(
     descriptor: &ContentPartDescriptor,
-    resolved: &[ResolvedContentPart],
-) -> Result<Vec<u8>, ModelError> {
+    resolved: &'a [ResolvedContentPart],
+) -> Result<&'a [u8], ModelError> {
     match &resolved_part(descriptor, resolved)?.payload {
-        ResolvedContent::Bytes(bytes) => Ok(bytes.clone()),
-        ResolvedContent::Text(text) => Ok(text.as_bytes().to_vec()),
+        ResolvedContent::Bytes(bytes) => Ok(bytes),
+        ResolvedContent::Text(text) => Ok(text.as_bytes()),
     }
 }
 
@@ -806,7 +806,7 @@ mod tests {
             payload: if kind == ContentPartKind::Text {
                 ResolvedContent::Text(String::from_utf8(payload.to_vec()).unwrap())
             } else {
-                ResolvedContent::Bytes(payload.to_vec())
+                ResolvedContent::Bytes(payload.to_vec().into())
             },
         }
     }

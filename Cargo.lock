@@ -2195,6 +2195,7 @@ name = "shikigami"
 version = "1.1.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "libc",
  "proptest",
@@ -2234,6 +2235,7 @@ name = "shikigami-engine"
 version = "1.1.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "libc",
  "proptest",

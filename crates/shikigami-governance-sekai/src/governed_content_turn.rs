@@ -94,7 +94,9 @@ pub(super) async fn execute(
             descriptor: Some(proto_descriptor(&part.descriptor)),
             payload: Some(match part.payload {
                 ResolvedContent::Text(text) => resolved_content_part_v1::Payload::Text(text),
-                ResolvedContent::Bytes(bytes) => resolved_content_part_v1::Payload::Bytes(bytes),
+                ResolvedContent::Bytes(bytes) => {
+                    resolved_content_part_v1::Payload::Bytes(bytes.to_vec())
+                }
             }),
         })
         .collect();

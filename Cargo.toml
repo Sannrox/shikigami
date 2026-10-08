@@ -43,6 +43,7 @@ governance-sekai-chisei = ["dep:shikigami-governance-sekai"]
 model-http = ["dep:reqwest", "dep:shikigami-http", "shikigami-engine/model-http"]
 
 [dependencies]
+bytes = "1"
 shikigami-engine = { path = "crates/shikigami-engine", default-features = false }
 shikigami-http = { path = "crates/shikigami-http", optional = true }
 shikigami-governance-sekai = { path = "crates/shikigami-governance-sekai", optional = true }
