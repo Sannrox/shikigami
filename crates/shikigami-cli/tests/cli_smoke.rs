@@ -853,3 +853,80 @@ fn run_content_fails_when_the_run_reports_failure() {
         .stdout(predicate::str::contains("\"success\": false"))
         .stderr(predicate::str::contains("run reported failure"));
 }
+
+#[test]
+fn human_output_keeps_model_and_error_controls_inert() {
+    let dir = tempdir().unwrap();
+    let state = dir.path().join("state");
+    let config_path = dir.path().join("config.toml");
+    let payload = "safe\u{1b}]52;c;payload\u{7}\u{1b}[2J\u{9b}2J\rspoof";
+    let assert_inert = |bytes: &[u8]| {
+        let text = std::str::from_utf8(bytes).unwrap();
+        assert!(
+            !text
+                .chars()
+                .any(|ch| ch.is_control() && ch != '\n' && ch != '\t'),
+            "{text:?}"
+        );
+        assert!(text.contains('\u{fffd}'), "{text:?}");
+    };
+    for tool in ["report", "escalate"] {
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.events.adapter = "none".into();
+        config.workspace.adapter = "directory".into();
+        config.workspace.root = dir.path().join("workspaces").to_string_lossy().into();
+        config.model.adapter = "scripted".into();
+        let args = if tool == "report" {
+            serde_json::json!({"summary":payload, "success":true})
+        } else {
+            serde_json::json!({"reason":payload, "question":payload})
+        };
+        config.model.script_json = Some(
+            serde_json::json!([{"tool_calls":[{"name":tool, "args_json":args.to_string()}]}])
+                .to_string(),
+        );
+        config.save(&config_path).unwrap();
+        let output = cargo_bin_cmd!("shikigami")
+            .args([
+                "--state",
+                state.to_str().unwrap(),
+                "--config",
+                config_path.to_str().unwrap(),
+                "run",
+                "test",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), tool == "report");
+        assert_inert(&output.stdout);
+    }
+    let output = cargo_bin_cmd!("shikigami")
+        .args(["--state", state.to_str().unwrap(), "runs"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_inert(&output.stdout);
+    let output = cargo_bin_cmd!("shikigami")
+        .args(["--state", state.to_str().unwrap(), "runs", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let records: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        records
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["summary"] == payload)
+    );
+    let mut config = Config::default();
+    config.governance.adapter = payload.into();
+    config.save(&config_path).unwrap();
+    let output = cargo_bin_cmd!("shikigami")
+        .args(["--config", config_path.to_str().unwrap(), "doctor"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_inert(&output.stderr);
+}

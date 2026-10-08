@@ -3,3 +3,4 @@
 pub mod atomic;
 pub mod digest;
 pub mod identity;
+pub mod terminal;

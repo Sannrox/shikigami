@@ -2226,6 +2226,7 @@ dependencies = [
  "serde_json",
  "shikigami",
  "shikigami-tui",
+ "shikigami-types",
  "tempfile",
  "tokio",
 ]
@@ -2296,6 +2297,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "shikigami",
+ "shikigami-types",
  "tempfile",
  "tokio",
  "unicode-width",
