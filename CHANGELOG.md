@@ -125,6 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP attachment admission stores trimmed, lowercase MIME types so padded
+  allowlisted types remain valid throughout the content turn.
+
 - TUI resume and continue-last selection omit content sessions after their
   in-memory attachment store is lost, while text sessions remain listed.
 
