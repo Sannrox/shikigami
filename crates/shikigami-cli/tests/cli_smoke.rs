@@ -84,6 +84,93 @@ fn doctor_succeeds_on_local_defaults() {
 }
 
 #[test]
+fn doctor_without_state_flag_uses_user_state_dir() {
+    let xdg = tempdir().expect("xdg");
+    let cwd = tempdir().expect("cwd");
+    cargo_bin_cmd!("shikigami")
+        .current_dir(cwd.path())
+        .env("XDG_STATE_HOME", xdg.path())
+        .env_remove("SHIKIGAMI_STATE")
+        .args(["doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status: ok"))
+        .stdout(predicate::str::contains(
+            xdg.path().join("shikigami").display().to_string(),
+        ));
+    assert!(
+        !cwd.path().join(".shikigami-state").exists(),
+        "cwd-local default must not be created"
+    );
+}
+
+#[test]
+fn doctor_without_xdg_uses_platform_user_state_under_home() {
+    let home = tempdir().expect("home");
+    let cwd = tempdir().expect("cwd");
+    let expected = {
+        #[cfg(target_os = "macos")]
+        {
+            home.path()
+                .join("Library")
+                .join("Application Support")
+                .join("shikigami")
+        }
+        #[cfg(windows)]
+        {
+            home.path().join("AppData").join("Local").join("shikigami")
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            home.path().join(".local").join("state").join("shikigami")
+        }
+    };
+    cargo_bin_cmd!("shikigami")
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("SHIKIGAMI_STATE")
+        .args(["doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(expected.display().to_string()));
+    assert!(!cwd.path().join(".shikigami-state").exists());
+}
+
+#[test]
+fn doctor_without_home_or_xdg_fails_closed() {
+    cargo_bin_cmd!("shikigami")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("SHIKIGAMI_STATE")
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no user state directory"));
+}
+
+#[test]
+fn doctor_with_relative_home_fails_closed() {
+    let cwd = tempdir().expect("cwd");
+    cargo_bin_cmd!("shikigami")
+        .current_dir(cwd.path())
+        .env("HOME", ".")
+        .env("USERPROFILE", ".")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("LOCALAPPDATA")
+        .env_remove("SHIKIGAMI_STATE")
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no user state directory"));
+    assert!(!cwd.path().join(".shikigami-state").exists());
+}
+
+#[test]
 fn doctor_models_reports_default_auto_route() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");

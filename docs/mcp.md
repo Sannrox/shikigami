@@ -22,7 +22,7 @@ authenticated boundary.
 
 ```bash
 # Optional: same --state / --config as other subcommands
-shikigami --state ./state mcp
+shikigami mcp
 ```
 
 Hosts should connect via MCP stdio (for example Cursor / Claude Desktop style

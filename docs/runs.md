@@ -1,7 +1,8 @@
 # Run registry, artifacts, and local control
 
 Every harness run writes host-local operational state under
-$SHIKIGAMI_STATE/runs/<run_id>/:
+`$SHIKIGAMI_STATE/runs/<run_id>/` (default: platform user-state directory
+keyed by cwd; see [cli.md](cli.md)):
 
 ~~~
 run.json       # status, outcome, digests, usage, workspace, artifact path
@@ -118,16 +119,19 @@ metadata. Authorization denials and parked calls that have not executed remain
 in the existing lifecycle events rather than counting as matcher failures.
 Events are best-effort operational observations, not governed receipts.
 
-Count failures by model, tool, and reason across retained run journals:
+Count failures by model, tool, and reason across retained run journals.
+The host state root is `$SHIKIGAMI_STATE` when set; otherwise the `state:`
+line from `shikigami doctor`:
 
 ```sh
+state=${SHIKIGAMI_STATE:-$(shikigami doctor | sed -n 's/^[[:space:]]*state:[[:space:]]*//p')}
 jq -s '
   [ .[] | select(.event == "edit_outcome") | .edit_outcome
     | select(.outcome != "applied" and .outcome != "applied_normalized") ]
   | group_by([.model, .tool, .outcome])
   | map({model: .[0].model, tool: .[0].tool,
          outcome: .[0].outcome, count: length})
-' "${SHIKIGAMI_STATE:-.shikigami-state}"/runs/*/events.jsonl
+' "$state"/runs/*/events.jsonl
 ```
 
 Compatibility: journal schema v1 gains the optional `edit_outcome` object and

@@ -29,7 +29,7 @@ intake still cancels in-flight work without a terminal ack (see below).
 
 ## Queue layout
 
-Under `$SHIKIGAMI_STATE` (default `./.shikigami-state`):
+Under `$SHIKIGAMI_STATE` (default: platform user-state directory keyed by cwd):
 
 ```text
 queue/

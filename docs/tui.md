@@ -7,12 +7,13 @@ freeze-core CLI (`version` / `doctor` / `run` / `serve`). Bare `shikigami`
 stays usage/help.
 
 ```bash
-shikigami --state ../tui-state tui
+shikigami tui
 ```
 
-The session is inplace on the current directory. `--state` / `SHIKIGAMI_STATE`
-must sit outside that directory; the default `./.shikigami-state` is inside it
-and fails closed.
+The session is inplace on the current directory. The process-host default puts
+`--state` in the platform user-state directory keyed by cwd, which sits outside
+the workspace. `--state` / `SHIKIGAMI_STATE` still override; a root inside the
+workspace fails closed.
 
 Credentials come from the environment, same as CLI. There is no TUI login.
 Ungoverned HTTP through a local OpenAI-compatible gateway uses the same

@@ -111,8 +111,9 @@ a local model adapter is configured for other profiles.
 | `git-worktree` | stable for 1.x | `git worktree add` + branch; cleaned after successful runs |
 
 `inplace` requires an existing directory, does not support snapshots, and
-requires the harness state root to be outside the workspace. Hosts must
-serialize concurrent runs against the same in-place root.
+requires the harness state root to be outside the workspace. The CLI default
+state root is already outside cwd. Hosts must serialize concurrent runs against
+the same in-place root.
 
 `git-worktree` requires `git` on `PATH`.
 

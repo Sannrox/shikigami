@@ -54,8 +54,9 @@ cargo run --bin shikigami -- --config examples/cliproxy-http.toml tui
 
 The example allowlists `127.0.0.1` so the harness HTTP client can reach the
 gateway and nothing else. Widen `network.allow_hosts` if you add `web_fetch`.
-For TUI over a project tree, set `workspace.adapter = "inplace"` and put
-`--state` / `SHIKIGAMI_STATE` outside that tree.
+For TUI over a project tree, set `workspace.adapter = "inplace"`. The CLI
+default state root is already outside cwd; `--state` / `SHIKIGAMI_STATE`
+overrides.
 
 ## Tenkai note
 

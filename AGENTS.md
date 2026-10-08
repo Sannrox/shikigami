@@ -15,8 +15,9 @@ eval live in the matching `src/` modules; see [DESIGN.md](DESIGN.md) for the
 module map. The sekai-chisei
 adapter consumes the versioned upstream `sekai-client` Rust facade and its
 canonical `sekai-proto` dependency; Shikigami does not carry a second protocol
-snapshot. Integration tests live in `tests/`. Optional host state defaults
-under `.shikigami-state/`; do not commit local state, run workspaces, or
+snapshot. Integration tests live in `tests/`. Optional host state defaults to
+the platform user-state directory keyed by cwd (or `.shikigami-state/` when
+`--state` points there); do not commit local state, run workspaces, or
 generated runtime artifacts.
 
 Architecture is **ports + settings**
