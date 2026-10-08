@@ -125,6 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACP rejects empty attachment files and resource text at admission with a
+  clear invalid-parameter error, before creating a content run.
+
 - ACP attachment admission stores trimmed, lowercase MIME types so padded
   allowlisted types remain valid throughout the content turn.
 
