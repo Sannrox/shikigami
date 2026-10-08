@@ -146,6 +146,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Human-readable CLI output replaces terminal controls in model, tool, and
+  recorded text with U+FFFD, retaining LF and tab, using the same sanitizer
+  as the TUI. Run summaries, parked prompts, diagnoses, and errors cannot
+  execute OSC/CSI sequences. Structured JSON and exports retain their data.
+
 - `edit`, `multi_edit`, and `apply_patch` accept LF fragments on consistently
   CRLF files and preserve CRLF output. Mixed-ending files remain exact.
 

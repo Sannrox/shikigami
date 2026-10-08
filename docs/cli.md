@@ -47,3 +47,9 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 There is **no** `init` command. Config is optional; disk state is created when a
 run needs it.
 
+
+Human-readable CLI output uses the TUI's terminal-text policy: control characters
+become U+FFFD, except LF and tab. Model summaries, parked questions, recorded
+fields, and errors are displayed without executing terminal escape sequences.
+JSON, journals, transcript exports, and artifact exports retain their serialized
+data; file output is unchanged.

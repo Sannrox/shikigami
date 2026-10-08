@@ -3,6 +3,8 @@
 //! Evolving surface, same rank as `shikigami acp`. Not freeze-core.
 //! See [ADR 0014](../../../docs/decisions/0014-usable-guest-hosts.md).
 
+use shikigami_types::terminal::terminal_text;
+
 use std::io::{self, IsTerminal, Write, stdin, stdout};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1065,19 +1067,6 @@ impl TuiSession {
     fn fail_osc_write(&self) {
         *self.osc_write.lock().unwrap_or_else(|e| e.into_inner()) = osc_write_fail;
     }
-}
-
-/// Keep untrusted text inert when ratatui writes it to the terminal.
-fn terminal_text(text: &str) -> String {
-    text.chars()
-        .map(|ch| {
-            if ch.is_control() && ch != '\n' && ch != '\t' {
-                '\u{fffd}'
-            } else {
-                ch
-            }
-        })
-        .collect()
 }
 
 fn line_text(line: &TranscriptLine) -> String {

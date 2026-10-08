@@ -17,6 +17,7 @@ governance-sekai-chisei = ["shikigami/governance-sekai-chisei"]
 model-http = ["shikigami/model-http"]
 
 [dependencies]
+shikigami-types = { path = "../shikigami-types" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

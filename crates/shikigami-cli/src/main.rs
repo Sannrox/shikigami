@@ -12,6 +12,19 @@ use shikigami::{
     VERSION, diagnose_run, export_replay_inputs,
 };
 
+// Sanitize the complete human-readable message at its terminal boundary.
+// JSON, journals, and artifact exports keep their serialization unchanged.
+macro_rules! human_println {
+    ($($arg:tt)*) => {
+        println!("{}", shikigami_types::terminal::terminal_text(&format!($($arg)*)))
+    };
+}
+macro_rules! human_eprintln {
+    ($($arg:tt)*) => {
+        eprintln!("{}", shikigami_types::terminal::terminal_text(&format!($($arg)*)))
+    };
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ServeIntake {
     Filesystem,
@@ -242,7 +255,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            human_eprintln!("error: {err:#}");
             ExitCode::FAILURE
         }
     }
@@ -269,7 +282,7 @@ async fn run() -> anyhow::Result<()> {
                     }))?
                 );
             } else {
-                println!("{PRODUCT} {VERSION}");
+                human_println!("{PRODUCT} {VERSION}");
             }
         }
         Command::Doctor { json, models } => {
@@ -296,27 +309,27 @@ async fn run() -> anyhow::Result<()> {
                 }
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
-                println!("{PRODUCT} doctor");
-                println!("  version:  {VERSION}");
+                human_println!("{PRODUCT} doctor");
+                human_println!("  version:  {VERSION}");
                 for line in &report.lines {
-                    println!("  {line}");
+                    human_println!("  {line}");
                 }
                 if let Some(models) = available_models {
                     let default_model = harness.effective_model_name();
-                    println!("  models:");
+                    human_println!("  models:");
                     for model in models {
                         let marker = if model.canonical_model == default_model {
                             " (default)"
                         } else {
                             ""
                         };
-                        println!("    {}{}", model.canonical_model, marker);
+                        human_println!("    {}{}", model.canonical_model, marker);
                     }
                     if let Some(error) = &model_catalog_error {
-                        println!("    error: {error}");
+                        human_println!("    error: {error}");
                     }
                 }
-                println!("status: {}", if doctor_ok { "ok" } else { "fail" });
+                human_println!("status: {}", if doctor_ok { "ok" } else { "fail" });
             }
             if !doctor_ok {
                 if let Some(error) = model_catalog_error {
@@ -370,7 +383,7 @@ async fn run() -> anyhow::Result<()> {
                 _ => None,
             };
             let result = harness.run(request).await?;
-            println!(
+            human_println!(
                 "run {} turns={} success={} termination={} summary={}",
                 result.run_id,
                 result.turns,
@@ -378,27 +391,27 @@ async fn run() -> anyhow::Result<()> {
                 result.termination.as_str(),
                 result.summary
             );
-            println!("workspace {}", result.workspace.display());
+            human_println!("workspace {}", result.workspace.display());
             if let Some(artifacts) = &result.artifact_dir {
-                println!("artifacts {}", artifacts.display());
+                human_println!("artifacts {}", artifacts.display());
             }
             if let Some(park) = &result.park {
-                println!("parked reason={}", park.reason);
-                println!("parked question={}", park.question);
+                human_println!("parked reason={}", park.reason);
+                human_println!("parked question={}", park.question);
                 if park.kind == shikigami::ParkKind::Approval {
                     if let Some(approval_id) = &park.approval_id {
-                        println!("parked kind=approval approval_id={approval_id}");
+                        human_println!("parked kind=approval approval_id={approval_id}");
                     } else {
-                        println!("parked kind=approval");
+                        human_println!("parked kind=approval");
                     }
-                    println!("resume with: shikigami run --resume {}", result.run_id);
+                    human_println!("resume with: shikigami run --resume {}", result.run_id);
                     return Err(anyhow::anyhow!(
                         "run parked awaiting approval (exit semantics: non-zero)"
                     ));
                 }
                 if park.kind == shikigami::ParkKind::Plan {
-                    println!("parked kind=plan digest={}", park.plan_digest);
-                    println!(
+                    human_println!("parked kind=plan digest={}", park.plan_digest);
+                    human_println!(
                         "resume with: shikigami run --resume {} --plan-accept|--plan-reject",
                         result.run_id
                     );
@@ -406,7 +419,7 @@ async fn run() -> anyhow::Result<()> {
                         "run parked awaiting plan review (exit semantics: non-zero)"
                     ));
                 }
-                println!(
+                human_println!(
                     "resume with: shikigami run --resume {} --answer \"...\"",
                     result.run_id
                 );
@@ -439,7 +452,7 @@ async fn run() -> anyhow::Result<()> {
                         .map(|step| step.as_str())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    println!(
+                    human_println!(
                         "run {} class={} next=[{}] reason={}",
                         diagnosis.run_id,
                         diagnosis.class.as_str(),
@@ -454,7 +467,7 @@ async fn run() -> anyhow::Result<()> {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&record)?);
                     } else {
-                        println!(
+                        human_println!(
                             "run {} status={} success={:?} turns={} termination={} artifacts={}",
                             record.run_id,
                             record.status,
@@ -472,7 +485,7 @@ async fn run() -> anyhow::Result<()> {
                             .map(|step| step.as_str())
                             .collect::<Vec<_>>()
                             .join(", ");
-                        println!(
+                        human_println!(
                             "diagnosis class={} next=[{}] reason={}",
                             diagnosis.class.as_str(),
                             steps,
@@ -485,7 +498,7 @@ async fn run() -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string_pretty(&records)?);
                     } else {
                         for record in records {
-                            println!(
+                            human_println!(
                                 "{}\t{}\t{}\t{}",
                                 record.run_id,
                                 record.status,
@@ -500,14 +513,14 @@ async fn run() -> anyhow::Result<()> {
         Command::Cancel { run_id } => {
             let registry = shikigami::RunRegistry::new(state.path())?;
             registry.cancel(&run_id)?;
-            println!("cancellation requested for {run_id}");
+            human_println!("cancellation requested for {run_id}");
         }
         Command::Logs { run_id, output } => {
             let registry = shikigami::RunRegistry::new(state.path())?;
             let log = registry.event_log(&run_id)?;
             if let Some(path) = output {
                 std::fs::write(&path, log)?;
-                eprintln!("wrote event journal to {}", path.display());
+                human_eprintln!("wrote event journal to {}", path.display());
             } else {
                 print!("{log}");
             }
@@ -515,7 +528,7 @@ async fn run() -> anyhow::Result<()> {
         Command::Cleanup { run_id, force } => {
             let registry = shikigami::RunRegistry::new(state.path())?;
             registry.clean(&run_id, force)?;
-            println!("cleaned run {run_id}");
+            human_println!("cleaned run {run_id}");
         }
         Command::Artifacts {
             run_id,
@@ -527,7 +540,7 @@ async fn run() -> anyhow::Result<()> {
                     .map_err(|error| anyhow::anyhow!(error))?;
             if let Some(path) = output {
                 std::fs::write(&path, text)?;
-                eprintln!("wrote artifacts to {}", path.display());
+                human_eprintln!("wrote artifacts to {}", path.display());
             } else {
                 print!("{text}");
             }
@@ -546,7 +559,7 @@ async fn run() -> anyhow::Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                println!(
+                human_println!(
                     "eval {} passed={} cases={}/{}",
                     result.suite,
                     result.passed,
@@ -554,7 +567,7 @@ async fn run() -> anyhow::Result<()> {
                     result.passed_cases + result.failed_cases
                 );
                 for case in &result.cases {
-                    println!(
+                    human_println!(
                         "  {}: {}{}",
                         case.name,
                         if case.passed { "ok" } else { "fail" },
@@ -617,7 +630,7 @@ async fn run() -> anyhow::Result<()> {
                     }
                     let layout = QueueLayout::under_state(state.path());
                     layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
-                    println!(
+                    human_println!(
                         "serve intake=filesystem inbox={} health={}",
                         layout.inbox.display(),
                         layout.health.display()
@@ -655,7 +668,7 @@ async fn run() -> anyhow::Result<()> {
                         if token.is_none() {
                             anyhow::bail!("--listen requires --auth-token-env");
                         }
-                        println!(
+                        human_println!(
                             "serve control http={} authenticated={}",
                             addr,
                             token.is_some()
@@ -732,17 +745,23 @@ async fn run() -> anyhow::Result<()> {
                         .await?;
                         let info = prepared.info();
                         if let Some(addr) = info.lifecycle_addr {
-                            println!(
+                            human_println!(
                                 "serve lifecycle http={} file={}",
                                 addr,
                                 info.lifecycle_path.display()
                             );
                         } else {
-                            println!("serve lifecycle file={}", info.lifecycle_path.display());
+                            human_println!(
+                                "serve lifecycle file={}",
+                                info.lifecycle_path.display()
+                            );
                         }
-                        println!(
+                        human_println!(
                             "serve intake=plane runtime={} namespace={} ttl_secs={} worker={}",
-                            info.runtime_id, info.namespace, claim_ttl_secs, info.worker_id
+                            info.runtime_id,
+                            info.namespace,
+                            claim_ttl_secs,
+                            info.worker_id
                         );
                         prepared.run().await?
                     }
@@ -753,12 +772,12 @@ async fn run() -> anyhow::Result<()> {
                     }
                 }
             };
-            println!("serve stopped after {n} job(s)");
+            human_println!("serve stopped after {n} job(s)");
             drop(tx);
         }
         Command::Mcp => {
             // Protocol uses stdout; keep diagnostics on stderr only.
-            eprintln!(
+            human_eprintln!(
                 "{PRODUCT} mcp server (stdio) — tools: doctor, run, run_start, run_status, run_wait"
             );
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
@@ -767,7 +786,7 @@ async fn run() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Acp => {
-            eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
+            human_eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
             shikigami::acp::run_stdio(harness)
                 .await
@@ -790,7 +809,7 @@ async fn run() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!(e))?;
             if let Some(path) = output {
                 std::fs::write(&path, &jsonl)?;
-                eprintln!(
+                human_eprintln!(
                     "wrote transcript {} bytes to {}",
                     jsonl.len(),
                     path.display()
@@ -835,9 +854,12 @@ async fn run() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 let missing = report.missing.join(",");
-                println!(
+                human_println!(
                     "replay-export {} complete={} missing=[{}] reason={}",
-                    report.run_id, report.complete, missing, report.reason
+                    report.run_id,
+                    report.complete,
+                    missing,
+                    report.reason
                 );
             }
         }
@@ -863,7 +885,7 @@ async fn run() -> anyhow::Result<()> {
                     .iter()
                     .filter(|step| step.status == shikigami::ReplayComparisonStatus::Equal)
                     .count();
-                println!(
+                human_println!(
                     "replay {} success={} termination={} terminal={} steps={} equal={} manifest={}",
                     report.run_id,
                     report.success,
@@ -873,7 +895,7 @@ async fn run() -> anyhow::Result<()> {
                     equal,
                     report.manifest_digest
                 );
-                println!("workspace {}", report.workspace);
+                human_println!("workspace {}", report.workspace);
             }
         }
         Command::RunContent {
@@ -890,11 +912,14 @@ async fn run() -> anyhow::Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!(
+                human_println!(
                     "content-run {} success={} termination={} turns={}",
-                    report.run_id, report.success, report.termination, report.turns
+                    report.run_id,
+                    report.success,
+                    report.termination,
+                    report.turns
                 );
-                println!("workspace {}", report.workspace);
+                human_println!("workspace {}", report.workspace);
             }
             if result.run.park.is_some() {
                 return Err(anyhow::anyhow!(
