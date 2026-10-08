@@ -1,14 +1,15 @@
 //! OpenAI-compatible HTTP model adapter.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 
 use shikigami_engine::config::Config;
 use shikigami_engine::content::{
     ContentCapabilitiesV1, ContentDisclosureState, ContentMessageV1, ContentModelTurnV1,
-    ContentPartDescriptor, ContentPartKind, ResolvedContent, ResolvedContentPart,
-    tool_arguments_part_id, validate_messages,
+    ContentPartDescriptor, ContentPartKind, MAX_CONTENT_AGGREGATE_BYTES, MAX_CONTENT_PARTS,
+    ResolvedContent, ResolvedContentPart, sha256_digest, tool_arguments_part_id, validate_messages,
 };
 use shikigami_engine::model::{
     ChatMessage, ModelError, ModelPort, ModelTurn, TokenUsage, ToolCall, effective_model_name,
@@ -413,7 +414,7 @@ fn encode_part(
             let url = data_url(&descriptor.media_type, bytes);
             Ok(serde_json::json!({
                 "type": "image_url",
-                "image_url": { "url": url },
+                "image_url": { "url": url.as_str() },
             }))
         }
         ContentPartKind::Document => match descriptor.media_type.as_str() {
@@ -423,7 +424,7 @@ fn encode_part(
                     "type": "file",
                     "file": {
                         "filename": format!("{}.pdf", descriptor.part_id),
-                        "file_data": data_url(&descriptor.media_type, bytes),
+                        "file_data": data_url(&descriptor.media_type, bytes).as_str(),
                     },
                 }))
             }
@@ -477,8 +478,56 @@ fn resolved_bytes<'a>(
     }
 }
 
-fn data_url(media_type: &str, bytes: &[u8]) -> String {
-    format!("data:{media_type};base64,{}", encode_base64(bytes))
+// One maximum bounded-content history plus per-part data URL headers.
+const MAX_DATA_URL_CACHE_BYTES: usize =
+    (MAX_CONTENT_AGGREGATE_BYTES as usize).div_ceil(3) * 4 + MAX_CONTENT_PARTS * 128;
+
+#[derive(Default)]
+struct DataUrlCache {
+    entries: VecDeque<(String, String, Arc<String>)>,
+}
+
+impl DataUrlCache {
+    fn get_or_encode(&mut self, media_type: &str, digest: String, bytes: &[u8]) -> Arc<String> {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(mime, key, _)| mime == media_type && key == &digest)
+            && let Some(entry) = self.entries.remove(index)
+        {
+            let url = Arc::clone(&entry.2);
+            self.entries.push_back(entry);
+            return url;
+        }
+        let url = Arc::new(format!("data:{media_type};base64,{}", encode_base64(bytes)));
+        if url.len() <= MAX_DATA_URL_CACHE_BYTES {
+            while self.entries.len() >= MAX_CONTENT_PARTS
+                || self
+                    .entries
+                    .iter()
+                    .map(|entry| entry.2.len())
+                    .sum::<usize>()
+                    + url.len()
+                    > MAX_DATA_URL_CACHE_BYTES
+            {
+                self.entries.pop_front();
+            }
+            self.entries
+                .push_back((media_type.to_owned(), digest, Arc::clone(&url)));
+        }
+        url
+    }
+}
+
+fn data_url(media_type: &str, bytes: &[u8]) -> Arc<String> {
+    // ACP reconstructs adapters between prompts. Keep derived encodings in a
+    // bounded process cache; custody and disclosure still resolve on every call.
+    static CACHE: OnceLock<Mutex<DataUrlCache>> = OnceLock::new();
+    let digest = sha256_digest(bytes);
+    match CACHE.get_or_init(Mutex::default).lock() {
+        Ok(mut cache) => cache.get_or_encode(media_type, digest, bytes),
+        Err(_) => Arc::new(format!("data:{media_type};base64,{}", encode_base64(bytes))),
+    }
 }
 
 fn content_kind_name(kind: ContentPartKind) -> &'static str {
@@ -515,6 +564,53 @@ fn encode_base64(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn data_url_cache_evicts_by_recency_and_bounds_retained_bytes() {
+        let mut cache = DataUrlCache::default();
+        let first = cache.get_or_encode("image/png", sha256_digest(b"first"), b"first");
+        for index in 0..MAX_CONTENT_PARTS - 1 {
+            let bytes = index.to_string();
+            cache.get_or_encode(
+                "image/png",
+                sha256_digest(bytes.as_bytes()),
+                bytes.as_bytes(),
+            );
+        }
+        let touched = cache.get_or_encode("image/png", sha256_digest(b"first"), b"first");
+        assert!(Arc::ptr_eq(&first, &touched));
+        cache.get_or_encode("image/png", sha256_digest(b"extra"), b"extra");
+        let retained = cache.get_or_encode("image/png", sha256_digest(b"first"), b"first");
+        assert!(Arc::ptr_eq(&first, &retained));
+        assert_eq!(cache.entries.len(), MAX_CONTENT_PARTS);
+
+        for byte in 0..3 {
+            let payload = vec![byte; shikigami_engine::content::MAX_CONTENT_PART_BYTES as usize];
+            cache.get_or_encode("image/png", sha256_digest(&payload), &payload);
+            assert!(
+                cache
+                    .entries
+                    .iter()
+                    .map(|entry| entry.2.len())
+                    .sum::<usize>()
+                    <= MAX_DATA_URL_CACHE_BYTES
+            );
+        }
+        let reencoded = cache.get_or_encode("image/png", sha256_digest(b"first"), b"first");
+        assert!(!Arc::ptr_eq(&first, &reencoded));
+        assert_eq!(first, reencoded);
+    }
+
+    #[test]
+    fn data_url_reuses_encoding_for_the_same_bytes_and_media_type() {
+        let first = data_url("image/png", b"encoding-reuse-regression");
+        let second = data_url("image/png", b"encoding-reuse-regression");
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        let other_bytes = data_url("image/png", b"changed-payload");
+        let other_mime = data_url("application/pdf", b"encoding-reuse-regression");
+        assert_ne!(first, other_bytes);
+        assert_ne!(first, other_mime);
+    }
+
     use super::*;
     use shikigami_engine::config::Config;
 
