@@ -7,6 +7,29 @@ intake is the Rust embedding API. The CLI adds a thin process host
 Content replay is still unsupported. `replay-export` reports content runs as
 incomplete (`missing: ["content"]`).
 
+## Upgrading from 1.x
+
+Version 2.0 changes the public `ResolvedContent::Bytes` enum payload from
+`Vec<u8>` to `content::Bytes`, the re-exported immutable `bytes::Bytes` buffer.
+Downstream construction and typed match bindings must migrate:
+
+```rust
+use shikigami::content::{Bytes, ResolvedContent};
+
+let payload: Vec<u8> = vec![1, 2, 3];
+let resolved = ResolvedContent::Bytes(payload.into());
+if let ResolvedContent::Bytes(buffer) = resolved {
+    let buffer: Bytes = buffer;
+    let borrowed: &[u8] = buffer.as_ref();
+    let owned: Vec<u8> = borrowed.to_vec();
+    assert_eq!(owned, vec![1, 2, 3]);
+}
+```
+
+Pass a borrowed slice when ownership is unnecessary; `.to_vec()` copies.
+`Bytes::clone()` shares the allocation. The descriptor, settings, and content
+wire schemas remain v1; this migration affects the Rust library source API.
+
 ## Before you start
 
 Binary resolver payloads use `ResolvedContent::Bytes(content::Bytes)`, an
