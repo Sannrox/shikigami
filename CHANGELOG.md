@@ -169,7 +169,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI renders control characters as visible replacement marks so assistant,
   tool, and permission text cannot execute terminal escape sequences.
 - ACP rejects invalid session mode mappings before creating or freezing a
-  session, leaving a rejected first prompt available for a valid retry.
+  session. Compatibility: invalid mappings now return `-32602` at `session/new`
+  (no session created) or first `session/prompt` (unfrozen for retry), replacing
+  the earlier late `-32603` on `session/prompt`. Clients spanning versions must
+  handle both codes for this mapping error and rejection at either method.
 
 - Nested parent cancel/timeout waits until `wait=false` children are
   inactive, including children whose JoinHandles were detached across
