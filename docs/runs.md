@@ -78,7 +78,24 @@ removes its temporary workspace.
 | `multi_edit` | Several unique replacements in one file, computed before writing. |
 | `apply_patch` | Replacements with optional surrounding context, computed across files before writing. |
 
-Matching is exact and fails on zero or multiple matches. Consistently CRLF
+`edit` and `multi_edit` try exact matching first. A unique exact match succeeds;
+multiple exact matches fail without trying normalization. Only zero exact matches
+allow a unique normalized match. This supersedes the exact-only policy in #79
+as accepted in #415. The fixed normalization set is:
+
+- Ignore trailing whitespace on each line except CR.
+- Map U+2018–U+201B and U+201C–U+201F to ASCII single and double quotes.
+- Map U+2010–U+2015 and U+2212 to ASCII hyphen.
+- Map U+00A0, U+1680, U+2000–U+200A, U+202F, U+205F, and U+3000 to space.
+
+There is no case folding, indentation normalization, NFKC, or fuzzy matching.
+Normalized ambiguity fails closed, including overlapping candidates; its
+`match_count` is 2 (at least two), because searching stops at ambiguity.
+A normalized replacement changes only its matched original span and reports
+`normalized match` in the tool response. Unmatched lines retain their bytes.
+`apply_patch` remains exact, including its context.
+
+Consistently CRLF
 files accept LF or CRLF edit fragments and retain CRLF when written, including
 untouched lines. Mixed-ending files are matched byte-for-byte without line-ending
 normalization. Path and plan-jail permissions still apply. A failed match writes
@@ -87,7 +104,7 @@ nothing; `multi_edit` and `apply_patch` currently match hunks sequentially.
 Each completed edit-tool execution attempt emits an argument-free
 `edit_outcome` journal record. `edit_outcome` contains `tool`, `model`,
 `outcome`, and an optional `match_count` for match failures. Outcomes are
-`applied`, `no_match`, `ambiguous`, `invalid_input`, `limit`, and `io`.
+`applied`, `applied_normalized`, `no_match`, `ambiguous`, `invalid_input`, `limit`, and `io`.
 `model` is the configured effective model alias, including `auto` when routing
 is delegated; it is not a claim about the provider model chosen by the plane.
 No path, `old`, `new`, context, tool arguments, or error text is stored in this
@@ -100,7 +117,7 @@ Count failures by model, tool, and reason across retained run journals:
 ```sh
 jq -s '
   [ .[] | select(.event == "edit_outcome") | .edit_outcome
-    | select(.outcome != "applied") ]
+    | select(.outcome != "applied" and .outcome != "applied_normalized") ]
   | group_by([.model, .tool, .outcome])
   | map({model: .[0].model, tool: .[0].tool,
          outcome: .[0].outcome, count: length})

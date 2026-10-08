@@ -1,6 +1,7 @@
 //! Filesystem tools: read/write/edit/patch/glob/grep and path resolve.
 
 use std::borrow::Cow;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -82,6 +83,103 @@ pub(crate) struct GrepArgs {
     pub(crate) path: Option<PathBuf>,
     #[serde(default)]
     pub(crate) max_matches: Option<usize>,
+}
+
+pub(crate) struct AppliedEdits {
+    pub(crate) count: usize,
+    pub(crate) normalized: bool,
+}
+
+struct EditMatch {
+    span: Range<usize>,
+    normalized: bool,
+}
+
+// Each normalized byte boundary maps back to a boundary in the original text.
+// Dropped trailing whitespace belongs to the preceding matched line.
+struct NormalizedText {
+    text: String,
+    offsets: Vec<usize>,
+}
+
+impl NormalizedText {
+    fn new(input: &str) -> Self {
+        let mut text = String::with_capacity(input.len());
+        let mut offsets = Vec::with_capacity(input.len() + 1);
+        let mut base = 0;
+        for line in input.split_inclusive('\n') {
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            let trimmed = body.trim_end_matches(|ch: char| ch.is_whitespace() && ch != '\r');
+            for (index, ch) in trimmed.char_indices() {
+                let normalized = match ch {
+                    '\u{2018}'..='\u{201b}' => '\'',
+                    '\u{201c}'..='\u{201f}' => '"',
+                    '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+                    '\u{a0}'
+                    | '\u{1680}'
+                    | '\u{2000}'..='\u{200a}'
+                    | '\u{202f}'
+                    | '\u{205f}'
+                    | '\u{3000}' => ' ',
+                    other => other,
+                };
+                text.push(normalized);
+                for byte in 0..normalized.len_utf8() {
+                    offsets.push(base + index + if ch == normalized { byte } else { 0 });
+                }
+            }
+            if line.ends_with('\n') {
+                text.push('\n');
+                offsets.push(base + body.len());
+            }
+            base += line.len();
+        }
+        offsets.push(input.len());
+        Self { text, offsets }
+    }
+}
+
+fn locate_edit(text: &str, old: &str) -> Result<EditMatch, usize> {
+    let count = text.matches(old).count();
+    if count == 1
+        && let Some(start) = text.find(old)
+    {
+        return Ok(EditMatch {
+            span: start..start + old.len(),
+            normalized: false,
+        });
+    }
+    if count != 0 {
+        return Err(count);
+    }
+    let normalized = NormalizedText::new(text);
+    let needle = NormalizedText::new(old).text;
+    if needle.is_empty() {
+        return Err(0);
+    }
+    let Some(start) = normalized.text.find(&needle) else {
+        return Err(0);
+    };
+    // Search again one character later, so overlapping candidates also fail.
+    let next = start
+        + normalized.text[start..]
+            .chars()
+            .next()
+            .map_or(0, char::len_utf8);
+    if normalized.text[next..].contains(&needle) {
+        return Err(2);
+    }
+    let end = start + needle.len();
+    // A trailing newline ends its own line, before whitespace on the next one.
+    let original_end = if needle.ends_with('\n') {
+        normalized.offsets[end - 1] + 1
+    } else {
+        normalized.offsets[end]
+    };
+    Ok(EditMatch {
+        span: normalized.offsets[start]..original_end,
+        normalized: true,
+    })
 }
 
 // Only consistently CRLF files opt into LF matching. Mixed endings stay exact.
@@ -178,34 +276,48 @@ impl ToolExecutor {
         Ok(())
     }
 
-    pub(crate) fn edit(&self, path: &Path, old: &str, new: &str) -> Result<(), ToolError> {
-        let (text, crlf) = lf_file_text(self.read_file(path)?);
+    pub(crate) fn edit(
+        &self,
+        path: &Path,
+        old: &str,
+        new: &str,
+    ) -> Result<AppliedEdits, ToolError> {
+        let (mut text, crlf) = lf_file_text(self.read_file(path)?);
         let old = edit_fragment(old, crlf);
         let new = edit_fragment(new, crlf);
-        let count = text.matches(old.as_ref()).count();
-        if count != 1 {
-            return Err(ToolError::EditMatch { count });
-        }
-        let updated = restore_line_endings(text.replacen(old.as_ref(), new.as_ref(), 1), crlf);
-        self.write_file(path, &updated)
+        let found =
+            locate_edit(&text, old.as_ref()).map_err(|count| ToolError::EditMatch { count })?;
+        text.replace_range(found.span, new.as_ref());
+        self.write_file(path, &restore_line_endings(text, crlf))?;
+        Ok(AppliedEdits {
+            count: 1,
+            normalized: found.normalized,
+        })
     }
 
-    pub(crate) fn multi_edit(&self, path: &Path, edits: &[EditHunk]) -> Result<usize, ToolError> {
+    pub(crate) fn multi_edit(
+        &self,
+        path: &Path,
+        edits: &[EditHunk],
+    ) -> Result<AppliedEdits, ToolError> {
         if edits.is_empty() {
             return Err(ToolError::MultiEditEmpty);
         }
         let (mut text, crlf) = lf_file_text(self.read_file(path)?);
+        let mut normalized = false;
         for (index, hunk) in edits.iter().enumerate() {
             let old = edit_fragment(&hunk.old, crlf);
             let new = edit_fragment(&hunk.new, crlf);
-            let count = text.matches(old.as_ref()).count();
-            if count != 1 {
-                return Err(ToolError::MultiEditMatch { index, count });
-            }
-            text = text.replacen(old.as_ref(), new.as_ref(), 1);
+            let found = locate_edit(&text, old.as_ref())
+                .map_err(|count| ToolError::MultiEditMatch { index, count })?;
+            normalized |= found.normalized;
+            text.replace_range(found.span, new.as_ref());
         }
         self.write_file(path, &restore_line_endings(text, crlf))?;
-        Ok(edits.len())
+        Ok(AppliedEdits {
+            count: edits.len(),
+            normalized,
+        })
     }
 
     /// Apply structured context hunks atomically across files (compute then write).

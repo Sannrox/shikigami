@@ -354,18 +354,23 @@ async fn edit_outcomes_are_redacted_and_attributed_in_the_run_journal() {
     for name in ["edit", "multi_edit", "apply_patch"] {
         for outcome in [
             "applied",
+            "applied_normalized",
             "no_match",
             "ambiguous",
             "invalid_input",
             "limit",
             "io",
-        ] {
+        ]
+        .into_iter()
+        .filter(|outcome| name != "apply_patch" || *outcome != "applied_normalized")
+        {
             let dir = tempdir().unwrap();
             let workspace = dir.path().join("workspace");
             std::fs::create_dir(&workspace).unwrap();
             let path = workspace.join("secret-path.txt");
             match outcome {
                 "applied" | "invalid_input" => std::fs::write(&path, "secret-old\n").unwrap(),
+                "applied_normalized" => std::fs::write(&path, "secret–old\n").unwrap(),
                 "no_match" => std::fs::write(&path, "unmatched\n").unwrap(),
                 "ambiguous" => std::fs::write(&path, "secret-old\nsecret-old\n").unwrap(),
                 "limit" => std::fs::File::create(&path)

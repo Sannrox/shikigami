@@ -16,7 +16,7 @@ use super::fs::{
     MultiEditArgs, PathArgs, WriteArgs,
 };
 use super::path::load_ignore_patterns;
-use super::{ParkRequest, Report, ToolError, ToolOutput, parse};
+use super::{EditOutcome, ExecutedTool, ParkRequest, Report, ToolError, ToolOutput, parse};
 use crate::config::SandboxSettings;
 use crate::sandbox::Sandbox;
 
@@ -85,7 +85,7 @@ impl ToolExecutor {
         &self,
         name: &str,
         args_json: &str,
-    ) -> Result<ToolOutput, ToolError> {
+    ) -> Result<ExecutedTool, ToolError> {
         if !self.enabled.iter().any(|e| e == name) {
             return Err(ToolError::Disabled(name.into()));
         }
@@ -93,7 +93,8 @@ impl ToolExecutor {
         if !builtin_catalog().iter().any(|d| d.name == name) {
             return Err(ToolError::UnknownTool(name.into()));
         }
-        match name {
+        let mut edit_outcome = None;
+        let output = match name {
             "read_file" => {
                 let args: PathArgs = parse(name, args_json)?;
                 Ok(ToolOutput::Text(self.read_file(&args.path)?))
@@ -105,13 +106,38 @@ impl ToolExecutor {
             }
             "edit" => {
                 let args: EditArgs = parse(name, args_json)?;
-                self.edit(&args.path, &args.old, &args.new)?;
-                Ok(ToolOutput::Text("file edited".into()))
+                let applied = self.edit(&args.path, &args.old, &args.new)?;
+                edit_outcome = Some(if applied.normalized {
+                    EditOutcome::AppliedNormalized
+                } else {
+                    EditOutcome::Applied
+                });
+                Ok(ToolOutput::Text(
+                    if applied.normalized {
+                        "file edited (normalized match)"
+                    } else {
+                        "file edited"
+                    }
+                    .into(),
+                ))
             }
             "multi_edit" => {
                 let args: MultiEditArgs = parse(name, args_json)?;
-                let n = self.multi_edit(&args.path, &args.edits)?;
-                Ok(ToolOutput::Text(format!("{n} edits applied")))
+                let applied = self.multi_edit(&args.path, &args.edits)?;
+                edit_outcome = Some(if applied.normalized {
+                    EditOutcome::AppliedNormalized
+                } else {
+                    EditOutcome::Applied
+                });
+                let suffix = if applied.normalized {
+                    " (normalized match)"
+                } else {
+                    ""
+                };
+                Ok(ToolOutput::Text(format!(
+                    "{} edits applied{suffix}",
+                    applied.count
+                )))
             }
             "apply_patch" => {
                 if args_json.len() > MAX_APPLY_PATCH_BYTES {
@@ -168,7 +194,11 @@ impl ToolExecutor {
                 Ok(ToolOutput::Park(park))
             }
             other => Err(ToolError::UnknownTool(other.into())),
-        }
+        }?;
+        Ok(ExecutedTool {
+            output,
+            edit_outcome,
+        })
     }
 
     async fn bash(&self, script: &str, limit: Duration) -> Result<String, ToolError> {

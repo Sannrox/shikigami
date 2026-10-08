@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `edit` and `multi_edit` retry zero exact matches with a fixed normalization
+  set for trailing whitespace, Unicode quotes, dashes, and spaces. Only unique
+  matches succeed; unmatched lines retain their bytes. Normalized successes
+  report `normalized match` and the `applied_normalized` journal outcome.
+  `apply_patch` remains exact.
+
 - HTTP image/PDF turns reuse base64 data URLs from a bounded process cache
   across follow-up prompts. Payload resolution and disclosure checks still
   run on each call; cached encodings expire by eviction or process exit.

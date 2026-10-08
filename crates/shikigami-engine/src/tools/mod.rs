@@ -49,6 +49,13 @@ pub enum ToolOutput {
     Park(ParkRequest),
 }
 
+// Private execution metadata lets the run journal keep typed outcomes without
+// changing the public tool output contract.
+pub(crate) struct ExecutedTool {
+    pub(crate) output: ToolOutput,
+    pub(crate) edit_outcome: Option<EditOutcome>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub summary: String,
@@ -71,6 +78,7 @@ pub struct ParkRequest {
 #[serde(rename_all = "snake_case")]
 pub enum EditOutcome {
     Applied,
+    AppliedNormalized,
     NoMatch,
     Ambiguous,
     InvalidInput,
@@ -922,6 +930,96 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn edit_normalization_is_unique_and_preserves_unmatched_lines() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["edit", "multi_edit"]);
+        let prefix = "untouched ‘quote’—\u{a0}  \n";
+        let suffix = "other “quote”\t\n";
+        for name in ["edit", "multi_edit"] {
+            for (source, old) in [
+                ("alpha \t\nbeta", "alpha\nbeta"),
+                ("“a” ‘b’", "\"a\" 'b'"),
+                ("🙂left—right−tail", "🙂left-right-tail"),
+                (
+                    "a\u{a0}b\u{2002}c\u{2003}d\u{2009}e\u{3000}f",
+                    "a b c d e f",
+                ),
+            ] {
+                let original = format!("{prefix}{source}\n{suffix}");
+                std::fs::write(dir.path().join("file.txt"), &original).unwrap();
+                let args = if name == "edit" {
+                    serde_json::json!({"path":"file.txt", "old":old, "new":"changed"})
+                } else {
+                    serde_json::json!({"path":"file.txt", "edits":[{"old":old, "new":"changed"}]})
+                };
+                let ToolOutput::Text(output) =
+                    tools.execute(name, &args.to_string()).await.unwrap()
+                else {
+                    panic!("text expected")
+                };
+                assert!(output.contains("normalized"), "{name}: {output}");
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+                    format!("{prefix}changed\n{suffix}"),
+                    "{name}"
+                );
+            }
+        }
+
+        for name in ["edit", "multi_edit"] {
+            for suffix in ["   \nkeep", "   "] {
+                std::fs::write(dir.path().join("file.txt"), format!("‘a’\n{suffix}")).unwrap();
+                let args = if name == "edit" {
+                    serde_json::json!({"path":"file.txt", "old":"'a'\n", "new":"x\n"})
+                } else {
+                    serde_json::json!({"path":"file.txt", "edits":[{"old":"'a'\n", "new":"x\n"}]})
+                };
+                tools.execute(name, &args.to_string()).await.unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+                    format!("x\n{suffix}")
+                );
+            }
+        }
+
+        let args = r#"{"path":"file.txt","old":"'a'","new":"changed"}"#;
+        std::fs::write(dir.path().join("file.txt"), "‘a’\n'a'\n").unwrap();
+        let ToolOutput::Text(output) = tools.execute("edit", args).await.unwrap() else {
+            panic!("text expected")
+        };
+        assert!(!output.contains("normalized"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+            "‘a’\nchanged\n"
+        );
+        for original in ["'a'\n'a'\n‘a’\n", "‘a’\n’a’\n"] {
+            std::fs::write(dir.path().join("file.txt"), original).unwrap();
+            assert!(matches!(
+                tools.execute("edit", args).await,
+                Err(ToolError::EditMatch { count: 2 })
+            ));
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+                original
+            );
+        }
+        std::fs::write(dir.path().join("file.txt"), "a–a–a").unwrap();
+        assert!(matches!(
+            tools
+                .execute("edit", r#"{"path":"file.txt","old":"a-a","new":"x"}"#)
+                .await,
+            Err(ToolError::EditMatch { count: 2 })
+        ));
+        let original = "‘a’ b\n";
+        std::fs::write(dir.path().join("file.txt"), original).unwrap();
+        assert!(tools.execute("multi_edit", r#"{"path":"file.txt","edits":[{"old":"'a'","new":"x"},{"old":"missing","new":"y"}]}"#).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file.txt")).unwrap(),
+            original
+        );
     }
 
     #[tokio::test]
