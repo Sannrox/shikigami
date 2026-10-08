@@ -185,6 +185,9 @@ fn format_event(event: &HarnessEvent) -> String {
                 format!("tool_end={name} ok={ok} call_id={call_id}")
             }
         }
+        HarnessEvent::EditOutcome { record } => {
+            format!("edit_outcome={} {:?}", record.tool, record.outcome)
+        }
         HarnessEvent::ModelTurn { turn, .. } => format!("model_turn={turn}"),
         HarnessEvent::ContentTurn {
             turn, part_count, ..

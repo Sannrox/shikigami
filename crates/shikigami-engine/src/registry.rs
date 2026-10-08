@@ -114,6 +114,8 @@ pub struct RunEventRecord {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_outcome: Option<crate::events::EditOutcomeRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +609,10 @@ impl RunRegistry {
             event: event_name(event).into(),
             detail: event_detail(event),
             call_id: event_call_id(event),
+            edit_outcome: match event {
+                HarnessEvent::EditOutcome { record } => Some(record.clone()),
+                _ => None,
+            },
         };
         let Ok(mut line) = serde_json::to_string(&record) else {
             return;
@@ -784,6 +790,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::Status { .. } => "status",
         HarnessEvent::ToolStart { .. } => "tool_start",
         HarnessEvent::ToolEnd { .. } => "tool_end",
+        HarnessEvent::EditOutcome { .. } => "edit_outcome",
         HarnessEvent::ModelTurn { .. } => "model_turn",
         HarnessEvent::ContentTurn { .. } => "content_turn",
         HarnessEvent::Message { .. } => "message",
@@ -798,6 +805,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
 
 fn event_detail(event: &HarnessEvent) -> Option<String> {
     let detail = match event {
+        HarnessEvent::EditOutcome { .. } => return None,
         HarnessEvent::Status { status } => status.clone(),
         HarnessEvent::ToolStart { name, call_id, .. } => {
             if call_id.is_empty() {

@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Edit-tool execution attempts emit redacted `edit_outcome` journal metadata
+  with the configured model alias, outcome, and match-failure count. Journal
+  schema v1 gains an optional object; live events gain `EditOutcome`, and
+  patch errors gain structured `ApplyPatchMatch` / `ApplyPatchLimit` variants.
+
 - HTTP model adapter reads image and PDF content turns and advertises
   `promptCapabilities.image` and `embeddedContext`. Audio stays false.
   Image parts are posted as `image_url` data URLs; PDFs as `file` `file_data`.
@@ -128,6 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway ([`examples/cliproxy-http.toml`](examples/cliproxy-http.toml)).
 
 ### Fixed
+
+- `edit`, `multi_edit`, and `apply_patch` accept LF fragments on consistently
+  CRLF files and preserve CRLF output. Mixed-ending files remain exact.
 
 - ACP rejects empty attachment files and resource text at admission with a
   clear invalid-parameter error, before creating a content run.

@@ -781,8 +781,31 @@ impl<'a> DurableToolBatch<'a> {
                         )
                         .await
                         {
-                            Ok(Ok(output)) => Ok(output),
-                            Ok(Err(error)) => Err(error.to_string()),
+                            Ok(result) => {
+                                if matches!(
+                                    call.name.as_str(),
+                                    "edit" | "multi_edit" | "apply_patch"
+                                ) {
+                                    let (outcome, match_count) = match &result {
+                                        Ok(_) => (tools::EditOutcome::Applied, None),
+                                        Err(error) => error.edit_outcome(),
+                                    };
+                                    self.engine.emit(
+                                        &session.run_id,
+                                        HarnessEvent::EditOutcome {
+                                            record: crate::events::EditOutcomeRecord {
+                                                tool: call.name.clone(),
+                                                model: crate::model::effective_model_name(
+                                                    &self.engine.config,
+                                                ),
+                                                outcome,
+                                                match_count,
+                                            },
+                                        },
+                                    );
+                                }
+                                result.map_err(|error| error.to_string())
+                            }
                             Err(error) => {
                                 flush_pending_background_children(
                                     self.engine,

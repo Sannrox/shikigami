@@ -115,7 +115,7 @@ impl ToolExecutor {
             }
             "apply_patch" => {
                 if args_json.len() > MAX_APPLY_PATCH_BYTES {
-                    return Err(ToolError::ApplyPatch(format!(
+                    return Err(ToolError::ApplyPatchLimit(format!(
                         "payload exceeds {MAX_APPLY_PATCH_BYTES} bytes"
                     )));
                 }
