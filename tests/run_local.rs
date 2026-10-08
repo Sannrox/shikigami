@@ -348,3 +348,80 @@ async fn denied_tool_authorization_does_not_execute() {
         "denied write_file must not create the file"
     );
 }
+
+#[tokio::test]
+async fn edit_outcomes_are_redacted_and_attributed_in_the_run_journal() {
+    for name in ["edit", "multi_edit", "apply_patch"] {
+        for outcome in [
+            "applied",
+            "no_match",
+            "ambiguous",
+            "invalid_input",
+            "limit",
+            "io",
+        ] {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let path = workspace.join("secret-path.txt");
+            match outcome {
+                "applied" | "invalid_input" => std::fs::write(&path, "secret-old\n").unwrap(),
+                "no_match" => std::fs::write(&path, "unmatched\n").unwrap(),
+                "ambiguous" => std::fs::write(&path, "secret-old\nsecret-old\n").unwrap(),
+                "limit" => std::fs::File::create(&path)
+                    .unwrap()
+                    .set_len(2 * 1024 * 1024 + 1)
+                    .unwrap(),
+                _ => {}
+            }
+            let hunk = serde_json::json!({"old":"secret-old\n", "new":"secret-new\n"});
+            let args = if outcome == "invalid_input" {
+                "not-json-secret".to_owned()
+            } else {
+                match name {
+                    "edit" => serde_json::json!({"path":"secret-path.txt", "old":"secret-old\n", "new":"secret-new\n"}),
+                    "multi_edit" => serde_json::json!({"path":"secret-path.txt", "edits":[hunk]}),
+                    _ => serde_json::json!({"patches":[{"path":"secret-path.txt", "hunks":[hunk]}]}),
+                }.to_string()
+            };
+            let mut config = Config::default();
+            config.governance.adapter = "local".into();
+            config.model.adapter = "scripted".into();
+            config.model.model = "edit-test-model".into();
+            config.events.adapter = "none".into();
+            config.workspace.adapter = "inplace".into();
+            config.workspace.root = workspace.to_string_lossy().into_owned();
+            config.model.script_json = Some(serde_json::json!([
+                {"tool_calls":[{"name":name, "args_json":args}]},
+                {"tool_calls":[{"name":"report", "args_json":"{\"summary\":\"done\",\"success\":true}"}]}
+            ]).to_string());
+            let harness =
+                Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+            let result = harness
+                .run(RunRequest::new("test edit outcomes"))
+                .await
+                .unwrap();
+            let journal = harness.registry.event_log(&result.run_id).unwrap();
+            assert!(!journal.contains("secret-"), "{journal}");
+            let records: Vec<serde_json::Value> = journal
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let edits: Vec<_> = records
+                .iter()
+                .filter(|record| record["event"] == "edit_outcome")
+                .collect();
+            assert_eq!(edits.len(), 1, "{name} {outcome}: {journal}");
+            assert_eq!(edits[0]["edit_outcome"]["tool"], name);
+            assert_eq!(edits[0]["edit_outcome"]["model"], "edit-test-model");
+            assert_eq!(edits[0]["edit_outcome"]["outcome"], outcome);
+            if let Some(count) = match outcome {
+                "no_match" => Some(0),
+                "ambiguous" => Some(2),
+                _ => None,
+            } {
+                assert_eq!(edits[0]["edit_outcome"]["match_count"], count);
+            }
+        }
+    }
+}

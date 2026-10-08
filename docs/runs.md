@@ -70,6 +70,49 @@ untracked files from the retained patch. File contents are not copied into the
 manifest. The manifest and patch are retained even when a successful run
 removes its temporary workspace.
 
+## Edit tools and outcomes
+
+| Tool | Use |
+| --- | --- |
+| `edit` | One unique `old`/`new` replacement in a file. |
+| `multi_edit` | Several unique replacements in one file, computed before writing. |
+| `apply_patch` | Replacements with optional surrounding context, computed across files before writing. |
+
+Matching is exact and fails on zero or multiple matches. Consistently CRLF
+files accept LF or CRLF edit fragments and retain CRLF when written, including
+untouched lines. Mixed-ending files are matched byte-for-byte without line-ending
+normalization. Path and plan-jail permissions still apply. A failed match writes
+nothing; `multi_edit` and `apply_patch` currently match hunks sequentially.
+
+Each completed edit-tool execution attempt emits an argument-free
+`edit_outcome` journal record. `edit_outcome` contains `tool`, `model`,
+`outcome`, and an optional `match_count` for match failures. Outcomes are
+`applied`, `no_match`, `ambiguous`, `invalid_input`, `limit`, and `io`.
+`model` is the configured effective model alias, including `auto` when routing
+is delegated; it is not a claim about the provider model chosen by the plane.
+No path, `old`, `new`, context, tool arguments, or error text is stored in this
+metadata. Authorization denials and parked calls that have not executed remain
+in the existing lifecycle events rather than counting as matcher failures.
+Events are best-effort operational observations, not governed receipts.
+
+Count failures by model, tool, and reason across retained run journals:
+
+```sh
+jq -s '
+  [ .[] | select(.event == "edit_outcome") | .edit_outcome
+    | select(.outcome != "applied") ]
+  | group_by([.model, .tool, .outcome])
+  | map({model: .[0].model, tool: .[0].tool,
+         outcome: .[0].outcome, count: length})
+' "${SHIKIGAMI_STATE:-.shikigami-state}"/runs/*/events.jsonl
+```
+
+Compatibility: journal schema v1 gains the optional `edit_outcome` object and
+new event name; older records omit it. Readers should ignore unknown event
+names and optional fields. Live `HarnessEvent` consumers must handle the
+additive `EditOutcome` variant. `ToolError` now distinguishes structured
+`ApplyPatchMatch` and `ApplyPatchLimit` variants from invalid patch input.
+
 ## HTTP control and intake
 
 Filesystem serve can expose a small authenticated operator surface:

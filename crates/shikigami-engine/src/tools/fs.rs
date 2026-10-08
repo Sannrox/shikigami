@@ -1,5 +1,6 @@
 //! Filesystem tools: read/write/edit/patch/glob/grep and path resolve.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -83,6 +84,32 @@ pub(crate) struct GrepArgs {
     pub(crate) max_matches: Option<usize>,
 }
 
+// Only consistently CRLF files opt into LF matching. Mixed endings stay exact.
+fn lf_file_text(text: String) -> (String, bool) {
+    let crlf = text.contains("\r\n") && text.split("\r\n").all(|line| !line.contains(['\r', '\n']));
+    if crlf {
+        (text.replace("\r\n", "\n"), true)
+    } else {
+        (text, false)
+    }
+}
+
+fn edit_fragment(text: &str, crlf: bool) -> Cow<'_, str> {
+    if crlf {
+        Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+fn restore_line_endings(text: String, crlf: bool) -> String {
+    if crlf {
+        text.replace('\n', "\r\n")
+    } else {
+        text
+    }
+}
+
 impl ToolExecutor {
     pub(crate) fn resolve(&self, relative: &Path) -> Result<PathBuf, ToolError> {
         self.resolve_path(relative, false)
@@ -152,12 +179,14 @@ impl ToolExecutor {
     }
 
     pub(crate) fn edit(&self, path: &Path, old: &str, new: &str) -> Result<(), ToolError> {
-        let text = self.read_file(path)?;
-        let count = text.matches(old).count();
+        let (text, crlf) = lf_file_text(self.read_file(path)?);
+        let old = edit_fragment(old, crlf);
+        let new = edit_fragment(new, crlf);
+        let count = text.matches(old.as_ref()).count();
         if count != 1 {
             return Err(ToolError::EditMatch { count });
         }
-        let updated = text.replacen(old, new, 1);
+        let updated = restore_line_endings(text.replacen(old.as_ref(), new.as_ref(), 1), crlf);
         self.write_file(path, &updated)
     }
 
@@ -165,15 +194,17 @@ impl ToolExecutor {
         if edits.is_empty() {
             return Err(ToolError::MultiEditEmpty);
         }
-        let mut text = self.read_file(path)?;
+        let (mut text, crlf) = lf_file_text(self.read_file(path)?);
         for (index, hunk) in edits.iter().enumerate() {
-            let count = text.matches(&hunk.old).count();
+            let old = edit_fragment(&hunk.old, crlf);
+            let new = edit_fragment(&hunk.new, crlf);
+            let count = text.matches(old.as_ref()).count();
             if count != 1 {
                 return Err(ToolError::MultiEditMatch { index, count });
             }
-            text = text.replacen(&hunk.old, &hunk.new, 1);
+            text = text.replacen(old.as_ref(), new.as_ref(), 1);
         }
-        self.write_file(path, &text)?;
+        self.write_file(path, &restore_line_endings(text, crlf))?;
         Ok(edits.len())
     }
 
@@ -185,7 +216,7 @@ impl ToolExecutor {
             ));
         }
         if patches.len() > MAX_APPLY_PATCH_FILES {
-            return Err(ToolError::ApplyPatch(format!(
+            return Err(ToolError::ApplyPatchLimit(format!(
                 "at most {MAX_APPLY_PATCH_FILES} files per call"
             )));
         }
@@ -194,7 +225,7 @@ impl ToolExecutor {
             return Err(ToolError::ApplyPatch("no hunks provided".into()));
         }
         if total_hunks > MAX_APPLY_PATCH_HUNKS {
-            return Err(ToolError::ApplyPatch(format!(
+            return Err(ToolError::ApplyPatchLimit(format!(
                 "at most {MAX_APPLY_PATCH_HUNKS} hunks per call"
             )));
         }
@@ -213,7 +244,7 @@ impl ToolExecutor {
                     file.path
                 )));
             }
-            let mut text = self.read_file(&path)?;
+            let (mut text, crlf) = lf_file_text(self.read_file(&path)?);
             for (index, hunk) in file.hunks.iter().enumerate() {
                 let before = hunk.context_before.as_deref().unwrap_or("");
                 let after = hunk.context_after.as_deref().unwrap_or("");
@@ -223,18 +254,18 @@ impl ToolExecutor {
                         file.path
                     )));
                 }
-                let needle = format!("{before}{}{after}", hunk.old);
+                let needle =
+                    edit_fragment(&format!("{before}{}{after}", hunk.old), crlf).into_owned();
                 let count = text.matches(&needle).count();
                 if count != 1 {
-                    return Err(ToolError::ApplyPatch(format!(
-                        "{} hunk {index}: expected exactly one match for context+old+context, found {count}",
-                        file.path
-                    )));
+                    return Err(ToolError::ApplyPatchMatch { path, index, count });
                 }
-                let replacement = format!("{before}{}{after}", hunk.new);
+                let replacement =
+                    edit_fragment(&format!("{before}{}{after}", hunk.new), crlf).into_owned();
                 text = text.replacen(&needle, &replacement, 1);
                 applied += 1;
             }
+            let text = restore_line_endings(text, crlf);
             if text.len() as u64 > MAX_FILE_BYTES {
                 return Err(ToolError::FileTooLarge(path));
             }

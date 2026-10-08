@@ -66,6 +66,18 @@ pub struct ParkRequest {
     pub question: String,
 }
 
+/// Argument-free outcome of one edit-tool execution attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditOutcome {
+    Applied,
+    NoMatch,
+    Ambiguous,
+    InvalidInput,
+    Limit,
+    Io,
+}
+
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error("invalid arguments for {tool}: {source}")]
@@ -90,6 +102,16 @@ pub enum ToolError {
     MultiEditEmpty,
     #[error("apply_patch: {0}")]
     ApplyPatch(String),
+    #[error("apply_patch: {0}")]
+    ApplyPatchLimit(String),
+    #[error(
+        "apply_patch: {path} hunk {index}: expected exactly one match for context+old+context, found {count}"
+    )]
+    ApplyPatchMatch {
+        path: PathBuf,
+        index: usize,
+        count: usize,
+    },
     #[error("bash timed out after {0:?}")]
     BashTimeout(Duration),
     #[error("bash output exceeded limit")]
@@ -108,6 +130,26 @@ pub enum ToolError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Message(String),
+}
+
+impl ToolError {
+    pub(crate) fn edit_outcome(&self) -> (EditOutcome, Option<usize>) {
+        match self {
+            Self::EditMatch { count }
+            | Self::MultiEditMatch { count, .. }
+            | Self::ApplyPatchMatch { count, .. } => (
+                if *count == 0 {
+                    EditOutcome::NoMatch
+                } else {
+                    EditOutcome::Ambiguous
+                },
+                Some(*count),
+            ),
+            Self::FileTooLarge(_) | Self::ApplyPatchLimit(_) => (EditOutcome::Limit, None),
+            Self::Io(_) => (EditOutcome::Io, None),
+            _ => (EditOutcome::InvalidInput, None),
+        }
+    }
 }
 
 pub(crate) fn parse<T: for<'de> Deserialize<'de>>(tool: &str, raw: &str) -> Result<T, ToolError> {
@@ -841,6 +883,45 @@ mod tests {
             std::fs::read_to_string(dir.path().join("c.txt")).unwrap(),
             "a\nfoo\nb\nfoo\nc\n"
         );
+    }
+
+    #[tokio::test]
+    async fn edit_tools_preserve_crlf_and_leave_mixed_endings_unmodified() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["edit", "multi_edit", "apply_patch"]);
+        for name in ["edit", "multi_edit", "apply_patch"] {
+            let args = match name {
+                "edit" => serde_json::json!({"path":"file.txt", "old":"old\n", "new":"new\n"}),
+                "multi_edit" => {
+                    serde_json::json!({"path":"file.txt", "edits":[{"old":"old\n", "new":"new\n"}]})
+                }
+                _ => serde_json::json!({"patches":[{"path":"file.txt", "hunks":[{
+                    "context_before":"before\n", "old":"old\n", "new":"new\n", "context_after":"after\n"
+                }]}]}),
+            };
+            std::fs::write(
+                dir.path().join("file.txt"),
+                "before\r\nold\r\nafter\r\nuntouched  \r\n",
+            )
+            .unwrap();
+            tools.execute(name, &args.to_string()).await.unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("file.txt")).unwrap(),
+                b"before\r\nnew\r\nafter\r\nuntouched  \r\n",
+                "{name}"
+            );
+            let mixed = b"before\r\nold\r\nafter\nuntouched  \r\n";
+            std::fs::write(dir.path().join("file.txt"), mixed).unwrap();
+            assert!(
+                tools.execute(name, &args.to_string()).await.is_err(),
+                "{name}"
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("file.txt")).unwrap(),
+                mixed,
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

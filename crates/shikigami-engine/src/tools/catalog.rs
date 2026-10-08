@@ -312,17 +312,17 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
         ),
         def(
             "edit",
-            "Replace exactly one occurrence of old with new in a file.",
+            "Replace exactly one occurrence of old with new in a file. LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed endings stay exact.",
             r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
         ),
         def(
             "multi_edit",
-            "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none).",
+            "Apply multiple exact single-occurrence replacements to one file atomically (all succeed or none). LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed endings stay exact.",
             r#"{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","items":{"type":"object","properties":{"old":{"type":"string"},"new":{"type":"string"}},"required":["old","new"]}},"required":["path","edits"]}"#,
         ),
         def(
             "apply_patch",
-            "Apply structured multi-hunk patches with optional surrounding context. Atomic across all files/hunks (all succeed or none). Prefer when multi_edit exact matches are too brittle. Fails closed on 0 or >1 matches.",
+            "Apply structured multi-hunk patches with optional surrounding context. Atomic across all files/hunks (all succeed or none). Prefer when multi_edit exact matches are too brittle. Fails closed on 0 or >1 matches. LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed endings stay exact.",
             r#"{"type":"object","properties":{"patches":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"hunks":{"type":"array","items":{"type":"object","properties":{"context_before":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"},"context_after":{"type":"string"}},"required":["old","new"]}}},"required":["path","hunks"]}}},"required":["patches"]}"#,
         ),
         def(

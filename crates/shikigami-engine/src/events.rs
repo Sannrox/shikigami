@@ -11,6 +11,16 @@ use thiserror::Error;
 
 use crate::config::Config;
 
+/// Redacted metadata for an edit tool, attributed to the configured model alias.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditOutcomeRecord {
+    pub tool: String,
+    pub model: String,
+    pub outcome: crate::tools::EditOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HarnessEvent {
@@ -37,6 +47,9 @@ pub enum HarnessEvent {
         turn: u32,
         #[serde(default)]
         call_id: String,
+    },
+    EditOutcome {
+        record: EditOutcomeRecord,
     },
     ModelTurn {
         turn: u32,
