@@ -9,6 +9,10 @@ incomplete (`missing: ["content"]`).
 
 ## Before you start
 
+Binary resolver payloads use `ResolvedContent::Bytes(content::Bytes)`, an
+immutable shared buffer. Convert an owned `Vec<u8>` with `.into()`; cloned
+buffers share their allocation. Text payloads remain owned `String` values.
+
 A host must own a payload store and implement `ContentResolver`. Shikigami
 persists only descriptors and a stable resolver id. The resolver must:
 

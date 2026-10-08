@@ -81,7 +81,7 @@ impl ContentResolver for MemoryResolver {
                 |_| ContentError::Resolver("fixture text is invalid".into()),
             )?))
         } else {
-            Ok(ResolvedContent::Bytes(bytes))
+            Ok(ResolvedContent::Bytes(bytes.into()))
         }
     }
 

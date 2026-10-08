@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{BufReader, stdin, stdout};
@@ -88,7 +89,7 @@ struct SessionContent {
 }
 
 struct SessionContentStore {
-    values: std::sync::Mutex<HashMap<String, (ContentPartKind, Vec<u8>)>>,
+    values: std::sync::Mutex<HashMap<String, (ContentPartKind, Bytes)>>,
 }
 
 impl SessionContentStore {
@@ -103,7 +104,7 @@ impl SessionContentStore {
         part_id: &str,
         kind: ContentPartKind,
         media_type: &str,
-        payload: &[u8],
+        payload: Bytes,
         session_id: &str,
     ) -> Result<ContentPartDescriptor, Value> {
         if payload.len() as u64 > MAX_CONTENT_PART_BYTES {
@@ -116,13 +117,13 @@ impl SessionContentStore {
         self.values
             .lock()
             .map_err(|_| rpc_error(-32603, "content store lock poisoned"))?
-            .insert(reference.clone(), (kind, payload.to_vec()));
+            .insert(reference.clone(), (kind, payload.clone()));
         Ok(ContentPartDescriptor {
             part_id: part_id.into(),
             kind,
             media_type: media_type.into(),
             byte_length: payload.len() as u64,
-            sha256_digest: sha256_digest(payload),
+            sha256_digest: sha256_digest(&payload),
             reference,
             provenance: ContentProvenanceV1 {
                 source: "acp".into(),
@@ -138,7 +139,7 @@ impl SessionContentStore {
     fn text(&self, reference: &str) -> Option<String> {
         let (kind, bytes) = self.values.lock().ok()?.get(reference).cloned()?;
         if kind == ContentPartKind::Text {
-            String::from_utf8(bytes).ok()
+            std::str::from_utf8(&bytes).ok().map(str::to_owned)
         } else {
             None
         }
@@ -169,8 +170,8 @@ impl ContentResolver for SessionContentStore {
                 )
             })?;
         if kind == ContentPartKind::Text {
-            String::from_utf8(bytes)
-                .map(ResolvedContent::Text)
+            std::str::from_utf8(&bytes)
+                .map(|text| ResolvedContent::Text(text.to_owned()))
                 .map_err(|_| {
                     crate::content::ContentError::Resolver(
                         "text attachment is not valid utf-8".into(),
@@ -185,7 +186,10 @@ impl ContentResolver for SessionContentStore {
         &self,
         content: ContentToStore,
     ) -> Result<ContentPartDescriptor, crate::content::ContentError> {
-        let bytes = content.payload.as_bytes().to_vec();
+        let bytes = match content.payload {
+            ResolvedContent::Text(text) => Bytes::from(text),
+            ResolvedContent::Bytes(bytes) => bytes,
+        };
         let reference = format!("acp-{}", content.part_id);
         self.values
             .lock()
@@ -2045,7 +2049,7 @@ struct ParsedPrompt {
 struct StagedAttachment {
     kind: ContentPartKind,
     media_type: String,
-    payload: Vec<u8>,
+    payload: Bytes,
 }
 
 impl ParsedPrompt {
@@ -2080,7 +2084,7 @@ impl ParsedPrompt {
                 &format!("text-{index}"),
                 ContentPartKind::Text,
                 "text/plain",
-                self.text.as_bytes(),
+                Bytes::copy_from_slice(self.text.as_bytes()),
                 session_id,
             )?);
             index += 1;
@@ -2090,7 +2094,7 @@ impl ParsedPrompt {
                 &format!("part-{index}"),
                 attachment.kind,
                 &attachment.media_type,
-                &attachment.payload,
+                attachment.payload.clone(),
                 session_id,
             )?);
             index += 1;
@@ -2192,7 +2196,7 @@ fn staged_inline_part(part: &Value, part_type: &str) -> Result<StagedAttachment,
     Ok(StagedAttachment {
         kind,
         media_type: mime.to_ascii_lowercase(),
-        payload,
+        payload: payload.into(),
     })
 }
 
@@ -2226,7 +2230,7 @@ fn staged_resource_part(part: &Value) -> Result<StagedAttachment, Value> {
     Ok(StagedAttachment {
         kind,
         media_type: mime.to_ascii_lowercase(),
-        payload,
+        payload: payload.into(),
     })
 }
 
@@ -2756,6 +2760,27 @@ impl AcpClient for MalformedPermissionClient {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn attachment_storage_and_resolution_share_the_decoded_buffer() {
+        let parsed = parse_prompt(&serde_json::json!([
+            {"type": "text", "text": "inspect"},
+            {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="}
+        ]))
+        .unwrap();
+        let pointer = parsed.attachments[0].payload.as_ptr();
+        let store = SessionContentStore::new();
+        let messages = parsed.messages(&store, "session").unwrap();
+        let descriptor = &messages[0].parts[1];
+        let first = store.resolve(descriptor).await.unwrap();
+        let second = store.resolve(descriptor).await.unwrap();
+        assert_eq!(first.as_bytes(), b"hello");
+        assert_eq!(first.as_bytes().as_ptr(), pointer);
+        assert_eq!(second.as_bytes().as_ptr(), pointer);
+        drop(parsed);
+        drop(first);
+        assert_eq!(second.as_bytes(), b"hello");
+    }
+
     use super::*;
     use crate::config::Config;
     use crate::state::StateRoot;

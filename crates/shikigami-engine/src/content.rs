@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+pub use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::watch;
@@ -235,7 +236,8 @@ impl ContentCapabilitiesV1 {
 
 pub enum ResolvedContent {
     Text(String),
-    Bytes(Vec<u8>),
+    /// Shared immutable payload; cloning a handle does not copy decoded bytes.
+    Bytes(Bytes),
 }
 
 pub struct ResolvedContentPart {
@@ -611,7 +613,7 @@ impl ContentResolver for FileContentResolver {
                 .map_err(|_| ContentError::Resolver("text payload is not valid UTF-8".into()))?;
             Ok(ResolvedContent::Text(text))
         } else {
-            Ok(ResolvedContent::Bytes(bytes))
+            Ok(ResolvedContent::Bytes(bytes.into()))
         }
     }
 

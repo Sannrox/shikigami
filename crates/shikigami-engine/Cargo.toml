@@ -12,6 +12,7 @@ default = ["model-http"]
 model-http = ["dep:reqwest"]
 
 [dependencies]
+bytes = "1"
 shikigami-types = { path = "../shikigami-types" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
