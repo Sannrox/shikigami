@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- TUI reports working, permission requests, completion, errors, and idle via
+  OSC 7501 so supporting terminals can surface agent status.
+
 - CLI default `--state` is the platform user-state directory keyed by cwd
   (`XDG_STATE_HOME/shikigami/<encoded-cwd>` when set; otherwise macOS
   Application Support, Windows `%LOCALAPPDATA%`, Unix `~/.local/state`).

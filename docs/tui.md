@@ -48,6 +48,12 @@ Escape sequences in model or tool output therefore remain inert.
 `/copy` uses OSC 52. Over SSH that can land clipboard contents on the local
 terminal; some terminals ignore OSC 52.
 
+The host reports status using [OSC 7501](https://www.superlogical.com/rex/docs/build/program-status)
+(revision 0.3): idle, working, blocked for permission, done after a completed
+turn, and error. Reports contain only fixed state metadata and `app=shikigami`,
+never transcript or tool text. Reports are sent on state changes; exiting the
+TUI returns the record to idle. Terminals without support ignore the sequence.
+
 The host requires a terminal. It does not add a theming engine, plugin store,
 voice, dashboard, or web view. Status is one dim footer under the composer
 (short session id and keys; long errors go to the transcript). Nested

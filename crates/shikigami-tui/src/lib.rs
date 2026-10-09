@@ -1891,8 +1891,25 @@ fn follow_pad(content_rows: u16, view_h: u16, scroll_back: u16) -> u16 {
 
 struct TerminalGuard;
 
+/// OSC 7501 revision 0.3. Only fixed metadata leaves the TUI; transcript and
+/// tool text never become terminal control sequences.
+fn program_status(shared: &Shared) -> &'static [u8] {
+    if shared.permission.is_some() {
+        b"\x1b]7501;state=blocked:kind=permission:app=shikigami\x1b\\"
+    } else if shared.busy {
+        b"\x1b]7501;state=working:app=shikigami\x1b\\"
+    } else {
+        match shared.status.as_str() {
+            "error" => b"\x1b]7501;state=error:app=shikigami\x1b\\",
+            "end_turn" => b"\x1b]7501;state=done:app=shikigami\x1b\\",
+            _ => b"\x1b]7501;state=idle:app=shikigami\x1b\\",
+        }
+    }
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = osc_write_stdout(b"\x1b]7501;state=idle:app=shikigami\x1b\\");
         let _ = disable_raw_mode();
         let mut out = stdout();
         let _ = execute!(
@@ -1972,7 +1989,13 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
         }
     });
 
+    let mut last_program_status = None;
     loop {
+        let status = program_status(&session.lock_shared());
+        if last_program_status != Some(status) {
+            osc_write_stdout(status).map_err(|e| e.to_string())?;
+            last_program_status = Some(status);
+        }
         if session.lock_shared().dirty {
             terminal
                 .draw(|frame| draw(frame, &session))
@@ -2533,6 +2556,54 @@ fn scroll_offset(body: &str, area: Rect) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn program_status_reports_prompt_lifecycle() {
+        let mut shared = super::Shared::new();
+        assert_eq!(
+            super::program_status(&shared),
+            b"\x1b]7501;state=idle:app=shikigami\x1b\\"
+        );
+        shared.busy = true;
+        // Cosmetic footer messages must not hide an active prompt.
+        shared.status = "copied".into();
+        assert_eq!(
+            super::program_status(&shared),
+            b"\x1b]7501;state=working:app=shikigami\x1b\\"
+        );
+        let (tx, _) = tokio::sync::oneshot::channel();
+        shared.permission = Some(super::PendingPermission {
+            title: "tool".into(),
+            raw_input: "{}".into(),
+            tx,
+        });
+        assert_eq!(
+            super::program_status(&shared),
+            b"\x1b]7501;state=blocked:kind=permission:app=shikigami\x1b\\"
+        );
+        shared.permission = None;
+        assert_eq!(
+            super::program_status(&shared),
+            b"\x1b]7501;state=working:app=shikigami\x1b\\"
+        );
+        shared.busy = false;
+        for (response, expected) in [
+            (
+                serde_json::json!({"result":{"stopReason":"end_turn"}}),
+                b"\x1b]7501;state=done:app=shikigami\x1b\\".as_slice(),
+            ),
+            (
+                serde_json::json!({"error":{"message":"failed"}}),
+                b"\x1b]7501;state=error:app=shikigami\x1b\\".as_slice(),
+            ),
+            (
+                serde_json::json!({"result":{"stopReason":"cancelled"}}),
+                b"\x1b]7501;state=idle:app=shikigami\x1b\\".as_slice(),
+            ),
+        ] {
+            super::apply_prompt_result(&mut shared, Some(&response));
+            assert_eq!(super::program_status(&shared), expected);
+        }
+    }
     use super::*;
     use std::time::{Duration, SystemTime};
 
