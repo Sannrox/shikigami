@@ -2,7 +2,7 @@
 
 # The builder and runtime references are pinned to the linux/amd64 manifests
 # used by the release workflow. Do not replace them with floating tags.
-FROM --platform=linux/amd64 docker.io/library/rust:1.88-bookworm@sha256:4727898c104ecd2e22d780925832502faee9fe4e70581b8572af081370b315a0 AS builder
+FROM --platform=linux/amd64 docker.io/library/rust:1.97.1-bookworm@sha256:408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6 AS builder
 
 WORKDIR /src
 
