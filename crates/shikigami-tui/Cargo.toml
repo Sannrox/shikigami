@@ -10,7 +10,7 @@ description = "Interactive ACP client host for shikigami."
 [dependencies]
 shikigami-types = { path = "../shikigami-types" }
 async-trait = "0.1"
-crossterm = "0.28"
+crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = [
   "crossterm_0_28",
   "unstable-rendered-line-info",
