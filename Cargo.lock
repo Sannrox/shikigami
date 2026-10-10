@@ -2292,7 +2292,7 @@ name = "shikigami-tui"
 version = "2.0.0"
 dependencies = [
  "async-trait",
- "crossterm 0.28.1",
+ "crossterm 0.29.0",
  "libc",
  "ratatui",
  "serde_json",
