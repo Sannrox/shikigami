@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- OS sandbox enforcement moves to a pinned [kekkai](https://github.com/Sannrox/kekkai)
+  `v0.1.0` dependency. Settings names, CLI, and doctor output are unchanged
+  (no behavior change).
+
 - TUI reports working, permission requests, completion, errors, and idle via
   OSC 7501 so supporting terminals can surface agent status.
 

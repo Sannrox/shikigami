@@ -126,6 +126,9 @@ reporting) shipped. `sandbox.backend` is currently `none | rlimit |
 linux_native`. `seatbelt` and `sandbox.tool_sockets` remain subsequent
 additive deliverables as sequenced in decision item 7.
 
+Enforcement for those backends now lives in a pinned kekkai release;
+settings names and doctor lines stay here ([ADR 0020](0020-kekkai-sandbox-pin.md)).
+
 ## Rejected alternatives
 
 - **User namespaces / bubblewrap-style helper as the baseline.** Blocked by

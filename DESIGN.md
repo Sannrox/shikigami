@@ -137,7 +137,7 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | --- | --- |
 | `src/harness.rs`, `src/harness/diagnosis.rs`, `src/harness/recovery.rs` | Public wiring: config → ports → doctor/run; diagnosis delegates to one private deep recovery module |
 | `crates/shikigami-types` (`identity`, `digest`, `atomic`) | Product identity, shared SHA-256 hex/prefixed digests and Unix-ms clocks, atomic file replace |
-| `crates/shikigami-engine` | Turn loop (`Engine`), ports, settings, workspace jail, sandbox, ungoverned scripted/plane model and events adapters, in-process `none`/`local` governance, tools, MCP client, replay, content, fallback, evidence queue, checkpoints, registry, metrics, tracing, transcripts, worker lifecycle |
+| `crates/shikigami-engine` | Turn loop (`Engine`), ports, settings, workspace jail, sandbox (settings mapped onto pinned kekkai), ungoverned scripted/plane model and events adapters, in-process `none`/`local` governance, tools, MCP client, replay, content, fallback, evidence queue, checkpoints, registry, metrics, tracing, transcripts, worker lifecycle |
 | `crates/shikigami-http` | OpenAI-compatible HTTP `ModelPort` adapter selected by `Harness::from_config` |
 | `crates/shikigami-governance-sekai` | Production `sekai-chisei` `GovernancePort` plus `PlaneIntakePort`; consumes versioned `sekai-client` |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |

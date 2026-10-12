@@ -23,6 +23,7 @@ Accepted decisions that must outlive a single PR.
 | [0017](0017-acp-attachments.md) | ACP prompt attachments, fail closed | Accepted |
 | [0018](0018-skills-mcp-extension.md) | Skills and MCP are the only extension surface | Accepted |
 | [0019](0019-skill-context-boundaries.md) | No skill-declared context boundaries | Accepted |
+| [0020](0020-kekkai-sandbox-pin.md) | Pin kekkai for OS sandbox enforcement | Accepted |
 
 ## When to write an ADR
 

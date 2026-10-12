@@ -149,7 +149,7 @@ mark the Issue unless documented maintainer policy requires it.
    the branch onto `main` and rerun the affected checks. Otherwise refresh only
    for a failing gate, an explicit request, or a sibling lane that landed on a
    shared surface (ports and settings, governance adapters, the workspace jail,
-   or the sekai-client proto pin). Do not rebase merely because `main` advanced.
+   the sekai-client proto pin, or the kekkai pin). Do not rebase merely because `main` advanced.
 2. Publish to the claim branch with **GitHub-verified** commits via
    `scripts/gh-verified-push.sh` (GraphQL `createCommitOnBranch`), not a plain
    `git push`, unless the user explicitly asks for git-protocol push:
