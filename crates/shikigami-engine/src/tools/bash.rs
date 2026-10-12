@@ -15,6 +15,7 @@ pub(crate) struct BackgroundJobs {
 pub(crate) struct BgJob {
     pub(crate) child: tokio::process::Child,
     pub(crate) log_path: PathBuf,
+    pub(crate) _applied: crate::sandbox::AppliedSandbox,
 }
 
 impl BackgroundJobs {

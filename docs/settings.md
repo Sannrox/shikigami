@@ -201,7 +201,7 @@ closed. Hosts must serialize concurrent runs against the same inplace root.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| backend | "none" | `none` (no isolation), Unix-only `rlimit` (limits + process group), or Linux-only `linux_native` (Landlock + seccomp; ADR 0013) |
+| backend | "none" | `none` (no isolation), Unix-only `rlimit` (limits + process group), or Linux-only `linux_native` (Landlock + seccomp via pinned kekkai; ADR 0013, ADR 0020) |
 | cpu_time_secs | unset | CPU seconds for Bash children |
 | memory_mb | unset | Address-space limit for Bash children |
 | user_processes | unset | Per-real-user process ceiling (RLIMIT_NPROC); not isolated per run |
@@ -224,8 +224,9 @@ fails for every address family (`socketpair` is limited to `AF_UNIX` stream
 pairs for pipelines). Landlock does not mediate `chmod`/`chown`/`setxattr` on
 inaccessible paths; that is a kernel residual, not an allowlist. Tool-child sockets
 stay denied even when `[network]` is an allowlist — that table still governs
-only harness-owned HTTP clients. See [network.md](network.md) and
-[ADR 0013](decisions/0013-os-sandbox-adapter.md).
+only harness-owned HTTP clients. See [network.md](network.md),
+[ADR 0013](decisions/0013-os-sandbox-adapter.md), and
+[ADR 0020](decisions/0020-kekkai-sandbox-pin.md).
 
 Under `profile = governed` or `governance.fail_closed = true`, enabling Bash
 (explicitly or via `tools.mode = workspace_exec`) **refuses** configuration when

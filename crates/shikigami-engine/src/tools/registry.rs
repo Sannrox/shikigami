@@ -140,17 +140,17 @@ impl ToolRegistry {
 
     /// Kill all background bash jobs (run end cleanup).
     pub async fn kill_background_jobs(&self) {
-        let children: Vec<tokio::process::Child> = {
+        let jobs: Vec<BgJob> = {
             let mut guard = match self.bg_jobs.lock() {
                 Ok(g) => g,
                 Err(_) => return,
             };
-            guard.jobs.drain().map(|(_id, job)| job.child).collect()
+            guard.jobs.drain().map(|(_id, job)| job).collect()
         };
-        for mut child in children {
-            self.executor.sandbox.kill_process_group(child.id());
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+        for mut job in jobs {
+            self.executor.sandbox.kill_process_group(job.child.id());
+            let _ = job.child.start_kill();
+            let _ = job.child.wait().await;
         }
     }
 
@@ -276,7 +276,7 @@ impl ToolRegistry {
         let log_file = std::fs::File::create(&log_path)?;
         let stdout = Stdio::from(log_file.try_clone()?);
         let stderr = Stdio::from(log_file);
-        let mut command = self.executor.bash_command(&args.command)?;
+        let (mut command, applied) = self.executor.bash_command(&args.command)?;
         command.stdout(stdout).stderr(stderr);
         let child = command.spawn()?;
         guard.jobs.insert(
@@ -284,6 +284,7 @@ impl ToolRegistry {
             BgJob {
                 child,
                 log_path: log_path.clone(),
+                _applied: applied,
             },
         );
         Ok(format!("job_id={job_id}\nlog={}", log_path.display()))
@@ -385,8 +386,9 @@ impl Drop for ToolRegistry {
         let Ok(mut guard) = self.bg_jobs.lock() else {
             return;
         };
-        for (_, job) in guard.jobs.drain() {
+        for (_, mut job) in guard.jobs.drain() {
             self.executor.sandbox.kill_process_group(job.child.id());
+            let _ = job.child.start_kill();
         }
     }
 }

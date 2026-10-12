@@ -34,6 +34,7 @@ tokio = { version = "1", default-features = false, features = [
 toml = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+kekkai = { git = "https://github.com/Sannrox/kekkai.git", tag = "v0.1.0", default-features = false }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 regex = "1.13.1"

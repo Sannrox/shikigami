@@ -65,7 +65,10 @@ impl ToolExecutor {
         })
     }
 
-    pub(crate) fn bash_command(&self, script: &str) -> Result<Command, ToolError> {
+    pub(crate) fn bash_command(
+        &self,
+        script: &str,
+    ) -> Result<(Command, crate::sandbox::AppliedSandbox), ToolError> {
         let mut command = Command::new("bash");
         command
             .arg("--noprofile")
@@ -75,10 +78,11 @@ impl ToolExecutor {
             .current_dir(&self.workspace)
             .kill_on_drop(true);
         self.environment.apply(&mut command);
-        self.sandbox
+        let applied = self
+            .sandbox
             .apply(&mut command)
             .map_err(|error| ToolError::Message(error.to_string()))?;
-        Ok(command)
+        Ok((command, applied))
     }
 
     pub(crate) async fn execute(
@@ -202,7 +206,7 @@ impl ToolExecutor {
     }
 
     async fn bash(&self, script: &str, limit: Duration) -> Result<String, ToolError> {
-        let mut command = self.bash_command(script)?;
+        let (mut command, applied) = self.bash_command(script)?;
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = command.spawn()?;
         let pid = child.id();
@@ -212,6 +216,7 @@ impl ToolExecutor {
         let _guard = ProcessGroupGuard {
             sandbox: &self.sandbox,
             pid,
+            _applied: applied,
         };
 
         let output = match timeout(limit, child.wait_with_output()).await {
@@ -244,6 +249,7 @@ impl ToolExecutor {
 struct ProcessGroupGuard<'a> {
     sandbox: &'a crate::sandbox::Sandbox,
     pid: Option<u32>,
+    _applied: crate::sandbox::AppliedSandbox,
 }
 
 impl Drop for ProcessGroupGuard<'_> {

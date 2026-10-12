@@ -181,8 +181,8 @@ implementation Pull Requests plus claim branches without one. Assigned or
 planned work with neither is not a running lane.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
-ports and settings, governance adapters, the workspace jail, and the
-sekai-client proto pin. Lanes that would both change one of these surfaces run
+ports and settings, governance adapters, the workspace jail, the
+sekai-client proto pin, and the kekkai pin. Lanes that would both change one of these surfaces run
 in sequence, not in parallel.
 
 A lane publishes its first Verified commit to the claim branch as a draft Pull
