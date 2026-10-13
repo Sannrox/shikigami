@@ -105,6 +105,31 @@ fn doctor_without_state_flag_uses_user_state_dir() {
 }
 
 #[test]
+fn existing_project_state_is_refused_without_state_flag() {
+    let xdg = tempdir().expect("xdg");
+    let cwd = tempdir().expect("cwd");
+    fs::create_dir(cwd.path().join(".shikigami-state")).expect("legacy state");
+    let cli = || {
+        let mut cmd = cargo_bin_cmd!("shikigami");
+        cmd.current_dir(cwd.path())
+            .env("XDG_STATE_HOME", xdg.path())
+            .env_remove("SHIKIGAMI_STATE");
+        cmd
+    };
+
+    cli()
+        .arg("runs")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("found project state at"))
+        .stderr(predicate::str::contains("--state"));
+    cli()
+        .args(["--state", "./.shikigami-state", "runs"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn doctor_without_xdg_uses_platform_user_state_under_home() {
     let home = tempdir().expect("home");
     let cwd = tempdir().expect("cwd");
