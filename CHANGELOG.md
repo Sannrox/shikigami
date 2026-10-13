@@ -31,8 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inplace workspace. `--state` / `SHIKIGAMI_STATE` still win. Embedders keep
   `StateRoot::default_in` for cwd-local scratch. Project-local trees remain
   available as `--state ./.shikigami-state`. Existing `.shikigami-state`
-  directories are not migrated. New state directories are created mode
-  `0700` on Unix.
+  directories are not migrated: without `--state`, the CLI stops with an
+  error naming both directories instead of silently ignoring one, so pass
+  `--state ./.shikigami-state` or move its contents and remove it. New state
+  directories are created mode `0700` on Unix.
 
 ## [2.0.0] — 2026-10-08
 

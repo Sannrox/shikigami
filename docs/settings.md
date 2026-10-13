@@ -45,6 +45,14 @@ workspace, so `tui` and `acp` do not need `--state`. Project-local scratch is
 `LOCALAPPDATA` fail closed.
 New state directories are created mode `0700` on Unix.
 
+Without `--state`, an existing `./.shikigami-state` (the CLI default through 2.0.0)
+stops the CLI with an error instead of being ignored, so earlier runs, parked
+runs, and its config do not silently disappear. Pass
+`--state ./.shikigami-state` to keep using it, or move its contents to the
+user-state directory named in the error and remove it. It is never adopted
+automatically because a directory inside a repository may be repository
+content.
+
 ## Profiles
 
 Behavioral profiles are retained unchanged for settings version 1

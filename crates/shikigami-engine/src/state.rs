@@ -32,6 +32,10 @@ pub enum StateError {
         "no user state directory; set --state or SHIKIGAMI_STATE (need XDG_STATE_HOME, HOME, or LOCALAPPDATA)"
     )]
     MissingUserState,
+    #[error(
+        "found project state at {legacy}, which is no longer the default; pass --state {legacy} to keep using it, or move its contents to {user} and remove it"
+    )]
+    LegacyProjectState { legacy: PathBuf, user: PathBuf },
     #[error(transparent)]
     Config(#[from] ConfigError),
 }
@@ -60,11 +64,25 @@ impl StateRoot {
     }
 
     /// `--state` / `SHIKIGAMI_STATE` when set, else [`user_default`].
+    ///
+    /// Without an explicit root, an existing `<cwd>/.shikigami-state` (the
+    /// default before the user-state directory) fails with
+    /// [`StateError::LegacyProjectState`] instead of being silently orphaned.
+    /// It is not adopted automatically: a directory inside a repository may be
+    /// repository content, and its config must not load without consent.
     pub fn resolve_host(explicit: Option<&Path>, cwd: &Path) -> Result<Self, StateError> {
-        match explicit {
-            Some(path) => Ok(Self::new(path)),
-            None => Self::user_default(cwd),
+        if let Some(path) = explicit {
+            return Ok(Self::new(path));
         }
+        let user = Self::user_default(cwd)?;
+        let legacy = Self::default_in(cwd);
+        if legacy.exists() {
+            return Err(StateError::LegacyProjectState {
+                legacy: legacy.path,
+                user: user.path,
+            });
+        }
+        Ok(user)
     }
 
     pub fn path(&self) -> &Path {
@@ -371,6 +389,23 @@ mod tests {
         let explicit = cwd.path().join("custom-state");
         let root = StateRoot::resolve_host(Some(&explicit), cwd.path()).expect("resolve");
         assert_eq!(root.path(), explicit);
+    }
+
+    #[test]
+    fn resolve_host_refuses_existing_project_state() {
+        let _lock = lock_env();
+        let xdg = tempdir().expect("xdg");
+        let cwd = tempdir().expect("cwd");
+        let _xdg = EnvGuard::set("XDG_STATE_HOME", xdg.path());
+        let legacy = cwd.path().join(StateRoot::DEFAULT_DIRNAME);
+        fs::create_dir(&legacy).expect("legacy dir");
+
+        let error = StateRoot::resolve_host(None, cwd.path()).expect_err("legacy refused");
+        assert!(
+            matches!(error, StateError::LegacyProjectState { legacy: ref path, .. } if *path == legacy)
+        );
+        let explicit = StateRoot::resolve_host(Some(&legacy), cwd.path()).expect("explicit");
+        assert_eq!(explicit.path(), legacy);
     }
 
     #[test]
