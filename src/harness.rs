@@ -125,6 +125,9 @@ impl Harness {
     }
 
     /// Resolve settings from the usual search path and build a harness.
+    ///
+    /// A working-directory `shikigami.toml` is never loaded implicitly; pass
+    /// it as `explicit_config` to opt in.
     pub fn resolve(
         explicit_config: Option<&Path>,
         state: StateRoot,

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+
+- A `shikigami.toml` in the current working directory is no longer loaded
+  implicitly, so a cloned repository cannot run its hooks or relax governance,
+  sandbox, or egress settings. The CLI prints a note when one is present; pass
+  `--config shikigami.toml` to use it. `--config`, `SHIKIGAMI_CONFIG`, and the
+  state-root config are unchanged.
+
 ### Changed
 
 - OS sandbox enforcement moves to a pinned [kekkai](https://github.com/Sannrox/kekkai)
