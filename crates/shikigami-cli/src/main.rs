@@ -285,6 +285,18 @@ async fn run() -> anyhow::Result<()> {
 
     let state = StateRoot::resolve_host(cli.state.as_deref(), &cwd)?;
 
+    // A cwd `shikigami.toml` is repository content, so it only loads on opt-in.
+    // Note it when it would previously have been the selected file.
+    if cli.config.is_none()
+        && !state.config_path().is_file()
+        && cwd.join(Config::FILENAME).is_file()
+    {
+        human_eprintln!(
+            "note: ignoring ./{name} in the current directory; pass --config {name} to use it",
+            name = Config::FILENAME
+        );
+    }
+
     match cli.command {
         Command::Version { .. } => unreachable!("version returns before host state is resolved"),
         Command::Doctor { json, models } => {

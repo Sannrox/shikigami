@@ -171,6 +171,36 @@ fn doctor_with_relative_home_fails_closed() {
 }
 
 #[test]
+fn cwd_config_hooks_run_only_with_explicit_config() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let marker = dir.path().join("hook-ran");
+    fs::write(
+        dir.path().join(Config::FILENAME),
+        format!(
+            "version = 1\n[[hooks]]\nevent = \"pre_run\"\ncommand = \"touch\"\nargs = [{:?}]\n",
+            marker.to_str().unwrap()
+        ),
+    )
+    .expect("write cwd config");
+    let run = |extra: &[&str]| {
+        cargo_bin_cmd!("shikigami")
+            .current_dir(dir.path())
+            .env_remove("SHIKIGAMI_CONFIG")
+            .args(["--state", state.to_str().unwrap()])
+            .args(extra)
+            .args(["run", "hello"])
+            .assert()
+    };
+
+    run(&[]).stderr(predicate::str::contains("ignoring ./shikigami.toml"));
+    assert!(!marker.exists(), "implicit cwd config must not run hooks");
+
+    run(&["--config", Config::FILENAME]);
+    assert!(marker.exists(), "explicit --config opts in to the hook");
+}
+
+#[test]
 fn doctor_models_reports_default_auto_route() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");

@@ -11,9 +11,14 @@ Later sources override earlier ones where documented:
 2. Config file (first match):
    - `--config` / `SHIKIGAMI_CONFIG`
    - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: platform user-state directory keyed by cwd; see [cli.md](cli.md))
-   - `./shikigami.toml` in the current working directory
 3. Environment variables
 4. CLI flags (where provided)
+
+A `shikigami.toml` in the current working directory is never loaded
+implicitly. It is repository content that can add hooks and MCP servers or
+relax governance, sandbox, and egress, so a cloned repository must not apply it
+without consent. The CLI prints a note when one is present; opt in with
+`--config shikigami.toml`.
 
 Invalid adapter ids fail at resolve/validate time. Missing optional files are
 not errors.

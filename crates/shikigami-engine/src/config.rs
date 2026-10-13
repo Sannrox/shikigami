@@ -976,21 +976,26 @@ impl Config {
         resolution::resolve(path.as_ref(), None)
     }
 
+    /// Resolve from `explicit`, then `SHIKIGAMI_CONFIG`, then the state root.
+    ///
+    /// A working-directory `shikigami.toml` is never loaded implicitly: it is
+    /// untrusted repository content. `_cwd` is kept for source compatibility.
     pub fn resolve_search(
         explicit: Option<&Path>,
         state_root: &Path,
-        cwd: &Path,
+        _cwd: &Path,
     ) -> Result<(Self, ConfigSource), ConfigError> {
-        resolution::resolve_search(explicit, state_root, cwd)
+        resolution::resolve_search(explicit, state_root)
     }
 
+    /// [`Self::resolve_search`] plus a final host model override.
     pub fn resolve_search_with_model(
         explicit: Option<&Path>,
         state_root: &Path,
-        cwd: &Path,
+        _cwd: &Path,
         model: Option<&str>,
     ) -> Result<(Self, ConfigSource), ConfigResolutionError> {
-        resolution::resolve_search_with_model(explicit, state_root, cwd, model)
+        resolution::resolve_search_with_model(explicit, state_root, model)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {

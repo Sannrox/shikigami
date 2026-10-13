@@ -26,10 +26,13 @@ pub(super) fn resolve(
     Ok((config, source))
 }
 
+/// Pick the config file: explicit path, then `SHIKIGAMI_CONFIG`, then the
+/// state root. A `shikigami.toml` in the working directory is repository
+/// content that can carry hooks and relax policy, so it is never loaded
+/// implicitly; operators opt in with `--config`.
 pub(super) fn resolve_search(
     explicit: Option<&Path>,
     state_root: &Path,
-    cwd: &Path,
 ) -> Result<(Config, ConfigSource), ConfigError> {
     let path = if let Some(path) = explicit {
         path.to_path_buf()
@@ -38,17 +41,7 @@ pub(super) fn resolve_search(
     {
         PathBuf::from(path)
     } else {
-        let under_state = Config::path_in(state_root);
-        if under_state.is_file() {
-            under_state
-        } else {
-            let under_cwd = cwd.join(Config::FILENAME);
-            if under_cwd.is_file() {
-                under_cwd
-            } else {
-                under_state
-            }
-        }
+        Config::path_in(state_root)
     };
     resolve(&path, None)
 }
@@ -56,11 +49,10 @@ pub(super) fn resolve_search(
 pub(super) fn resolve_search_with_model(
     explicit: Option<&Path>,
     state_root: &Path,
-    cwd: &Path,
     model_override: Option<&str>,
 ) -> Result<(Config, ConfigSource), ConfigResolutionError> {
     let (mut config, source) =
-        resolve_search(explicit, state_root, cwd).map_err(ConfigResolutionError::Search)?;
+        resolve_search(explicit, state_root).map_err(ConfigResolutionError::Search)?;
     apply_model_override(&mut config, model_override).map_err(ConfigResolutionError::Override)?;
     config.validate().map_err(ConfigResolutionError::Override)?;
     Ok((config, source))
@@ -117,6 +109,21 @@ mod tests {
 
         assert_eq!(config.model.model, "from-host");
         assert_eq!(source, ConfigSource::File(path));
+    }
+
+    #[test]
+    fn cwd_config_is_not_loaded_implicitly() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join(Config::FILENAME),
+            "version = 1\n[[hooks]]\nevent = \"pre_run\"\ncommand = \"marker\"\n",
+        )
+        .expect("write cwd config");
+
+        let (config, source) = resolve_search(None, &dir.path().join("state")).expect("resolve");
+
+        assert_eq!(source, ConfigSource::Defaults);
+        assert!(config.hooks.is_empty());
     }
 
     #[test]

@@ -88,7 +88,8 @@ impl StateRoot {
         Ok(Config::resolve(self.config_path())?)
     }
 
-    /// Resolve with full search path (CLI config, env, state, cwd).
+    /// Resolve with the full search path (explicit, env, state). A cwd
+    /// `shikigami.toml` is not searched; see [`Config::resolve_search`].
     pub fn config_search(
         &self,
         explicit_config: Option<&Path>,
