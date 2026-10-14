@@ -92,6 +92,64 @@ pub struct PlaneClaimLease {
     /// clock at grant interpretation. Missing or already-expired grants are
     /// fence loss. After that, local fencing uses this Instant only.
     pub valid_until: Instant,
+    /// Per-claim credential for heartbeat, ack, and claim events.
+    pub runtime_token: RuntimeToken,
+}
+
+/// Short-lived plane credential granted with one claim. It authenticates only
+/// the follow-up calls for that claim; `Debug` never prints the value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RuntimeToken {
+    value: String,
+    expires_at_ms: i64,
+}
+
+impl RuntimeToken {
+    /// Accept a token from a claim or heartbeat grant. A missing token refuses
+    /// the claimed work (the plane needs a signing key and a tenant-scoped
+    /// worker credential); an expired one is fence loss.
+    pub fn from_grant(
+        value: String,
+        expires_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<Self, PlaneIntakeError> {
+        if value.trim().is_empty() || expires_at_ms <= 0 {
+            return Err(PlaneIntakeError::Source(
+                "claim grant has no runtime token; the plane must sign runtime tokens and the worker credential must carry a tenant".into(),
+            ));
+        }
+        let token = Self {
+            value,
+            expires_at_ms,
+        };
+        token.check_live(now_ms)?;
+        Ok(token)
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+
+    /// Refuse use at or after expiry (wall clock, milliseconds since epoch).
+    pub fn check_live(&self, now_ms: i64) -> Result<(), PlaneIntakeError> {
+        if now_ms >= self.expires_at_ms {
+            return Err(PlaneIntakeError::FenceLost("runtime token expired".into()));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for RuntimeToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeToken")
+            .field("value", &"[REDACTED]")
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

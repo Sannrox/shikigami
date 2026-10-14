@@ -20,8 +20,9 @@ tokio = { version = "1", default-features = false, features = [
   "time",
 ] }
 uuid = { version = "1", features = ["v4"] }
-sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "1b4584c8194b74d9cbf37ffefc30820942a4b61d", version = "0.1.1" }
+sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "6f7c98b3151b6c4fcf5f2dfa987922f8a2a72f33", version = "0.1.1" }
 
 [dev-dependencies]
 tempfile = "3"
+tonic = { version = "0.14", default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }

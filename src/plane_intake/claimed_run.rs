@@ -91,7 +91,7 @@ pub(super) async fn execute(
     let run_result = loop {
         tokio::select! {
             result = &mut run => break result,
-            _ = tokio::time::sleep(options.heartbeat_interval) => {
+            _ = tokio::time::sleep(next_heartbeat(&claim, options.heartbeat_interval)) => {
                 let call_window = match claim_call_window(&claim, options.heartbeat_interval) {
                     Ok(window) => window,
                     Err(error) => {
@@ -639,6 +639,17 @@ fn park_reason(result: &crate::run::RunResult) -> String {
         Some(park) => format!("{}; question: {}", park.reason, park.question),
         None => result.summary.clone(),
     }
+}
+
+/// Sleep until the next heartbeat: the configured interval, but never more than
+/// half the remaining local fence, so a short-lived runtime token is renewed
+/// before it expires.
+pub(super) fn next_heartbeat(claim: &PlaneClaim, interval: Duration) -> Duration {
+    let remaining = claim
+        .lease
+        .valid_until
+        .saturating_duration_since(Instant::now());
+    interval.min(remaining / 2)
 }
 
 pub(super) fn claim_call_window(

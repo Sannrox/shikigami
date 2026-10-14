@@ -22,7 +22,7 @@ mod serve_loop;
 pub use shikigami_plane_intake::{
     ClaimedPlaneWork, ClaimedWorkMappingError, PlaneAck, PlaneAckOutcome, PlaneCheckpoint,
     PlaneClaim, PlaneClaimEventKind, PlaneClaimLease, PlaneIntakeError, PlaneIntakePort,
-    PlaneWorkContinuation,
+    PlaneWorkContinuation, RuntimeToken,
 };
 
 pub const RUNTIME_DISPATCH_KIND: &str = "runtime_dispatch";
@@ -438,12 +438,35 @@ mod tests {
                 fencing_token: "fence-1".into(),
                 expires_at_ms: crate::digest::unix_now_ms_i64() + 10,
                 valid_until: Instant::now() + Duration::from_millis(10),
+                runtime_token: RuntimeToken::from_grant("rt-test".into(), i64::MAX, 0).unwrap(),
             },
         };
         assert!(matches!(
             claimed_run::claim_call_window(&claim, Duration::from_secs(20)),
             Err(PlaneIntakeError::FenceLost(_))
         ));
+    }
+
+    #[test]
+    fn heartbeat_runs_before_a_short_local_fence_lapses() {
+        let mut claim = PlaneClaim {
+            work: work(json!({"task": "demo"})),
+            lease: PlaneClaimLease {
+                runtime_id: "shikigami".into(),
+                generation: 1,
+                fencing_token: "fence-1".into(),
+                expires_at_ms: crate::digest::unix_now_ms_i64() + 3_600_000,
+                valid_until: Instant::now() + Duration::from_secs(60),
+                runtime_token: RuntimeToken::from_grant("rt-test".into(), i64::MAX, 0).unwrap(),
+            },
+        };
+        let interval = Duration::from_secs(20 * 60);
+        assert!(claimed_run::next_heartbeat(&claim, interval) <= Duration::from_secs(30));
+        claim.lease.valid_until = Instant::now() + Duration::from_secs(3_600);
+        assert_eq!(
+            claimed_run::next_heartbeat(&claim, Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use shikigami::{
     ClaimedPlaneWork, Config, Harness, PermissionMode, PlaneAck, PlaneAckOutcome, PlaneClaim,
     PlaneClaimEventKind, PlaneClaimLease, PlaneIntakeError, PlaneIntakePort, PlaneServeOptions,
-    PlaneWorkContinuation, StateRoot, WorkerLifecycle, WorkerLifecycleIdentity,
+    PlaneWorkContinuation, RuntimeToken, StateRoot, WorkerLifecycle, WorkerLifecycleIdentity,
     WorkerLifecycleState, run_plane_serve,
 };
 use tempfile::tempdir;
@@ -177,6 +177,7 @@ async fn claim_run_and_ack_with_mock_plane() {
                 fencing_token: "fence-1".into(),
                 expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
                 valid_until: std::time::Instant::now() + Duration::from_secs(60),
+                runtime_token: RuntimeToken::from_grant("rt-test".into(), i64::MAX, 0).unwrap(),
             },
         }])),
         acks: Mutex::new(Vec::new()),
@@ -265,6 +266,7 @@ async fn park_resolve_reclaim_resumes_same_checkpoint_and_operation() {
                 fencing_token: "fence-1".into(),
                 expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
                 valid_until: std::time::Instant::now() + Duration::from_secs(60),
+                runtime_token: RuntimeToken::from_grant("rt-test".into(), i64::MAX, 0).unwrap(),
             },
         }])),
         acks: Mutex::new(Vec::new()),
@@ -370,6 +372,7 @@ fn sample_claim(effect_id: &str) -> PlaneClaim {
             fencing_token: "fence-1".into(),
             expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
             valid_until: std::time::Instant::now() + Duration::from_secs(60),
+            runtime_token: RuntimeToken::from_grant("rt-test".into(), i64::MAX, 0).unwrap(),
         },
     }
 }
