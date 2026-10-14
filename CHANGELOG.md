@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Security
+
+- Sandboxed tool children receive only a live job-scoped token
+  (`SHIKIGAMI_JOB_TOKEN`, plus tenant/namespace when present) minted for the
+  claimed work. The worker client secret, plane bearer, model keys, and MCP
+  tokens stay in the harness process: they are stripped from the reconstructed
+  child environment, and leftover `SHIKIGAMI_JOB_*` parent exports cannot
+  impersonate a grant. Expired grants are not injected. A heartbeat that
+  refreshes the claim token updates the grant seen by later child spawns (#442).
+
+- `sandbox.tool_sockets` ships (`deny` default, `host` grant). `linux_native`
+  children cannot open host sockets unless the job/operator sets `host`;
+  doctor reports the effective mode. `[network].egress` remains harness HTTP
+  only (#442, ADR 0013).
+
 ### Breaking changes and upgrade
 
 - `sekai-chisei` workers authenticate as registered service principals: the

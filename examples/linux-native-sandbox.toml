@@ -16,6 +16,8 @@ root = "."
 backend = "linux_native"
 # Additive host toolchains (absolute, existing, canonicalized at apply time):
 # read_only_paths = ["/opt/toolchains"]
+# tool_sockets defaults to deny (no child socket()). Set "host" only when the
+# job explicitly needs host sockets.
 
 [network]
 egress = "deny"

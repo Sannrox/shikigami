@@ -541,6 +541,11 @@ pub struct SandboxSettings {
     /// Extra absolute paths granted read and execute under `linux_native`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_paths: Vec<String>,
+    /// Tool-child sockets under `linux_native`. Default `deny` (kekkai
+    /// `Network::Deny`). `host` is an explicit job/operator grant that lifts
+    /// the seccomp socket gate (ADR 0013).
+    #[serde(default)]
+    pub tool_sockets: ToolSockets,
 }
 
 /// Supported local child-process limit and isolation backends.
@@ -553,6 +558,18 @@ pub enum SandboxBackend {
     LinuxNative,
 }
 
+/// Whether sandboxed tool children may open host sockets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSockets {
+    /// No `socket()` in the child (default; ADR 0013).
+    #[default]
+    Deny,
+    /// Explicit grant: the child uses the host network. Doctor reports this
+    /// as host-enforced and unverified by the harness.
+    Host,
+}
+
 impl Default for SandboxSettings {
     fn default() -> Self {
         Self {
@@ -563,6 +580,7 @@ impl Default for SandboxSettings {
             file_size_mb: None,
             open_files: None,
             read_only_paths: Vec::new(),
+            tool_sockets: ToolSockets::Deny,
         }
     }
 }
@@ -1422,6 +1440,11 @@ impl Config {
                 .iter()
                 .filter_map(|server| server.token_env.clone()),
         );
+        names.extend([
+            "SHIKIGAMI_JOB_TOKEN".into(),
+            "SHIKIGAMI_JOB_TENANT".into(),
+            "SHIKIGAMI_JOB_NAMESPACE".into(),
+        ]);
         names.sort_by_key(|name| name.to_ascii_uppercase());
         names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         names
@@ -1611,7 +1634,14 @@ allow_insecure_remote = true
 
         assert_eq!(
             config.protected_tool_environment_names(),
-            vec!["MCP_TOKEN", "MODEL_KEY", "PLANE_TOKEN"]
+            vec![
+                "MCP_TOKEN",
+                "MODEL_KEY",
+                "PLANE_TOKEN",
+                "SHIKIGAMI_JOB_NAMESPACE",
+                "SHIKIGAMI_JOB_TENANT",
+                "SHIKIGAMI_JOB_TOKEN",
+            ]
         );
 
         config.model.adapter = "scripted".into();
@@ -1620,6 +1650,24 @@ allow_insecure_remote = true
                 .protected_tool_environment_names()
                 .contains(&"MODEL_KEY".into())
         );
+    }
+
+    #[test]
+    fn tool_sockets_defaults_to_deny_and_parses_host() {
+        assert_eq!(Config::default().sandbox.tool_sockets, ToolSockets::Deny);
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[sandbox]
+tool_sockets = "host"
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::resolve(&path).unwrap();
+        assert_eq!(config.sandbox.tool_sockets, ToolSockets::Host);
     }
 
     #[test]

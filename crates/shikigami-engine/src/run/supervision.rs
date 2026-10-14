@@ -143,6 +143,7 @@ impl<'a> RunSupervision<'a> {
             resume_answer,
         } = request;
         let run_request = RunRequest {
+            job_credential: None,
             task,
             keep_workspace,
             timeout,

@@ -183,8 +183,12 @@ pub(super) async fn prepare(
             }
         }
     }
-    let mut tools =
-        ToolRegistry::from_config_enabled(&workspace.path, &engine.config, enabled.clone())?;
+    let mut tools = ToolRegistry::from_config_enabled_with_job(
+        &workspace.path,
+        &engine.config,
+        enabled.clone(),
+        request.job_credential.as_ref(),
+    )?;
     tools.set_todos(todos);
     if !explore && !plan_jail && !engine.config.tools.mcp_servers.is_empty() {
         crate::mcp::attach_mcp_servers(&mut tools, &engine.config).await?;
@@ -796,6 +800,7 @@ mod tests {
         let prepared = prepare(
             &engine,
             &RunRequest {
+                job_credential: None,
                 task: "task".into(),
                 keep_workspace: true,
                 ..RunRequest::new("")

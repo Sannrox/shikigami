@@ -901,6 +901,7 @@ fn child_request(
         .logical_operation_id
         .clone()
         .or_else(|| Some(session.run_id.clone()));
+    request.job_credential = parent.job_credential.clone();
     request
 }
 

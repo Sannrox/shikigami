@@ -771,6 +771,7 @@ mod tests {
         let result = RunTransaction::new(&engine)
             .execute(
                 RunRequest {
+                    job_credential: None,
                     task: "task".into(),
                     keep_workspace: true,
                     ..RunRequest::new("")

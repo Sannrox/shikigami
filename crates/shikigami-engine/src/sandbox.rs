@@ -14,7 +14,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::process::Command;
 
-use crate::config::{SandboxBackend, SandboxSettings};
+use crate::config::{SandboxBackend, SandboxSettings, ToolSockets};
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
@@ -221,8 +221,12 @@ fn linux_native_health(settings: &SandboxSettings) -> SandboxHealth {
         kekkai::Health::Ok(message) => {
             let abi = linux_native_abi(&message);
             let signal = if abi >= 6 { "landlock" } else { "none" };
+            let sockets = match settings.tool_sockets {
+                ToolSockets::Deny => "deny",
+                ToolSockets::Host => "host",
+            };
             SandboxHealth::Ok(format!(
-                "sandbox:   backend=linux_native abi={abi} tool_sockets=deny signal_scoping={signal} writable=workspace+scratch cpu={:?} memory_mb={:?} user_processes={:?} read_only_paths={}",
+                "sandbox:   backend=linux_native abi={abi} tool_sockets={sockets} signal_scoping={signal} writable=workspace+scratch cpu={:?} memory_mb={:?} user_processes={:?} read_only_paths={}",
                 settings.cpu_time_secs,
                 settings.memory_mb,
                 settings.user_processes,
@@ -263,7 +267,10 @@ fn mapped_settings(
             file_size_mb: settings.file_size_mb,
             open_files: settings.open_files,
         })
-        .network(kekkai::Network::Deny);
+        .network(match settings.tool_sockets {
+            ToolSockets::Deny => kekkai::Network::Deny,
+            ToolSockets::Host => kekkai::Network::Allow,
+        });
     if matches!(settings.backend, SandboxBackend::LinuxNative) {
         builder = builder.readable_roots(frozen_read_only.to_vec());
         if let Some(scratch) = run_scratch {
@@ -403,6 +410,21 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn mapped_settings_honor_tool_socket_grants() {
+        let deny = mapped_settings(&SandboxSettings::default(), None, &[]);
+        assert!(matches!(deny.network, kekkai::Network::Deny));
+        let host = mapped_settings(
+            &SandboxSettings {
+                tool_sockets: ToolSockets::Host,
+                ..SandboxSettings::default()
+            },
+            None,
+            &[],
+        );
+        assert!(matches!(host.network, kekkai::Network::Allow));
     }
 
     #[test]

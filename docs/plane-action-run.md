@@ -51,7 +51,10 @@ claim's tenant, namespace, effect, runtime, and generation. Shikigami uses it,
 not the worker's service token, for every call about that claim: heartbeat,
 acknowledgement, and claim events. Each heartbeat returns a refreshed token.
 The service token stays in use for listing, claiming, instance lookup,
-and governed execution, which the runtime token does not cover.
+and governed execution, which the runtime token does not cover. Sandboxed
+Bash children never receive the worker client secret or service token; they
+receive only the live claim grant as `SHIKIGAMI_JOB_TOKEN` (see
+[credentials](credentials.md#bash-subprocesses)).
 
 A claim without a runtime token is refused and `serve` exits, leaving the claim
 to expire. An expired token is fence loss: the run is drained and not
