@@ -158,19 +158,29 @@ async fn linux_native_child_sees_job_token_not_worker_secret_and_needs_socket_gr
     unsafe {
         std::env::remove_var(secret_name);
     }
+    // Redirect /proc denials off stdout: linux_native refuses /proc, and the
+    // harness captures bash stderr in the tool text.
     let env_probe = serde_json::json!({
         "command": r#"secret_env="${SHIKIGAMI_TEST_WORKER_SECRET_LINUX_442-unset}"
 job="${SHIKIGAMI_JOB_TOKEN-unset}"
-proc=$(tr '\0' '\n' < /proc/self/environ | grep -F 'worker-secret' >/dev/null && echo leaked || echo clean)
+proc=$(tr '\0' '\n' < /proc/self/environ 2>/dev/null | grep -F 'worker-secret' >/dev/null && echo leaked || echo clean)
 parent=$(cat /proc/$PPID/environ >/dev/null 2>&1 && echo parent || echo noparent)
 fds=$(ls /proc/$PPID/fd >/dev/null 2>&1 && echo fds || echo nofds)
 printf '%s|%s|%s|%s|%s' "$secret_env" "$job" "$proc" "$parent" "$fds""#
     })
     .to_string();
     let env_out = denied.execute("bash", &env_probe).await.unwrap();
+    let shikigami::tools::ToolOutput::Text(text) = env_out else {
+        panic!("expected bash text, got {env_out:?}");
+    };
+    let line = text
+        .lines()
+        .find(|line| line.contains('|') && !line.contains("Permission denied"))
+        .unwrap_or(text.trim());
     assert_eq!(
-        env_out,
-        shikigami::tools::ToolOutput::Text("unset|job-scoped-token|clean|noparent|nofds".into())
+        line.trim(),
+        "unset|job-scoped-token|clean|noparent|nofds",
+        "{text:?}"
     );
     let denied_socket = denied
         .execute("bash", r#"{"command":"echo >/dev/tcp/127.0.0.1/9"}"#)
