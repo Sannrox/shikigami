@@ -61,7 +61,7 @@ mapping. The plane claim client reuses one connected Channel for
 list/claim/lease RPCs and reconnects only after a transport error. The facade
 consumes the canonical upstream `sekai-proto`
 crate, so Shikigami does not carry a second protocol snapshot. The supported
-boundary is `sekai-client` 0.1.x with `sekai-proto` 1.x, pinned in
+boundary is `sekai-client` 0.1.x with `sekai-proto` 1.x (1.3 or later for runtime tokens), pinned in
 `Cargo.toml`/`Cargo.lock`. The SDK permits plain HTTP for loopback development
 endpoints. Non-loopback planes should use HTTPS. Private-network compose that
 can reach Chisei only as a Docker DNS name over plaintext gRPC may set

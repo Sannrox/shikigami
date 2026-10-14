@@ -39,8 +39,23 @@ from the plane administrator. Configure `governance.principal` and
 `governance.namespace` in the governed settings file, with the matching
 credential selected by `governance.token_env` when the plane requires one.
 The plane must authorize that identity to list and claim Action work for the
-selected `--runtime-id`, and to renew and report its claims. See the
+selected `--runtime-id`. See the
 [governance settings reference](settings.md#governance).
+
+### Runtime tokens for claimed work
+
+Each claim carries a short-lived runtime token from the plane, bound to the
+claim's tenant, namespace, effect, runtime, and generation. Shikigami uses it,
+not the `token_env` credential, for every call about that claim: heartbeat,
+acknowledgement, and claim events. Each heartbeat returns a refreshed token.
+The `token_env` credential stays in use for listing, claiming, instance lookup,
+and governed execution, which the runtime token does not cover.
+
+A claim without a runtime token is refused and `serve` exits, leaving the claim
+to expire. An expired token is fence loss: the run is drained and not
+acknowledged. To upgrade a worker, the plane must have an assertion signing key
+and the worker credential must carry a tenant; otherwise the plane issues no
+token. No Shikigami setting changes.
 
 When a producing application is retired, restore the worker only with a
 plane-authorized runtime identity that is independent of the retired
@@ -164,6 +179,8 @@ plane state. For detailed event fields, see [harvest.md](harvest.md) and
 | Lease or fence lost mid-run | Cancel and drain local execution (reap bash process groups); do not acknowledge under stale authority |
 | Claim/heartbeat identity mismatch (effect, owner, token, generation) | `FenceLost`; do not adopt another principal's fence or swap work identity |
 | Lease grant missing, expired, or `ttl_ms == 0` | Reject; do not default to 60s or overstay the requested TTL |
+| Claim or heartbeat grant has no runtime token | Refuse the claim; `serve` exits and the claim expires |
+| Runtime token expired | `FenceLost`; no call is made with it |
 | Claimed envelope fails validation | Acknowledge `failed` while the fence is live |
 | Run parks for operator input | Acknowledge `parked`; wait for governed `resolve_parked_work/v1` |
 | Checkpoint unavailable after resolution | Report fenced fallback events and start a replacement under the same operation |

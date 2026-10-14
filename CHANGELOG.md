@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes and upgrade
 
+- Plane intake authenticates every call for claimed work (heartbeat,
+  acknowledgement, claim events) with the claim's short-lived runtime token
+  instead of the `governance.token_env` bearer, and uses each refreshed token
+  from heartbeats. A claim without a runtime token is refused and `serve`
+  exits; an expired token is fence loss. Upgrade the plane to one that issues
+  runtime tokens (assertion signing key configured) and give the worker a
+  tenant-scoped credential. `token_env` remains the credential for listing,
+  claiming, and governed execution. The `sekai-client` pin moves to the
+  release that carries the token fields. See
+  [runtime tokens for claimed work](docs/plane-action-run.md#runtime-tokens-for-claimed-work).
+- `PlaneClaimLease` gains a `runtime_token: RuntimeToken` field; hosts that
+  build leases (for example test fakes) construct it with
+  `RuntimeToken::from_grant`.
+
 - Remote governance adapters (`sekai-chisei`, `http-callback`, `host-authz`)
   now fail closed by default: doctor, `run`, and `serve` refuse when
   governance is unreachable or refuses, whatever `governance.fail_closed`

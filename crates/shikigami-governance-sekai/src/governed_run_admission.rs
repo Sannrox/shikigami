@@ -29,6 +29,7 @@ pub(super) fn host_receipt_input(
         logical_operation_id: logical_operation_id.into(),
         attempt_id: run_id.into(),
         route_override: String::new(),
+        learning_pin: None,
     }
 }
 

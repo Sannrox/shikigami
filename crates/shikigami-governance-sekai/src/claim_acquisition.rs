@@ -4,12 +4,18 @@
 //! fence renew, plus post-admit heartbeat, ack, and claim-event reporting.
 //! Claim and heartbeat grants are bound to the claimed work and requested
 //! runtime; `valid_until` never exceeds `min(requested, granted)` remaining.
+//!
+//! Listing, claiming, and instance lookup use the worker credential. Every
+//! call for claimed work (heartbeat, ack, claim events) authenticates with the
+//! claim's short-lived runtime token, refreshed by each heartbeat. A claim
+//! without a runtime token, or with an expired one, refuses the work.
 
 use std::time::{Duration, Instant};
 
-use sekai_client::{SdkError, SdkErrorCode};
+use sekai_client::{CoreLoopClient, CoreLoopTransport, SdkError, SdkErrorCode};
 
 use super::{SekaiClaimClient, plane_session, proto};
+use crate::plane_intake::RuntimeToken;
 
 macro_rules! cached_unary {
     ($slot:ident, $call:expr) => {{
@@ -98,6 +104,11 @@ pub(super) async fn claim_next(
         crate::plane_intake::PlaneIntakeError::Source("ClaimActionWork returned no effect".into())
     })?;
     bind_granted_identity(&candidate_effect_id, runtime_id, 0, None, &claimed_effect)?;
+    let runtime_token = RuntimeToken::from_grant(
+        claimed.runtime_token,
+        claimed.runtime_token_expires_at_ms,
+        wall_now_ms(),
+    )?;
     let instance_response: proto::sekai::GetActionInstanceResponse = match cached_unary!(
         plane_slot,
         plane_slot
@@ -110,6 +121,7 @@ pub(super) async fn claim_next(
                     instance_id: claimed_effect.instance_id.clone(),
                     namespace: String::new(),
                     idempotency_key: String::new(),
+                    operation_id: String::new(),
                 },
                 plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
             )
@@ -131,11 +143,13 @@ pub(super) async fn claim_next(
     // initial TTL. Revalidate and renew the same fence before the host is
     // allowed to start the run.
     let renew_started = Instant::now();
+    let claim_plane = with_runtime_token(
+        plane_slot.as_ref().expect("connected plane is inserted"),
+        &runtime_token,
+    )?;
     let effect_response: proto::sekai::HeartbeatActionClaimResponse = match cached_unary!(
         plane_slot,
-        plane_slot
-            .as_ref()
-            .expect("connected plane is inserted")
+        claim_plane
             .raw()
             .unary(
                 "/sekai.SekaiService/HeartbeatActionClaim",
@@ -156,6 +170,11 @@ pub(super) async fn claim_next(
         // serve loop and keep the worker accepting claims.
         Err(error) => return Err(map_owned_claim_heartbeat_error(&error)),
     };
+    let refreshed_token = RuntimeToken::from_grant(
+        effect_response.runtime_token,
+        effect_response.runtime_token_expires_at_ms,
+        wall_now_ms(),
+    )?;
     let heartbeat_effect = effect_response.effect.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source(
             "HeartbeatActionClaim before run returned no effect".into(),
@@ -172,6 +191,7 @@ pub(super) async fn claim_next(
             now_ms: wall_now_ms(),
         },
         &heartbeat_effect,
+        refreshed_token,
     )?;
 
     Ok(Some(crate::plane_intake::PlaneClaim {
@@ -205,11 +225,13 @@ pub(super) async fn heartbeat(
     }
     let renew_started = Instant::now();
     let mut plane_slot = client.connected_plane().await?;
+    let claim_plane = with_runtime_token(
+        plane_slot.as_ref().expect("connected plane is inserted"),
+        &claim.lease.runtime_token,
+    )?;
     let response: proto::sekai::HeartbeatActionClaimResponse = match cached_unary!(
         plane_slot,
-        plane_slot
-            .as_ref()
-            .expect("connected plane is inserted")
+        claim_plane
             .raw()
             .unary(
                 "/sekai.SekaiService/HeartbeatActionClaim",
@@ -227,6 +249,11 @@ pub(super) async fn heartbeat(
         Ok(response) => response,
         Err(error) => return Err(map_lease_rpc_error("HeartbeatActionClaim", &error)),
     };
+    let refreshed_token = RuntimeToken::from_grant(
+        response.runtime_token,
+        response.runtime_token_expires_at_ms,
+        wall_now_ms(),
+    )?;
     let effect = response.effect.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source(
             "HeartbeatActionClaim returned no effect".into(),
@@ -243,6 +270,7 @@ pub(super) async fn heartbeat(
             now_ms: wall_now_ms(),
         },
         &effect,
+        refreshed_token,
     )
 }
 
@@ -253,11 +281,13 @@ pub(super) async fn ack(
     ack: &crate::plane_intake::PlaneAck,
 ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
     let mut plane_slot = client.connected_plane().await?;
+    let claim_plane = with_runtime_token(
+        plane_slot.as_ref().expect("connected plane is inserted"),
+        &claim.lease.runtime_token,
+    )?;
     let _: proto::sekai::AckActionWorkResponse = match cached_unary!(
         plane_slot,
-        plane_slot
-            .as_ref()
-            .expect("connected plane is inserted")
+        claim_plane
             .raw()
             .unary(
                 "/sekai.SekaiService/AckActionWork",
@@ -311,11 +341,13 @@ pub(super) async fn report_claim_event(
     request_id: &str,
 ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
     let mut plane_slot = client.connected_plane().await?;
+    let claim_plane = with_runtime_token(
+        plane_slot.as_ref().expect("connected plane is inserted"),
+        &claim.lease.runtime_token,
+    )?;
     let _: proto::sekai::ReportActionClaimEventResponse = match cached_unary!(
         plane_slot,
-        plane_slot
-            .as_ref()
-            .expect("connected plane is inserted")
+        claim_plane
             .raw()
             .unary(
                 "/sekai.SekaiService/ReportActionClaimEvent",
@@ -491,6 +523,7 @@ fn granted_valid_until(
 fn lease_from_granted_effect(
     grant: &LeaseGrant<'_>,
     effect: &proto::sekai::ActionEffect,
+    runtime_token: RuntimeToken,
 ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
     bind_granted_identity(
         grant.expected_effect_id,
@@ -499,18 +532,48 @@ fn lease_from_granted_effect(
         grant.held_fencing_token,
         effect,
     )?;
+    let lease_until = granted_valid_until(
+        grant.renew_started,
+        grant.requested_ttl,
+        effect.claim_expires_at_ms,
+        grant.now_ms,
+    )?;
+    // The runtime token may expire before the lease (the plane caps it at a
+    // few minutes). Local authority ends at the earlier of the two, so the
+    // serve loop renews in time and drains when the token lapses.
+    let token_until = granted_valid_until(
+        grant.renew_started,
+        grant.requested_ttl,
+        runtime_token.expires_at_ms(),
+        grant.now_ms,
+    )?;
     Ok(crate::plane_intake::PlaneClaimLease {
         runtime_id: grant.requested_runtime_id.to_owned(),
         generation: effect.claim_generation,
         fencing_token: effect.claim_fencing_token.clone(),
         expires_at_ms: effect.claim_expires_at_ms,
-        valid_until: granted_valid_until(
-            grant.renew_started,
-            grant.requested_ttl,
-            effect.claim_expires_at_ms,
-            grant.now_ms,
-        )?,
+        valid_until: lease_until.min(token_until),
+        runtime_token,
     })
+}
+
+/// A client on the cached connection that authenticates with the claim's
+/// runtime token instead of the worker credential. Refuses an expired token
+/// before any call.
+fn with_runtime_token<T: CoreLoopTransport + Clone>(
+    plane: &CoreLoopClient<T>,
+    token: &RuntimeToken,
+) -> Result<CoreLoopClient<T>, crate::plane_intake::PlaneIntakeError> {
+    token.check_live(wall_now_ms())?;
+    let source = |error: SdkError| {
+        crate::plane_intake::PlaneIntakeError::Source(format!("runtime token client: {error}"))
+    };
+    let config = plane
+        .config()
+        .clone()
+        .with_token(token.value())
+        .map_err(source)?;
+    CoreLoopClient::new(config, plane.transport().clone()).map_err(source)
 }
 
 fn duration_millis(duration: Duration) -> Result<i64, crate::plane_intake::PlaneIntakeError> {
@@ -694,7 +757,123 @@ mod tests {
                 now_ms,
             },
             effect,
+            RuntimeToken::from_grant("rt-1".into(), i64::MAX, now_ms).unwrap(),
         )
+    }
+
+    /// Transport that is never called; the tests only inspect request metadata.
+    #[derive(Clone)]
+    struct NoTransport;
+
+    #[async_trait::async_trait]
+    impl CoreLoopTransport for NoTransport {
+        type Stream = futures_util::stream::Empty<
+            Result<proto::chisei::ExecutePlanStreamEvent, tonic::Status>,
+        >;
+
+        async fn plan_execution(
+            &self,
+            _: tonic::Request<proto::chisei::PlanExecutionRequest>,
+        ) -> Result<tonic::Response<proto::chisei::PlanExecutionResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("test"))
+        }
+
+        async fn execute_plan_stream(
+            &self,
+            _: tonic::Request<proto::chisei::ExecutePlanRequest>,
+        ) -> Result<tonic::Response<Self::Stream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("test"))
+        }
+
+        async fn report_operation_event(
+            &self,
+            _: tonic::Request<proto::chisei::ReportOperationEventRequest>,
+        ) -> Result<tonic::Response<proto::chisei::ReportOperationEventResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("test"))
+        }
+
+        async fn get_operation_receipt(
+            &self,
+            _: tonic::Request<proto::chisei::GetOperationReceiptRequest>,
+        ) -> Result<tonic::Response<proto::chisei::GetOperationReceiptResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("test"))
+        }
+    }
+
+    fn worker_plane() -> CoreLoopClient<NoTransport> {
+        let config = sekai_client::ClientConfig::new("http://127.0.0.1:1", "worker")
+            .with_token("worker-static")
+            .unwrap();
+        CoreLoopClient::new(config, NoTransport).unwrap()
+    }
+
+    fn authorization(plane: &CoreLoopClient<NoTransport>) -> String {
+        plane
+            .metadata(&sekai_client::CallOptions::new(), "req-1")
+            .unwrap()
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn claimed_work_calls_authenticate_with_the_runtime_token() {
+        let worker = worker_plane();
+        let token = RuntimeToken::from_grant("rt-claim".into(), i64::MAX, wall_now_ms()).unwrap();
+
+        let claim_plane = with_runtime_token(&worker, &token).unwrap();
+
+        assert_eq!(authorization(&claim_plane), "Bearer rt-claim");
+        assert_eq!(authorization(&worker), "Bearer worker-static");
+    }
+
+    #[test]
+    fn expired_runtime_token_refuses_claimed_work() {
+        let now = wall_now_ms();
+        let token = RuntimeToken::from_grant("rt-claim".into(), now + 1, now).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let error = with_runtime_token(&worker_plane(), &token).err().unwrap();
+
+        assert!(
+            matches!(error, crate::plane_intake::PlaneIntakeError::FenceLost(_)),
+            "{error}"
+        );
+        assert!(RuntimeToken::from_grant("rt".into(), now, now).is_err());
+    }
+
+    #[test]
+    fn local_fence_ends_at_a_shorter_runtime_token_expiry() {
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let lease = lease_from_granted_effect(
+            &LeaseGrant {
+                expected_effect_id: "effect-1",
+                requested_runtime_id: "runtime-1",
+                expected_generation: 0,
+                held_fencing_token: None,
+                requested_ttl: Duration::from_secs(60),
+                renew_started: start,
+                now_ms,
+            },
+            &granted_effect(),
+            RuntimeToken::from_grant("rt".into(), now_ms + 5_000, now_ms).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lease.valid_until, start + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn missing_runtime_token_refuses_the_claim() {
+        let error = RuntimeToken::from_grant(String::new(), 0, 0).unwrap_err();
+        assert!(
+            matches!(error, crate::plane_intake::PlaneIntakeError::Source(_)),
+            "{error}"
+        );
     }
 
     #[test]

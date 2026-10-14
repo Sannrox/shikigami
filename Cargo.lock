@@ -2076,7 +2076,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "sekai-client"
 version = "0.1.2"
-source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=1b4584c8194b74d9cbf37ffefc30820942a4b61d#1b4584c8194b74d9cbf37ffefc30820942a4b61d"
+source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=6f7c98b3151b6c4fcf5f2dfa987922f8a2a72f33#6f7c98b3151b6c4fcf5f2dfa987922f8a2a72f33"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2097,12 +2097,13 @@ dependencies = [
 
 [[package]]
 name = "sekai-proto"
-version = "1.0.1"
-source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=1b4584c8194b74d9cbf37ffefc30820942a4b61d#1b4584c8194b74d9cbf37ffefc30820942a4b61d"
+version = "1.3.0"
+source = "git+https://github.com/Sannrox/sekai-chisei.git?rev=6f7c98b3151b6c4fcf5f2dfa987922f8a2a72f33#6f7c98b3151b6c4fcf5f2dfa987922f8a2a72f33"
 dependencies = [
  "prost",
  "prost-types",
  "protoc-bin-vendored",
+ "serde",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -2277,6 +2278,7 @@ dependencies = [
  "shikigami-plane-intake",
  "tempfile",
  "tokio",
+ "tonic",
  "uuid",
 ]
 
@@ -2475,7 +2477,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

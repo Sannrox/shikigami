@@ -100,7 +100,7 @@ Top-level `version` is required and must be `1`.
 | `principal` | `"shikigami"` | Identity presented to the plane (not a secret) |
 | `namespace` | unset | Governance namespace. Required for `sekai-chisei`, `http-callback`, and `host-authz`; there is no implicit default |
 | `fail_closed` | `false` | Fail doctor/run when governance is unhealthy. Always on for `sekai-chisei`, `http-callback`, and `host-authz` |
-| `token_env` | unset | Env var name holding a Bearer token for the plane |
+| `token_env` | unset | Env var name holding the worker's Bearer token for the plane. Claimed-work calls use the claim's runtime token instead; see [plane-action-run.md](plane-action-run.md#runtime-tokens-for-claimed-work) |
 | `allow_insecure_remote` | `false` | Opt-in for plaintext `http://` `sekai-chisei` endpoints whose host is not loopback (private-network compose). Default stays reject. HTTPS remote and loopback `http://` do not need this flag. |
 
 `sekai-client` still rejects remote plaintext unless this flag is true. Keep it
