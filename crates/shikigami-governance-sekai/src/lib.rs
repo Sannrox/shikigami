@@ -65,7 +65,8 @@ pub struct SekaiChiseiGovernance {
     namespace: String,
     fail_closed: bool,
     allow_insecure_remote: bool,
-    token_env: Option<String>,
+    client_secret_env: Option<String>,
+    service_token: plane_session::ServiceTokenCache,
     max_tokens: i32,
     preferred_model: String,
     harvest: HarvestTransaction,
@@ -107,10 +108,18 @@ impl SekaiClaimClient {
         tokio::sync::MutexGuard<'_, Option<PlaneClient>>,
         crate::plane_intake::PlaneIntakeError,
     > {
-        self.plane
+        let mut slot = self
+            .plane
             .get_or_try_insert_with(|| plane_session::connect(&self.inner))
             .await
-            .map_err(plane_intake_source)
+            .map_err(plane_intake_source)?;
+        // The connection is long-lived; the service token is not.
+        if let Some(plane) = slot.as_mut() {
+            *plane = plane_session::authorize(&self.inner, plane)
+                .await
+                .map_err(plane_intake_source)?;
+        }
+        Ok(slot)
     }
 }
 
@@ -152,7 +161,8 @@ impl SekaiChiseiGovernance {
             namespace: config.governance.namespace.clone(),
             fail_closed: config.requires_governance(),
             allow_insecure_remote: config.governance.allow_insecure_remote,
-            token_env: config.governance.token_env.clone(),
+            client_secret_env: config.governance.client_secret_env.clone(),
+            service_token: plane_session::ServiceTokenCache::default(),
             max_tokens: 4096,
             preferred_model: config.model.model.clone(),
             harvest: HarvestTransaction::default(),
@@ -1586,7 +1596,8 @@ mod tests {
             namespace: "default".into(),
             fail_closed: false,
             allow_insecure_remote: false,
-            token_env: None,
+            client_secret_env: None,
+            service_token: plane_session::ServiceTokenCache::default(),
             max_tokens: 4096,
             preferred_model: "auto".into(),
             harvest: HarvestTransaction::default(),

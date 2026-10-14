@@ -74,7 +74,7 @@ Requirements:
 
 - build with the default `governance-sekai-chisei` feature;
 - set `governance.adapter = "sekai-chisei"`, endpoint, namespace, principal,
-  and optional `token_env`;
+  and `client_secret_env` when the plane requires authentication;
 - use a principal authorized for team-namespace write on the claim namespace;
 - when checkpoint resume is enabled, configure the same logical store id in
   the plane's `SEKAI_CHECKPOINT_STORES` allowlist; and

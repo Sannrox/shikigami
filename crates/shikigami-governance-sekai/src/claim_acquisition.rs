@@ -568,12 +568,7 @@ fn with_runtime_token<T: CoreLoopTransport + Clone>(
     let source = |error: SdkError| {
         crate::plane_intake::PlaneIntakeError::Source(format!("runtime token client: {error}"))
     };
-    let config = plane
-        .config()
-        .clone()
-        .with_token(token.value())
-        .map_err(source)?;
-    CoreLoopClient::new(config, plane.transport().clone()).map_err(source)
+    plane_session::with_bearer(plane, Some(token.value())).map_err(source)
 }
 
 fn duration_millis(duration: Duration) -> Result<i64, crate::plane_intake::PlaneIntakeError> {
@@ -829,6 +824,17 @@ mod tests {
 
         assert_eq!(authorization(&claim_plane), "Bearer rt-claim");
         assert_eq!(authorization(&worker), "Bearer worker-static");
+    }
+
+    #[test]
+    fn credential_exchange_client_sends_no_bearer() {
+        let anonymous = plane_session::with_bearer(&worker_plane(), None).unwrap();
+        let metadata = anonymous
+            .metadata(&sekai_client::CallOptions::new(), "req-1")
+            .unwrap();
+        assert!(metadata.get("authorization").is_none());
+        let service = plane_session::with_bearer(&anonymous, Some("st-1")).unwrap();
+        assert_eq!(authorization(&service), "Bearer st-1");
     }
 
     #[test]

@@ -36,8 +36,10 @@ the plane and the host state is intended to support parked-run resume. See
 
 Before starting plane intake, obtain an active runtime principal and namespace
 from the plane administrator. Configure `governance.principal` and
-`governance.namespace` in the governed settings file, with the matching
-credential selected by `governance.token_env` when the plane requires one.
+`governance.namespace` in the governed settings file. When the plane requires
+authentication, the administrator registers that principal as a service
+principal; set `governance.client_secret_env` to the env var holding its client
+secret (see [service tokens](settings.md#service-principal-tokens)).
 The plane must authorize that identity to list and claim Action work for the
 selected `--runtime-id`. See the
 [governance settings reference](settings.md#governance).
@@ -46,9 +48,9 @@ selected `--runtime-id`. See the
 
 Each claim carries a short-lived runtime token from the plane, bound to the
 claim's tenant, namespace, effect, runtime, and generation. Shikigami uses it,
-not the `token_env` credential, for every call about that claim: heartbeat,
+not the worker's service token, for every call about that claim: heartbeat,
 acknowledgement, and claim events. Each heartbeat returns a refreshed token.
-The `token_env` credential stays in use for listing, claiming, instance lookup,
+The service token stays in use for listing, claiming, instance lookup,
 and governed execution, which the runtime token does not cover.
 
 A claim without a runtime token is refused and `serve` exits, leaving the claim

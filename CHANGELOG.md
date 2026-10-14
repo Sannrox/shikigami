@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes and upgrade
 
+- `sekai-chisei` workers authenticate as registered service principals: the
+  new `governance.client_secret_env` names the env var holding the client
+  secret, which the adapter exchanges for short-lived service tokens and
+  refreshes before expiry. The static bearer is removed: `governance.token_env`
+  with `sekai-chisei` fails at startup (it remains the host token for
+  `http-callback` / `host-authz`). A refused credential exchange fails closed.
+  Requires a plane with the service-principal token call. See
+  [service-principal tokens](docs/settings.md#service-principal-tokens).
+
 - Plane intake authenticates every call for claimed work (heartbeat,
   acknowledgement, claim events) with the claim's short-lived runtime token
   instead of the `governance.token_env` bearer, and uses each refreshed token

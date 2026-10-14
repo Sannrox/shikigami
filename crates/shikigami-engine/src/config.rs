@@ -109,8 +109,15 @@ pub struct GovernanceSettings {
     /// governance adapter is configured; there is no implicit default.
     #[serde(default)]
     pub namespace: String,
+    /// Env var holding the Bearer token for the `http-callback` / `host-authz`
+    /// host. Refused for `sekai-chisei`, which uses [`Self::client_secret_env`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    /// Env var holding the client secret of the worker's registered service
+    /// principal (`principal`). `sekai-chisei` exchanges it for short-lived
+    /// service tokens and refreshes them before expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_env: Option<String>,
     /// Opt-in for plaintext `http://` governance endpoints whose host is not
     /// loopback. Default false; required for private-network compose names.
     /// `sekai-client` keeps rejecting remote plaintext until this is true.
@@ -168,6 +175,7 @@ impl Default for GovernanceSettings {
             fail_closed: false,
             namespace: String::new(),
             token_env: None,
+            client_secret_env: None,
             allow_insecure_remote: false,
             delayed_evidence: DelayedEvidenceSettings::default(),
         }
@@ -1143,6 +1151,11 @@ impl Config {
                 "governance adapter `http-callback` requires governance.endpoint".into(),
             ));
         }
+        if self.governance.adapter == "sekai-chisei" && self.governance.token_env.is_some() {
+            return Err(ConfigError::Invalid(
+                "governance.token_env (static bearer) is no longer supported for `sekai-chisei`; register the worker as a service principal and set governance.client_secret_env".into(),
+            ));
+        }
         if self.remote_governance_configured() && self.governance.namespace.trim().is_empty() {
             return Err(ConfigError::Invalid(format!(
                 "governance adapter `{}` requires an explicit governance.namespace",
@@ -1398,9 +1411,8 @@ impl Config {
     /// to agent-controlled tool or MCP stdio subprocesses.
     pub fn protected_tool_environment_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        if let Some(name) = &self.governance.token_env {
-            names.push(name.clone());
-        }
+        names.extend(self.governance.token_env.clone());
+        names.extend(self.governance.client_secret_env.clone());
         if self.model.adapter == "http" {
             names.push(self.model.api_key_env.clone());
         }
@@ -1442,6 +1454,12 @@ pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
         if let Some(stripped) = v.strip_prefix("Bearer ") {
             secrets.push(stripped.to_string());
         }
+        secrets.push(v);
+    }
+    if let Some(name) = &config.governance.client_secret_env
+        && let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+    {
         secrets.push(v);
     }
     if let Ok(v) = std::env::var(&config.model.api_key_env)
@@ -1968,6 +1986,25 @@ read_only_paths = ["{}"]
         let local = Config::default();
         assert!(!local.requires_governance());
         local.validate().unwrap();
+    }
+
+    #[test]
+    fn sekai_chisei_refuses_static_bearer_and_protects_client_secret() {
+        let mut c = Config::default();
+        c.governance.adapter = "sekai-chisei".into();
+        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        c.governance.namespace = "team-a".into();
+        c.governance.token_env = Some("PLANE_TOKEN".into());
+        let err = c.validate().unwrap_err();
+        assert!(err.to_string().contains("client_secret_env"), "{err}");
+
+        c.governance.token_env = None;
+        c.governance.client_secret_env = Some("WORKER_CLIENT_SECRET".into());
+        c.validate().unwrap();
+        assert!(
+            c.protected_tool_environment_names()
+                .contains(&"WORKER_CLIENT_SECRET".to_string())
+        );
     }
 
     #[test]
