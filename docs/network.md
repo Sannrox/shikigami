@@ -45,6 +45,7 @@ without OS isolation, or on hosts that cannot provide `linux_native`.
 MCP HTTP transports already call `NetworkSettings::check_http_url`. See
 [mcp.md](mcp.md).
 
-An address-level egress allowlist for tool children is a separate decision
-([ADR 0013](decisions/0013-os-sandbox-adapter.md)); today `linux_native`
-denies every child `socket()`.
+`linux_native` denies every child `socket()` unless the job sets
+`sandbox.tool_sockets = "host"` (ADR 0013). That grant is host-enforced and
+unverified by the harness. An address-level egress allowlist for tool children
+remains a separate decision.

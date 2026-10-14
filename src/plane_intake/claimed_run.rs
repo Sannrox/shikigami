@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::run::RunTermination;
+use crate::run::{JobCredential, JobCredentialHandle, RunTermination};
 
 use super::{
     ClaimedPlaneWork, Harness, HarnessError, PlaneAck, PlaneAckOutcome, PlaneCheckpoint,
@@ -35,8 +35,18 @@ pub(super) async fn execute(
         let _ = lc.begin_claim(&claim_id);
     }
 
+    let namespace = harness.config.governance.namespace.clone();
     let mut prepared = match prepare_claimed_run(harness, &claim.work, options) {
-        Ok(request) => request,
+        Ok(mut request) => {
+            request.request.job_credential = JobCredentialHandle::from_live(
+                claim.lease.runtime_token.value().to_string(),
+                claim.lease.runtime_token.expires_at_ms(),
+                String::new(),
+                namespace.clone(),
+                now_ms(),
+            );
+            request
+        }
         Err(error) => {
             let ack = PlaneAck {
                 outcome: PlaneAckOutcome::Failed,
@@ -78,6 +88,7 @@ pub(super) async fn execute(
     prepared.request.cancel = Some(cancel_rx);
     let resumed = prepared.resumed;
     let expected_checkpoint_digest = prepared.checkpoint_digest.clone();
+    let job_handle = prepared.request.job_credential.clone();
     let request = prepared.request;
     let mut run = Box::pin(async move {
         if resumed {
@@ -109,7 +120,18 @@ pub(super) async fn execute(
                     call_window,
                     intake.heartbeat(&claim, options.claim_ttl),
                 ).await {
-                    Ok(Ok(lease)) => claim.lease = lease,
+                    Ok(Ok(lease)) => {
+                        claim.lease = lease;
+                        if let Some(handle) = &job_handle {
+                            handle.replace(JobCredential::live(
+                                claim.lease.runtime_token.value().to_string(),
+                                claim.lease.runtime_token.expires_at_ms(),
+                                String::new(),
+                                namespace.clone(),
+                                now_ms(),
+                            ));
+                        }
+                    }
                     Ok(Err(error)) => {
                         return fail_closed_after_fence_loss(
                             &cancel_tx,
@@ -667,6 +689,13 @@ pub(super) fn claim_call_window(
     }
     let safety = (remaining / 10).clamp(Duration::from_millis(10), Duration::from_millis(250));
     Ok(maximum.min(remaining - safety))
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

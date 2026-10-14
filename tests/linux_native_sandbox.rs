@@ -4,6 +4,8 @@
 use std::path::Path;
 
 use shikigami::{Config, EgressMode, Harness, RunRequest, SandboxBackend, StateRoot};
+#[cfg(target_os = "linux")]
+use shikigami::{JobCredentialHandle, ToolSockets};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -126,6 +128,99 @@ async fn linux_native_overhead_stays_within_budget() {
     assert!(
         added <= Duration::from_millis(10),
         "linux_native added {added:?} per tool call (budget 10ms); baseline={baseline:?} isolated={isolated:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_native_child_sees_job_token_not_worker_secret_and_needs_socket_grant() {
+    use shikigami::tools::ToolRegistry;
+
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let secret_name = "SHIKIGAMI_TEST_WORKER_SECRET_LINUX_442";
+    unsafe {
+        std::env::set_var(secret_name, "worker-secret");
+    }
+    let mut config = isolation_config(dir.path());
+    config.workspace.root = workspace.to_string_lossy().into();
+    config.governance.client_secret_env = Some(secret_name.into());
+    let job = JobCredentialHandle::from_live("job-scoped-token", i64::MAX, "tenant-a", "ns-a", 0)
+        .unwrap();
+    let denied = ToolRegistry::from_config_enabled_with_job(
+        &workspace,
+        &config,
+        vec!["bash".into()],
+        Some(&job),
+    )
+    .unwrap();
+    unsafe {
+        std::env::remove_var(secret_name);
+    }
+    // Redirect /proc denials off stdout: linux_native refuses /proc, and the
+    // harness captures bash stderr in the tool text.
+    let env_probe = serde_json::json!({
+        "command": r#"secret_env="${SHIKIGAMI_TEST_WORKER_SECRET_LINUX_442-unset}"
+job="${SHIKIGAMI_JOB_TOKEN-unset}"
+proc=$(tr '\0' '\n' < /proc/self/environ 2>/dev/null | grep -F 'worker-secret' >/dev/null && echo leaked || echo clean)
+parent=$(cat /proc/$PPID/environ >/dev/null 2>&1 && echo parent || echo noparent)
+fds=$(ls /proc/$PPID/fd >/dev/null 2>&1 && echo fds || echo nofds)
+printf '%s|%s|%s|%s|%s' "$secret_env" "$job" "$proc" "$parent" "$fds""#
+    })
+    .to_string();
+    let env_out = denied.execute("bash", &env_probe).await.unwrap();
+    let shikigami::tools::ToolOutput::Text(text) = env_out else {
+        panic!("expected bash text, got {env_out:?}");
+    };
+    let line = text
+        .lines()
+        .find(|line| line.contains('|') && !line.contains("Permission denied"))
+        .unwrap_or(text.trim());
+    assert_eq!(
+        line.trim(),
+        "unset|job-scoped-token|clean|noparent|nofds",
+        "{text:?}"
+    );
+    let denied_socket = denied
+        .execute("bash", r#"{"command":"echo >/dev/tcp/127.0.0.1/9"}"#)
+        .await
+        .expect_err("child without a socket grant must fail");
+    let denied_text = denied_socket.to_string();
+    assert!(
+        denied_text.contains("Permission")
+            || denied_text.contains("denied")
+            || denied_text.contains("Operation not permitted")
+            || denied_text.contains("failed"),
+        "{denied_text}"
+    );
+
+    config.sandbox.tool_sockets = ToolSockets::Host;
+    let granted = ToolRegistry::from_config_enabled_with_job(
+        &workspace,
+        &config,
+        vec!["bash".into()],
+        Some(&job),
+    )
+    .unwrap();
+    let host_socket = granted
+        .execute(
+            "bash",
+            r#"{"command":"echo >/dev/tcp/127.0.0.1/9; printf opened"}"#,
+        )
+        .await;
+    let host_text = match host_socket {
+        Ok(shikigami::tools::ToolOutput::Text(text)) => text,
+        Err(error) => error.to_string(),
+        Ok(other) => panic!("expected bash text, got {other:?}"),
+    };
+    assert!(
+        host_text.contains("opened") || host_text.contains("Connection refused"),
+        "host grant should allow socket(); got {host_text}"
+    );
+    assert!(
+        !host_text.contains("Operation not permitted"),
+        "{host_text}"
     );
 }
 

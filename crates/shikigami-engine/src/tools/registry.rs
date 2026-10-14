@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::config::{Config, NetworkSettings, SandboxSettings};
 
+use super::JobCredentialHandle;
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
 use super::catalog::{BASH_HELPER_TOOLS, builtin_is_authorized, model_visible_builtin_definitions};
 use super::executor::{BashArgs, ToolExecutor};
@@ -62,6 +63,27 @@ impl ToolRegistry {
             config.tools.respect_ignore,
             &config.protected_tool_environment_names(),
             config.sandbox.clone(),
+            None,
+        )
+    }
+
+    /// Same as [`Self::from_config_enabled`] with a live job grant injected
+    /// into sandboxed tool children.
+    pub fn from_config_enabled_with_job(
+        workspace: impl Into<PathBuf>,
+        config: &Config,
+        enabled: Vec<String>,
+        job: Option<&JobCredentialHandle>,
+    ) -> Result<Self, ToolError> {
+        Self::with_builtins_sandbox_protected_environment(
+            workspace,
+            enabled,
+            config.tools.bash_timeout_secs,
+            config.network.clone(),
+            config.tools.respect_ignore,
+            &config.protected_tool_environment_names(),
+            config.sandbox.clone(),
+            job,
         )
     }
 
@@ -108,9 +130,11 @@ impl ToolRegistry {
             respect_ignore,
             protected_environment_names,
             SandboxSettings::default(),
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_builtins_sandbox_protected_environment(
         workspace: impl Into<PathBuf>,
         enabled: Vec<String>,
@@ -119,6 +143,7 @@ impl ToolRegistry {
         respect_ignore: bool,
         protected_environment_names: &[String],
         sandbox_settings: SandboxSettings,
+        job: Option<&JobCredentialHandle>,
     ) -> Result<Self, ToolError> {
         let web_fetcher = default_web_fetcher()?;
         Ok(Self {
@@ -129,6 +154,7 @@ impl ToolRegistry {
                 respect_ignore,
                 protected_environment_names,
                 sandbox_settings,
+                job,
             )?,
             external: Vec::new(),
             todos: Arc::new(Mutex::new(Vec::new())),

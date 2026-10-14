@@ -44,7 +44,7 @@ mod content_tests;
 
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpFraming, McpServerSettings, PermissionMode,
-    SandboxBackend, SandboxSettings, TracingSettings,
+    SandboxBackend, SandboxSettings, ToolSockets, TracingSettings,
 };
 pub use content::{
     CLI_FILE_RESOLVER_ID, CONTENT_CONTRACT_VERSION, CONTENT_PROCESS_REQUEST_SCHEMA_VERSION,
@@ -89,8 +89,9 @@ pub use replay::{
     export_replay_inputs, steps_from_messages, text_digest, workspace_digest,
 };
 pub use run::{
-    AskDecision, ChildProfile, ParkInfo, ParkKind, PlanDecision, RunRequest, RunResult,
-    RunTermination, SYSTEM_PROMPT,
+    AskDecision, ChildProfile, JOB_CREDENTIAL_ENV_NAMES, JOB_NAMESPACE_ENV, JOB_TENANT_ENV,
+    JOB_TOKEN_ENV, JobCredential, JobCredentialHandle, ParkInfo, ParkKind, PlanDecision,
+    RunRequest, RunResult, RunTermination, SYSTEM_PROMPT,
 };
 pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,

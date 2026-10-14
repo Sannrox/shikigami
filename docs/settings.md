@@ -222,6 +222,7 @@ closed. Hosts must serialize concurrent runs against the same inplace root.
 | file_size_mb | unset | Maximum child-created file size |
 | open_files | unset | Maximum open descriptors |
 | read_only_paths | `[]` | Extra absolute paths granted read/execute under `linux_native` only |
+| tool_sockets | `deny` | `deny` (default): `linux_native` children cannot `socket()`. `host`: explicit job/operator grant that lifts the seccomp socket gate; doctor reports host-enforced, unverified by the harness (ADR 0013) |
 
 `none` is the historical default and produces a doctor warning. `rlimit` is
 opt-in limits-only (doctor label: `limits`); it is not OS isolation. Non-Unix
@@ -237,8 +238,9 @@ are the writable trees; `/proc`, `$HOME`, and host secrets are denied; `socket()
 fails for every address family (`socketpair` is limited to `AF_UNIX` stream
 pairs for pipelines). Landlock does not mediate `chmod`/`chown`/`setxattr` on
 inaccessible paths; that is a kernel residual, not an allowlist. Tool-child sockets
-stay denied even when `[network]` is an allowlist — that table still governs
-only harness-owned HTTP clients. See [network.md](network.md),
+stay denied even when `[network]` is an allowlist unless `sandbox.tool_sockets
+= "host"`. `[network]` still governs only harness-owned HTTP clients. See
+[network.md](network.md),
 [ADR 0013](decisions/0013-os-sandbox-adapter.md), and
 [ADR 0020](decisions/0020-kekkai-sandbox-pin.md).
 

@@ -15,6 +15,7 @@ use super::fs::{
     ApplyPatchArgs, EditArgs, GlobArgs, GrepArgs, MAX_APPLY_PATCH_BYTES, MAX_SEARCH_MATCHES,
     MultiEditArgs, PathArgs, WriteArgs,
 };
+use super::job_credential::JobCredentialHandle;
 use super::path::load_ignore_patterns;
 use super::{EditOutcome, ExecutedTool, ParkRequest, Report, ToolError, ToolOutput, parse};
 use crate::config::SandboxSettings;
@@ -30,6 +31,7 @@ pub(crate) struct ToolExecutor {
     /// Patterns for glob/grep filtering (empty when respect_ignore is false).
     pub(crate) ignore_patterns: Vec<String>,
     pub(crate) sandbox: Sandbox,
+    job: Option<JobCredentialHandle>,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +48,7 @@ impl ToolExecutor {
         respect_ignore: bool,
         protected_environment_names: &[String],
         sandbox_settings: SandboxSettings,
+        job: Option<&JobCredentialHandle>,
     ) -> Result<Self, ToolError> {
         let workspace = std::fs::canonicalize(workspace.into())?;
         let ignore_patterns = if respect_ignore {
@@ -62,6 +65,7 @@ impl ToolExecutor {
             environment: ToolEnvironment::resolve(protected_environment_names),
             ignore_patterns,
             sandbox,
+            job: job.cloned(),
         })
     }
 
@@ -77,7 +81,8 @@ impl ToolExecutor {
             .arg(script)
             .current_dir(&self.workspace)
             .kill_on_drop(true);
-        self.environment.apply(&mut command);
+        let job = self.job.as_ref().and_then(JobCredentialHandle::snapshot);
+        self.environment.apply_job(&mut command, job.as_ref());
         let applied = self
             .sandbox
             .apply(&mut command)

@@ -6,6 +6,7 @@ mod environment;
 mod executor;
 mod fs;
 mod handoff;
+mod job_credential;
 mod path;
 mod registry;
 mod todo;
@@ -24,6 +25,10 @@ pub(crate) use handoff::apply_handoff;
 pub use handoff::{
     HandoffBrief, MAX_HANDOFF_FILES, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_PATH_CHARS,
     MAX_HANDOFF_TEXT_CHARS,
+};
+pub use job_credential::{
+    JOB_CREDENTIAL_ENV_NAMES, JOB_NAMESPACE_ENV, JOB_TENANT_ENV, JOB_TOKEN_ENV, JobCredential,
+    JobCredentialHandle,
 };
 pub use path::{is_unsafe_relative_path, path_is_ignored};
 pub use registry::{ExternalTool, ToolRegistry};
@@ -279,6 +284,7 @@ mod tests {
             true,
             &[],
             sandbox,
+            None,
         )
         .unwrap();
         let command = format!(
@@ -293,6 +299,63 @@ mod tests {
             !marker.exists(),
             "bash descendants must not outlive ToolRegistry drop"
         );
+    }
+
+    #[tokio::test]
+    async fn bash_injects_live_job_token_and_hides_worker_secret() {
+        let dir = tempdir().unwrap();
+        let secret_name = "SHIKIGAMI_TEST_WORKER_SECRET_442";
+        unsafe {
+            std::env::set_var(secret_name, "must-not-reach-child");
+        }
+        let job = crate::tools::JobCredentialHandle::from_live(
+            "job-scoped-token",
+            i64::MAX,
+            "tenant-a",
+            "ns-a",
+            0,
+        )
+        .unwrap();
+        let reg = ToolRegistry::with_builtins_sandbox_protected_environment(
+            dir.path(),
+            vec!["bash".into()],
+            30,
+            NetworkSettings::default(),
+            true,
+            &[secret_name.into()],
+            crate::config::SandboxSettings::default(),
+            Some(&job),
+        )
+        .unwrap();
+        unsafe {
+            std::env::remove_var(secret_name);
+        }
+        let output = reg
+            .execute(
+                "bash",
+                r#"{"command":"printf '%s|%s|%s|%s' \"${SHIKIGAMI_TEST_WORKER_SECRET_442-unset}\" \"${SHIKIGAMI_JOB_TOKEN-unset}\" \"${SHIKIGAMI_JOB_TENANT-unset}\" \"${SHIKIGAMI_JOB_NAMESPACE-unset}\""}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output,
+            ToolOutput::Text("unset|job-scoped-token|tenant-a|ns-a".into())
+        );
+        job.replace(crate::tools::JobCredential::live(
+            "refreshed-token",
+            i64::MAX,
+            "tenant-a",
+            "ns-a",
+            0,
+        ));
+        let refreshed = reg
+            .execute(
+                "bash",
+                r#"{"command":"printf '%s' \"${SHIKIGAMI_JOB_TOKEN-unset}\""}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed, ToolOutput::Text("refreshed-token".into()));
     }
 
     #[tokio::test]

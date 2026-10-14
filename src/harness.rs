@@ -867,7 +867,7 @@ mod tests {
             line == "tools.visible:    [read_file, bash, bash_background, bash_job_status, bash_job_logs]"
         }));
         assert!(report.lines.contains(
-            &"tools.environment: parent minus protected/startup controls; protected=[PLANE_TOKEN]"
+            &"tools.environment: parent minus protected/startup controls; protected=[PLANE_TOKEN, SHIKIGAMI_JOB_NAMESPACE, SHIKIGAMI_JOB_TENANT, SHIKIGAMI_JOB_TOKEN]"
                 .into()
         ));
     }

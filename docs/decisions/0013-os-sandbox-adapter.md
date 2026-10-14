@@ -122,9 +122,9 @@ cannot read a `sockaddr`.
 ## Later
 
 `linux_native` (Landlock + total socket deny, `read_only_paths`, doctor ABI
-reporting) shipped. `sandbox.backend` is currently `none | rlimit |
-linux_native`. `seatbelt` and `sandbox.tool_sockets` remain subsequent
-additive deliverables as sequenced in decision item 7.
+reporting) shipped. `sandbox.tool_sockets` (`deny` default, `host` grant)
+shipped in #442. `sandbox.backend` is currently `none | rlimit |
+linux_native`. `seatbelt` remains a subsequent additive deliverable.
 
 Enforcement for those backends now lives in a pinned kekkai release;
 settings names and doctor lines stay here ([ADR 0020](0020-kekkai-sandbox-pin.md)).

@@ -45,6 +45,10 @@ mod transaction;
 
 use supervision::RunSupervision;
 
+pub use crate::tools::{
+    JOB_CREDENTIAL_ENV_NAMES, JOB_NAMESPACE_ENV, JOB_TENANT_ENV, JOB_TOKEN_ENV, JobCredential,
+    JobCredentialHandle,
+};
 pub use model_turn::compact_messages;
 pub use resume::validate_resumed_workspace;
 
@@ -115,6 +119,10 @@ pub struct RunRequest {
     pub nested_profile: Option<ChildProfile>,
     /// Pre-assigned run id (nested children persist identity before start).
     pub assigned_run_id: Option<String>,
+    /// Live job-scoped token injected into sandboxed tool children. Absent for
+    /// ungoverned local runs. Never holds the worker client secret. Clone shares
+    /// the same slot so plane heartbeats can refresh the grant mid-run.
+    pub job_credential: Option<JobCredentialHandle>,
 }
 
 /// Session-host decision for an ask=park mutating tool.
@@ -173,6 +181,7 @@ impl RunRequest {
             parent_run_id: None,
             nested_profile: None,
             assigned_run_id: None,
+            job_credential: None,
         }
     }
 }
@@ -608,6 +617,7 @@ mod tests {
         let _keep = tx;
         let err = eng
             .run(RunRequest {
+                job_credential: None,
                 task: "t".into(),
                 keep_workspace: true,
                 timeout: None,
@@ -649,6 +659,7 @@ mod tests {
         };
         let err = eng
             .run(RunRequest {
+                job_credential: None,
                 task: "t".into(),
                 keep_workspace: true,
                 timeout: Some(Duration::from_secs(0)),
@@ -702,6 +713,7 @@ mod tests {
         };
         let err = eng
             .run(RunRequest {
+                job_credential: None,
                 task: "partial".into(),
                 keep_workspace: true,
                 timeout: None,
@@ -771,6 +783,7 @@ mod tests {
         };
         let result = eng2
             .run(RunRequest {
+                job_credential: None,
                 task: String::new(),
                 keep_workspace: true,
                 timeout: None,
@@ -889,6 +902,7 @@ mod tests {
         };
         let err = eng
             .run(RunRequest {
+                job_credential: None,
                 task: "with todos".into(),
                 keep_workspace: true,
                 timeout: None,
@@ -972,6 +986,7 @@ mod tests {
         };
         let result = eng2
             .run(RunRequest {
+                job_credential: None,
                 task: String::new(),
                 keep_workspace: true,
                 timeout: None,
@@ -1072,6 +1087,7 @@ mod tests {
         };
         let err = eng2
             .run(RunRequest {
+                job_credential: None,
                 task: String::new(),
                 keep_workspace: true,
                 timeout: None,

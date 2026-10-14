@@ -55,10 +55,17 @@ model content are host/workspace data — do not put secrets there.
 ## Bash subprocesses
 
 Foreground and background Bash environments are explicitly reconstructed from
-the parent environment. Any configured plane token, active HTTP model key, or
-MCP bearer-token env name is removed, so those harness credentials cannot be
-expanded or printed by Bash. Shell-startup controls are also removed and Bash
-startup files are disabled.
+the parent environment. Any configured plane token, client secret, active HTTP
+model key, or MCP bearer-token env name is removed, so those harness
+credentials cannot be expanded or printed by Bash. Shell-startup controls are
+also removed and Bash startup files are disabled.
+
+When a claimed job has a live runtime token, Bash receives only that grant as
+`SHIKIGAMI_JOB_TOKEN` (and `SHIKIGAMI_JOB_TENANT` / `SHIKIGAMI_JOB_NAMESPACE`
+when set). The grant expires with the claim; an expired token is omitted.
+Heartbeat refresh of the runtime token updates the grant for later child
+spawns. Leftover `SHIKIGAMI_JOB_*` variables from the parent environment are
+stripped so they cannot impersonate a live grant.
 
 The supported 1.x API intentionally preserves other parent variables for local
 compatibility. Managed hosts must therefore launch Shikigami with an allowlist
