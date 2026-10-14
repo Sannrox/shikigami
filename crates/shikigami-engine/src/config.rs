@@ -100,10 +100,14 @@ pub struct GovernanceSettings {
     pub endpoint: Option<String>,
     #[serde(default = "default_principal")]
     pub principal: String,
+    /// Fail closed for the `local` adapter. Remote adapters
+    /// (`sekai-chisei`, `http-callback`, `host-authz`) always fail closed; see
+    /// [`Config::requires_governance`].
     #[serde(default)]
     pub fail_closed: bool,
-    /// Namespace for plane operations (sekai-chisei).
-    #[serde(default = "default_namespace")]
+    /// Namespace for governance operations. Required (non-empty) when a remote
+    /// governance adapter is configured; there is no implicit default.
+    #[serde(default)]
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
@@ -154,9 +158,6 @@ fn default_governance_adapter() -> String {
 fn default_principal() -> String {
     "shikigami".into()
 }
-fn default_namespace() -> String {
-    "default".into()
-}
 
 impl Default for GovernanceSettings {
     fn default() -> Self {
@@ -165,7 +166,7 @@ impl Default for GovernanceSettings {
             endpoint: None,
             principal: default_principal(),
             fail_closed: false,
-            namespace: default_namespace(),
+            namespace: String::new(),
             token_env: None,
             allow_insecure_remote: false,
             delayed_evidence: DelayedEvidenceSettings::default(),
@@ -960,6 +961,7 @@ impl Config {
     pub const CONFIG_PATH_ENV: &'static str = "SHIKIGAMI_CONFIG";
     pub const CONTROL_PLANE_ENV: &'static str = "SHIKIGAMI_CONTROL_PLANE";
     pub const GOVERNANCE_ADAPTER_ENV: &'static str = "SHIKIGAMI_GOVERNANCE_ADAPTER";
+    pub const GOVERNANCE_NAMESPACE_ENV: &'static str = "SHIKIGAMI_GOVERNANCE_NAMESPACE";
     pub const GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV: &'static str =
         "SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE";
     pub const PROFILE_ENV: &'static str = "SHIKIGAMI_PROFILE";
@@ -1090,6 +1092,11 @@ impl Config {
         {
             self.governance.endpoint = Some(value);
         }
+        if let Ok(value) = env::var(Self::GOVERNANCE_NAMESPACE_ENV)
+            && !value.is_empty()
+        {
+            self.governance.namespace = value;
+        }
         if let Ok(value) = env::var(Self::GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV)
             && let Some(flag) = parse_env_flag(&value)
         {
@@ -1135,6 +1142,12 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "governance adapter `http-callback` requires governance.endpoint".into(),
             ));
+        }
+        if self.remote_governance_configured() && self.governance.namespace.trim().is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "governance adapter `{}` requires an explicit governance.namespace",
+                self.governance.adapter
+            )));
         }
         match self.workspace.adapter.as_str() {
             "directory" | "inplace" | "directory-inplace" | "git-worktree" => {}
@@ -1334,8 +1347,20 @@ impl Config {
         Ok(())
     }
 
+    /// Whether a run must refuse to start without healthy governance. True for
+    /// profile `governed`, `governance.fail_closed`, and every remote adapter.
     pub fn requires_governance(&self) -> bool {
-        self.governance.fail_closed || self.profile.name == "governed"
+        self.governance.fail_closed
+            || self.profile.name == "governed"
+            || self.remote_governance_configured()
+    }
+
+    /// A remote governance adapter (one that talks to an endpoint) is selected.
+    pub fn remote_governance_configured(&self) -> bool {
+        matches!(
+            self.governance.adapter.as_str(),
+            "sekai-chisei" | "http-callback" | "host-authz"
+        )
     }
 
     pub fn uses_plane_model(&self) -> bool {
@@ -1449,6 +1474,8 @@ mod tests {
 version = 1
 [profile]
 name = "governed"
+[governance]
+namespace = "team-a"
 "#,
         )
         .unwrap();
@@ -1512,6 +1539,7 @@ version = 1
 [governance]
 adapter = "sekai-chisei"
 endpoint = "http://chisei:50051"
+namespace = "team-a"
 allow_insecure_remote = true
 "#,
         )
@@ -1840,6 +1868,7 @@ prompt = "be thorough"
         c.apply_profile_presets();
         c.tools.enabled = vec!["bash".into(), "report".into()];
         c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        c.governance.namespace = "team-a".into();
 
         let err = c.validate().unwrap_err();
         assert!(
@@ -1925,12 +1954,30 @@ read_only_paths = ["{}"]
     }
 
     #[test]
+    fn remote_governance_fails_closed_and_needs_explicit_namespace() {
+        for adapter in ["sekai-chisei", "http-callback", "host-authz"] {
+            let mut c = Config::default();
+            c.governance.adapter = adapter.into();
+            c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+            assert!(c.requires_governance(), "{adapter} fails closed by default");
+            let err = c.validate().unwrap_err();
+            assert!(err.to_string().contains("governance.namespace"), "{err}");
+            c.governance.namespace = "team-a".into();
+            c.validate().unwrap();
+        }
+        let local = Config::default();
+        assert!(!local.requires_governance());
+        local.validate().unwrap();
+    }
+
+    #[test]
     fn governed_without_bash_allows_sandbox_none() {
         let mut c = Config::default();
         c.profile.name = "governed".into();
         c.apply_profile_presets();
         c.tools.enabled = vec!["read_file".into(), "report".into()];
         c.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        c.governance.namespace = "team-a".into();
         c.validate().unwrap();
         assert!(!c.bash_enabled());
     }

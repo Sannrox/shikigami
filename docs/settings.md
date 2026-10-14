@@ -98,8 +98,8 @@ Top-level `version` is required and must be `1`.
 | `adapter` | `"none"` | `none` \| `local` \| `http-callback` (`host-authz`) \| `sekai-chisei` |
 | `endpoint` | unset | Plane base URL for `sekai-chisei`, or authorization URL for `http-callback`; required by fail-closed plane use and all callback use |
 | `principal` | `"shikigami"` | Identity presented to the plane (not a secret) |
-| `namespace` | `"default"` | Plane namespace |
-| `fail_closed` | `false` | Fail doctor/run when governance is unhealthy |
+| `namespace` | unset | Governance namespace. Required for `sekai-chisei`, `http-callback`, and `host-authz`; there is no implicit default |
+| `fail_closed` | `false` | Fail doctor/run when governance is unhealthy. Always on for `sekai-chisei`, `http-callback`, and `host-authz` |
 | `token_env` | unset | Env var name holding a Bearer token for the plane |
 | `allow_insecure_remote` | `false` | Opt-in for plaintext `http://` `sekai-chisei` endpoints whose host is not loopback (private-network compose). Default stays reject. HTTPS remote and loopback `http://` do not need this flag. |
 
@@ -241,7 +241,8 @@ only harness-owned HTTP clients. See [network.md](network.md),
 [ADR 0013](decisions/0013-os-sandbox-adapter.md), and
 [ADR 0020](decisions/0020-kekkai-sandbox-pin.md).
 
-Under `profile = governed` or `governance.fail_closed = true`, enabling Bash
+Under `profile = governed`, `governance.fail_closed = true`, or a remote
+governance adapter (`sekai-chisei`, `http-callback`, `host-authz`), enabling Bash
 (explicitly or via `tools.mode = workspace_exec`) **refuses** configuration when
 `sandbox.backend = none` or `network.egress = unrestricted`. Operators must set
 `sandbox.backend = rlimit` or `linux_native`, and `network.egress = deny` or
@@ -468,6 +469,7 @@ hooks. See [hooks.md](hooks.md).
 | `SHIKIGAMI_PROFILE` | Profile name |
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
 | `SHIKIGAMI_CONTROL_PLANE` | sekai-chisei endpoint |
+| `SHIKIGAMI_GOVERNANCE_NAMESPACE` | Override `governance.namespace` |
 | `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE` | Override `governance.allow_insecure_remote` (`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`) |
 | `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
 | `SHIKIGAMI_MODEL` | Override the configured model name; `auto` for plane routing |
@@ -506,11 +508,28 @@ only installs or upgrades the binary; see
 
 Doctor and `run` fail when:
 
-- `fail_closed` is true or profile is `governed`, **and**
+- `fail_closed` is true, profile is `governed`, or a remote governance adapter
+  (`sekai-chisei`, `http-callback`, `host-authz`) is selected, **and**
 - governance is unhealthy (e.g. `sekai-chisei` without endpoint, or live probe
   failure for required plane connectivity).
 
 Offline defaults never require a plane.
+
+### Upgrading remote-governance configs
+
+Remote governance adapters now fail closed and need an explicit namespace.
+For each worker or host that selects `sekai-chisei`, `http-callback`, or
+`host-authz` (directly or through `profile = governed`):
+
+1. Set `governance.namespace` (or `SHIKIGAMI_GOVERNANCE_NAMESPACE`). Configs
+   that relied on the old implicit value use `namespace = "default"`.
+   Without it, settings resolution fails at startup.
+2. Expect doctor, `run`, and `serve` to refuse when governance is unreachable
+   or refuses, even without `fail_closed = true`. `fail_closed = false` no
+   longer relaxes a remote adapter.
+3. If Bash is enabled, set `sandbox.backend = rlimit` or `linux_native` and
+   `network.egress = deny` or `allowlist`; the governed Bash rule now applies.
+4. Run `shikigami doctor` with the new settings before starting the worker.
 
 ## Examples
 

@@ -19,6 +19,33 @@ const REQUEST_VERSION: &str = "host-authz.request/v1";
 const MAX_ARGS_CHARS: usize = 4_096;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
+/// Doctor/run-start reachability check for the callback host. Sends a `HEAD`
+/// through the same client setup as authorization requests (proxy, DNS, TLS);
+/// any HTTP response counts as reachable because the callback protocol has no
+/// health route. Only transport failures are errors.
+pub(crate) async fn probe_reachable(endpoint: &str) -> Result<(), String> {
+    #[cfg(not(feature = "model-http"))]
+    {
+        let _ = endpoint;
+        Err("http-callback requires the model-http feature (reqwest)".into())
+    }
+    #[cfg(feature = "model-http")]
+    {
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+        let client = reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
+        client
+            .head(endpoint)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Tools that skip the host callback (harness-internal: reads, job inspect,
 /// checklist, terminate, or park).
 fn tool_skips_host_authz(name: &str) -> bool {
@@ -130,7 +157,7 @@ impl HttpCallbackGovernance {
             Ok(Self {
                 endpoint,
                 principal: config.governance.principal.clone(),
-                fail_closed: config.governance.fail_closed,
+                fail_closed: config.requires_governance(),
                 enabled_tools: config.tools.effective_enabled(),
                 token,
                 timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
@@ -432,11 +459,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_errors_deny_even_when_not_fail_closed() {
+    async fn transport_errors_deny_and_remote_adapter_fails_closed_by_default() {
         let mut config = config_with_endpoint("http://127.0.0.1:1/authz");
         config.governance.fail_closed = false;
         let gov = HttpCallbackGovernance::from_config(&config).unwrap();
-        assert!(!gov.fail_closed);
+        assert!(
+            gov.fail_closed,
+            "a remote adapter fails closed without the flag"
+        );
         let handle = gov.begin_run("run-fo", "task", None).await.unwrap();
         let err = gov
             .authorize_tool(&handle, "write_file", r#"{"path":"a.txt","content":"x"}"#)

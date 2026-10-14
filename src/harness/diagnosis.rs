@@ -111,17 +111,6 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
         ok = false;
         lines.push(format!("error: {error}"));
     }
-    if matches!(
-        harness.config.governance.adapter.as_str(),
-        "sekai-chisei" | "http-callback" | "host-authz"
-    ) && !harness.config.governance.fail_closed
-        && harness.config.profile.name != "governed"
-    {
-        lines.push(
-            "note: mid-run tool authz for sekai-chisei/http-callback is always fail-closed; set governance.fail_closed=true or profile=governed for doctor/run start gates"
-                .into(),
-        );
-    }
     let lines = lines
         .into_iter()
         .map(|line| redact_secrets_in_line(&line, &harness.config))
@@ -144,6 +133,20 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
 
 pub(super) async fn doctor_async(harness: &Harness) -> DoctorReport {
     let mut report = doctor(harness);
+    if matches!(
+        harness.config.governance.adapter.as_str(),
+        "http-callback" | "host-authz"
+    ) && let Some(endpoint) = harness.config.governance.endpoint.as_deref()
+        && let Err(error) = crate::governance::http_callback::probe_reachable(endpoint).await
+    {
+        report.lines.push(redact_secrets_in_line(
+            &format!("callback:  unreachable ({error})"),
+            &harness.config,
+        ));
+        if harness.config.requires_governance() {
+            report.ok = false;
+        }
+    }
     #[cfg(feature = "governance-sekai-chisei")]
     if harness.config.governance.adapter == "sekai-chisei"
         && harness.config.governance.endpoint.is_some()

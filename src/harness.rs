@@ -767,16 +767,16 @@ mod tests {
     }
 
     #[test]
-    fn doctor_accepts_loopback_plaintext_and_remote_opt_in() {
+    fn doctor_omits_plaintext_hint_for_loopback_and_remote_opt_in() {
         let dir = tempdir().unwrap();
         let mut config = Config::default();
         config.governance.adapter = "sekai-chisei".into();
         config.governance.endpoint = Some("http://127.0.0.1:50051".into());
+        config.governance.namespace = "team-a".into();
         let harness =
             Harness::from_config(config.clone(), StateRoot::new(dir.path().join("loopback")))
                 .unwrap();
         let report = harness.doctor();
-        assert!(report.ok, "{:?}", report.lines);
         assert!(
             report
                 .lines
@@ -791,7 +791,6 @@ mod tests {
         let harness =
             Harness::from_config(config, StateRoot::new(dir.path().join("opt-in"))).unwrap();
         let report = harness.doctor();
-        assert!(report.ok, "{:?}", report.lines);
         assert!(
             report
                 .lines
@@ -807,6 +806,25 @@ mod tests {
             "{}",
             report.governance_detail
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_refuses_unreachable_remote_governance_by_default() {
+        for (adapter, endpoint) in [
+            ("sekai-chisei", "http://127.0.0.1:1"),
+            ("http-callback", "http://127.0.0.1:1/authz"),
+        ] {
+            let dir = tempdir().unwrap();
+            let mut config = Config::default();
+            config.governance.adapter = adapter.into();
+            config.governance.endpoint = Some(endpoint.into());
+            config.governance.namespace = "team-a".into();
+            assert!(!config.governance.fail_closed);
+            let harness =
+                Harness::from_config(config, StateRoot::new(dir.path().join("s"))).unwrap();
+            let report = harness.doctor_async().await;
+            assert!(!report.ok, "{adapter}: {:?}", report.lines);
+        }
     }
 
     #[test]

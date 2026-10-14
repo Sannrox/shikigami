@@ -268,6 +268,8 @@ fn doctor_fails_governed_without_endpoint() {
 version = 1
 [profile]
 name = "governed"
+[governance]
+namespace = "team-a"
 "#,
     )
     .expect("write config");
@@ -296,6 +298,8 @@ fn doctor_models_preserves_report_when_catalog_unavailable() {
 version = 1
 [profile]
 name = "governed"
+[governance]
+namespace = "team-a"
 "#,
     )
     .expect("write config");
