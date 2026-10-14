@@ -467,12 +467,19 @@ fn display_tools(tools: &[String]) -> String {
 
 /// Summarize credential *sources* without values (for doctor).
 pub fn credential_summary(config: &Config) -> String {
-    let plane = match &config.governance.token_env {
-        Some(name) if !name.is_empty() => {
+    let plane = match (
+        &config.governance.client_secret_env,
+        &config.governance.token_env,
+    ) {
+        (Some(name), _) if !name.is_empty() => {
+            let state = if env_nonempty(name) { "set" } else { "unset" };
+            format!("plane_client_secret_env={name} ({state})")
+        }
+        (_, Some(name)) if !name.is_empty() => {
             let state = if env_nonempty(name) { "set" } else { "unset" };
             format!("plane_token_env={name} ({state})")
         }
-        _ => "plane_token_env=(none)".into(),
+        _ => "plane_credential=(none)".into(),
     };
     let model_env = &config.model.api_key_env;
     let model_state = if env_nonempty(model_env) {

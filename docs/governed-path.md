@@ -6,8 +6,9 @@ This document is the smoke recipe for the production governance adapter.
 
 1. A running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) control plane
    reachable over gRPC (default `http://127.0.0.1:50051`).
-2. Optional plane token in an environment variable (see
-   `governance.token_env` in settings).
+2. When the plane requires authentication, a registered service principal and
+   its client secret in an environment variable (see
+   `governance.client_secret_env` in settings).
 3. Providers configured on the plane for model execution (required for full
    `run`, not for `doctor` connectivity probe).
 
@@ -20,7 +21,7 @@ or set:
 export SHIKIGAMI_PROFILE=governed
 export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
 export SHIKIGAMI_GOVERNANCE_NAMESPACE=team-a
-# export SEKAI_TOKEN=...   # if token_env = "SEKAI_TOKEN"
+# export SEKAI_CLIENT_SECRET=...   # if client_secret_env = "SEKAI_CLIENT_SECRET"
 ```
 
 Loopback `http://127.0.0.1:…` and remote `https://` need no extra flag. A

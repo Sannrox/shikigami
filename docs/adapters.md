@@ -87,9 +87,11 @@ queued envelope instead of minting `accepted`.
 
 ### Credentials
 
-Do not put tokens in TOML. Set `governance.token_env` to an environment
-variable name (for example `SEKAI_TOKEN`) that holds a raw token or
-`Bearer …` value.
+Do not put secrets in TOML. Set `governance.client_secret_env` to an
+environment variable name (for example `SEKAI_CLIENT_SECRET`) that holds the
+client secret of the worker's registered service principal. The adapter
+exchanges it for short-lived service tokens and refreshes them before expiry.
+`governance.token_env` (a static bearer) is refused for `sekai-chisei`.
 
 ## Model (`ModelPort`)
 

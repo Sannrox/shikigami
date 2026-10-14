@@ -8,7 +8,8 @@ use std::env;
 use std::time::Duration;
 
 use sekai_client::{
-    CallContext, CallOptions, ClientConfig, CoreLoopClient, GrpcTransport, SdkError, SdkErrorCode,
+    CallContext, CallOptions, ClientConfig, CoreLoopClient, CoreLoopTransport, GrpcTransport,
+    SdkError, SdkErrorCode,
 };
 
 use super::{SekaiChiseiGovernance, proto};
@@ -21,29 +22,117 @@ const AUTH_SOURCE_METADATA: &str = "x-sekai-auth-source";
 pub(super) type PlaneClient = CoreLoopClient<GrpcTransport>;
 
 fn auth_source(governance: &SekaiChiseiGovernance) -> &'static str {
-    governance
-        .token_env
-        .as_ref()
-        .and_then(|name| env::var(name).ok())
-        .filter(|token| !token.trim().is_empty())
-        .map(|_| "token")
-        .unwrap_or("local")
+    if governance.client_secret_env.is_some() {
+        "token"
+    } else {
+        "local"
+    }
 }
 
-fn token(governance: &SekaiChiseiGovernance) -> Option<String> {
-    let token = governance
-        .token_env
-        .as_ref()
-        .and_then(|name| env::var(name).ok())
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())?;
-    Some(
-        token
-            .strip_prefix("Bearer ")
-            .unwrap_or(&token)
-            .trim()
-            .to_string(),
-    )
+/// Short-lived service token for the worker's registered service principal.
+pub(super) struct ServiceToken {
+    value: String,
+    issued_at_ms: i64,
+    expires_at_ms: i64,
+}
+
+impl ServiceToken {
+    /// Accept an issued token. Empty or already-expired grants are refused.
+    fn from_grant(value: String, expires_at_ms: i64, now_ms: i64) -> Result<Self, GovernanceError> {
+        if value.trim().is_empty() || expires_at_ms <= now_ms {
+            return Err(GovernanceError::Message(
+                "IssueServicePrincipalToken returned no usable token".into(),
+            ));
+        }
+        Ok(Self {
+            value,
+            issued_at_ms: now_ms,
+            expires_at_ms,
+        })
+    }
+
+    /// Reuse until four fifths of the lifetime have passed, so the refresh
+    /// lands well before expiry.
+    fn fresh(&self, now_ms: i64) -> bool {
+        let refresh_at = self.issued_at_ms + (self.expires_at_ms - self.issued_at_ms) * 4 / 5;
+        now_ms < refresh_at
+    }
+}
+
+/// Holds the current service token; shared by every plane call of one adapter.
+#[derive(Default)]
+pub(super) struct ServiceTokenCache(tokio::sync::Mutex<Option<ServiceToken>>);
+
+/// Map a refused credential exchange. The plane refuses unregistered
+/// principals and invalid secrets; those are governance refusals, not outages.
+fn issuance_error(error: SdkError) -> GovernanceError {
+    match error.code {
+        SdkErrorCode::Unavailable | SdkErrorCode::DeadlineExceeded => {
+            GovernanceError::Unavailable(format!("IssueServicePrincipalToken: {error}"))
+        }
+        _ => GovernanceError::Message(format!(
+            "IssueServicePrincipalToken refused the worker credentials: {error}"
+        )),
+    }
+}
+
+/// The current service token, issued or refreshed via client credentials when
+/// needed. `None` when no client secret is configured (unauthenticated local
+/// planes).
+async fn service_token(
+    governance: &SekaiChiseiGovernance,
+    plane: &PlaneClient,
+) -> Result<Option<String>, GovernanceError> {
+    let Some(name) = &governance.client_secret_env else {
+        return Ok(None);
+    };
+    let mut slot = governance.service_token.0.lock().await;
+    let now_ms = crate::digest::unix_now_ms_i64();
+    if let Some(token) = slot.as_ref().filter(|token| token.fresh(now_ms)) {
+        return Ok(Some(token.value.clone()));
+    }
+    let secret = env::var(name)
+        .ok()
+        .filter(|secret| !secret.trim().is_empty())
+        .ok_or_else(|| {
+            GovernanceError::Unavailable(format!(
+                "governance.client_secret_env {name} is unset or empty"
+            ))
+        })?;
+    let response: proto::sekai::IssueServicePrincipalTokenResponse = plane
+        .raw()
+        .unary(
+            "/sekai.SekaiService/IssueServicePrincipalToken",
+            proto::sekai::IssueServicePrincipalTokenRequest {
+                principal: governance.principal.clone(),
+                client_secret: secret,
+            },
+            CallOptions::new().with_timeout(CONNECT_TIMEOUT),
+        )
+        .await
+        .map_err(issuance_error)?;
+    let token = ServiceToken::from_grant(
+        response.token,
+        response.expires_at_ms,
+        crate::digest::unix_now_ms_i64(),
+    )?;
+    let value = token.value.clone();
+    *slot = Some(token);
+    Ok(Some(value))
+}
+
+/// A client on the same connection that authenticates with `token`, or sends
+/// no bearer at all for `None`.
+pub(super) fn with_bearer<T: CoreLoopTransport + Clone>(
+    plane: &CoreLoopClient<T>,
+    token: Option<&str>,
+) -> Result<CoreLoopClient<T>, SdkError> {
+    let mut config = plane.config().clone();
+    config.credential = None;
+    if let Some(token) = token {
+        config = config.with_token(token)?;
+    }
+    CoreLoopClient::new(config, plane.transport().clone())
 }
 
 pub(super) fn call_options(
@@ -95,18 +184,29 @@ pub(super) async fn connect(
             crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT
         )));
     }
-    let mut config = ClientConfig::new(governance.endpoint.clone(), governance.principal.clone())
+    let config = ClientConfig::new(governance.endpoint.clone(), governance.principal.clone())
         .with_namespace(governance.namespace.clone())
         .with_default_timeout(CONNECT_TIMEOUT)
         .allow_insecure_remote(governance.allow_insecure_remote);
-    if let Some(token) = token(governance) {
-        config = config
-            .with_token(token)
-            .map_err(|error| map_error("configure plane credential", error))?;
-    }
-    CoreLoopClient::connect(config)
+    let plane = CoreLoopClient::connect(config)
         .await
-        .map_err(|error| map_error("connect", error))
+        .map_err(|error| map_error("connect", error))?;
+    authorize(governance, &plane).await
+}
+
+/// `plane` carrying the current service token (refreshed when due), or
+/// unchanged without client credentials. Cached clients call this before each
+/// use so a long-lived connection never sends an expired token.
+pub(super) async fn authorize(
+    governance: &SekaiChiseiGovernance,
+    plane: &PlaneClient,
+) -> Result<PlaneClient, GovernanceError> {
+    let credential = |error| map_error("configure plane credential", error);
+    // The credential exchange authenticates from the request body; never send
+    // a (possibly expired) bearer with it.
+    let anonymous = with_bearer(plane, None).map_err(credential)?;
+    let token = service_token(governance, &anonymous).await?;
+    with_bearer(plane, token.as_deref()).map_err(credential)
 }
 
 pub(super) async fn probe(governance: &SekaiChiseiGovernance) -> Result<(), GovernanceError> {
@@ -127,6 +227,38 @@ pub(super) async fn probe(governance: &SekaiChiseiGovernance) -> Result<(), Gove
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn service_token_is_refreshed_before_expiry() {
+        let token = ServiceToken::from_grant("st".into(), 1_000_000, 0).unwrap();
+        assert!(token.fresh(0));
+        assert!(token.fresh(799_999));
+        assert!(
+            !token.fresh(800_000),
+            "refresh at four fifths of the lifetime"
+        );
+        assert!(!token.fresh(1_000_000));
+    }
+
+    #[test]
+    fn empty_or_expired_service_token_grant_is_refused() {
+        assert!(ServiceToken::from_grant(String::new(), 10, 0).is_err());
+        assert!(ServiceToken::from_grant("st".into(), 10, 10).is_err());
+    }
+
+    #[test]
+    fn refused_credential_exchange_is_a_governance_refusal() {
+        for code in [
+            SdkErrorCode::PermissionDenied,
+            SdkErrorCode::Unauthenticated,
+            SdkErrorCode::NotFound,
+        ] {
+            let error = issuance_error(SdkError::new(code));
+            assert!(matches!(error, GovernanceError::Message(_)), "{error}");
+        }
+        let error = issuance_error(SdkError::new(SdkErrorCode::Unavailable));
+        assert!(matches!(error, GovernanceError::Unavailable(_)), "{error}");
+    }
 
     #[test]
     fn call_options_preserve_auth_source_and_correlation() {

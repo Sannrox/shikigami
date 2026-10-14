@@ -100,7 +100,8 @@ Top-level `version` is required and must be `1`.
 | `principal` | `"shikigami"` | Identity presented to the plane (not a secret) |
 | `namespace` | unset | Governance namespace. Required for `sekai-chisei`, `http-callback`, and `host-authz`; there is no implicit default |
 | `fail_closed` | `false` | Fail doctor/run when governance is unhealthy. Always on for `sekai-chisei`, `http-callback`, and `host-authz` |
-| `token_env` | unset | Env var name holding the worker's Bearer token for the plane. Claimed-work calls use the claim's runtime token instead; see [plane-action-run.md](plane-action-run.md#runtime-tokens-for-claimed-work) |
+| `client_secret_env` | unset | `sekai-chisei`: env var name holding the client secret of the worker's registered service principal (`principal`). See [service-principal tokens](#service-principal-tokens) |
+| `token_env` | unset | `http-callback` / `host-authz`: env var name holding the host Bearer token. Refused for `sekai-chisei` |
 | `allow_insecure_remote` | `false` | Opt-in for plaintext `http://` `sekai-chisei` endpoints whose host is not loopback (private-network compose). Default stays reject. HTTPS remote and loopback `http://` do not need this flag. |
 
 `sekai-client` still rejects remote plaintext unless this flag is true. Keep it
@@ -287,7 +288,7 @@ Background jobs (when bash is enabled): start with `bash_background`, poll with
 
 Foreground and background Bash share one explicitly reconstructed child
 environment. For 1.x compatibility, ordinary parent variables remain
-available, while active `governance.token_env`, HTTP `model.api_key_env`, MCP
+available, while active `governance.token_env`, `governance.client_secret_env`, HTTP `model.api_key_env`, MCP
 bearer-token env names, and shell-startup controls are removed. Bash startup
 files are disabled so they cannot repopulate the child environment. MCP stdio
 server children use the same reconstructed environment (credentials are not
@@ -480,7 +481,8 @@ hooks. See [hooks.md](hooks.md).
 | `SHIKIGAMI_WORKER_ID` | Worker identity written into the plane lifecycle snapshot |
 | `SHIKIGAMI_LIFECYCLE_LISTEN` | Plane-intake lifecycle probe bind |
 | `OPENAI_API_KEY` | Default HTTP model key |
-| *(value of `token_env`)* | Plane bearer token when configured |
+| *(value of `client_secret_env`)* | Plane service-principal client secret when configured |
+| *(value of `token_env`)* | Callback host bearer token when configured |
 
 Credential ergonomics, anti-patterns, and doctor redaction:
 **[credentials.md](credentials.md)**.
@@ -514,6 +516,26 @@ Doctor and `run` fail when:
   failure for required plane connectivity).
 
 Offline defaults never require a plane.
+
+### Service-principal tokens
+
+With `governance.client_secret_env` set, `sekai-chisei` exchanges the client
+secret of the registered service principal `governance.principal` for a
+short-lived service token (`IssueServicePrincipalToken`), uses it as the
+bearer for plane calls, and fetches a new one after four fifths of its
+lifetime. The secret is sent only in that exchange. A refused exchange
+(unregistered principal, wrong secret, plane without an identity extension) is
+a governance refusal, so doctor and runs fail closed. Calls for claimed work
+use the per-claim runtime token instead (see
+[plane-action-run.md](plane-action-run.md#runtime-tokens-for-claimed-work)).
+Without `client_secret_env` the adapter sends no bearer, which only an
+unauthenticated local plane accepts.
+
+To migrate a worker from the static bearer: ask the plane administrator to
+register the worker's principal as a service principal (scopes and namespaces
+are enforced by the plane), store its client secret in an env var, replace
+`token_env` with `client_secret_env`, and run `shikigami doctor`. A config
+that still sets `token_env` with `sekai-chisei` fails at startup.
 
 ### Upgrading remote-governance configs
 

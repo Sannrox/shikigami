@@ -426,6 +426,7 @@ mod tests {
                 fail_closed: true,
                 namespace: "default".into(),
                 token_env: None,
+                client_secret_env: None,
                 allow_insecure_remote: false,
                 delayed_evidence: crate::config::DelayedEvidenceSettings::default(),
             },

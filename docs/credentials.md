@@ -7,7 +7,7 @@ TOML, git, doctor output, or event streams.
 
 | Secret | Settings field | Typical env |
 | --- | --- | --- |
-| Plane bearer token | `governance.token_env` | `SEKAI_TOKEN` |
+| Plane service-principal client secret | `governance.client_secret_env` | `SEKAI_CLIENT_SECRET` |
 | HTTP model API key | `model.api_key_env` | `OPENAI_API_KEY` (or `CLIPROXY_API_KEY` for a local OpenAI-compatible gateway; see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)) |
 
 Settings store **names of env vars**, never secret values.
@@ -18,11 +18,11 @@ Settings store **names of env vars**, never secret values.
 adapter = "sekai-chisei"
 endpoint = "http://127.0.0.1:50051"
 namespace = "team-a"
-token_env = "SEKAI_TOKEN"
+client_secret_env = "SEKAI_CLIENT_SECRET"
 ```
 
 ```bash
-export SEKAI_TOKEN="…"          # shell / CI secret store / agent host
+export SEKAI_CLIENT_SECRET="…"  # shell / CI secret store / agent host
 export OPENAI_API_KEY="…"       # only for ungoverned http model
 export CLIPROXY_API_KEY="…"     # gateway access key when using examples/cliproxy-http.toml
 shikigami --config examples/governed-sekai-chisei.toml doctor
@@ -75,7 +75,7 @@ starting shikigami (no first-party keyring feature required):
 
 ```bash
 # example pattern (macOS)
-export SEKAI_TOKEN="$(security find-generic-password -s sekai-token -w)"
+export SEKAI_CLIENT_SECRET="$(security find-generic-password -s sekai-client-secret -w)"
 ```
 
 Hosts such as onmyoji may inject credentials into the process environment
