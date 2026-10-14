@@ -25,7 +25,7 @@ embed the harness library:
 adapter = "http-callback"
 endpoint = "http://127.0.0.1:9/host-authz"   # host-supplied loopback URL
 token_env = "ALDUNIS_PROVIDER_RUN_TOKEN"    # optional Bearer token env
-fail_closed = true
+namespace = "default"                        # required for remote adapters
 ```
 
 On each mutating tool authorization the harness POSTs JSON:

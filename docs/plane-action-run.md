@@ -19,6 +19,7 @@ Use a governed configuration and explicit plane intake:
 ```bash
 export SHIKIGAMI_PROFILE=governed
 export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
+export SHIKIGAMI_GOVERNANCE_NAMESPACE=team-a
 
 shikigami --config shikigami.toml serve \
   --intake plane \

@@ -19,6 +19,7 @@ or set:
 ```bash
 export SHIKIGAMI_PROFILE=governed
 export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
+export SHIKIGAMI_GOVERNANCE_NAMESPACE=team-a
 # export SEKAI_TOKEN=...   # if token_env = "SEKAI_TOKEN"
 ```
 
@@ -30,7 +31,7 @@ over plaintext gRPC (the public HTTPS edge is off) is supported by opting in:
 [governance]
 adapter = "sekai-chisei"
 endpoint = "http://chisei:50051"
-fail_closed = true
+namespace = "team-a"
 allow_insecure_remote = true
 ```
 

@@ -4,7 +4,7 @@
 //! wires `http-callback` / `host-authz` and `sekai-chisei` onto the engine
 //! port.
 
-mod http_callback;
+pub(crate) mod http_callback;
 #[cfg(feature = "governance-sekai-chisei")]
 pub use shikigami_governance_sekai as sekai_chisei;
 

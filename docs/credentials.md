@@ -17,6 +17,7 @@ Settings store **names of env vars**, never secret values.
 [governance]
 adapter = "sekai-chisei"
 endpoint = "http://127.0.0.1:50051"
+namespace = "team-a"
 token_env = "SEKAI_TOKEN"
 ```
 

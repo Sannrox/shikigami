@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Breaking changes and upgrade
+
+- Remote governance adapters (`sekai-chisei`, `http-callback`, `host-authz`)
+  now fail closed by default: doctor, `run`, and `serve` refuse when
+  governance is unreachable or refuses, whatever `governance.fail_closed`
+  says. The governed Bash sandbox and egress rule applies to them too.
+- `governance.namespace` no longer defaults to `"default"`. A remote
+  governance adapter without an explicit namespace fails at startup. Set
+  `namespace` in `[governance]` or the new `SHIKIGAMI_GOVERNANCE_NAMESPACE`;
+  use `"default"` to keep the old value. See
+  [upgrading remote-governance configs](docs/settings.md#upgrading-remote-governance-configs).
+
 ### Security
 
 - A `shikigami.toml` in the current working directory is no longer loaded
