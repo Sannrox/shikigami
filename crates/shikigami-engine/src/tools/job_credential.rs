@@ -122,6 +122,13 @@ impl JobCredentialHandle {
         self.lock().clone()
     }
 
+    /// The token while the grant is live now; `None` once it expired.
+    pub(crate) fn live_token(&self) -> Option<String> {
+        self.snapshot()
+            .filter(|credential| credential.is_live(super::environment::now_ms()))
+            .map(|credential| credential.token)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<JobCredential>> {
         self.inner
             .lock()

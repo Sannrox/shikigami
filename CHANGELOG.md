@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `[tools.mcp_gateway]` (off by default) routes every remote MCP tool call
+  through one governed gateway, authenticated per request with the run's live
+  job credential. Direct HTTP `tools.mcp_servers` entries are refused while it
+  is set, and third-party tool credentials stay in the gateway (#458).
+
 - Sandboxed tool children receive only a live job-scoped token
   (`SHIKIGAMI_JOB_TOKEN`, plus tenant/namespace when present) minted for the
   claimed work. The worker client secret, plane bearer, model keys, and MCP

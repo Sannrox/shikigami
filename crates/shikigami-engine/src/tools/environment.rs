@@ -8,7 +8,7 @@ use super::job_credential::{JOB_CREDENTIAL_ENV_NAMES, JobCredential};
 
 const SHELL_STARTUP_ENVIRONMENT_NAMES: &[&str] = &["BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"];
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))

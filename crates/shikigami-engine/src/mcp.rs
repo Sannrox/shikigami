@@ -19,15 +19,48 @@ mod protocol;
 
 use protocol::{Client as McpClient, Transport, attach_tools};
 
-use crate::config::{Config, McpFraming, McpServerSettings};
-use crate::tools::{ExternalTool, ToolDef, ToolEnvironment, ToolError, ToolRegistry};
+use crate::config::{Config, MCP_GATEWAY_NAME, McpFraming, McpGatewaySettings, McpServerSettings};
+use crate::tools::{
+    ExternalTool, JobCredentialHandle, ToolDef, ToolEnvironment, ToolError, ToolRegistry,
+};
 
-/// Attach MCP tools named `mcp.<server>.<tool>` to a registry.
+/// Gateway mode fails closed: every remote server must go through the
+/// gateway, and its name is reserved. Local stdio servers are unaffected.
+pub fn check_gateway_servers(servers: &[McpServerSettings]) -> Result<(), String> {
+    for server in servers {
+        if server.is_http() {
+            return Err(format!(
+                "tools.mcp_servers `{}`: direct remote MCP server refused while tools.mcp_gateway is set",
+                server.name
+            ));
+        }
+        if server.name == MCP_GATEWAY_NAME {
+            return Err(format!(
+                "tools.mcp_servers `{MCP_GATEWAY_NAME}`: name is reserved for tools.mcp_gateway"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Attach MCP tools named `mcp.<server>.<tool>` to a registry. `job` is the
+/// run's live grant; the gateway, when configured, requires it.
 pub async fn attach_mcp_servers(
     registry: &mut ToolRegistry,
     config: &Config,
+    job: Option<&JobCredentialHandle>,
 ) -> Result<usize, ToolError> {
     let mut n = 0;
+    if let Some(gateway) = &config.tools.mcp_gateway {
+        check_gateway_servers(&config.tools.mcp_servers).map_err(ToolError::Message)?;
+        let job = job.ok_or_else(|| {
+            ToolError::Message("mcp gateway requires the run's job credential".into())
+        })?;
+        let client = McpHttpTransport::connect_gateway(gateway, job.clone(), config).await?;
+        n += attach_tools(registry, MCP_GATEWAY_NAME, client)
+            .await
+            .map_err(|e| ToolError::Message(format!("mcp gateway: {e}")))?;
+    }
     for server in &config.tools.mcp_servers {
         // Special offline mock: command "mock" registers a fixed tool.
         if server.command == "mock" {
@@ -39,10 +72,7 @@ pub async fn attach_mcp_servers(
             n += 1;
             continue;
         }
-        let transport = server.transport.as_str();
-        let is_http = transport == "http"
-            || (server.url.is_some() && (transport == "stdio" || transport.is_empty()));
-        if is_http {
+        if server.is_http() {
             let url = server.url.as_deref().ok_or_else(|| {
                 ToolError::Message(format!("mcp server `{}`: http requires url", server.name))
             })?;
@@ -230,10 +260,33 @@ impl Transport for McpStdioTransport {
     }
 }
 
+/// Bearer credential an HTTP MCP request carries.
+enum HttpAuth {
+    None,
+    /// Read once at connect from the server's `token_env`.
+    Static(String),
+    /// The run's job grant, read per request so a heartbeat refresh applies
+    /// and an expired grant fails closed instead of sending a stale token.
+    Job(JobCredentialHandle),
+}
+
+impl HttpAuth {
+    fn bearer(&self) -> Result<Option<String>, ToolError> {
+        match self {
+            Self::None => Ok(None),
+            Self::Static(token) => Ok(Some(token.clone())),
+            Self::Job(job) => job
+                .live_token()
+                .map(Some)
+                .ok_or_else(|| ToolError::Message("mcp gateway: job credential expired".into())),
+        }
+    }
+}
+
 /// Minimal HTTP JSON-RPC MCP client (POST body; not full SSE streaming).
 struct McpHttpTransport {
     url: String,
-    token: Option<String>,
+    auth: HttpAuth,
     #[cfg(feature = "model-http")]
     client: reqwest::Client,
 }
@@ -247,29 +300,45 @@ impl McpHttpTransport {
             .url
             .clone()
             .ok_or_else(|| ToolError::Message("http mcp missing url".into()))?;
+        let auth = server
+            .token_env
+            .as_ref()
+            .and_then(|e| std::env::var(e).ok())
+            .filter(|v| !v.is_empty())
+            .map_or(HttpAuth::None, HttpAuth::Static);
+        Self::open(url, auth, server.timeout(), config)
+    }
+
+    async fn connect_gateway(
+        gateway: &McpGatewaySettings,
+        job: JobCredentialHandle,
+        config: &Config,
+    ) -> Result<McpClient<Self>, ToolError> {
+        let timeout = std::time::Duration::from_secs(gateway.timeout_secs.max(1));
+        Self::open(gateway.url.clone(), HttpAuth::Job(job), timeout, config)
+    }
+
+    fn open(
+        url: String,
+        auth: HttpAuth,
+        timeout: std::time::Duration,
+        config: &Config,
+    ) -> Result<McpClient<Self>, ToolError> {
         config
             .network
             .check_http_url(&url)
             .map_err(ToolError::Message)?;
-        let token = server
-            .token_env
-            .as_ref()
-            .and_then(|e| std::env::var(e).ok())
-            .filter(|v| !v.is_empty());
         #[cfg(feature = "model-http")]
         {
             let client = reqwest::Client::builder()
-                .timeout(server.timeout())
+                .timeout(timeout)
                 .build()
                 .map_err(|e| ToolError::Message(format!("http mcp client: {e}")))?;
-            Ok(McpClient::new(
-                Self { url, token, client },
-                server.timeout(),
-            ))
+            Ok(McpClient::new(Self { url, auth, client }, timeout))
         }
         #[cfg(not(feature = "model-http"))]
         {
-            let _ = (url, token);
+            let _ = (url, auth, timeout);
             Err(ToolError::Message(
                 "http mcp requires the model-http feature".into(),
             ))
@@ -290,7 +359,7 @@ impl Transport for McpHttpTransport {
         #[cfg(feature = "model-http")]
         {
             let mut req = self.client.post(&self.url).json(request);
-            if let Some(tok) = &self.token {
+            if let Some(tok) = self.auth.bearer()? {
                 req = req.bearer_auth(tok);
             }
             let resp = req
@@ -320,7 +389,7 @@ impl Transport for McpHttpTransport {
         #[cfg(feature = "model-http")]
         {
             let mut req = self.client.post(&self.url).json(notification);
-            if let Some(tok) = &self.token {
+            if let Some(tok) = self.auth.bearer()? {
                 req = req.bearer_auth(tok);
             }
             let _ = req.send().await;
@@ -397,7 +466,10 @@ done
             NetworkSettings::default(),
         )
         .unwrap();
-        assert_eq!(attach_mcp_servers(&mut reg, &config).await.unwrap(), 1);
+        assert_eq!(
+            attach_mcp_servers(&mut reg, &config, None).await.unwrap(),
+            1
+        );
         assert!(reg.definitions().iter().any(|d| d.name == "mcp.nl.probe"));
 
         let denied = reg
@@ -465,7 +537,10 @@ done
             NetworkSettings::default(),
         )
         .unwrap();
-        assert_eq!(attach_mcp_servers(&mut reg, &config).await.unwrap(), 1);
+        assert_eq!(
+            attach_mcp_servers(&mut reg, &config, None).await.unwrap(),
+            1
+        );
 
         // Larger than any default pipe capacity, smaller than MAX_FRAME_BYTES:
         // the write parks on a full pipe and the deadline cancels it mid-frame.
@@ -498,7 +573,7 @@ done
             NetworkSettings::default(),
         )
         .unwrap();
-        let n = attach_mcp_servers(&mut reg, &config).await.unwrap();
+        let n = attach_mcp_servers(&mut reg, &config, None).await.unwrap();
         assert_eq!(n, 1);
         let defs = reg.definitions();
         assert!(defs.iter().any(|d| d.name == "mcp.demo.echo"));
@@ -641,7 +716,7 @@ done
             config.network.clone(),
         )
         .unwrap();
-        let n = attach_mcp_servers(&mut reg, &config).await.unwrap();
+        let n = attach_mcp_servers(&mut reg, &config, None).await.unwrap();
         assert_eq!(n, 1);
         let out = reg.execute("mcp.httpdemo.ping", "{}").await.unwrap();
         match out {
@@ -665,10 +740,127 @@ done
             deny_cfg.network.clone(),
         )
         .unwrap();
-        let err = attach_mcp_servers(&mut reg2, &deny_cfg).await.unwrap_err();
+        let err = attach_mcp_servers(&mut reg2, &deny_cfg, None)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("denied") || err.to_string().contains("egress"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn gateway_mode_refuses_direct_remote_servers() {
+        let mut direct = mock_stdio_server("docs");
+        direct.url = Some("https://tools.example/mcp".into());
+        direct.token_env = Some("DOCS_TOKEN".into());
+        assert!(
+            check_gateway_servers(&[direct])
+                .unwrap_err()
+                .contains("refused")
+        );
+        assert!(check_gateway_servers(&[mock_stdio_server(MCP_GATEWAY_NAME)]).is_err());
+        assert!(check_gateway_servers(&[mock_stdio_server("local")]).is_ok());
+    }
+
+    /// One-tool MCP endpoint on an ephemeral port that reports each request's
+    /// `authorization` header.
+    #[cfg(feature = "model-http")]
+    async fn auth_echo_server() -> (String, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let auth = req
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("authorization: ")
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default();
+                let _ = tx.send(auth);
+                let body = if req.contains("tools/list") {
+                    json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ping","description":"ping","inputSchema":{"type":"object"}}]}})
+                } else if req.contains("tools/call") {
+                    json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"pong"}]}})
+                } else {
+                    json!({"jsonrpc":"2.0","id":0,"result":{}})
+                }
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}/mcp"), rx)
+    }
+
+    #[cfg(feature = "model-http")]
+    #[tokio::test]
+    async fn gateway_tool_works_with_the_job_credential_only() {
+        let (url, mut auth) = auth_echo_server().await;
+        let dir = tempdir().unwrap();
+        let mut config = Config {
+            network: NetworkSettings {
+                egress: EgressMode::Allowlist,
+                allow_hosts: vec!["127.0.0.1".into()],
+            },
+            ..Default::default()
+        };
+        config.tools.mcp_gateway = Some(McpGatewaySettings {
+            url,
+            timeout_secs: 5,
+        });
+        let registry = || {
+            ToolRegistry::with_builtins(
+                dir.path(),
+                vec!["read_file".into()],
+                30,
+                config.network.clone(),
+            )
+            .unwrap()
+        };
+
+        // No grant: the gateway is never contacted.
+        let err = attach_mcp_servers(&mut registry(), &config, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("job credential"), "{err}");
+
+        let job =
+            JobCredentialHandle::from_live("job-token-458", i64::MAX, "tenant", "ns", 0).unwrap();
+        let mut reg = registry();
+        assert_eq!(
+            attach_mcp_servers(&mut reg, &config, Some(&job))
+                .await
+                .unwrap(),
+            1
+        );
+        match reg.execute("mcp.gateway.ping", "{}").await.unwrap() {
+            crate::tools::ToolOutput::Text(t) => assert_eq!(t, "pong"),
+            _ => panic!("expected text"),
+        }
+        let mut seen = Vec::new();
+        while let Ok(header) = auth.try_recv() {
+            seen.push(header);
+        }
+        assert!(
+            !seen.is_empty() && seen.iter().all(|h| h == "bearer job-token-458"),
+            "{seen:?}"
+        );
+
+        // An expired grant fails the call closed instead of sending it.
+        job.replace(crate::tools::JobCredential::live(
+            "old", 2, "tenant", "ns", 1,
+        ));
+        assert!(reg.execute("mcp.gateway.ping", "{}").await.is_err());
+        assert!(auth.try_recv().is_err());
     }
 }
