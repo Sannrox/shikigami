@@ -190,8 +190,13 @@ pub(super) async fn prepare(
         request.job_credential.as_ref(),
     )?;
     tools.set_todos(todos);
-    if !explore && !plan_jail && !engine.config.tools.mcp_servers.is_empty() {
-        crate::mcp::attach_mcp_servers(&mut tools, &engine.config).await?;
+    if !explore
+        && !plan_jail
+        && (!engine.config.tools.mcp_servers.is_empty()
+            || engine.config.tools.mcp_gateway.is_some())
+    {
+        crate::mcp::attach_mcp_servers(&mut tools, &engine.config, request.job_credential.as_ref())
+            .await?;
     }
     let tool_defs = tools.definitions();
     let tools = Arc::new(tools);

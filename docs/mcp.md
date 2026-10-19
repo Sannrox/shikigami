@@ -111,6 +111,25 @@ HTTP URLs are checked with `[network]` egress (`deny` / `allowlist` / `unrestric
 `timeout_secs` (default 30) bounds every request on both transports. Full SSE
 streaming is not required for v1 list/call.
 
+### Gateway mode
+
+`[tools.mcp_gateway]` (off when unset) routes every remote MCP tool call
+through one governed gateway:
+
+```toml
+[tools.mcp_gateway]
+url = "https://tools-gateway.example/mcp"
+timeout_secs = 30   # optional
+```
+
+- The gateway's tools register as `mcp.gateway.<tool>`.
+- Every request carries the run's live job credential as the bearer. A run
+  without one, or whose grant has expired, fails closed instead of calling.
+- An HTTP entry in `tools.mcp_servers` is a configuration error, and the name
+  `gateway` is reserved. Local stdio servers are unchanged.
+- Third-party tool credentials stay in the gateway; the run never reads or
+  stores them.
+
 ### Result and failure projection
 
 | Server response | Harness outcome |

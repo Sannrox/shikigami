@@ -948,16 +948,19 @@ fn child_config(
             config.tools.mode = crate::config::PermissionMode::Read;
             config.tools.enabled.clear();
             config.tools.mcp_servers.clear();
+            config.tools.mcp_gateway = None;
             config.run.plan_jail = false;
         }
         ChildProfile::Plan => {
             config.run.plan_jail = true;
             config.tools.mcp_servers.clear();
+            config.tools.mcp_gateway = None;
         }
         ChildProfile::Full => {
             config.run.plan_jail = plan_jail;
             if plan_jail {
                 config.tools.mcp_servers.clear();
+                config.tools.mcp_gateway = None;
             }
         }
     }

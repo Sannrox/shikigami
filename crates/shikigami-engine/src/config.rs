@@ -307,6 +307,26 @@ pub struct ToolsSettings {
     /// MCP servers whose tools are registered as `mcp.<name>.<tool>`.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerSettings>,
+    /// Governed MCP gateway (off when unset). When set it is the only remote
+    /// MCP server: its tools register as `mcp.gateway.<tool>`, every request
+    /// carries the run's live job credential, and HTTP entries in
+    /// `mcp_servers` are refused. Third-party credentials stay in the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_gateway: Option<McpGatewaySettings>,
+}
+
+/// Server name the gateway's tools register under.
+pub const MCP_GATEWAY_NAME: &str = "gateway";
+
+/// Governed MCP gateway endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpGatewaySettings {
+    /// Gateway MCP endpoint URL.
+    pub url: String,
+    /// Per-request deadline for `tools/list` and `tools/call`.
+    #[serde(default = "default_mcp_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 /// MCP server configuration (stdio command or HTTP URL).
@@ -373,6 +393,14 @@ impl McpServerSettings {
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs.max(1))
     }
+
+    /// True for a remote server: HTTP transport, or a `url` on the default
+    /// transport.
+    pub fn is_http(&self) -> bool {
+        let transport = self.transport.as_str();
+        transport == "http"
+            || (self.url.is_some() && (transport == "stdio" || transport.is_empty()))
+    }
 }
 
 fn default_mcp_transport() -> String {
@@ -403,6 +431,7 @@ impl Default for ToolsSettings {
             bash_timeout_secs: default_bash_timeout(),
             respect_ignore: default_respect_ignore(),
             mcp_servers: Vec::new(),
+            mcp_gateway: None,
         }
     }
 }
@@ -1295,6 +1324,15 @@ impl Config {
                 )));
             }
         }
+        if let Some(gateway) = &self.tools.mcp_gateway {
+            if gateway.timeout_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "tools.mcp_gateway: timeout_secs must be greater than zero".into(),
+                ));
+            }
+            crate::mcp::check_gateway_servers(&self.tools.mcp_servers)
+                .map_err(ConfigError::Invalid)?;
+        }
         if self.governance.delayed_evidence.max_entries == 0 {
             return Err(ConfigError::Invalid(
                 "governance.delayed_evidence.max_entries must be greater than zero".into(),
@@ -1668,6 +1706,31 @@ tool_sockets = "host"
         .unwrap();
         let (config, _) = Config::resolve(&path).unwrap();
         assert_eq!(config.sandbox.tool_sockets, ToolSockets::Host);
+    }
+
+    #[test]
+    fn mcp_gateway_parses_and_refuses_direct_remote_servers() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        let gateway = r#"
+version = 1
+
+[tools.mcp_gateway]
+url = "https://gateway.example/mcp"
+
+[[tools.mcp_servers]]
+name = "local"
+command = "local-mcp"
+"#;
+        fs::write(&path, gateway).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.tools.mcp_gateway.as_ref().unwrap().timeout_secs, 30);
+        assert!(config.validate().is_ok());
+
+        let mut direct = config.clone();
+        direct.tools.mcp_servers[0].url = Some("https://tools.example/mcp".into());
+        let err = direct.validate().unwrap_err().to_string();
+        assert!(err.contains("refused"), "{err}");
     }
 
     #[test]

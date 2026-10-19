@@ -644,6 +644,7 @@ pub fn replay_config(config: &Config) -> Config {
         "report".into(),
     ];
     replay.tools.mcp_servers.clear();
+    replay.tools.mcp_gateway = None;
     replay.network.egress = EgressMode::Deny;
     replay.network.allow_hosts.clear();
     replay.hooks.clear();
@@ -1793,6 +1794,16 @@ mod tests {
                 "workspace_digest followed a directory swapped to a symlink"
             );
         }
+    }
+
+    #[test]
+    fn replay_runtime_drops_the_mcp_gateway() {
+        let mut config = Config::default();
+        config.tools.mcp_gateway = Some(crate::config::McpGatewaySettings {
+            url: "https://gateway.example/mcp".into(),
+            timeout_secs: 30,
+        });
+        assert_eq!(replay_config(&config).tools.mcp_gateway, None);
     }
 
     #[test]

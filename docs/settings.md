@@ -367,6 +367,18 @@ Each entry attaches one MCP server whose tools join the registry as
 A `tools/call` result flagged `isError` is a failed tool call (`ok = false` in
 governance reports and events). See [mcp.md](mcp.md).
 
+### `[tools.mcp_gateway]`
+
+Off when unset. When set, the gateway is the only remote MCP server: its tools
+join as `mcp.gateway.<tool>`, each request carries the run's live job
+credential, and HTTP `[[tools.mcp_servers]]` entries fail validation. See
+[mcp.md](mcp.md#gateway-mode).
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `url` | (required) | Gateway MCP endpoint, checked against `[network]` egress |
+| `timeout_secs` | `30` | Per-request deadline; must be > 0 |
+
 ### `[context]`
 
 | Field | Default | Description |
