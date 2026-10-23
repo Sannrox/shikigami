@@ -1,0 +1,11 @@
+diff --git a/proto/sekai.proto b/proto/sekai.proto
+--- a/proto/sekai.proto
++++ b/proto/sekai.proto
+@@ -210,6 +210,9 @@ service SekaiService {
+   rpc GetLinks(GetLinksRequest) returns (GetLinksResponse);
+   rpc GetLinkedObjects(GetLinkedObjectsRequest) returns (GetLinkedObjectsResponse);
++  // Comments on one object, oldest first.
++  rpc ListObjectComments(ListObjectCommentsRequest) returns (ListObjectCommentsResponse);
++  rpc AddObjectComment(AddObjectCommentRequest) returns (ObjectComment);
+   rpc GetLineage(GetLineageRequest) returns (GetLineageResponse);
+ }

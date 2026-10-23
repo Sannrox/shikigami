@@ -23,6 +23,7 @@ Operator and contributor documentation for **shikigami**.
 | Run with bounded image, audio, and document parts | [content.md](content.md) |
 | Replay a run from content-bound evidence | [replay.md](replay.md) |
 | Run deterministic offline golden fixtures | [eval.md](eval.md) |
+| Propose isolation probe specs from RPC diffs | [red-team.md](red-team.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
 | Run deterministic project checks | [project-verification.md](project-verification.md) |

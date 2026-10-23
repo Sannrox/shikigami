@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   doctor reports the effective mode. `[network].egress` remains harness HTTP
   only (#442, ADR 0013).
 
+- `examples/red-team.toml` and the `red-team` skill pack: a read-only run that
+  reads RPC surface diffs and past security bug reports and emits
+  `sekai.probe-spec/v1` probe specs in its final report. It has no network,
+  exec or RPC tool, refused tool attempts are journaled, and a run that
+  exhausts its budget ends blocked with no specs (docs/red-team.md, #466).
+
 ### Breaking changes and upgrade
 
 - `sekai-chisei` workers authenticate as registered service principals: the
