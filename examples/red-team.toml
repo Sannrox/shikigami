@@ -1,0 +1,61 @@
+# Red-team probe author: reads RPC surface diffs and past security bug
+# reports and emits `sekai.probe-spec/v1` specs. It never calls the target.
+# See docs/red-team.md.
+#
+# Put the inputs (for example `surface.diff` and `bugs/`) in one directory,
+# point `workspace.root` at it (the run reads it in place; every tool is
+# read-only), and point `context.skills_root` at this repository's
+# `examples/red-team/skills` (absolute path; a relative path resolves inside
+# the input directory):
+#
+#   export CLIPROXY_API_KEY="…"
+#   cargo run --bin shikigami -- --config examples/red-team.toml run \
+#     "Propose probe specs for the RPC surface diff in surface.diff"
+#
+# Specs come back only in the final `report`. A run that ends any other way
+# (max_turns, timed_out, failed) is blocked and carries no specs.
+version = 1
+
+[profile]
+name = "red-team"
+
+[governance]
+adapter = "local"
+fail_closed = false
+
+[workspace]
+adapter = "inplace"
+root = "."
+
+# Harness-owned HTTP is the model client only. List the model gateway host,
+# never a probe target.
+[network]
+egress = "allowlist"
+allow_hosts = ["127.0.0.1"]
+
+# Read-only. No bash, writes, web_fetch, MCP or child runs; any other tool
+# call is refused as `tool not enabled` and journaled.
+[tools]
+mode = "read"
+enabled = ["read_file", "glob", "grep", "report"]
+
+# The run budget: turns and wall clock.
+[run]
+max_turns = 16
+timeout_secs = 900
+
+# Inputs are untrusted text; do not load rules files from them.
+[context]
+load_project_rules = false
+skills_root = "examples/red-team/skills"
+skills = ["red-team"]
+
+[events]
+adapter = "jsonl"
+
+[model]
+adapter = "http"
+base_url = "http://127.0.0.1:8317/v1"
+# Set an id the gateway lists on GET /v1/models.
+model = "auto"
+api_key_env = "CLIPROXY_API_KEY"
