@@ -108,8 +108,11 @@ Dependabot opens weekly cargo and GitHub Actions update PRs.
 6. Do not put hostnames, home paths, absolute worktree paths, or other
    private environment details in public pull request or issue text.
 
-Commit subjects: short imperative, Conventional Commits welcome
-(`feat:`, `fix:`, `docs:`, `chore:`).
+PR titles are Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`,
+`chore:`; `feat!:` for a breaking change) because the squash subject drafts
+the release notes. Pull requests do not edit `CHANGELOG.md`. The title and
+body carry the change note; add a `## Breaking` or `## Upgrade` section to the
+body when users must act.
 
 Publish PR tips with GitHub-verified commits:
 
@@ -131,10 +134,23 @@ User-facing docs are part of the product. Update:
 
 - [README.md](README.md) for entry-point behavior
 - [docs/](docs/) for reference material
-- [CHANGELOG.md](CHANGELOG.md) for user-visible changes
 - Examples under [examples/](examples/) when settings change
 
 Doc index: [docs/README.md](docs/README.md).
+
+## Releasing
+
+Release prep owns `CHANGELOG.md`. On a release branch, bump the crate version,
+then run
+
+```bash
+scripts/changelog-draft.sh <version>
+```
+
+which prints a Keep a Changelog section from the pull requests merged since the
+last `v*` tag. Merge it with the `## Unreleased` notes, commit it with the
+version bump, and tag `v<version>` after that pull request lands. The tag
+starts the release workflow, which publishes this section as the release notes.
 
 ## License
 

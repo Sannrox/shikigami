@@ -6,6 +6,12 @@ environment details. -->
 
 <!-- Use "Closes #123" when a primary Issue exists. -->
 
+## Release note
+
+<!-- One line for users, or "None". Do not edit CHANGELOG.md; release prep
+drafts it from the title and this body. Add a "## Breaking" or "## Upgrade"
+section when users must act. -->
+
 ## Approach
 
 <!-- Explain the implementation and important tradeoffs. -->

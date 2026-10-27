@@ -599,7 +599,7 @@ requests and model discovery use the same selection.
 | `lines` | string[] | Human diagnostic lines |
 
 Breaking renames/removals of these fields require a `schema_version` bump and
-CHANGELOG entry. Additional fields may appear without a bump.
+a breaking release note. Additional fields may appear without a bump.
 
 ## Compatibility policy (1.0)
 
@@ -609,7 +609,7 @@ CHANGELOG entry. Additional fields may appear without a bump.
    typos rather than silent ignore.
 3. **Breaking changes** (rename/remove freeze-core fields, change defaults that
    alter security posture, change settings schema `version`) require a settings
-   `version` bump and/or crate major version, plus a CHANGELOG entry.
+   `version` bump and/or crate major version, plus a breaking release note.
 4. **Additive fields** with `#[serde(default)]` may ship in the same
    settings `version` when they do not change existing behavior.
 5. From **crate 1.0**, freeze-core public API and doctor JSON follow semver;

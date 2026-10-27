@@ -69,7 +69,7 @@ pub struct Harness {
 
 /// Stable doctor JSON contract (`schema_version` = 1).
 ///
-/// Breaking field renames/removals require a schema_version bump and CHANGELOG.
+/// Breaking field renames/removals require a schema_version bump and a breaking release note.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DoctorReport {
     /// Doctor JSON schema version (currently `1`).

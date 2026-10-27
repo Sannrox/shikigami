@@ -252,8 +252,10 @@ concise behavior summary, **tests run**, **autoreview result** (for non-trivial
 code), linked issue or context, and any configuration or security implications.
 Do not put hostnames, FQDNs, home directories, absolute worktree paths, LAN
 or employer network names, or other private environment inventory on public
-Issues, Pull Requests, comments, or commit messages. Update
-[CHANGELOG.md](CHANGELOG.md) for user-visible changes.
+Issues, Pull Requests, comments, or commit messages. Pull requests do not edit
+[CHANGELOG.md](CHANGELOG.md): the Conventional Commit title and the body carry
+the change note, with a `## Breaking` or `## Upgrade` section when users must
+act. Release prep drafts the changelog (CONTRIBUTING.md, Releasing).
 
 ### Verified commits on GitHub
 
