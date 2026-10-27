@@ -231,9 +231,9 @@ recovery.
 | Replay request/result schemas and `Harness` replay methods | Additive post-1.0 surface; versioned independently from `RunRequest` and transcript export |
 | Content request/result/resolver schemas and `Harness` content methods | Additive post-1.0 surface; versioned independently from text run, resume, transcript, and replay |
 
-### CHANGELOG policy for embedders
+### Release-note policy for embedders
 
-- **Breaking** embed API or doctor JSON key removals: call out under `### Changed` / `### Breaking` and bump the relevant schema version when applicable.
+- **Breaking** embed API or doctor JSON key removals: mark the pull request breaking (`feat!:` or a `## Breaking` body section) and bump the relevant schema version when applicable.
 - **Additive** fields with defaults: same settings `version` or same doctor `schema_version` is OK.
 
 ## Upgrading the Rust library to 2.0

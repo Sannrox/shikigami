@@ -11,7 +11,7 @@ use super::HarnessError;
 
 /// Stable recovery-diagnosis JSON contract (`schema_version` = 1).
 ///
-/// Breaking field renames/removals require a schema_version bump and CHANGELOG.
+/// Breaking field renames/removals require a schema_version bump and a breaking release note.
 pub const RECOVERY_DIAGNOSIS_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
