@@ -7,7 +7,7 @@ in one repository-owned place.
 
 ```bash
 make update             # run sorted scripts/update-*.sh scripts
-make validate           # run sorted scripts/validate-*.sh scripts
+make validate           # run sorted scripts/validate-*.sh scripts (not workflow-skills)
 make test               # unit tests
 make test-integration   # integration tests
 make test-e2e           # offline host proof

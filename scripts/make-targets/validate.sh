@@ -12,7 +12,10 @@ while IFS= read -r script; do
     echo "Validating $(basename "${script}")"
     bash "${script}"
 done < <(
-    find "${ROOT_PATH}/scripts" -maxdepth 1 -type f -name 'validate-*.sh' -print \
+    # validate-workflow-skills.sh fetches agent-kit main; CI runs it in its own
+    # job, and agents run it directly (see AGENTS.md).
+    find "${ROOT_PATH}/scripts" -maxdepth 1 -type f -name 'validate-*.sh' \
+        ! -name validate-workflow-skills.sh -print \
         | LC_ALL=C sort
 )
 

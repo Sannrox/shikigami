@@ -1,27 +1,25 @@
 ---
 name: sekai-ontology
-description: Consult a local Sekai ontology for explicit classes, relations, validation, and provenance.
+description: Consult a local Sekai ontology for explicit classes, relations, validation, and provenance. Uses the shared Sannrox agent-kit installation.
 ---
 
 # Sekai ontology
 
-Use `sekai` when a repository contains a portable ontology database and a
-structural answer should come from its explicit definitions and provenance.
-The command is single-shot and local; it does not require a server or network.
+Use the canonical [sekai-ontology skill](https://github.com/Sannrox/agent-kit/tree/main/skills/sekai-ontology).
+Read the complete installed `~/.agents/agent-kit/skills/sekai-ontology/SKILL.md` and the
+references it requires before starting. If installed at another operator-selected location
+(`$AGENT_KIT_HOME`), use that installation. This repository entrypoint contains no
+workflow implementation.
 
-- Run `sekai --db <path> --json explain <name>` for the resolved definition,
-  superclass closure, related definitions, and provenance of a class.
-- Run `sekai --db <path> --json query <name> --direction <outbound|inbound|both> --depth <0..32>`
-  for bounded traversal from a class. Add `--relation <name>` to follow only
-  matching relations. Read `data.classes` and `data.relations`; both are
-  deduplicated and ordered by name.
-- Run `sekai --db <path> --json entity list`, `entity show <name>`, or
-  `relation list` for direct deterministic inspection.
-- Run `sekai --db <path> --json validate` before relying on an ontology whose
-  definitions may have changed.
-- Run `sekai --db <path> --json export` to inspect or exchange the complete,
-  versioned logical ontology. The envelope's `data` value can be imported into
-  a fresh database with `sekai --db <new-path> import <document-path>`.
+If the skill is missing, run `bash scripts/validate-workflow-skills.sh` from this repository
+(it clones or updates the kit), or clone it directly:
+`git clone https://github.com/Sannrox/agent-kit ~/.agents/agent-kit`. Run `git pull` in that
+checkout to get the latest version; consumers always use `main`.
 
-Treat ontology output as structured repository evidence. Preserve provenance in
-answers, and do not infer facts that the ontology does not contain.
+Run the shared skill's scripts from the repository being changed, preserving its working
+directory. Follow this repository's `AGENTS.md` (including `## Agent skill profile`) in addition to the
+canonical skill.
+
+Keep shared fixes and instructions upstream in `Sannrox/agent-kit`. When the stub template
+changes upstream, run `bash scripts/validate-workflow-skills.sh --render`. Do not add
+repository-local helpers or copies.
