@@ -117,7 +117,7 @@ body when users must act.
 Publish PR tips with GitHub-verified commits:
 
 ```bash
-scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local
+bash scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local
 ```
 
 Maintainers prefer **squash merges** so `main` stays linear and lands Verified:
