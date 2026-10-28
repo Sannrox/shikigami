@@ -315,6 +315,9 @@ pub struct ToolsSettings {
     pub mcp_gateway: Option<McpGatewaySettings>,
 }
 
+/// Profile for site-agent turns (#487): governed, gateway-only tools.
+pub const SITE_AGENT_PROFILE: &str = "site-agent";
+
 /// Server name the gateway's tools register under.
 pub const MCP_GATEWAY_NAME: &str = "gateway";
 
@@ -1119,7 +1122,9 @@ impl Config {
     }
 
     fn apply_profile_presets(&mut self) {
-        if self.profile.name == "governed" {
+        // A site-agent turn runs governed, as the `governed` profile does
+        // (#487).
+        if self.profile.name == "governed" || self.profile.name == SITE_AGENT_PROFILE {
             if self.governance.adapter == "none" {
                 self.governance.adapter = "sekai-chisei".into();
             }
@@ -1180,6 +1185,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.profile.name == SITE_AGENT_PROFILE {
+            self.validate_site_agent()?;
+        }
         match self.governance.adapter.as_str() {
             "none" | "local" | "sekai-chisei" | "http-callback" | "host-authz" => {}
             other => return Err(ConfigError::UnknownGovernanceAdapter(other.into())),
@@ -1417,11 +1425,49 @@ impl Config {
     }
 
     /// Whether a run must refuse to start without healthy governance. True for
-    /// profile `governed`, `governance.fail_closed`, and every remote adapter.
+    /// profiles `governed` and `site-agent`, `governance.fail_closed`, and
+    /// every remote adapter.
     pub fn requires_governance(&self) -> bool {
         self.governance.fail_closed
             || self.profile.name == "governed"
+            || self.profile.name == SITE_AGENT_PROFILE
             || self.remote_governance_configured()
+    }
+
+    /// The `site-agent` profile fails closed (#487): it runs governed by
+    /// sekai-chisei, calls tools only through the governed MCP gateway, and
+    /// holds no direct MCP server, shell, write or filesystem tool, and starts
+    /// no child run. Only the gateway's tools and `report`/`escalate` may be
+    /// enabled, by name; a request-level nested flag is ignored too.
+    fn validate_site_agent(&self) -> Result<(), ConfigError> {
+        let refuse = |why: &str| Err(ConfigError::Invalid(format!("profile `site-agent`: {why}")));
+        if self.governance.adapter != "sekai-chisei" || !self.governance.fail_closed {
+            return refuse("requires governance adapter `sekai-chisei` with fail_closed");
+        }
+        if self.tools.mcp_gateway.is_none() {
+            return refuse("requires tools.mcp_gateway; tools reach the site only through it");
+        }
+        if self.run.nested {
+            return refuse("refuses run.nested; a child run would reach past the gateway");
+        }
+        if !self.tools.mcp_servers.is_empty() {
+            return refuse("refuses tools.mcp_servers; use the governed gateway");
+        }
+        if !matches!(self.tools.mode, PermissionMode::Custom) {
+            return refuse("requires tools.mode = \"custom\" with an explicit tools.enabled list");
+        }
+        if self.tools.enabled.is_empty() {
+            return refuse("requires an explicit tools.enabled list");
+        }
+        if let Some(tool) = self.tools.enabled.iter().find(|tool| {
+            !(matches!(tool.as_str(), "report" | "escalate")
+                || tool.starts_with(&format!("mcp.{MCP_GATEWAY_NAME}.")))
+        }) {
+            return refuse(&format!(
+                "tool `{tool}` is not allowed; enable only mcp.{MCP_GATEWAY_NAME}.* tools, report and escalate"
+            ));
+        }
+        Ok(())
     }
 
     /// A remote governance adapter (one that talks to an endpoint) is selected.
@@ -1563,6 +1609,78 @@ namespace = "team-a"
         assert!(c.governance.fail_closed);
         assert_eq!(c.model.adapter, "plane");
         assert_eq!(c.model.model, "auto");
+    }
+
+    /// The shipped site-agent example loads, governed and gateway-only.
+    #[test]
+    fn site_agent_example_loads_governed_and_gateway_only() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("site-agent-turn.toml");
+        fs::write(
+            &path,
+            include_str!("../../../examples/site-agent-turn.toml"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.profile.name, SITE_AGENT_PROFILE);
+        assert_eq!(config.governance.adapter, "sekai-chisei");
+        assert!(config.governance.fail_closed);
+        assert!(config.requires_governance());
+        assert!(config.tools.mcp_gateway.is_some());
+    }
+
+    /// Each way out of the gateway is refused with a named reason (#487).
+    #[test]
+    fn site_agent_profile_refuses_every_way_around_the_gateway() {
+        let base = || {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("site-agent-turn.toml");
+            fs::write(
+                &path,
+                include_str!("../../../examples/site-agent-turn.toml"),
+            )
+            .unwrap();
+            Config::load(&path).unwrap()
+        };
+        let refused = |config: Config| match config.validate() {
+            Err(ConfigError::Invalid(why)) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        let mut no_gateway = base();
+        no_gateway.tools.mcp_gateway = None;
+        assert!(refused(no_gateway).contains("requires tools.mcp_gateway"));
+
+        let mut direct = base();
+        direct
+            .tools
+            .mcp_servers
+            .push(toml::from_str("name = \"site\"\ncommand = \"mock\"").unwrap());
+        assert!(refused(direct).contains("refuses tools.mcp_servers"));
+
+        for tool in ["bash", "write_file", "read_file"] {
+            let mut shell = base();
+            shell.tools.enabled.push(tool.into());
+            assert!(refused(shell).contains(&format!("tool `{tool}` is not allowed")));
+        }
+
+        let mut workspace = base();
+        workspace.tools.mode = PermissionMode::WorkspaceExec;
+        assert!(refused(workspace).contains("tools.mode"));
+
+        let mut bearer = base();
+        bearer.governance.token_env = Some("SHIKIGAMI_TOKEN".into());
+        assert!(
+            matches!(bearer.validate(), Err(ConfigError::Invalid(why)) if why.contains("static bearer"))
+        );
+
+        let mut nested = base();
+        nested.run.nested = true;
+        assert!(refused(nested).contains("refuses run.nested"));
+
+        let mut ungoverned = base();
+        ungoverned.governance.adapter = "local".into();
+        assert!(refused(ungoverned).contains("requires governance adapter"));
     }
 
     #[test]

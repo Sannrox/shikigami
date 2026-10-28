@@ -57,7 +57,11 @@ pub async fn attach_mcp_servers(
             ToolError::Message("mcp gateway requires the run's job credential".into())
         })?;
         let client = McpHttpTransport::connect_gateway(gateway, job.clone(), config).await?;
-        n += attach_tools(registry, MCP_GATEWAY_NAME, client)
+        // A site-agent turn offers only the gateway tools its settings name
+        // (#487); other profiles attach every tool the gateway lists.
+        let allowed = (config.profile.name == crate::config::SITE_AGENT_PROFILE)
+            .then_some(config.tools.enabled.as_slice());
+        n += attach_tools(registry, MCP_GATEWAY_NAME, client, allowed)
             .await
             .map_err(|e| ToolError::Message(format!("mcp gateway: {e}")))?;
     }
@@ -82,7 +86,7 @@ pub async fn attach_mcp_servers(
                 .map_err(ToolError::Message)?;
             match McpHttpTransport::connect(server, config).await {
                 Ok(client) => {
-                    n += attach_tools(registry, &server.name, client)
+                    n += attach_tools(registry, &server.name, client, None)
                         .await
                         .map_err(|e| {
                             ToolError::Message(format!("mcp server `{}`: {e}", server.name))
@@ -107,6 +111,7 @@ pub async fn attach_mcp_servers(
                     registry,
                     &server.name,
                     McpClient::new(transport, server.timeout()),
+                    None,
                 )
                 .await
                 .map_err(|e| ToolError::Message(format!("mcp server `{}`: {e}", server.name)))?;
@@ -862,5 +867,58 @@ done
         ));
         assert!(reg.execute("mcp.gateway.ping", "{}").await.is_err());
         assert!(auth.try_recv().is_err());
+    }
+
+    /// A site-agent turn offers only the gateway tools its settings name:
+    /// one the gateway lists but the settings omit is neither registered
+    /// nor callable (#487).
+    #[cfg(feature = "model-http")]
+    #[tokio::test]
+    async fn site_agent_offers_only_the_gateway_tools_it_names() {
+        let (url, _auth) = auth_echo_server().await;
+        let dir = tempdir().unwrap();
+        let mut config = Config {
+            network: NetworkSettings {
+                egress: EgressMode::Allowlist,
+                allow_hosts: vec!["127.0.0.1".into()],
+            },
+            ..Default::default()
+        };
+        config.profile.name = crate::config::SITE_AGENT_PROFILE.into();
+        config.tools.mcp_gateway = Some(McpGatewaySettings {
+            url,
+            timeout_secs: 5,
+        });
+        let job =
+            JobCredentialHandle::from_live("job-token-487", i64::MAX, "tenant", "ns", 0).unwrap();
+        let registry = || {
+            ToolRegistry::with_builtins(
+                dir.path(),
+                vec!["report".into()],
+                30,
+                config.network.clone(),
+            )
+            .unwrap()
+        };
+
+        config.tools.enabled = vec!["report".into()];
+        let mut unnamed = registry();
+        assert_eq!(
+            attach_mcp_servers(&mut unnamed, &config, Some(&job))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(unnamed.execute("mcp.gateway.ping", "{}").await.is_err());
+
+        config.tools.enabled = vec!["report".into(), "mcp.gateway.ping".into()];
+        let mut named = registry();
+        assert_eq!(
+            attach_mcp_servers(&mut named, &config, Some(&job))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(named.execute("mcp.gateway.ping", "{}").await.is_ok());
     }
 }

@@ -146,13 +146,24 @@ impl<T: Transport> Client<T> {
     }
 }
 
+/// Registers the server's listed tools. With `allowed`, only tools whose
+/// full name it lists are registered, so a tool the server advertises but
+/// the settings do not name is never offered or callable.
 pub(super) async fn attach_tools<T: Transport + 'static>(
     registry: &mut ToolRegistry,
     server_name: &str,
     mut client: Client<T>,
+    allowed: Option<&[String]>,
 ) -> Result<usize, ToolError> {
     client.initialize().await;
-    let tools = client.list_tools().await?;
+    let tools: Vec<_> = client
+        .list_tools()
+        .await?
+        .into_iter()
+        .filter(|tool| {
+            allowed.is_none_or(|names| names.contains(&format!("mcp.{server_name}.{}", tool.name)))
+        })
+        .collect();
     let count = tools.len();
     let client = Arc::new(Mutex::new(client));
     for tool in tools {

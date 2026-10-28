@@ -1,0 +1,40 @@
+# Site-agent turn runtime (docs/site-agent.md, #487): runs governed by
+# sekai-chisei as a site agent instance's principal, and reaches the site only
+# through the governed MCP gateway. The `site-agent` profile refuses direct MCP
+# servers, shell, write and filesystem tools, and a static bearer.
+#
+# Consuming agent-turn claims is #488. Until it lands, this profile is the
+# fail-closed runtime settings for turns; see docs/site-agent.md.
+version = 1
+
+[profile]
+name = "site-agent"
+
+[governance]
+# The profile selects `sekai-chisei` and fail_closed.
+principal = "agent:line-7"
+namespace = "site"
+# A registered service principal's secret, never a static bearer.
+client_secret_env = "SHIKIGAMI_CLIENT_SECRET"
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[tools]
+# Only the gateway's tools and the terminal report or escalation. Name each
+# gateway tool the turn may call; the definition's tools can only narrow it.
+enabled = [
+  "report",
+  "escalate",
+  "mcp.gateway.sekai.objects.get",
+  "mcp.gateway.sekai.actions.submit",
+  "mcp.gateway.chisei.receipt.read",
+]
+
+[tools.mcp_gateway]
+url = "https://gateway.invalid/mcp"
+timeout_secs = 30
+
+[events]
+adapter = "jsonl"
