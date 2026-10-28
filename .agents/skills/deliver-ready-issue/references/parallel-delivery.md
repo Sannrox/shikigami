@@ -84,7 +84,7 @@ Lane brief
 - procedure: run deliver-ready-issue from "3. Bound the implementation"
   onward inside the worktree; readiness, claim, and isolation are done.
 - publish only to the claim branch, with
-  scripts/gh-verified-push.sh --branch <type>/<issue> --sync-local; open the
+  bash scripts/gh-verified-push.sh --branch <type>/<issue> --sync-local; open the
   Pull Request as a draft with "Closes #<issue>" and public lane fields
   (branch, repo-relative worktree, base SHA, published SHA, authority). Do
   not paste this internal brief, hostnames, or absolute paths onto GitHub.
@@ -117,7 +117,7 @@ Lane brief
 ## 4. Publish and land in sequence
 
 1. Each lane publishes to its claim branch from its own worktree with
-   `scripts/gh-verified-push.sh --branch <type>/<issue> --sync-local` under
+   `bash scripts/gh-verified-push.sh --branch <type>/<issue> --sync-local` under
    Publish authority, after `git fetch --prune origin` and
    `git merge-base --is-ancestor origin/main HEAD` pass. Publishing may happen
    concurrently; landing never.

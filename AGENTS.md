@@ -263,14 +263,14 @@ Prefer publishing PR branch tips with GitHub-signed commits so GitHub shows
 **Verified**:
 
 1. Implement and commit locally as usual (`commit.gpgsign` may still apply).
-2. Publish the branch tip with `scripts/gh-verified-push.sh` instead of a plain
+2. Publish the branch tip with `bash scripts/gh-verified-push.sh` instead of a plain
    `git push` when you want the hosted commit Verified (OpenClaw-style GraphQL
    `createCommitOnBranch`). That path creates one server-side commit with the
    local `HEAD` tree; committer is typically **GitHub**.
 3. New branch:
-   `scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
+   `bash scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
 4. Existing PR branch:
-   `scripts/gh-verified-push.sh --branch <topic> --sync-local`
+   `bash scripts/gh-verified-push.sh --branch <topic> --sync-local`
    (uses the current remote tip as `expectedHeadOid`).
 5. Never pass `--no-gpg-sign` for local commits; if GPG fails, stop and fix it.
 6. After publish, confirm `verification.verified=true` (the script prints this).
