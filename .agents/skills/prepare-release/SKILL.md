@@ -1,42 +1,25 @@
 ---
 name: prepare-release
-description: Prepare a sekai-chisei release by auditing version scope, compatibility, migrations, validation, artifacts, and release notes. Use when a maintainer asks for release readiness, a version bump plan, or a draft GitHub Release.
+description: Prepare a release by auditing version scope, compatibility, validation, artifacts, and release notes. Use when a maintainer asks for release readiness, a version bump plan, or a draft GitHub Release. Uses the shared Sannrox agent-kit installation.
 ---
 
 # Prepare Release
 
-Assemble decision-ready release evidence. Do not tag, push, publish, or alter
-GitHub state unless the maintainer explicitly authorizes that action.
+Use the canonical [prepare-release skill](https://github.com/Sannrox/agent-kit/tree/main/skills/prepare-release).
+Read the complete installed `~/.agents/agent-kit/skills/prepare-release/SKILL.md` and the
+references it requires before starting. If installed at another operator-selected location
+(`$AGENT_KIT_HOME`), use that installation. This repository entrypoint contains no
+workflow implementation.
 
-## Procedure
+If the skill is missing, run `bash scripts/validate-workflow-skills.sh` from this repository
+(it clones or updates the kit), or clone it directly:
+`git clone https://github.com/Sannrox/agent-kit ~/.agents/agent-kit`. Run `git pull` in that
+checkout to get the latest version; consumers always use `main`.
 
-1. Identify the target version, base tag, target commit, and milestone or merged
-   PR range. Read `Cargo.toml`, the release workflow, and open release-blocking
-   Issues. Complete when the exact release contents are bounded.
-2. Classify changes as `Added`, `Changed`, `Fixed`, `Security`, or `Migration`.
-   Check SemVer fit; before `1.0`, call out all public breaking changes even when
-   they fit a minor bump. Complete when every user-visible merged change is
-   represented once.
-3. Audit release impact:
-   - `Cargo.toml` version and lockfile consistency;
-   - public gRPC/gateway/client compatibility;
-   - SQLite migrations and implemented PostgreSQL alignment;
-   - configuration additions, removals, defaults, and `.env.example`;
-   - security, backup, rollback, retention, and operator actions;
-   - container and binary packaging.
-   Complete when every applicable item is resolved or a named blocker.
-4. Use `verify-change` for the full local gates. Confirm current GitHub CI and
-   security checks when access is available. Do not run live-provider tests
-   without intentional prerequisites. Complete when evidence is current for the
-   target commit.
-5. Draft concise user-facing release notes. Put upgrade and migration actions
-   before internal implementation detail. Credit contributors through GitHub's
-   generated notes rather than maintaining a manual ledger.
-6. Report go/no-go. A release is `go` only when required checks pass, no known
-   blocker remains, and rollback/upgrade implications are explicit.
+Run the shared skill's scripts from the repository being changed, preserving its working
+directory. Follow this repository's `AGENTS.md` (including `## Agent skill profile`) in addition to the
+canonical skill.
 
-## Output
-
-Return the target, commit range, readiness checklist, validation results,
-compatibility/migration notes, release-note draft, and blockers. Separate
-verified facts from recommendations.
+Keep shared fixes and instructions upstream in `Sannrox/agent-kit`. When the stub template
+changes upstream, run `bash scripts/validate-workflow-skills.sh --render`. Do not add
+repository-local helpers or copies.

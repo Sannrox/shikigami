@@ -58,6 +58,19 @@ jobs:
       - name: Prove linux_native denials and overhead
         run: cargo test --locked --test linux_native_sandbox -- --nocapture
 
+  # Runs agent-kit main by design (no pin), so it gets its own job with a
+  # read-only token, no persisted credentials, and no build cache.
+  workflow-skills:
+    name: Workflow Skills
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: bash scripts/validate-workflow-skills.sh
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest

@@ -114,10 +114,14 @@ the release notes. Pull requests do not edit `CHANGELOG.md`. The title and
 body carry the change note; add a `## Breaking` or `## Upgrade` section to the
 body when users must act.
 
-Publish PR tips with GitHub-verified commits:
+Contributors without a claimed Issue push their topic branch with
+`git push`. A delivery lane for a claimed Issue (branch `<type>/<issue>`, see
+`AGENTS.md`) publishes GitHub-verified commits and lands with the shared
+agent-kit lane script:
 
 ```bash
-bash scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local
+bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" push <issue>
+bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" land <issue> --pr <pr>
 ```
 
 Maintainers prefer **squash merges** so `main` stays linear and lands Verified:

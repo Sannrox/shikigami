@@ -42,7 +42,8 @@ Human documentation index: [docs/README.md](docs/README.md).
 - `cargo build --release` builds an optimized binary.
 - `make all` builds all targets.
 - `make update` runs sorted `scripts/update-*.sh` update scripts.
-- `make validate` runs sorted `scripts/validate-*.sh` validation scripts.
+- `make validate` runs sorted `scripts/validate-*.sh` validation scripts except
+  the networked `validate-workflow-skills.sh` (run it directly).
 - `make test` runs unit tests; `make test-integration` runs integration tests.
 - `make test-e2e` runs the offline library host proof (`make embed` is an alias).
   See [docs/project-verification.md](docs/project-verification.md).
@@ -55,8 +56,8 @@ Important variables include `SHIKIGAMI_STATE`, `SHIKIGAMI_CONFIG`,
 `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE`, and `SHIKIGAMI_MODEL_ADAPTER`.
 See [docs/settings.md](docs/settings.md) and [examples/](examples/).
 
-GitHub Issues are the planning source of truth. Project-specific Skills live
-under `.agents/skills/`. Read `DESIGN.md`, `VISION.md`, and accepted ADRs under
+GitHub Issues are the planning source of truth. The workflow Skills under
+`.agents/skills/` are shared agent-kit stubs (see `## Shared agent skills`). Read `DESIGN.md`, `VISION.md`, and accepted ADRs under
 `docs/decisions/` before changing system boundaries.
 
 ## Agent delivery closeout (required)
@@ -136,7 +137,7 @@ confirmation, unless the lead of the same parallel run owns the stalled lane.
 
 A lane claims before it implements, under Publish or Land authority or with an
 explicit claim authorization under Implement, using
-`bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh claim <issue>`:
+`bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}"/skills/deliver-ready-issue/scripts/issue-lane.sh claim <issue>`:
 
 - the branch `<type>/<issue>` is created on GitHub from the default branch by
   an atomic ref creation, so when two machines race exactly one claim
@@ -198,22 +199,25 @@ it refreshes onto `main` only for a conflict, a failing gate, an explicit
 request, or a sibling landing on a shared surface, not merely because `main`
 advanced.
 
-Landing is sequential. After each merge, fetch, recompute the frontier, and let
-the remaining lanes recheck `mergeable` against the new `main`. A failed or
-timed-out merge response may still have merged; reconcile the remote state
-before retrying.
+A lane publishes with `bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}"/skills/deliver-ready-issue/scripts/issue-lane.sh push <issue>` and lands with
+`bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}"/skills/deliver-ready-issue/scripts/issue-lane.sh land <issue> --pr <pr>`, which squash-merges the reviewed head once
+its checks pass and reconciles an uncertain merge response before reporting.
+A lane that conflicts with a sibling's landing reports it instead of merging.
+After each merge, fetch and recompute the frontier.
 
 The lead of a parallel run keeps a ledger per lane: Issue, branch, base SHA,
 owner, state, Pull Request, evidence, blockers, and cleanup. Keep hostnames
 and absolute checkout paths in the session with the maintainer, never on
 GitHub. Report verified outcomes, not launched work. The executable lead
-procedure is `.agents/skills/deliver-ready-issue/references/parallel-delivery.md`.
+procedure is `references/parallel-delivery.md` of the shared
+`deliver-ready-issue` Skill.
 
 ## Ontology Policy
 
 For work involving portable ontology definitions, classes, relations,
 provenance, validation, import, export, or structural queries, always use the
-project-local `sekai-ontology` Skill in `.agents/skills/sekai-ontology/`.
+`sekai-ontology` Skill (`.agents/skills/sekai-ontology/` is its shared
+agent-kit stub).
 
 Select the ontology database explicitly with `--db <path>` or `SEKAI_DB`, then
 run `sekai --db <path> --json validate` before relying on its contents. Treat
@@ -259,30 +263,23 @@ act. Release prep drafts the changelog (CONTRIBUTING.md, Releasing).
 
 ### Verified commits on GitHub
 
-Prefer publishing PR branch tips with GitHub-signed commits so GitHub shows
-**Verified**:
+Publish and land lanes with the shared agent-kit lane script so hosted commits
+are GitHub-signed (**Verified**) and `main` stays linear:
 
-1. Implement and commit locally as usual (`commit.gpgsign` may still apply).
-2. Publish the branch tip with `bash scripts/gh-verified-push.sh` instead of a plain
-   `git push` when you want the hosted commit Verified (OpenClaw-style GraphQL
-   `createCommitOnBranch`). That path creates one server-side commit with the
-   local `HEAD` tree; committer is typically **GitHub**.
-3. New branch:
-   `bash scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
-4. Existing PR branch:
-   `bash scripts/gh-verified-push.sh --branch <topic> --sync-local`
-   (uses the current remote tip as `expectedHeadOid`).
-5. Never pass `--no-gpg-sign` for local commits; if GPG fails, stop and fix it.
-6. After publish, confirm `verification.verified=true` (the script prints this).
+1. Commit locally as usual. Never pass `--no-gpg-sign`; if GPG fails, stop and
+   fix it.
+2. Publish the claim branch from the lane worktree with
+   `bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" push <issue>`.
+   It prints the Verified commit and resets the worktree to it, so local `HEAD`
+   is the Pull Request head.
+3. Land with `bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}/skills/deliver-ready-issue/scripts/issue-lane.sh" land <issue> --pr <pr>`.
+   It squash-merges the reviewed head once the required checks pass.
 
-When merging PRs, prefer **squash** (`gh pr merge --squash --delete-branch`) so
-the land commit on `main` is also GitHub-signed/Verified and history stays
-linear. Use `gh pr merge --merge` only when multi-commit history must be kept
-(original SHAs preserved). Avoid GitHub **rebase** merges when Verified history
-matters: rebase-merge rewrites commits and drops signatures. Do not rewrite
-protected `main` after merging unless the user explicitly approves; if
-protection is temporarily relaxed, restore force-push and status-check settings
-immediately after the correction.
+Avoid GitHub **rebase** merges when Verified history matters: rebase-merge
+rewrites commits and drops signatures. Do not rewrite protected `main` after
+merging unless the user explicitly approves; if protection is temporarily
+relaxed, restore force-push and status-check settings immediately after the
+correction.
 
 ## Security & Configuration Tips
 
@@ -294,3 +291,76 @@ home directories, absolute worktree paths, LAN or employer network names, or
 other private environment inventory on public Issues, Pull Requests, comments,
 or commit messages. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 Follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in all project spaces.
+
+## Shared agent skills
+
+The workflow Skills (`advance-issue-frontier`, `assess-change-impact`,
+`capture-project-decision`, `deliver-ready-issue`, `prepare-release`,
+`refactor-docs`, `shape-work-item`, `technical-documentation`, `verify-change`)
+and the opt-in `sekai-ontology` Skill are canonical in
+[Sannrox/agent-kit](https://github.com/Sannrox/agent-kit). There is no pin:
+this repository always uses the latest `main`. `.agents/skills/<name>/` holds
+only a generated stub that points to the shared skill; read the installed skill
+under `~/.agents/agent-kit/` (or `$AGENT_KIT_HOME`). Run
+`bash scripts/validate-workflow-skills.sh` to clone or update it; CI runs the
+same check in its own job (`make validate` skips it because it needs the
+network).
+
+- Repository-specific facts the shared Skills need come from this file: the
+  structure, commands, closeout, parallel-lane, and testing sections, plus
+  `## Agent skill profile` below for anything they do not already say. Edit
+  this file, not the stubs.
+- Never edit stubs or the vendored `scripts/validate-workflow-skills.sh` here;
+  change them upstream in agent-kit, then run
+  `bash scripts/validate-workflow-skills.sh --render` here when CI reports
+  drift.
+- Repository-only Skills live next to the stubs as full folders and stay local.
+
+## Agent skill profile
+
+Facts the shared agent-kit skills read that the sections above do not already
+state. Frame work against `VISION.md`, `DESIGN.md`, and the ADRs, and name the
+affected area (run, governance, workspace, settings, embed, ops, security). The
+local gates are the Make targets in `## Agent delivery closeout`; they run
+offline with no plane required.
+
+Feature: a new observable operator, embedding-host, or integration outcome.
+
+### Compatibility and failure obligations
+
+The upstream `sekai-client` / `sekai-proto` version pin and the kekkai pin;
+settings resolution order and existing `shikigami.toml` files; fail-closed
+governance under profile `governed` or `governance.fail_closed`; the public
+library API that hosts embed (`Harness`); offline `cargo test` stays green
+without sekai-chisei.
+
+### Additional impact boundaries
+
+- ports + settings ([ADR 0001](docs/decisions/0001-ports-and-settings.md)):
+  adapters are selected by configuration; delivery tools such as tenkai are
+  never runtime ports;
+- governance adapters (`none`, `local`, host callback, sekai-chisei) and their
+  fail-closed behavior;
+- the workspace jail and tool execution sandbox tiers.
+
+### Verification matrix
+
+Rows beyond `## Testing Guidelines`:
+
+| Surface | Required evidence |
+| --- | --- |
+| host proof or public embedding path | `make test-e2e` |
+| sekai-chisei governance adapter | ignored `tests/plane_live.rs` probe when a local plane is available; otherwise report skipped |
+| docs, ADRs | `make validate` (Markdown links, changelog version) |
+| Skills / `AGENTS.md` | `bash scripts/validate-workflow-skills.sh` |
+| packaging | `cargo build --locked`; `scripts/oci-image-smoke.sh` for the image |
+
+### Release audit
+
+- crate version, README status stamp, and the first dated `CHANGELOG.md`
+  heading agree (`scripts/validate-changelog-version.sh`);
+- changelog section drafted with `scripts/changelog-draft.sh <version>` and
+  committed with the version bump on a release branch; the `v<version>` tag
+  starts `.github/workflows/release.yml`;
+- `sekai-client` and kekkai pins and their upgrade notes;
+- OCI image publication needs a stable version.
