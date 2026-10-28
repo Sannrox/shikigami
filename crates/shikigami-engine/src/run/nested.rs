@@ -186,6 +186,11 @@ pub(super) fn nested_tools_enabled(
     // Children never inherit nested tools (an explore child must not spawn a
     // full grandchild with host write/MCP). nested_max_depth therefore only
     // gates the root; values above 1 are reserved.
+    // A site-agent turn never starts a child: a child's preset tools would
+    // reach past the gateway-only list (#487).
+    if engine.config.profile.name == crate::config::SITE_AGENT_PROFILE {
+        return false;
+    }
     if is_content
         || nested_depth > 0
         || !parent_run_id.is_empty()

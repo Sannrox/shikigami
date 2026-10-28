@@ -60,6 +60,9 @@ and rewritten only when the snapshot changes.
 
 ## Plane claim intake
 
+Site-agent turns use their own fail-closed settings
+([site-agent.md](site-agent.md)); consuming them is #488.
+
 Direct claim intake is explicit; filesystem intake remains the default:
 
 ```bash

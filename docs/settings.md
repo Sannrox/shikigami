@@ -65,9 +65,10 @@ the repository examples. A future schema direction is proposed in
 | --- | --- |
 | `local` | Default. Offline-friendly. Does not force a plane. |
 | `governed` | Sets governance to `sekai-chisei` if still `none`, forces `fail_closed = true`, prefers model adapter `plane`. |
+| `site-agent` | The `governed` preset, plus fail-closed checks for site-agent turns: requires `tools.mcp_gateway`, refuses `tools.mcp_servers`, and allows only `mcp.gateway.*` tools, `report` and `escalate` in an explicit `tools.enabled` list. See [site-agent.md](site-agent.md). |
 
-Custom profile names are allowed as labels; only `governed` applies the preset
-above today. Version 1 expands a file profile before applying environment
+Custom profile names are allowed as labels; only `governed` and `site-agent`
+apply the presets above today. Version 1 expands a file profile before applying environment
 overrides. Changing `SHIKIGAMI_PROFILE` later does not reverse values already
 expanded from the file:
 
