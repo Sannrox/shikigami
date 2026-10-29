@@ -30,6 +30,7 @@ pub use shikigami_engine::{
 pub(crate) use shikigami_engine::digest;
 
 pub mod acp;
+pub mod agent_turn;
 pub mod eval;
 pub mod governance;
 pub mod harness;
@@ -42,6 +43,10 @@ pub mod serve;
 #[cfg(test)]
 mod content_tests;
 
+pub use agent_turn::{
+    AgentTurnAck, AgentTurnContinuation, AgentTurnPort, AgentTurnServeOptions, ClaimedAgentTurn,
+    PublishedAgentDefinition, SiteAgentInstanceView, run_agent_turn_serve,
+};
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpFraming, McpServerSettings, PermissionMode,
     SandboxBackend, SandboxSettings, ToolSockets, TracingSettings,
@@ -70,7 +75,9 @@ pub use metrics::{Metrics, MetricsError, MetricsSnapshot};
 pub use model::{CostEstimate, TokenUsage};
 pub use plane_host::{PlaneHostError, PlaneHostInfo, PlaneHostOptions};
 #[cfg(feature = "governance-sekai-chisei")]
-pub use plane_host::{PreparedPlaneHost, prepare_plane_host};
+pub use plane_host::{
+    PreparedAgentTurnHost, PreparedPlaneHost, prepare_agent_turn_host, prepare_plane_host,
+};
 pub use plane_intake::{
     CLAIMED_STATUS, ClaimedPlaneWork, ClaimedWorkMappingError, ClaimedWorkPolicy,
     DEFAULT_MAX_CLAIMED_TASK_BYTES, DEFAULT_MAX_CONTINUATION_BYTES, PlaneAck, PlaneAckOutcome,

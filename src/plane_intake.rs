@@ -119,7 +119,7 @@ pub async fn run_plane_serve(
     serve_loop::run_until_shutdown(harness, intake, &options, shutdown).await
 }
 
-pub(super) fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecycle) {
+pub(crate) fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecycle) {
     if let Err(error) = lc.set_draining() {
         eprintln!(
             "warning: worker lifecycle drain publish failed: {error}; removed stale snapshot if present"
@@ -127,7 +127,7 @@ pub(super) fn lifecycle_set_draining(lc: &crate::worker_lifecycle::WorkerLifecyc
     }
 }
 
-pub(super) fn lifecycle_copy_delayed_evidence(
+pub(crate) fn lifecycle_copy_delayed_evidence(
     lc: &crate::worker_lifecycle::WorkerLifecycle,
     harness: &Harness,
 ) {
@@ -290,7 +290,7 @@ fn artifact_refs(value: Option<&Value>) -> Result<Vec<&str>, ClaimedWorkMappingE
 
 use crate::digest::sha256_hex;
 
-pub(super) async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+pub(crate) async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     loop {
         if *shutdown.borrow() || shutdown.changed().await.is_err() {
             return;

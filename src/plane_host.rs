@@ -14,6 +14,10 @@ use crate::worker_lifecycle::WorkerLifecycleError;
 use thiserror::Error;
 
 #[cfg(feature = "governance-sekai-chisei")]
+use crate::agent_turn::{AgentTurnServeOptions, run_agent_turn_serve};
+#[cfg(feature = "governance-sekai-chisei")]
+use crate::config::SITE_AGENT_PROFILE;
+#[cfg(feature = "governance-sekai-chisei")]
 use crate::governance::sekai_chisei::SekaiClaimClient;
 #[cfg(feature = "governance-sekai-chisei")]
 use crate::harness::Harness;
@@ -68,6 +72,8 @@ pub struct PlaneHostInfo {
 pub enum PlaneHostError {
     #[error("plane host requires governance.adapter = \"sekai-chisei\", got {actual:?}")]
     WrongGovernanceAdapter { actual: String },
+    #[error("agent-turn host requires profile.name = \"site-agent\", got {actual:?}")]
+    WrongProfile { actual: String },
     #[error("invalid plane host option {field}: {message}")]
     InvalidOption {
         field: &'static str,
@@ -81,6 +87,52 @@ pub enum PlaneHostError {
     Lifecycle(#[from] WorkerLifecycleError),
     #[error(transparent)]
     Intake(#[from] PlaneIntakeError),
+}
+
+/// An agent-turn host that passed every startup gate and can be run exactly once.
+#[cfg(feature = "governance-sekai-chisei")]
+pub struct PreparedAgentTurnHost<'a> {
+    harness: &'a Harness,
+    client: SekaiClaimClient,
+    options: AgentTurnServeOptions,
+    shutdown: watch::Receiver<bool>,
+    listener_shutdown: watch::Sender<bool>,
+    lifecycle: WorkerLifecycle,
+    finished: bool,
+    info: PlaneHostInfo,
+}
+
+#[cfg(feature = "governance-sekai-chisei")]
+impl PreparedAgentTurnHost<'_> {
+    pub fn info(&self) -> &PlaneHostInfo {
+        &self.info
+    }
+
+    pub async fn run(mut self) -> Result<u64, PlaneHostError> {
+        if let Err(error) = self.lifecycle.mark_serving() {
+            let _ = std::fs::remove_file(self.lifecycle.path());
+            return Err(error.into());
+        }
+        let result = run_agent_turn_serve(
+            self.harness,
+            &self.client,
+            self.options.clone(),
+            self.shutdown.clone(),
+        )
+        .await;
+        self.finished = true;
+        Ok(result?)
+    }
+}
+
+#[cfg(feature = "governance-sekai-chisei")]
+impl Drop for PreparedAgentTurnHost<'_> {
+    fn drop(&mut self) {
+        let _ = self.listener_shutdown.send(true);
+        if !self.finished {
+            let _ = std::fs::remove_file(self.lifecycle.path());
+        }
+    }
 }
 
 /// A plane host that passed every startup gate and can be run exactly once.
@@ -165,6 +217,94 @@ pub async fn prepare_plane_host(
         let _ = std::fs::remove_file(lifecycle.path());
     }
     prepared
+}
+
+/// Validate and prepare a managed agent-turn host without admitting work.
+#[cfg(feature = "governance-sekai-chisei")]
+pub async fn prepare_agent_turn_host(
+    harness: &Harness,
+    options: PlaneHostOptions,
+    shutdown: watch::Receiver<bool>,
+) -> Result<PreparedAgentTurnHost<'_>, PlaneHostError> {
+    remove_stale_lifecycle(harness.state.path());
+    validate_agent_turn_options(harness, &options)?;
+    let worker_id = options.worker_id.clone().unwrap_or_else(default_worker_id);
+    if worker_id.trim().is_empty() {
+        return Err(invalid("worker_id", "must not be empty"));
+    }
+
+    let lifecycle = WorkerLifecycle::open(
+        harness.state.path(),
+        WorkerLifecycleIdentity {
+            worker_id: worker_id.clone(),
+            namespace: harness.config.governance.namespace.clone(),
+            runtime_id: options.runtime_id.clone(),
+        },
+    )?;
+
+    let prepared =
+        prepare_agent_turn_after_lifecycle(harness, &options, shutdown, worker_id, &lifecycle)
+            .await;
+    if prepared.is_err() {
+        let _ = lifecycle.set_unhealthy("plane_startup_failed");
+        let _ = std::fs::remove_file(lifecycle.path());
+    }
+    prepared
+}
+
+#[cfg(feature = "governance-sekai-chisei")]
+async fn prepare_agent_turn_after_lifecycle<'a>(
+    harness: &'a Harness,
+    host: &PlaneHostOptions,
+    shutdown: watch::Receiver<bool>,
+    worker_id: String,
+    lifecycle: &WorkerLifecycle,
+) -> Result<PreparedAgentTurnHost<'a>, PlaneHostError> {
+    let client = SekaiClaimClient::from_config(&harness.config)?;
+    let report = harness.doctor();
+    if !report.ok {
+        return Err(PlaneHostError::DoctorFailed(report.lines.join("; ")));
+    }
+    let (listener_shutdown, listener_rx) = watch::channel(false);
+    let listener_addr = match lifecycle_bind(host)? {
+        Some(bind) => Some(serve_lifecycle_http(bind, lifecycle.clone(), listener_rx).await?),
+        None => None,
+    };
+    if listener_addr.is_some() {
+        let listener_shutdown_on_host = listener_shutdown.clone();
+        let mut host_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if !*host_shutdown.borrow() {
+                let _ = host_shutdown.changed().await;
+            }
+            let _ = listener_shutdown_on_host.send(true);
+        });
+    }
+    let options = AgentTurnServeOptions {
+        runtime_id: host.runtime_id.clone(),
+        poll_interval: host.poll_interval.max(Duration::from_millis(10)),
+        max_jobs: host.max_jobs,
+        claim_ttl: host.claim_ttl,
+        heartbeat_interval: host.claim_ttl / 3,
+        ack_retry_limit: 5,
+        lifecycle: Some(lifecycle.clone()),
+    };
+    Ok(PreparedAgentTurnHost {
+        harness,
+        client,
+        options,
+        shutdown,
+        listener_shutdown,
+        lifecycle: lifecycle.clone(),
+        finished: false,
+        info: PlaneHostInfo {
+            worker_id,
+            runtime_id: host.runtime_id.clone(),
+            namespace: harness.config.governance.namespace.clone(),
+            lifecycle_path: lifecycle.path(),
+            lifecycle_addr: listener_addr,
+        },
+    })
 }
 
 #[cfg(feature = "governance-sekai-chisei")]
@@ -263,6 +403,20 @@ fn validate_options(harness: &Harness, options: &PlaneHostOptions) -> Result<(),
 }
 
 #[cfg(feature = "governance-sekai-chisei")]
+fn validate_agent_turn_options(
+    harness: &Harness,
+    options: &PlaneHostOptions,
+) -> Result<(), PlaneHostError> {
+    validate_options(harness, options)?;
+    if harness.config.profile.name != SITE_AGENT_PROFILE {
+        return Err(PlaneHostError::WrongProfile {
+            actual: harness.config.profile.name.clone(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "governance-sekai-chisei")]
 fn lifecycle_bind(options: &PlaneHostOptions) -> Result<Option<SocketAddr>, PlaneHostError> {
     options
         .lifecycle_listen
@@ -318,6 +472,15 @@ mod tests {
             error,
             PlaneHostError::WrongGovernanceAdapter { .. }
         ));
+    }
+
+    #[test]
+    fn rejects_non_site_agent_profile_for_agent_turn_intake() {
+        let (_dir, mut harness) = harness();
+        harness.config.governance.adapter = "sekai-chisei".into();
+        let error =
+            validate_agent_turn_options(&harness, &PlaneHostOptions::default()).unwrap_err();
+        assert!(matches!(error, PlaneHostError::WrongProfile { .. }));
     }
 
     #[tokio::test]

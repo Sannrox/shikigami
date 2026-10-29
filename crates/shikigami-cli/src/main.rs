@@ -29,6 +29,7 @@ macro_rules! human_eprintln {
 enum ServeIntake {
     Filesystem,
     Plane,
+    AgentTurn,
 }
 
 #[derive(Debug, Parser)]
@@ -149,7 +150,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Long-running filesystem-queue or plane-claim host (see docs/serve.md).
+    /// Long-running filesystem-queue, plane-claim, or agent-turn host (see docs/serve.md).
     Serve {
         /// Work intake source. Filesystem remains the offline default.
         #[arg(long, value_enum, default_value_t = ServeIntake::Filesystem)]
@@ -783,6 +784,78 @@ async fn run() -> anyhow::Result<()> {
                     {
                         let _ = (worker_id, lifecycle_listen);
                         anyhow::bail!("plane intake requires the governance-sekai-chisei feature");
+                    }
+                }
+                ServeIntake::AgentTurn => {
+                    if listen.is_some()
+                        || auth_token_env.is_some()
+                        || concurrency != 1
+                        || retry_limit != 0
+                    {
+                        anyhow::bail!(
+                            "--listen/--auth-token-env/--concurrency/--retry-limit apply only to filesystem intake"
+                        );
+                    }
+                    let _ = std::fs::remove_file(shikigami::lifecycle_path(state.path()));
+                    if harness.config.governance.adapter != "sekai-chisei" {
+                        anyhow::bail!(
+                            "agent-turn intake requires governance.adapter = \"sekai-chisei\""
+                        );
+                    }
+                    if harness.config.profile.name != "site-agent" {
+                        anyhow::bail!("agent-turn intake requires profile.name = \"site-agent\"");
+                    }
+                    if runtime_id.trim().is_empty() {
+                        anyhow::bail!("--runtime-id must not be empty");
+                    }
+                    if claim_ttl_secs == 0 {
+                        anyhow::bail!("--claim-ttl-secs must be greater than zero");
+                    }
+                    let _ = checkpoint_store_id;
+                    #[cfg(feature = "governance-sekai-chisei")]
+                    {
+                        let prepared = shikigami::prepare_agent_turn_host(
+                            &harness,
+                            shikigami::PlaneHostOptions {
+                                runtime_id: runtime_id.clone(),
+                                worker_id,
+                                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
+                                max_jobs,
+                                claim_ttl: std::time::Duration::from_secs(claim_ttl_secs),
+                                checkpoint_store_id: None,
+                                lifecycle_listen,
+                            },
+                            rx,
+                        )
+                        .await?;
+                        let info = prepared.info();
+                        if let Some(addr) = info.lifecycle_addr {
+                            human_println!(
+                                "serve lifecycle http={} file={}",
+                                addr,
+                                info.lifecycle_path.display()
+                            );
+                        } else {
+                            human_println!(
+                                "serve lifecycle file={}",
+                                info.lifecycle_path.display()
+                            );
+                        }
+                        human_println!(
+                            "serve intake=agent-turn runtime={} namespace={} ttl_secs={} worker={}",
+                            info.runtime_id,
+                            info.namespace,
+                            claim_ttl_secs,
+                            info.worker_id
+                        );
+                        prepared.run().await?
+                    }
+                    #[cfg(not(feature = "governance-sekai-chisei"))]
+                    {
+                        let _ = (worker_id, lifecycle_listen);
+                        anyhow::bail!(
+                            "agent-turn intake requires the governance-sekai-chisei feature"
+                        );
                     }
                 }
             };

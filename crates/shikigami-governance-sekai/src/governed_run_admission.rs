@@ -30,6 +30,8 @@ pub(super) fn host_receipt_input(
         attempt_id: run_id.into(),
         route_override: String::new(),
         learning_pin: None,
+        budget_work_unit: String::new(),
+        action_claim: None,
     }
 }
 

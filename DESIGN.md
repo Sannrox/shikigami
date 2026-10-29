@@ -141,8 +141,9 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `crates/shikigami-http` | OpenAI-compatible HTTP `ModelPort` adapter selected by `Harness::from_config` |
 | `crates/shikigami-governance-sekai` | Production `sekai-chisei` `GovernancePort` plus `PlaneIntakePort`; consumes versioned `sekai-client` |
 | `src/serve.rs`, `src/serve/queue.rs`, `src/serve/control.rs`, `src/serve/serve_loop.rs` | Thin local-queue host over the private deep filesystem serve loop, filesystem queue lifecycle, and Run Control protocol |
-| `crates/shikigami-plane-intake` | `PlaneIntakePort` and claim values shared by the sekai adapter and plane serve |
+| `crates/shikigami-plane-intake` | `PlaneIntakePort`, `AgentTurnPort`, and claim values shared by the sekai adapter and plane serve |
 | `src/plane_intake.rs`, `src/plane_intake/` | Claimed-work mapping plus thin `run_plane_serve` over private deep plane serve loop and claimed-run transaction (including one lease-safe fenced RPC retry protocol) |
+| `src/agent_turn.rs`, `src/agent_turn/` | Agent-turn mapping plus thin `run_agent_turn_serve` over a private claim loop that runs as the instance principal |
 | `src/governance/` | Host adapter `http-callback` (`host-authz` alias) plus `from_config` wiring for `sekai-chisei` |
 | `src/mcp_server/`, `src/acp.rs`, `crates/shikigami-tui` | MCP server host, ACP newline JSON-RPC session host, and the thin TUI ACP client |
 | `src/eval.rs` | Offline golden-fixture harness (`shikigami eval`) |
