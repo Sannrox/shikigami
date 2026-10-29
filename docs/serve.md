@@ -61,7 +61,7 @@ and rewritten only when the snapshot changes.
 ## Plane claim intake
 
 Site-agent turns use their own fail-closed settings
-([site-agent.md](site-agent.md)); consuming them is #488.
+([site-agent.md](site-agent.md)) and are claimed with `--intake agent-turn`.
 
 Direct claim intake is explicit; filesystem intake remains the default:
 
@@ -82,6 +82,15 @@ Requirements:
 - when checkpoint resume is enabled, configure the same logical store id in
   the plane's `SEKAI_CHECKPOINT_STORES` allowlist; and
 - keep `runtime_id` aligned with the admitted `runtime_dispatch` payload.
+
+Site-agent turns (`--intake agent-turn`) require the `site-agent` profile.
+The host lists claimable turns, acquires a fenced claim, loads the instance
+and its published agent definition, refuses a frozen or kill-switched
+instance or a principal mismatch, runs as the instance principal with the
+turn's runtime token, heartbeats while the run is active, and acknowledges
+`completed`, `failed`, or `parked`. A parked Action is claimable again with
+its continuation once that Action is decided. The grant applies a decided
+Action once; the resumed run reads the outcome.
 
 The host lists claimable work, acquires a fenced claim, fetches the parent
 ActionInstance parameters, renews the fence once before returning the claim,

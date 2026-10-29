@@ -242,3 +242,81 @@ pub trait PlaneIntakePort: Send + Sync {
         request_id: &str,
     ) -> Result<(), PlaneIntakeError>;
 }
+
+/// Instance facts a claimed agent turn must load before running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteAgentInstanceView {
+    pub instance_id: String,
+    pub principal_id: String,
+    pub frozen: bool,
+    pub kill_switched: bool,
+    pub definition_revision_digest: String,
+    pub agent_member: String,
+}
+
+/// Published agent-definition member used as the turn's task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedAgentDefinition {
+    pub name: String,
+    pub task_class: String,
+    pub instructions: String,
+}
+
+/// Plane-owned continuation after a parked Action is decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTurnContinuation {
+    pub action_instance_id: String,
+    pub status: String,
+    pub approval_decision: String,
+    pub deny_reason: String,
+}
+
+/// One fenced agent-turn claim plus the instance and definition it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedAgentTurn {
+    pub turn_id: String,
+    pub namespace: String,
+    pub instance_id: String,
+    pub principal_id: String,
+    pub cause: String,
+    pub status: String,
+    pub parked_action_instance_id: String,
+    pub park_count: i64,
+    pub lease: PlaneClaimLease,
+    pub instance: SiteAgentInstanceView,
+    pub definition: PublishedAgentDefinition,
+    pub continuation: Option<AgentTurnContinuation>,
+}
+
+/// Terminal or park acknowledgement for an agent turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTurnAck {
+    pub outcome: PlaneAckOutcome,
+    pub reason: String,
+    /// Required when `outcome` is `Parked`: the Action this claim submitted.
+    pub parked_action_instance_id: String,
+}
+
+/// Claim / heartbeat / ack for agent-turn work. Separate from Action
+/// [`PlaneIntakePort`]: turns carry an instance principal and a parked Action,
+/// not a `runtime_dispatch` effect.
+#[async_trait::async_trait]
+pub trait AgentTurnPort: Send + Sync {
+    async fn claim_next(
+        &self,
+        runtime_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<ClaimedAgentTurn>, PlaneIntakeError>;
+
+    async fn heartbeat(
+        &self,
+        claim: &ClaimedAgentTurn,
+        ttl: Duration,
+    ) -> Result<PlaneClaimLease, PlaneIntakeError>;
+
+    async fn ack(
+        &self,
+        claim: &ClaimedAgentTurn,
+        ack: &AgentTurnAck,
+    ) -> Result<(), PlaneIntakeError>;
+}

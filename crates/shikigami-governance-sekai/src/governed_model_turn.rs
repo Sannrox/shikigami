@@ -290,6 +290,8 @@ fn execution_input(
         attempt_id: handle.run_id.clone(),
         route_override: String::new(),
         learning_pin: None,
+        budget_work_unit: String::new(),
+        action_claim: None,
     }
 }
 

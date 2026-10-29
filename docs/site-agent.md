@@ -30,10 +30,23 @@ fail-closed runtime settings for those turns (#487).
   Action at admission. The runtime sees a denial.
 - **Approval.** An Action that needs approval parks on the plane.
 
-## Not yet
+## Claiming turns
 
-Consuming agent-turn claims is #488, which needs sekai-chisei #1982. That
-issue covers per-claim runtime tokens bound to the instance principal, worker
-credentials scoped below root, and a `parked` turn outcome with a
-continuation. Until both land, this profile configures the runtime but `serve`
-does not claim turns.
+`serve --intake agent-turn` claims due turns, loads the instance and its
+published agent definition, and runs as the instance principal with the
+turn's runtime token. `governance.principal` is the worker's registered
+service principal; it authenticates list/claim. Each turn's runtime token
+is the instance principal.
+
+```bash
+shikigami --config examples/site-agent-turn.toml serve --intake agent-turn
+```
+
+A frozen or kill-switched instance is refused without a further apply; the
+refusal is acknowledged on the turn. A parked Action is acknowledged `parked`
+with that Action's id and resumed from the continuation once it is decided.
+A park without an Action submitted under the claim is acknowledged failed.
+Abrupt stop leaves the claim unacked so the next generation can reclaim it;
+a granted Action is applied once by its grant, and the resumed run reads
+that outcome. If the previous local run for this turn is still marked
+active, the host also leaves the claim unacked instead of failing it.

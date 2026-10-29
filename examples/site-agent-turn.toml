@@ -3,8 +3,8 @@
 # through the governed MCP gateway. The `site-agent` profile refuses direct MCP
 # servers, shell, write and filesystem tools, and a static bearer.
 #
-# Consuming agent-turn claims is #488. Until it lands, this profile is the
-# fail-closed runtime settings for turns; see docs/site-agent.md.
+# Claim those turns with `shikigami --config examples/site-agent-turn.toml serve
+# --intake agent-turn`. See docs/site-agent.md.
 version = 1
 
 [profile]

@@ -246,6 +246,8 @@ fn content_execution_input(
             attempt_id: handle.run_id.clone(),
             route_override: String::new(),
             learning_pin: None,
+            budget_work_unit: String::new(),
+            action_claim: None,
         }),
         content_messages: messages.iter().map(proto_message).collect(),
         requested_capabilities: Some(ProtoCapabilities {

@@ -28,6 +28,7 @@ pub use sekai_client::protocol as proto;
 
 use proto::chisei::GetEffectivePolicySummaryRequest;
 
+mod agent_turn_acquisition;
 mod claim_acquisition;
 mod governed_content_turn;
 mod governed_model_turn;
@@ -780,6 +781,34 @@ impl crate::plane_intake::PlaneIntakePort for SekaiClaimClient {
             request_id,
         )
         .await
+    }
+}
+
+#[async_trait]
+impl crate::plane_intake::AgentTurnPort for SekaiClaimClient {
+    async fn claim_next(
+        &self,
+        runtime_id: &str,
+        ttl: Duration,
+    ) -> Result<Option<crate::plane_intake::ClaimedAgentTurn>, crate::plane_intake::PlaneIntakeError>
+    {
+        agent_turn_acquisition::claim_next(self, runtime_id, ttl).await
+    }
+
+    async fn heartbeat(
+        &self,
+        claim: &crate::plane_intake::ClaimedAgentTurn,
+        ttl: Duration,
+    ) -> Result<crate::plane_intake::PlaneClaimLease, crate::plane_intake::PlaneIntakeError> {
+        agent_turn_acquisition::heartbeat(self, claim, ttl).await
+    }
+
+    async fn ack(
+        &self,
+        claim: &crate::plane_intake::ClaimedAgentTurn,
+        ack: &crate::plane_intake::AgentTurnAck,
+    ) -> Result<(), crate::plane_intake::PlaneIntakeError> {
+        agent_turn_acquisition::ack(self, claim, ack).await
     }
 }
 
