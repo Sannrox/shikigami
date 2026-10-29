@@ -26,6 +26,7 @@ pub mod registry;
 pub mod replay;
 pub mod run;
 pub mod sandbox;
+pub mod security_finder;
 pub mod state;
 pub mod tools;
 pub mod tracing_export;

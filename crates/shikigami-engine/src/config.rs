@@ -38,6 +38,9 @@ pub struct Config {
     /// Named session-mode catalog mapping. Empty means inherit `[model]` / `[tools]`.
     #[serde(default, skip_serializing_if = "SessionSettings::is_empty")]
     pub session: SessionSettings,
+    /// Role overlay for profile `security-finder` (#464). Empty on other profiles.
+    #[serde(default, skip_serializing_if = "SecurityFinderSettings::is_empty")]
+    pub security_finder: SecurityFinderSettings,
     #[serde(default)]
     pub context: ContextSettings,
     #[serde(default)]
@@ -317,6 +320,23 @@ pub struct ToolsSettings {
 
 /// Profile for site-agent turns (#487): governed, gateway-only tools.
 pub const SITE_AGENT_PROFILE: &str = "site-agent";
+
+/// Profile for specialised read-only security reviewers (#464).
+pub const SECURITY_FINDER_PROFILE: &str = "security-finder";
+
+/// Selected reviewer role for [`SECURITY_FINDER_PROFILE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityFinderSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+impl SecurityFinderSettings {
+    fn is_empty(&self) -> bool {
+        self.role.as_ref().is_none_or(|role| role.is_empty())
+    }
+}
 
 /// Server name the gateway's tools register under.
 pub const MCP_GATEWAY_NAME: &str = "gateway";
@@ -902,6 +922,7 @@ impl Default for Config {
             tracing: TracingSettings::default(),
             model: ModelSettings::default(),
             session: SessionSettings::default(),
+            security_finder: SecurityFinderSettings::default(),
             context: ContextSettings::default(),
             network: NetworkSettings::default(),
             sandbox: SandboxSettings::default(),
@@ -1188,6 +1209,13 @@ impl Config {
         if self.profile.name == SITE_AGENT_PROFILE {
             self.validate_site_agent()?;
         }
+        if self.profile.name == SECURITY_FINDER_PROFILE {
+            self.validate_security_finder()?;
+        } else if !self.security_finder.is_empty() {
+            return Err(ConfigError::Invalid(
+                "security_finder.role is only valid with profile `security-finder`".into(),
+            ));
+        }
         match self.governance.adapter.as_str() {
             "none" | "local" | "sekai-chisei" | "http-callback" | "host-authz" => {}
             other => return Err(ConfigError::UnknownGovernanceAdapter(other.into())),
@@ -1470,6 +1498,78 @@ impl Config {
         Ok(())
     }
 
+    /// The `security-finder` profile is a specialised read-only reviewer (#464):
+    /// one named role, that role's tool allowlist, no writes or child runs, and
+    /// a typed finding report. The model adapter is not forced.
+    fn validate_security_finder(&self) -> Result<(), ConfigError> {
+        let refuse = |why: &str| {
+            Err(ConfigError::Invalid(format!(
+                "profile `security-finder`: {why}"
+            )))
+        };
+        let role_name = self
+            .security_finder
+            .role
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| {
+                ConfigError::Invalid(
+                    "profile `security-finder`: requires security_finder.role".into(),
+                )
+            })?;
+        if role_name != role_name.trim() {
+            return refuse("security_finder.role must not have surrounding whitespace");
+        }
+        let Some(role) = crate::security_finder::role(role_name) else {
+            return refuse(&format!("unknown role `{role_name}`"));
+        };
+        if self.run.nested {
+            return refuse("refuses run.nested; a child run would write");
+        }
+        if !self.tools.mcp_servers.is_empty() {
+            return refuse("refuses tools.mcp_servers; the reviewer is read-only");
+        }
+        if self.tools.mcp_gateway.is_some() {
+            return refuse("refuses tools.mcp_gateway; the reviewer is read-only");
+        }
+        if !matches!(self.tools.mode, PermissionMode::Read) {
+            return refuse("requires tools.mode = \"read\" with an explicit tools.enabled list");
+        }
+        if self.tools.enabled.is_empty() {
+            return refuse("requires an explicit tools.enabled list");
+        }
+        if let Some(tool) = self
+            .tools
+            .enabled
+            .iter()
+            .find(|tool| !role.tools.iter().any(|allowed| allowed == tool))
+        {
+            return refuse(&format!(
+                "tool `{tool}` is not allowed for role `{role_name}`"
+            ));
+        }
+        if !self.tools.enabled.iter().any(|tool| tool == "report") {
+            return refuse("requires `report` in tools.enabled");
+        }
+        if self.run.max_turns > role.max_turns {
+            return refuse(&format!(
+                "run.max_turns {} exceeds role `{role_name}` budget {}",
+                self.run.max_turns, role.max_turns
+            ));
+        }
+        match self.run.timeout_secs {
+            Some(timeout) if timeout > 0 && timeout <= role.timeout_secs => {}
+            Some(timeout) => {
+                return refuse(&format!(
+                    "run.timeout_secs {timeout} exceeds role `{role_name}` budget {}",
+                    role.timeout_secs
+                ));
+            }
+            None => return refuse("requires run.timeout_secs as the role wall-clock budget"),
+        }
+        Ok(())
+    }
+
     /// A remote governance adapter (one that talks to an endpoint) is selected.
     pub fn remote_governance_configured(&self) -> bool {
         matches!(
@@ -1681,6 +1781,99 @@ namespace = "team-a"
         let mut ungoverned = base();
         ungoverned.governance.adapter = "local".into();
         assert!(refused(ungoverned).contains("requires governance adapter"));
+    }
+
+    /// The shipped security-finder example loads as a read-only reviewer (#464).
+    #[test]
+    fn security_finder_example_loads_read_only_role() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("security-finder.toml");
+        fs::write(
+            &path,
+            include_str!("../../../examples/security-finder.toml"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.profile.name, SECURITY_FINDER_PROFILE);
+        assert_eq!(
+            config.security_finder.role.as_deref(),
+            Some(crate::security_finder::ROLE_DEPENDENCY_ADVISORY)
+        );
+        assert_eq!(config.tools.mode, PermissionMode::Read);
+        assert_eq!(
+            config.tools.effective_enabled(),
+            vec![
+                "read_file".to_string(),
+                "glob".to_string(),
+                "grep".to_string(),
+                "report".to_string()
+            ]
+        );
+        assert!(!config.requires_governance());
+        config.validate().unwrap();
+    }
+
+    /// Each way out of a security-finder role allowlist is refused with a named reason.
+    #[test]
+    fn security_finder_profile_refuses_writes_nested_and_unknown_roles() {
+        let base = || {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("security-finder.toml");
+            fs::write(
+                &path,
+                include_str!("../../../examples/security-finder.toml"),
+            )
+            .unwrap();
+            Config::load(&path).unwrap()
+        };
+        let refused = |config: Config| match config.validate() {
+            Err(ConfigError::Invalid(why)) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        let mut missing_role = base();
+        missing_role.security_finder.role = None;
+        assert!(refused(missing_role).contains("requires security_finder.role"));
+
+        let mut unknown = base();
+        unknown.security_finder.role = Some("triage".into());
+        assert!(refused(unknown).contains("unknown role `triage`"));
+
+        let mut padded = base();
+        padded.security_finder.role = Some(" dependency-advisory ".into());
+        assert!(refused(padded).contains("surrounding whitespace"));
+
+        for tool in ["bash", "write_file", "escalate", "web_fetch"] {
+            let mut extra = base();
+            extra.tools.enabled.push(tool.into());
+            assert!(
+                refused(extra).contains(&format!("tool `{tool}` is not allowed")),
+                "{tool}"
+            );
+        }
+
+        let mut workspace = base();
+        workspace.tools.mode = PermissionMode::Workspace;
+        assert!(refused(workspace).contains("tools.mode"));
+
+        let mut nested = base();
+        nested.run.nested = true;
+        assert!(refused(nested).contains("refuses run.nested"));
+
+        let mut gateway = base();
+        gateway.tools.mcp_gateway = Some(McpGatewaySettings {
+            url: "https://gateway.invalid/mcp".into(),
+            timeout_secs: 30,
+        });
+        assert!(refused(gateway).contains("refuses tools.mcp_gateway"));
+
+        let mut over_budget = base();
+        over_budget.run.max_turns = 50;
+        assert!(refused(over_budget).contains("exceeds role `dependency-advisory` budget"));
+
+        let mut other = Config::default();
+        other.security_finder.role = Some("dependency-advisory".into());
+        assert!(refused(other).contains("only valid with profile `security-finder`"));
     }
 
     #[test]
