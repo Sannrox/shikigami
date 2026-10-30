@@ -11,31 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-### Security
-
-- `[tools.mcp_gateway]` (off by default) routes every remote MCP tool call
-  through one governed gateway, authenticated per request with the run's live
-  job credential. Direct HTTP `tools.mcp_servers` entries are refused while it
-  is set, and third-party tool credentials stay in the gateway (#458).
-
-- Sandboxed tool children receive only a live job-scoped token
-  (`SHIKIGAMI_JOB_TOKEN`, plus tenant/namespace when present) minted for the
-  claimed work. The worker client secret, plane bearer, model keys, and MCP
-  tokens stay in the harness process: they are stripped from the reconstructed
-  child environment, and leftover `SHIKIGAMI_JOB_*` parent exports cannot
-  impersonate a grant. Expired grants are not injected. A heartbeat that
-  refreshes the claim token updates the grant seen by later child spawns (#442).
-
-- `sandbox.tool_sockets` ships (`deny` default, `host` grant). `linux_native`
-  children cannot open host sockets unless the job/operator sets `host`;
-  doctor reports the effective mode. `[network].egress` remains harness HTTP
-  only (#442, ADR 0013).
-
-- `examples/red-team.toml` and the `red-team` skill pack: a read-only run that
-  reads RPC surface diffs and past security bug reports and emits
-  `sekai.probe-spec/v1` probe specs in its final report. It has no network,
-  exec or RPC tool, refused tool attempts are journaled, and a run that
-  exhausts its budget ends blocked with no specs (docs/red-team.md, #466).
+## [3.0.0] — 2026-10-30
 
 ### Breaking changes and upgrade
 
@@ -74,11 +50,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `[tools.mcp_gateway]` (off by default) routes every remote MCP tool call
+  through one governed gateway, authenticated per request with the run's live
+  job credential. Direct HTTP `tools.mcp_servers` entries are refused while it
+  is set, and third-party tool credentials stay in the gateway (#458).
+
+- Sandboxed tool children receive only a live job-scoped token
+  (`SHIKIGAMI_JOB_TOKEN`, plus tenant/namespace when present) minted for the
+  claimed work. The worker client secret, plane bearer, model keys, and MCP
+  tokens stay in the harness process: they are stripped from the reconstructed
+  child environment, and leftover `SHIKIGAMI_JOB_*` parent exports cannot
+  impersonate a grant. Expired grants are not injected. A heartbeat that
+  refreshes the claim token updates the grant seen by later child spawns (#442).
+
+- `sandbox.tool_sockets` ships (`deny` default, `host` grant). `linux_native`
+  children cannot open host sockets unless the job/operator sets `host`;
+  doctor reports the effective mode. `[network].egress` remains harness HTTP
+  only (#442, ADR 0013).
+
+- `examples/red-team.toml` and the `red-team` skill pack: a read-only run that
+  reads RPC surface diffs and past security bug reports and emits
+  `sekai.probe-spec/v1` probe specs in its final report. It has no network,
+  exec or RPC tool, refused tool attempts are journaled, and a run that
+  exhausts its budget ends blocked with no specs (docs/red-team.md, #466).
+
 - A `shikigami.toml` in the current working directory is no longer loaded
   implicitly, so a cloned repository cannot run its hooks or relax governance,
   sandbox, or egress settings. The CLI prints a note when one is present; pass
   `--config shikigami.toml` to use it. `--config`, `SHIKIGAMI_CONFIG`, and the
   state-root config are unchanged.
+
+- Dependency patches: `quinn-proto` 0.11.18, `rustls` 0.23.46, and the
+  rustls-webpki / webpki-roots / ctutils advisories (#453, #456, #477).
+
+### Added
+
+- Fail-closed `site-agent` profile: requires `tools.mcp_gateway`, refuses
+  direct MCP servers, and allows only gateway tools, `report`, and `escalate`
+  (#489). Agent-turn claims run as the instance principal (#491).
+- `security-finder` profile: specialised read-only reviewer roles that emit
+  typed findings (`pkg:security.finding-exposure/v1`) (#492).
+- `security-triage` profile: site-agent overlay that turns findings into
+  exposure verdicts (`pkg:security.exposure-verdict/v1`) (#493).
 
 ### Changed
 
