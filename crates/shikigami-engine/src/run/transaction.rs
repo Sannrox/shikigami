@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::sync::watch;
 
 use crate::checkpoint::{Checkpoint, ParkKind, ParkedState};
+use crate::config::SECURITY_FINDER_PROFILE;
 use crate::events::HarnessEvent;
 use crate::governance::RunOutcome;
 use crate::hooks::{self, HookEvent};
@@ -46,6 +47,19 @@ impl<'a> RunTransaction<'a> {
         let timeout = request
             .timeout
             .or_else(|| self.engine.config.run.timeout_secs.map(Duration::from_secs));
+        if self.engine.config.profile.name == SECURITY_FINDER_PROFILE
+            && let Some(role_name) = self.engine.config.security_finder.role.as_deref()
+            && let Some(role) = crate::security_finder::role(role_name)
+            && let Some(requested) = request.timeout
+            && requested > Duration::from_secs(role.timeout_secs)
+        {
+            return Err(RunError::Message(format!(
+                "profile `security-finder`: request timeout {}s exceeds role `{}` budget {}s",
+                requested.as_secs(),
+                role.name,
+                role.timeout_secs
+            )));
+        }
 
         let super::preparation::PreparedRun {
             mut session,
@@ -99,13 +113,21 @@ impl<'a> RunTransaction<'a> {
         let recovered_usage = recovered_content_terminal
             .as_ref()
             .map(|(terminal, _)| terminal.usage);
-        let recovered_text_report = recovered_text_report(&session.messages);
+        let finder_role = (self.engine.config.profile.name == SECURITY_FINDER_PROFILE)
+            .then_some(self.engine.config.security_finder.role.as_deref())
+            .flatten();
+        let recovered_text_report = recovered_text_report(&session.messages, finder_role);
 
         // Ok(Some(park)) when parked (escalate or approval); Ok(None) when
         // finished normally.
         let result: Result<Option<ParkInfo>, RunError> =
             if let Some((terminal, summary)) = recovered_content_terminal {
-                final_summary = summary;
+                final_summary = crate::security_finder::canonicalize_recovered_summary(
+                    &summary,
+                    terminal.success,
+                    finder_role,
+                )
+                .map_err(RunError::Message)?;
                 success = terminal.success;
                 termination = terminal.termination;
                 Ok(None)
@@ -155,6 +177,11 @@ impl<'a> RunTransaction<'a> {
                             if replay.is_some() {
                                 return Err(RunError::Message(
                                     "replay requires the terminal `report` tool".into(),
+                                ));
+                            }
+                            if self.engine.config.profile.name == SECURITY_FINDER_PROFILE {
+                                return Err(RunError::Message(
+                                    "profile `security-finder`: missing terminal `report`".into(),
                                 ));
                             }
                             final_summary = if turn.content.is_empty() {
@@ -705,7 +732,10 @@ async fn wait_for_child_idle(mut rx: watch::Receiver<bool>, already_idle: bool) 
     }
 }
 
-fn recovered_text_report(messages: &[ChatMessage]) -> Option<(bool, String)> {
+fn recovered_text_report(
+    messages: &[ChatMessage],
+    finder_role: Option<&str>,
+) -> Option<(bool, String)> {
     let assistant_idx = messages
         .iter()
         .rposition(|message| message.role == "assistant")?;
@@ -725,10 +755,27 @@ fn recovered_text_report(messages: &[ChatMessage]) -> Option<(bool, String)> {
     // A matching tool-call id is not enough: denied, hook-blocked, and failed
     // executions also append a tool message. Successful `report` results use
     // this prefix; anything else must resume through the normal turn loop.
-    if tool.content != format!("report: {}", report.summary) {
+    if tool.content == format!("report: {}", report.summary) {
+        if let Some(role) = finder_role {
+            if !report.success {
+                return Some((false, report.summary));
+            }
+            let canonical =
+                crate::security_finder::canonicalize_report(&report.summary, role).ok()?;
+            return Some((true, canonical));
+        }
+        return Some((report.success, report.summary));
+    }
+    // Security-finder stamps signatures into the tool result, not the call args.
+    let role = finder_role?;
+    if !report.success {
         return None;
     }
-    Some((report.success, report.summary))
+    let canonical = crate::security_finder::canonicalize_report(&report.summary, role).ok()?;
+    if tool.content != format!("report: {canonical}") {
+        return None;
+    }
+    Some((true, canonical))
 }
 
 fn projected_summary(content_run: bool, summary: &str) -> String {
@@ -1010,7 +1057,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            recovered_text_report(&messages),
+            recovered_text_report(&messages, None),
             Some((true, "done".into()))
         );
     }
@@ -1027,7 +1074,7 @@ mod tests {
                 args_json: r#"{"summary":"done","success":true}"#.into(),
             }],
         }];
-        assert_eq!(recovered_text_report(&messages), None);
+        assert_eq!(recovered_text_report(&messages, None), None);
     }
 
     #[test]
@@ -1050,6 +1097,67 @@ mod tests {
                 tool_calls: vec![],
             },
         ];
-        assert_eq!(recovered_text_report(&messages), None);
+        assert_eq!(recovered_text_report(&messages, None), None);
+    }
+
+    #[test]
+    fn recovered_text_report_recognizes_a_canonicalized_security_finder_report() {
+        let original = serde_json::json!({
+            "package": crate::security_finder::PACKAGE_ID,
+            "role": crate::security_finder::ROLE_DEPENDENCY_ADVISORY,
+            "coverage": {"complete": true, "summary": "Reviewed lockfile."},
+            "findings": [{
+                "source": "review",
+                "component": "left-pad",
+                "version_range": "=1.3.0",
+                "problem_signature": "model-invented",
+                "reported_severity": "high",
+                "finding_class": "vulnerable-dependency",
+            }],
+            "hypotheses": []
+        })
+        .to_string();
+        let canonical = crate::security_finder::canonicalize_report(
+            &original,
+            crate::security_finder::ROLE_DEPENDENCY_ADVISORY,
+        )
+        .unwrap();
+        assert_ne!(original, canonical);
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![crate::model::ToolCall {
+                    id: "call_0".into(),
+                    name: "report".into(),
+                    args_json: serde_json::json!({
+                        "summary": original,
+                        "success": true
+                    })
+                    .to_string(),
+                }],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: format!("report: {canonical}"),
+                tool_call_id: "call_0".into(),
+                tool_calls: vec![],
+            },
+        ];
+        assert_eq!(
+            recovered_text_report(
+                &messages,
+                Some(crate::security_finder::ROLE_DEPENDENCY_ADVISORY)
+            ),
+            Some((true, canonical.clone()))
+        );
+        assert_eq!(
+            recovered_text_report(
+                &messages,
+                Some(crate::security_finder::ROLE_AUTHORIZATION_BOUNDARY)
+            ),
+            None
+        );
     }
 }

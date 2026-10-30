@@ -1,0 +1,4 @@
+# Seeded authorization gap: anonymous principals may write and administer.
+[http]
+anonymous = ["read", "write", "admin"]
+authenticated = ["read", "write", "admin"]

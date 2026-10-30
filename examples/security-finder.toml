@@ -1,0 +1,57 @@
+# Security-finder: specialised read-only reviewers that emit typed findings
+# matching pkg:security.finding-exposure/v1. See docs/security-finder.md.
+#
+# Point `workspace.root` at the repo or bundle to review (read in place) and
+# `context.skills_root` at this repository's `examples/security-finder/skills`
+# (absolute path; a relative path resolves inside the workspace):
+#
+#   cargo run --bin shikigami -- --config examples/security-finder.toml run \
+#     "Review dependencies and advisories in this workspace"
+#
+# Switch role with `[security_finder] role`. Each role has its own tool
+# allowlist and budget. Findings come back only in the final `report`. A run
+# that ends any other way (max_turns, timed_out, failed) is blocked and is
+# not a clean review.
+version = 1
+
+[profile]
+name = "security-finder"
+
+[security_finder]
+role = "dependency-advisory"
+
+[governance]
+adapter = "local"
+fail_closed = false
+
+[workspace]
+adapter = "inplace"
+root = "."
+
+[network]
+egress = "allowlist"
+allow_hosts = ["127.0.0.1"]
+
+# Read-only. No bash, writes, web_fetch, MCP, escalate or child runs; any
+# other tool call is refused as `tool not enabled` and journaled.
+[tools]
+mode = "read"
+enabled = ["read_file", "glob", "grep", "report"]
+
+[run]
+max_turns = 12
+timeout_secs = 600
+
+[context]
+load_project_rules = false
+skills_root = "examples/security-finder/skills"
+skills = ["security-finder"]
+
+[events]
+adapter = "jsonl"
+
+[model]
+adapter = "http"
+base_url = "http://127.0.0.1:8317/v1"
+model = "auto"
+api_key_env = "CLIPROXY_API_KEY"

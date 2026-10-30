@@ -23,8 +23,8 @@
 
 pub use shikigami_engine::{
     artifacts, checkpoint, config, content, context, events, evidence_queue, fallback, hooks,
-    identity, mcp, metrics, prompts, registry, replay, run, sandbox, state, tools, tracing_export,
-    transcript, worker_lifecycle, workspace,
+    identity, mcp, metrics, prompts, registry, replay, run, sandbox, security_finder, state, tools,
+    tracing_export, transcript, worker_lifecycle, workspace,
 };
 
 pub(crate) use shikigami_engine::digest;

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::checkpoint::{Checkpoint, GovernanceCheckpoint};
+use crate::config::SECURITY_FINDER_PROFILE;
 use crate::content::{ContentCheckpointBinding, initial_messages_match};
 use crate::events::HarnessEvent;
 use crate::governance::{GovernanceError, RunHandle};
@@ -160,7 +161,9 @@ pub(super) async fn prepare(
     let host_enabled = engine.config.tools.effective_enabled();
     // `tools_mode` present means this checkpoint recorded spawn-time authority,
     // including an empty effective set. Do not expand empty via the mode preset.
-    let spawn_enabled = if !stored_tools_mode.is_empty() {
+    let spawn_enabled = if engine.config.profile.name == SECURITY_FINDER_PROFILE {
+        host_enabled.clone()
+    } else if !stored_tools_mode.is_empty() {
         stored_tools_enabled.clone()
     } else if explore {
         crate::config::ToolsSettings::tools_for_mode(crate::config::PermissionMode::Read)
@@ -168,6 +171,17 @@ pub(super) async fn prepare(
         host_enabled.clone()
     };
     // Nested resume must not union host tools onto spawn-time authority.
+    if is_resume && engine.config.profile.name == SECURITY_FINDER_PROFILE {
+        let extra = stored_tools_enabled
+            .iter()
+            .chain(spawn_enabled.iter())
+            .find(|name| !host_enabled.iter().any(|host| host == *name));
+        if let Some(tool) = extra {
+            return Err(RunError::Message(format!(
+                "profile `security-finder`: resumed tool `{tool}` is outside the role allowlist"
+            )));
+        }
+    }
     let mut enabled = if is_resume && !stored_parent_run_id.is_empty() {
         spawn_enabled
             .into_iter()
@@ -645,6 +659,21 @@ fn compose_context(
     let rules = crate::context::load_project_rules(&workspace.path, &engine.config.context);
     let skills = crate::context::load_skills(&workspace.path, &engine.config.context);
     let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &skills);
+    let finder_role = (engine.config.profile.name == SECURITY_FINDER_PROFILE)
+        .then_some(engine.config.security_finder.role.as_deref())
+        .flatten()
+        .and_then(crate::security_finder::role);
+    if let Some(role) = finder_role {
+        prompt.push_str("\n\n# Security-finder role\n\nYou are role `");
+        prompt.push_str(role.name);
+        prompt.push_str("`. Use only ");
+        prompt.push_str(&role.tools.join(", "));
+        prompt.push_str(". Budget: ");
+        prompt.push_str(&role.max_turns.to_string());
+        prompt.push_str(" turns / ");
+        prompt.push_str(&role.timeout_secs.to_string());
+        prompt.push_str("s. Finish with one typed `report`. Do not write.\n");
+    }
     if plan_jail {
         prompt.push_str("\n\nPlan write-jail is active. Mutating tools may only write `");
         prompt.push_str(crate::tools::PLAN_JAIL_PATH);
@@ -702,6 +731,15 @@ fn compose_context(
             HarnessEvent::Message {
                 level: "info".into(),
                 text: format!("skill {} digest={}", skill.id, skill.digest),
+            },
+        );
+    }
+    if let Some(role) = finder_role {
+        engine.emit(
+            run_id,
+            HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("security-finder role={}", role.name),
             },
         );
     }

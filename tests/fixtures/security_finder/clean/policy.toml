@@ -1,0 +1,3 @@
+[http]
+anonymous = ["health"]
+authenticated = ["read"]

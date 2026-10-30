@@ -66,9 +66,11 @@ the repository examples. A future schema direction is proposed in
 | `local` | Default. Offline-friendly. Does not force a plane. |
 | `governed` | Sets governance to `sekai-chisei` if still `none`, forces `fail_closed = true`, prefers model adapter `plane`. |
 | `site-agent` | The `governed` preset, plus fail-closed checks for site-agent turns: requires `tools.mcp_gateway`, refuses `tools.mcp_servers`, and allows only `mcp.gateway.*` tools, `report` and `escalate` in an explicit `tools.enabled` list. See [site-agent.md](site-agent.md). |
+| `security-finder` | Specialised read-only reviewer roles (`[security_finder] role`) that emit typed findings matching `pkg:security.finding-exposure/v1`. Does not force a governance or model adapter. See [security-finder.md](security-finder.md). |
 
 Custom profile names are allowed as labels; only `governed` and `site-agent`
-apply the presets above today. Version 1 expands a file profile before applying environment
+apply the governance presets above today. `security-finder` applies the
+read-only role checks. Version 1 expands a file profile before applying environment
 overrides. Changing `SHIKIGAMI_PROFILE` later does not reverse values already
 expanded from the file:
 
@@ -91,6 +93,14 @@ Top-level `version` is required and must be `1`.
 | Field | Default | Description |
 | --- | --- | --- |
 | `name` | `"local"` | Profile label / preset |
+
+### `[security_finder]`
+
+Used by profile `security-finder`. Empty on other profiles.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `role` | unset | `dependency-advisory`, `source-change`, `deployment-manifest`, or `authorization-boundary`. Required when the profile is `security-finder`. |
 
 ### `[governance]`
 
