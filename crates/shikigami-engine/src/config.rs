@@ -324,6 +324,16 @@ pub const SITE_AGENT_PROFILE: &str = "site-agent";
 /// Profile for specialised read-only security reviewers (#464).
 pub const SECURITY_FINDER_PROFILE: &str = "security-finder";
 
+/// Profile for security-triage site-agent turns (#465): site-agent bounds plus
+/// a typed exposure verdict.
+pub const SECURITY_TRIAGE_PROFILE: &str = "security-triage";
+
+/// Site-agent family: the base profile and specialised overlays that share its
+/// fail-closed, gateway-only bounds.
+pub fn is_site_agent_profile(name: &str) -> bool {
+    name == SITE_AGENT_PROFILE || name == SECURITY_TRIAGE_PROFILE
+}
+
 /// Selected reviewer role for [`SECURITY_FINDER_PROFILE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -1145,7 +1155,7 @@ impl Config {
     fn apply_profile_presets(&mut self) {
         // A site-agent turn runs governed, as the `governed` profile does
         // (#487).
-        if self.profile.name == "governed" || self.profile.name == SITE_AGENT_PROFILE {
+        if self.profile.name == "governed" || is_site_agent_profile(&self.profile.name) {
             if self.governance.adapter == "none" {
                 self.governance.adapter = "sekai-chisei".into();
             }
@@ -1206,8 +1216,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.profile.name == SITE_AGENT_PROFILE {
+        if is_site_agent_profile(&self.profile.name) {
             self.validate_site_agent()?;
+        }
+        if self.profile.name == SECURITY_TRIAGE_PROFILE {
+            self.validate_security_triage()?;
         }
         if self.profile.name == SECURITY_FINDER_PROFILE {
             self.validate_security_finder()?;
@@ -1458,7 +1471,7 @@ impl Config {
     pub fn requires_governance(&self) -> bool {
         self.governance.fail_closed
             || self.profile.name == "governed"
-            || self.profile.name == SITE_AGENT_PROFILE
+            || is_site_agent_profile(&self.profile.name)
             || self.remote_governance_configured()
     }
 
@@ -1468,7 +1481,8 @@ impl Config {
     /// no child run. Only the gateway's tools and `report`/`escalate` may be
     /// enabled, by name; a request-level nested flag is ignored too.
     fn validate_site_agent(&self) -> Result<(), ConfigError> {
-        let refuse = |why: &str| Err(ConfigError::Invalid(format!("profile `site-agent`: {why}")));
+        let profile = self.profile.name.as_str();
+        let refuse = |why: &str| Err(ConfigError::Invalid(format!("profile `{profile}`: {why}")));
         if self.governance.adapter != "sekai-chisei" || !self.governance.fail_closed {
             return refuse("requires governance adapter `sekai-chisei` with fail_closed");
         }
@@ -1494,6 +1508,28 @@ impl Config {
             return refuse(&format!(
                 "tool `{tool}` is not allowed; enable only mcp.{MCP_GATEWAY_NAME}.* tools, report and escalate"
             ));
+        }
+        Ok(())
+    }
+
+    /// Extra bounds for `security-triage` (#465): a typed verdict and the
+    /// triage skill on top of the site-agent family checks.
+    fn validate_security_triage(&self) -> Result<(), ConfigError> {
+        let refuse = |why: &str| {
+            Err(ConfigError::Invalid(format!(
+                "profile `security-triage`: {why}"
+            )))
+        };
+        if !self.tools.enabled.iter().any(|tool| tool == "report") {
+            return refuse("requires `report` in tools.enabled");
+        }
+        if !self
+            .context
+            .skills
+            .iter()
+            .any(|skill| skill == "security-triage")
+        {
+            return refuse("requires context.skills to include `security-triage`");
         }
         Ok(())
     }
@@ -1781,6 +1817,65 @@ namespace = "team-a"
         let mut ungoverned = base();
         ungoverned.governance.adapter = "local".into();
         assert!(refused(ungoverned).contains("requires governance adapter"));
+    }
+
+    /// The shipped security-triage example loads as a site-agent overlay (#465).
+    #[test]
+    fn security_triage_example_loads_governed_and_gateway_only() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("security-triage.toml");
+        fs::write(
+            &path,
+            include_str!("../../../examples/security-triage.toml"),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.profile.name, SECURITY_TRIAGE_PROFILE);
+        assert!(is_site_agent_profile(&config.profile.name));
+        assert_eq!(config.governance.adapter, "sekai-chisei");
+        assert!(config.governance.fail_closed);
+        assert!(config.requires_governance());
+        assert!(config.tools.mcp_gateway.is_some());
+        assert!(
+            config
+                .context
+                .skills
+                .iter()
+                .any(|skill| skill == "security-triage")
+        );
+        config.validate().unwrap();
+    }
+
+    /// Security-triage keeps the site-agent gateway bounds and requires the
+    /// typed-report skill (#465).
+    #[test]
+    fn security_triage_profile_refuses_ways_around_the_gateway() {
+        let base = || {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("security-triage.toml");
+            fs::write(
+                &path,
+                include_str!("../../../examples/security-triage.toml"),
+            )
+            .unwrap();
+            Config::load(&path).unwrap()
+        };
+        let refused = |config: Config| match config.validate() {
+            Err(ConfigError::Invalid(why)) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        let mut no_report = base();
+        no_report.tools.enabled.retain(|tool| tool != "report");
+        assert!(refused(no_report).contains("requires `report`"));
+
+        let mut no_skill = base();
+        no_skill.context.skills.clear();
+        assert!(refused(no_skill).contains("security-triage"));
+
+        let mut shell = base();
+        shell.tools.enabled.push("bash".into());
+        assert!(refused(shell).contains("tool `bash` is not allowed"));
     }
 
     /// The shipped security-finder example loads as a read-only reviewer (#464).

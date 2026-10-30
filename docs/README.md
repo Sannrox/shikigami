@@ -25,6 +25,7 @@ Operator and contributor documentation for **shikigami**.
 | Run deterministic offline golden fixtures | [eval.md](eval.md) |
 | Propose isolation probe specs from RPC diffs | [red-team.md](red-team.md) |
 | Run specialised read-only security reviews | [security-finder.md](security-finder.md) |
+| Turn findings into evidence-backed exposure verdicts | [security-triage.md](security-triage.md) |
 | Run site-agent turns fail-closed, gateway-only | [site-agent.md](site-agent.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |

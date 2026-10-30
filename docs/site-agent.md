@@ -42,6 +42,9 @@ is the instance principal.
 shikigami --config examples/site-agent-turn.toml serve --intake agent-turn
 ```
 
+The specialised `security-triage` profile ([security-triage.md](security-triage.md))
+uses these same bounds and is also valid for `--intake agent-turn`.
+
 A frozen or kill-switched instance is refused without a further apply; the
 refusal is acknowledged on the turn. A parked Action is acknowledged `parked`
 with that Action's id and resumed from the continuation once it is decided.

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::checkpoint::{Checkpoint, GovernanceCheckpoint};
-use crate::config::SECURITY_FINDER_PROFILE;
+use crate::config::{SECURITY_FINDER_PROFILE, SECURITY_TRIAGE_PROFILE};
 use crate::content::{ContentCheckpointBinding, initial_messages_match};
 use crate::events::HarnessEvent;
 use crate::governance::{GovernanceError, RunHandle};
@@ -161,7 +161,9 @@ pub(super) async fn prepare(
     let host_enabled = engine.config.tools.effective_enabled();
     // `tools_mode` present means this checkpoint recorded spawn-time authority,
     // including an empty effective set. Do not expand empty via the mode preset.
-    let spawn_enabled = if engine.config.profile.name == SECURITY_FINDER_PROFILE {
+    let spawn_enabled = if engine.config.profile.name == SECURITY_FINDER_PROFILE
+        || engine.config.profile.name == SECURITY_TRIAGE_PROFILE
+    {
         host_enabled.clone()
     } else if !stored_tools_mode.is_empty() {
         stored_tools_enabled.clone()
@@ -674,6 +676,11 @@ fn compose_context(
         prompt.push_str(&role.timeout_secs.to_string());
         prompt.push_str("s. Finish with one typed `report`. Do not write.\n");
     }
+    if engine.config.profile.name == SECURITY_TRIAGE_PROFILE {
+        prompt.push_str(
+            "\n\n# Security-triage\n\nGather context only through mcp.gateway.* tools. Finish with one typed exposure-verdict `report`. Measured facts stay out of hypotheses. A disposition without autonomy must park for review.\n",
+        );
+    }
     if plan_jail {
         prompt.push_str("\n\nPlan write-jail is active. Mutating tools may only write `");
         prompt.push_str(crate::tools::PLAN_JAIL_PATH);
@@ -740,6 +747,15 @@ fn compose_context(
             HarnessEvent::Message {
                 level: "info".into(),
                 text: format!("security-finder role={}", role.name),
+            },
+        );
+    }
+    if engine.config.profile.name == SECURITY_TRIAGE_PROFILE {
+        engine.emit(
+            run_id,
+            HarnessEvent::Message {
+                level: "info".into(),
+                text: "security-triage profile".into(),
             },
         );
     }

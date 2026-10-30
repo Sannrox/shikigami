@@ -1,0 +1,49 @@
+# Security-triage: a site-agent turn that turns findings into evidence-backed
+# exposure verdicts matching pkg:security.exposure-verdict/v1. See
+# docs/security-triage.md.
+#
+# Built on the site-agent profile (#487): governed, gateway-only tools, no
+# shell, writes, filesystem tools, nested children, or static bearer. Context
+# (catalog, delivery criticality, lineage, markings, prior dispositions) is
+# gathered only through the governed MCP gateway.
+#
+# Claim those turns with `shikigami --config examples/security-triage.toml serve
+# --intake agent-turn`.
+version = 1
+
+[profile]
+name = "security-triage"
+
+[governance]
+# The profile selects `sekai-chisei` and fail_closed.
+principal = "agent:security-triage"
+namespace = "site"
+# A registered service principal's secret, never a static bearer.
+client_secret_env = "SHIKIGAMI_CLIENT_SECRET"
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[tools]
+# Only the gateway's tools and the terminal report or escalation. Name each
+# gateway tool the turn may call; the definition's tools can only narrow it.
+enabled = [
+  "report",
+  "escalate",
+  "mcp.gateway.sekai.objects.get",
+  "mcp.gateway.sekai.actions.submit",
+  "mcp.gateway.chisei.receipt.read",
+]
+
+[tools.mcp_gateway]
+url = "https://gateway.invalid/mcp"
+timeout_secs = 30
+
+[context]
+load_project_rules = false
+skills_root = "examples/security-triage/skills"
+skills = ["security-triage"]
+
+[events]
+adapter = "jsonl"
