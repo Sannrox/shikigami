@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use crate::checkpoint::{
     ApprovalPark, ParkedState, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
-use crate::config::{Config, SECURITY_FINDER_PROFILE};
+use crate::config::{Config, SECURITY_FINDER_PROFILE, SECURITY_TRIAGE_PROFILE};
 use crate::events::HarnessEvent;
 use crate::governance::{
     GovernanceError, RunHandle, bind_parked_call, now_unix_ms, park_arguments_digest,
@@ -29,21 +29,24 @@ pub(super) enum ToolBatchOutcome {
     Parked { info: ParkInfo, summary: String },
 }
 
-/// Stamp canonical finding signatures on a successful security-finder report.
+/// Stamp canonical signatures on a successful typed-profile report.
 /// An incomplete or untyped successful report is refused so it cannot look clean.
 fn apply_security_finder_report(config: &Config, output: ToolOutput) -> Result<ToolOutput, String> {
     let ToolOutput::Report(mut report) = output else {
         return Ok(output);
     };
-    if config.profile.name != SECURITY_FINDER_PROFILE || !report.success {
+    if !report.success {
         return Ok(ToolOutput::Report(report));
     }
-    let role = config
-        .security_finder
-        .role
-        .as_deref()
-        .ok_or_else(|| "profile `security-finder`: missing security_finder.role".to_string())?;
-    report.summary = crate::security_finder::canonicalize_report(&report.summary, role)?;
+    if config.profile.name == SECURITY_FINDER_PROFILE {
+        let role =
+            config.security_finder.role.as_deref().ok_or_else(|| {
+                "profile `security-finder`: missing security_finder.role".to_string()
+            })?;
+        report.summary = crate::security_finder::canonicalize_report(&report.summary, role)?;
+    } else if config.profile.name == SECURITY_TRIAGE_PROFILE {
+        report.summary = crate::security_triage::canonicalize_report(&report.summary)?;
+    }
     Ok(ToolOutput::Report(report))
 }
 

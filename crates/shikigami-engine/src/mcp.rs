@@ -59,7 +59,7 @@ pub async fn attach_mcp_servers(
         let client = McpHttpTransport::connect_gateway(gateway, job.clone(), config).await?;
         // A site-agent turn offers only the gateway tools its settings name
         // (#487); other profiles attach every tool the gateway lists.
-        let allowed = (config.profile.name == crate::config::SITE_AGENT_PROFILE)
+        let allowed = crate::config::is_site_agent_profile(&config.profile.name)
             .then_some(config.tools.enabled.as_slice());
         n += attach_tools(registry, MCP_GATEWAY_NAME, client, allowed)
             .await

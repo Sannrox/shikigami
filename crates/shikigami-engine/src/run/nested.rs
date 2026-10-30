@@ -188,7 +188,7 @@ pub(super) fn nested_tools_enabled(
     // gates the root; values above 1 are reserved.
     // A site-agent turn never starts a child: a child's preset tools would
     // reach past the gateway-only list (#487).
-    if engine.config.profile.name == crate::config::SITE_AGENT_PROFILE
+    if crate::config::is_site_agent_profile(&engine.config.profile.name)
         || engine.config.profile.name == crate::config::SECURITY_FINDER_PROFILE
     {
         return false;

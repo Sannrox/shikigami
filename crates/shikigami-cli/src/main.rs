@@ -802,8 +802,10 @@ async fn run() -> anyhow::Result<()> {
                             "agent-turn intake requires governance.adapter = \"sekai-chisei\""
                         );
                     }
-                    if harness.config.profile.name != "site-agent" {
-                        anyhow::bail!("agent-turn intake requires profile.name = \"site-agent\"");
+                    if !shikigami::config::is_site_agent_profile(&harness.config.profile.name) {
+                        anyhow::bail!(
+                            "agent-turn intake requires profile.name = \"site-agent\" or \"security-triage\""
+                        );
                     }
                     if runtime_id.trim().is_empty() {
                         anyhow::bail!("--runtime-id must not be empty");

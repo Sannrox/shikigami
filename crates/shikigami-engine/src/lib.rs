@@ -27,6 +27,7 @@ pub mod replay;
 pub mod run;
 pub mod sandbox;
 pub mod security_finder;
+pub mod security_triage;
 pub mod state;
 pub mod tools;
 pub mod tracing_export;

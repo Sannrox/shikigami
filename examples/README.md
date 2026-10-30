@@ -14,6 +14,7 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | Governed ontology read → Action → receipt over MCP | [`governed-mcp-action.toml`](governed-mcp-action.toml) | Scripted run against `sekai-mcp`; local recipe in [docs/mcp.md](../docs/mcp.md) |
 | Red-team probe author | [`red-team.toml`](red-team.toml) | Read-only run that turns RPC surface diffs into probe specs; see [docs/red-team.md](../docs/red-team.md) |
 | Security finder | [`security-finder.toml`](security-finder.toml) | Read-only specialised reviewers that emit typed findings; see [docs/security-finder.md](../docs/security-finder.md) |
+| Security triage | [`security-triage.toml`](security-triage.toml) | Site-agent overlay that turns findings into exposure verdicts; see [docs/security-triage.md](../docs/security-triage.md) |
 | Linux OS sandbox | [`linux-native-sandbox.toml`](linux-native-sandbox.toml) | `linux_native` (Landlock + seccomp) on Bash children; Linux only |
 | Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
 | Plane worker fleet sketch | [`k8s-worker-lifecycle.yaml`](k8s-worker-lifecycle.yaml) | Readiness/liveness/SIGTERM drain for managed plane workers |

@@ -16,7 +16,7 @@ use thiserror::Error;
 #[cfg(feature = "governance-sekai-chisei")]
 use crate::agent_turn::{AgentTurnServeOptions, run_agent_turn_serve};
 #[cfg(feature = "governance-sekai-chisei")]
-use crate::config::SITE_AGENT_PROFILE;
+use crate::config::is_site_agent_profile;
 #[cfg(feature = "governance-sekai-chisei")]
 use crate::governance::sekai_chisei::SekaiClaimClient;
 #[cfg(feature = "governance-sekai-chisei")]
@@ -72,7 +72,9 @@ pub struct PlaneHostInfo {
 pub enum PlaneHostError {
     #[error("plane host requires governance.adapter = \"sekai-chisei\", got {actual:?}")]
     WrongGovernanceAdapter { actual: String },
-    #[error("agent-turn host requires profile.name = \"site-agent\", got {actual:?}")]
+    #[error(
+        "agent-turn host requires profile.name = \"site-agent\" or \"security-triage\", got {actual:?}"
+    )]
     WrongProfile { actual: String },
     #[error("invalid plane host option {field}: {message}")]
     InvalidOption {
@@ -408,7 +410,7 @@ fn validate_agent_turn_options(
     options: &PlaneHostOptions,
 ) -> Result<(), PlaneHostError> {
     validate_options(harness, options)?;
-    if harness.config.profile.name != SITE_AGENT_PROFILE {
+    if !is_site_agent_profile(&harness.config.profile.name) {
         return Err(PlaneHostError::WrongProfile {
             actual: harness.config.profile.name.clone(),
         });
@@ -481,6 +483,14 @@ mod tests {
         let error =
             validate_agent_turn_options(&harness, &PlaneHostOptions::default()).unwrap_err();
         assert!(matches!(error, PlaneHostError::WrongProfile { .. }));
+    }
+
+    #[test]
+    fn accepts_security_triage_profile_for_agent_turn_intake() {
+        let (_dir, mut harness) = harness();
+        harness.config.governance.adapter = "sekai-chisei".into();
+        harness.config.profile.name = crate::config::SECURITY_TRIAGE_PROFILE.into();
+        validate_agent_turn_options(&harness, &PlaneHostOptions::default()).unwrap();
     }
 
     #[tokio::test]

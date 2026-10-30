@@ -66,10 +66,11 @@ the repository examples. A future schema direction is proposed in
 | `local` | Default. Offline-friendly. Does not force a plane. |
 | `governed` | Sets governance to `sekai-chisei` if still `none`, forces `fail_closed = true`, prefers model adapter `plane`. |
 | `site-agent` | The `governed` preset, plus fail-closed checks for site-agent turns: requires `tools.mcp_gateway`, refuses `tools.mcp_servers`, and allows only `mcp.gateway.*` tools, `report` and `escalate` in an explicit `tools.enabled` list. See [site-agent.md](site-agent.md). |
+| `security-triage` | The `site-agent` preset, plus a typed exposure verdict (`pkg:security.exposure-verdict/v1`) and the `security-triage` skill. Agent-turn intake accepts it. See [security-triage.md](security-triage.md). |
 | `security-finder` | Specialised read-only reviewer roles (`[security_finder] role`) that emit typed findings matching `pkg:security.finding-exposure/v1`. Does not force a governance or model adapter. See [security-finder.md](security-finder.md). |
 
-Custom profile names are allowed as labels; only `governed` and `site-agent`
-apply the governance presets above today. `security-finder` applies the
+Custom profile names are allowed as labels; only `governed`, `site-agent`, and
+`security-triage` apply the governance presets above today. `security-finder` applies the
 read-only role checks. Version 1 expands a file profile before applying environment
 overrides. Changing `SHIKIGAMI_PROFILE` later does not reverse values already
 expanded from the file:

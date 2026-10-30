@@ -11,7 +11,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::checkpoint::Checkpoint;
-use crate::config::SECURITY_FINDER_PROFILE;
+use crate::config::{SECURITY_FINDER_PROFILE, SECURITY_TRIAGE_PROFILE};
 use crate::content::{
     ContentRunRequestV1, initial_messages_match, load_sidecar, project_bounded_text,
     resolve_accepted, resolve_terminal_summary, validate_messages,
@@ -216,11 +216,15 @@ impl<'a> RunSupervision<'a> {
         let finder_role = (self.engine.config.profile.name == SECURITY_FINDER_PROFILE)
             .then_some(self.engine.config.security_finder.role.as_deref())
             .flatten();
-        let summary = crate::security_finder::canonicalize_recovered_summary(
-            &summary,
-            terminal.success,
-            finder_role,
-        )
+        let summary = if self.engine.config.profile.name == SECURITY_TRIAGE_PROFILE {
+            crate::security_triage::canonicalize_recovered_summary(&summary, terminal.success)
+        } else {
+            crate::security_finder::canonicalize_recovered_summary(
+                &summary,
+                terminal.success,
+                finder_role,
+            )
+        }
         .map_err(RunError::Message)?;
         let cost = CostEstimate::from_usage_and_rates(
             terminal.usage,

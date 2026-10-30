@@ -83,7 +83,8 @@ Requirements:
   the plane's `SEKAI_CHECKPOINT_STORES` allowlist; and
 - keep `runtime_id` aligned with the admitted `runtime_dispatch` payload.
 
-Site-agent turns (`--intake agent-turn`) require the `site-agent` profile.
+Site-agent turns (`--intake agent-turn`) require the `site-agent` profile
+or the specialised `security-triage` overlay.
 The host lists claimable turns, acquires a fenced claim, loads the instance
 and its published agent definition, refuses a frozen or kill-switched
 instance or a principal mismatch, runs as the instance principal with the
