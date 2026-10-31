@@ -153,8 +153,9 @@ scripts/changelog-draft.sh <version>
 
 which prints a Keep a Changelog section from the pull requests merged since the
 last `v*` tag. Merge it with the `## Unreleased` notes, commit it with the
-version bump, and tag `v<version>` after that pull request lands. The tag
-starts the release workflow, which publishes this section as the release notes.
+version bump, and tag `v<version>` after that pull request lands. The tag must
+be annotated and signed; see [RELEASING.md](RELEASING.md). The tag starts the
+release workflow, which publishes this section as the release notes.
 
 ## License
 

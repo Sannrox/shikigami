@@ -354,6 +354,7 @@ Rows beyond `## Testing Guidelines`:
 | docs, ADRs | `make validate` (Markdown links, changelog version) |
 | Skills / `AGENTS.md` | `bash scripts/validate-workflow-skills.sh` |
 | packaging | `cargo build --locked`; `scripts/oci-image-smoke.sh` for the image |
+| `v*` release path | `bash scripts/validate-release.sh` |
 
 ### Release audit
 
@@ -363,4 +364,5 @@ Rows beyond `## Testing Guidelines`:
   committed with the version bump on a release branch; the `v<version>` tag
   starts `.github/workflows/release.yml`;
 - `sekai-client` and kekkai pins and their upgrade notes;
-- OCI image publication needs a stable version.
+- OCI image publication needs a stable version;
+- tagging: [RELEASING.md](RELEASING.md). Agents never push `v*` tags.
