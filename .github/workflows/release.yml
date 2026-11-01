@@ -1,5 +1,8 @@
 name: release
 
+# Tag pushes only; pull requests run scripts/validate-release.sh through
+# `make validate` and never mint attestations. Assets land on a draft release
+# that the finalize job publishes after attesting them.
 on:
   push:
     tags: ["v*"]
@@ -8,15 +11,45 @@ permissions:
   contents: read
 
 jobs:
+  verify-tag:
+    name: Verify signed tag
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the signer allowlist is read from origin/main, and the
+      # tagged commit must be on main or a release/v* branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      # checkout may leave a lightweight ref; fetch the real tag object.
+      - name: Fetch annotated tag object
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+      - name: Refuse unsigned, lightweight, or mismatched tags
+        run: bash scripts/verify-release-tag.sh verify "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
+
   create-release:
-    name: Create GitHub release
+    name: Create draft GitHub release
+    needs: verify-tag
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The action below deletes and recreates an existing release; only
+      # allow that for a draft left by an earlier failed run.
+      - name: Refuse to replace a published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)" && [[ "$draft" != true ]]; then
+            echo "release ${GITHUB_REF_NAME} is already published" >&2
+            exit 1
+          fi
+      # Release notes come from the matching CHANGELOG.md section.
       - uses: taiki-e/create-gh-release-action@eba8ea96c86cca8a37f1b56e94b4d13301fba651 # v1
         with:
+          changelog: CHANGELOG.md
+          draft: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
   shikigami-binaries:
@@ -55,6 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release.outputs.version }}
+      publish: ${{ steps.release.outputs.publish }}
     permissions:
       contents: read
     steps:
@@ -70,9 +104,11 @@ jobs:
             echo "release tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
+          # Pre-releases ship binaries only; the image is published for stable versions.
+          publish=true
           if [[ "$version" == *-* ]]; then
-            echo "OCI publication requires a stable release version (got $version)" >&2
-            exit 1
+            echo "Pre-release $version: skipping OCI publication"
+            publish=false
           fi
           if [[ "$version" == *+* ]]; then
             echo "OCI publication requires a registry-safe version without build metadata (got $version)" >&2
@@ -84,6 +120,7 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
@@ -106,10 +143,13 @@ jobs:
   oci-image:
     name: Publish OCI image
     needs: [create-release, oci-smoke]
+    if: needs.oci-smoke.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -149,6 +189,7 @@ jobs:
           sbom: true
 
       - name: Record immutable image reference
+        id: reference
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ steps.image.outputs.name }}
@@ -170,6 +211,7 @@ jobs:
             '{schema_version: 1, image: $image, digest: $digest, reference: ($image + "@" + $digest), version: $version, revision: $revision, architecture: "linux/amd64", provenance: "BuildKit provenance mode=max", sbom: "BuildKit SBOM attestation"}' \
             > "$metadata_file"
           gh release upload "$GITHUB_REF_NAME" "$metadata_file" --clobber
+          echo "image=${IMAGE}:${VERSION}=${DIGEST}" >>"$GITHUB_OUTPUT"
           {
             echo "### OCI image"
             echo
@@ -177,3 +219,98 @@ jobs:
             echo
             echo "Metadata, provenance, and SBOM attestations were attached to the published image."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  finalize:
+    name: Attest, write manifest, and publish
+    needs: [shikigami-binaries, oci-smoke, oci-image]
+    # oci-image is skipped, not failed, for a pre-release.
+    if: ${{ !cancelled() && needs.shikigami-binaries.result == 'success' && needs.oci-smoke.result == 'success' && (needs.oci-image.result == 'success' || (needs.oci-image.result == 'skipped' && needs.oci-smoke.outputs.publish == 'false')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.97.1
+      - name: Download draft assets and write SBOM
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --dir dist --pattern 'shikigami-*'
+          python3 scripts/release-sbom.py dist/shikigami.cdx.json
+      - name: Attest provenance
+        id: provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/shikigami-v*.tar.gz
+            dist/shikigami.cdx.json
+      - name: Attest SBOM
+        id: sbom
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-path: dist/shikigami-v*.tar.gz
+          sbom-path: dist/shikigami.cdx.json
+      - name: Write release manifest
+        env:
+          IMAGE: ${{ needs.oci-image.outputs.image }}
+          PROVENANCE: ${{ steps.provenance.outputs.attestation-url }}
+          SBOM: ${{ steps.sbom.outputs.attestation-url }}
+        run: |
+          set -euo pipefail
+          # Gate flags come from the labels of every pull request squashed into
+          # prev..tag, whatever branch it merged into. The baseline is the
+          # nearest final (non-pre-release) ancestor tag, so a final release
+          # also carries gates first seen in its release candidates.
+          # Without a final tag, start at the first pull request: the commits
+          # before it are the repository bootstrap and carry no labels.
+          prev="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' "${GITHUB_SHA}^" 2>/dev/null || true)"
+          if [[ -z "$prev" ]]; then
+            prev="$(git log --reverse --format='%H %s' "$GITHUB_SHA" | awk '!found && /\(#[0-9]+\)$/ { print $1; found = 1 }')^"
+          fi
+          subjects="$(git log --format='%h %s' "${prev}..${GITHUB_SHA}")"
+          # Fail closed: a commit with no pull request, or any lookup error,
+          # fails the step instead of dropping a gate.
+          if unattributed="$(grep -vE '\(#[0-9]+\)$' <<<"$subjects")"; then
+            echo "commits without a pull request reference since ${prev}:" >&2
+            echo "$unattributed" >&2
+            exit 1
+          fi
+          labels=()
+          prs="$(sed -nE 's/.*\(#([0-9]+)\)$/\1/p' <<<"$subjects" | sort -un)"
+          while IFS= read -r pr; do
+            names="$(gh pr view "$pr" --json labels --jq '.labels[].name')"
+            while IFS= read -r label; do
+              if [[ -n "$label" ]]; then labels+=(--label "$label"); fi
+            done <<<"$names"
+          done <<<"$prs"
+          image=()
+          if [[ -n "$IMAGE" ]]; then image=(--image "$IMAGE"); fi
+          python3 scripts/release-manifest.py \
+            --version "${TAG#v}" --git-sha "$GITHUB_SHA" --tag "$TAG" \
+            --dist dist --out dist/shikigami-release.json \
+            --attestation "$PROVENANCE" --attestation "$SBOM" \
+            "${image[@]}" "${labels[@]}"
+      # The manifest's own provenance attestation is its signature for Tenkai.
+      - name: Sign release manifest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/shikigami-release.json
+      - name: Attach and publish
+        run: |
+          set -euo pipefail
+          # A published release is immutable; never replace its assets.
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]]; then
+            echo "release ${TAG} is already published" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" dist/shikigami.cdx.json dist/shikigami-release.json --clobber
+          gh release edit "$TAG" --draft=false

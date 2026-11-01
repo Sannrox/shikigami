@@ -259,7 +259,10 @@ or employer network names, or other private environment inventory on public
 Issues, Pull Requests, comments, or commit messages. Pull requests do not edit
 [CHANGELOG.md](CHANGELOG.md): the Conventional Commit title and the body carry
 the change note, with a `## Breaking` or `## Upgrade` section when users must
-act. Release prep drafts the changelog (CONTRIBUTING.md, Releasing).
+act. Release prep drafts the changelog (CONTRIBUTING.md, Releasing). The CI
+`Semver` job runs `cargo-semver-checks` on the library crates against the pull
+request base; a reported break passes only with a `type!:` title or one of
+those sections, plus the `risk:breaking` label.
 
 ### Verified commits on GitHub
 
@@ -354,6 +357,7 @@ Rows beyond `## Testing Guidelines`:
 | docs, ADRs | `make validate` (Markdown links, changelog version) |
 | Skills / `AGENTS.md` | `bash scripts/validate-workflow-skills.sh` |
 | packaging | `cargo build --locked`; `scripts/oci-image-smoke.sh` for the image |
+| `v*` release path | `bash scripts/validate-release.sh` |
 
 ### Release audit
 
@@ -363,4 +367,5 @@ Rows beyond `## Testing Guidelines`:
   committed with the version bump on a release branch; the `v<version>` tag
   starts `.github/workflows/release.yml`;
 - `sekai-client` and kekkai pins and their upgrade notes;
-- OCI image publication needs a stable version.
+- OCI image publication needs a stable version;
+- tagging: [RELEASING.md](RELEASING.md). Agents never push `v*` tags.
