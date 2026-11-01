@@ -259,7 +259,10 @@ or employer network names, or other private environment inventory on public
 Issues, Pull Requests, comments, or commit messages. Pull requests do not edit
 [CHANGELOG.md](CHANGELOG.md): the Conventional Commit title and the body carry
 the change note, with a `## Breaking` or `## Upgrade` section when users must
-act. Release prep drafts the changelog (CONTRIBUTING.md, Releasing).
+act. Release prep drafts the changelog (CONTRIBUTING.md, Releasing). The CI
+`Semver` job runs `cargo-semver-checks` on the library crates against the pull
+request base; a reported break passes only with a `type!:` title or one of
+those sections, plus the `risk:breaking` label.
 
 ### Verified commits on GitHub
 
