@@ -64,6 +64,11 @@ artifact directory. Active runs are never deleted in place: --force requests
 cancellation through a marker outside the run directory and returns a conflict;
 retry cleanup after the run reaches a terminal state.
 
+Cancellation controllers write only the durable control marker. They do not
+rewrite the owner's `run.json`, so cancellation cannot overwrite a concurrent
+terminal transition. Registry reads project `cancel_requested` from the marker
+for active runs, including after reopening the registry.
+
 The artifact manifest contains bounded file metadata, SHA-256 hashes, and
 added/modified/deleted paths relative to an optional initial workspace
 snapshot. The hash-only baseline is also used to exclude pre-existing dirty or
