@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -67,13 +68,17 @@ def bom(metas: list[dict]) -> dict:
         for lib in libs:
             entry = component(lib, "library")
             components[entry["bom-ref"]] = entry
-    return {
+    document = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
         "version": 1,
         "metadata": {"component": component(root, "application")},
         "components": sorted(components.values(), key=lambda c: c["bom-ref"]),
     }
+
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    document["serialNumber"] = uuid.uuid5(uuid.NAMESPACE_URL, canonical).urn
+    return document
 
 
 def self_test() -> None:
@@ -98,7 +103,15 @@ def self_test() -> None:
         ] + [{"id": p["id"], "deps": []} for p in packages[2:]]
         return {"workspace_members": [root, types], "packages": packages, "resolve": {"nodes": nodes}}
 
-    out = bom([meta("r#memchr@2.0.0"), meta("r#windows@1.0.0")])
+    metas = [meta("r#memchr@2.0.0"), meta("r#windows@1.0.0")]
+    out = bom(metas)
+    serial = out["serialNumber"]
+    assert serial.startswith("urn:uuid:")
+    assert uuid.UUID(serial.removeprefix("urn:uuid:")).version == 5
+    assert bom(metas)["serialNumber"] == serial
+    changed = meta("r#memchr@2.0.0")
+    changed["packages"][2]["version"] = "1.0.1"
+    assert bom([changed])["serialNumber"] != bom([metas[0]])["serialNumber"]
     assert out["metadata"]["component"]["name"] == "shikigami"
     by_ref = {c["bom-ref"]: c for c in out["components"]}
     assert set(by_ref) == {
