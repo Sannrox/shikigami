@@ -1189,8 +1189,8 @@ dependencies = [
 
 [[package]]
 name = "kekkai"
-version = "0.1.0"
-source = "git+https://github.com/Sannrox/kekkai.git?tag=v0.1.0#73e24f580ed6223b7e8395793e6f2317eb8edfd9"
+version = "0.2.2"
+source = "git+https://github.com/Sannrox/kekkai.git?tag=v0.2.2#c4295fb1bcb7e01738d583ac96b3d0f67c7754c7"
 dependencies = [
  "libc",
  "serde",
