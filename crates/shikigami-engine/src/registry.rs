@@ -504,7 +504,10 @@ impl RunRegistry {
         if !path.is_file() {
             return Err(RegistryError::Missing(run_id.into()));
         }
-        Ok(serde_json::from_slice(&fs::read(path)?)?)
+        let mut record: RunRecord = serde_json::from_slice(&fs::read(path)?)?;
+        record.cancel_requested = matches!(record.status.as_str(), "starting" | "running")
+            && self.cancel_requested(run_id);
+        Ok(record)
     }
 
     pub fn list(&self) -> Result<Vec<RunRecord>, RegistryError> {
@@ -523,7 +526,10 @@ impl RunRegistry {
             }
             let path = entry.path().join(RUN_RECORD_FILENAME);
             if path.is_file() {
-                records.push(serde_json::from_slice(&fs::read(path)?)?);
+                let mut record: RunRecord = serde_json::from_slice(&fs::read(path)?)?;
+                record.cancel_requested = matches!(record.status.as_str(), "starting" | "running")
+                    && self.cancel_requested(&record.run_id);
+                records.push(record);
             }
         }
         records.sort_by_key(|record| std::cmp::Reverse(record.last_started_at_ms));
@@ -533,13 +539,14 @@ impl RunRegistry {
     pub fn cancel(&self, run_id: &str) -> Result<(), RegistryError> {
         let run_lock = self.lock_for(run_id)?;
         let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
-        let mut record = self.load_unlocked(run_id)?;
+        let record = self.load_unlocked(run_id)?;
         if !matches!(record.status.as_str(), "starting" | "running") {
             return Err(RegistryError::NotActive(run_id.into()));
         }
+        // Controllers never rewrite owner state: a stale snapshot could
+        // otherwise replace a concurrent terminal transition with `running`.
         fs::write(self.cancel_root.join(run_id), b"cancel\n")?;
-        record.cancel_requested = true;
-        self.write(&record)
+        Ok(())
     }
 
     /// Write a cancel marker for an assigned run id that may not have
@@ -548,13 +555,12 @@ impl RunRegistry {
         let run_lock = self.lock_for(run_id)?;
         let _guard = run_lock.lock().map_err(|_| RegistryError::Lock)?;
         match self.load_unlocked(run_id) {
-            Ok(mut record) => {
+            Ok(record) => {
                 if !matches!(record.status.as_str(), "starting" | "running") {
                     return Err(RegistryError::NotActive(run_id.into()));
                 }
                 fs::write(self.cancel_root.join(run_id), b"cancel\n")?;
-                record.cancel_requested = true;
-                self.write(&record)
+                Ok(())
             }
             Err(RegistryError::Missing(_)) => {
                 fs::create_dir_all(&self.cancel_root)?;
@@ -638,9 +644,6 @@ impl RunRegistry {
                 return Err(RegistryError::Active(run_id.into()));
             }
             fs::write(self.cancel_root.join(run_id), b"cancel\n")?;
-            let mut record = record;
-            record.cancel_requested = true;
-            self.write(&record)?;
             return Err(RegistryError::Active(run_id.into()));
         }
         // A stale owner lease means no live process can safely be using the
@@ -976,10 +979,44 @@ mod tests {
                 .unwrap()
                 .contains("secret task")
         );
+        let path = registry.run_dir("run-1").unwrap().join(RUN_RECORD_FILENAME);
+        let owner_record = fs::read(&path).unwrap();
         registry.cancel("run-1").unwrap();
         assert!(registry.cancel_requested("run-1"));
+        assert_eq!(fs::read(&path).unwrap(), owner_record);
+        let reopened = RunRegistry::new(dir.path()).unwrap();
+        assert!(reopened.load("run-1").unwrap().cancel_requested);
+        assert!(reopened.list().unwrap()[0].cancel_requested);
         registry.clear_cancel("run-1").unwrap();
         assert!(!registry.cancel_requested("run-1"));
+        assert!(!reopened.load("run-1").unwrap().cancel_requested);
+    }
+
+    #[test]
+    fn independent_cancellation_cannot_resurrect_finished_runs() {
+        let dir = tempdir().unwrap();
+        let owner = RunRegistry::new(dir.path()).unwrap();
+        let controller = RunRegistry::new(dir.path()).unwrap();
+        for attempt in 0..100 {
+            let run_id = format!("run-{attempt}");
+            owner.start(&run_id, "task", None, None).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    owner.finish_error(&run_id, &RunError::Cancelled).unwrap();
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    match controller.request_cancel(&run_id) {
+                        Ok(()) | Err(RegistryError::NotActive(_)) => {}
+                        Err(error) => panic!("cancel: {error}"),
+                    }
+                });
+            });
+            assert_eq!(owner.load(&run_id).unwrap().status, "cancelled");
+            assert!(!owner.run_is_active(&run_id).unwrap());
+        }
     }
 
     #[test]
