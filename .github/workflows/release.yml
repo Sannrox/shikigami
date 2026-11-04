@@ -80,8 +80,12 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
-            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+          # Only "release not found" or a draft may continue; a token that
+          # cannot see drafts reports a draft as not found.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
             exit 1
           fi
       - name: Resolve release commit
@@ -107,6 +111,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Refuse a published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify-tag.outputs.tag }}
+        run: |
+          # "Re-run failed jobs" reuses verify-tag's outputs, so check again
+          # here. Only "release not found" or a draft may continue.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.verify-tag.outputs.sha }}
@@ -185,9 +204,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.verify-tag.outputs.tag }}
         run: |
-          # "Re-run failed jobs" reuses verify-tag's outputs, so check again here.
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
-            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+          # "Re-run failed jobs" reuses verify-tag's outputs, so check again
+          # here. Only "release not found" or a draft may continue.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
             exit 1
           fi
       - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
@@ -300,9 +322,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.verify-tag.outputs.tag }}
         run: |
-          # "Re-run failed jobs" reuses verify-tag's outputs, so check again here.
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
-            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+          # "Re-run failed jobs" reuses verify-tag's outputs, so check again
+          # here. Only "release not found" or a draft may continue.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
             exit 1
           fi
 
@@ -398,6 +423,21 @@ jobs:
       - name: Require HEAD at the release commit
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$SHA"
+      - name: Refuse a published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify-tag.outputs.tag }}
+        run: |
+          # "Re-run failed jobs" reuses verify-tag's outputs, so check again
+          # here. Only "release not found" or a draft may continue.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
