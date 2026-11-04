@@ -152,6 +152,18 @@ self_test() {
 
   (cd "$work" && expect_failure "invalid release tag" v0.1 "$first")
 
+  # Release candidates: an rc tag on main equals an rc workspace version, and a
+  # final tag never releases an rc version.
+  local rc
+  printf '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "0.3.0-rc.1"\n' >"${work}/Cargo.toml"
+  git -C "$work" commit -q -am rc
+  rc="$(git -C "$work" rev-parse HEAD)"
+  git -C "$work" tag -s v0.3.0-rc.1 -m rc "$rc"
+  (cd "$work" && bash "$SCRIPT_PATH" verify v0.3.0-rc.1 "$rc" >/dev/null)
+  git -C "$work" tag -s v0.3.0 -m "final on rc" "$rc"
+  (cd "$work" && expect_failure "does not match workspace version 0.3.0-rc.1" v0.3.0 "$rc")
+  (cd "$work" && expect_failure "invalid release tag" v0.3.0-rc "$rc")
+
   # Revoking the key on the trusted ref rejects tags it signed earlier.
   # gpg prefixes the stored certificate's armor with ':' against accidental use.
   sed 's/^:-----BEGIN/-----BEGIN/' "${GNUPGHOME}/openpgp-revocs.d/${fpr}.rev" | gpg --batch --import >/dev/null 2>&1

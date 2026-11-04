@@ -1,60 +1,154 @@
 name: release
 
-# Tag pushes only; pull requests run scripts/validate-release.sh through
-# `make validate` and never mint attestations. Assets land on a draft release
-# that the finalize job publishes after attesting them.
+# Runs from main for a signed tag. release-dispatch.yml starts it on a v* tag
+# push; a failed run is fixed on main and re-run for the same tag. Without a
+# tag it is a dry run: it resolves the checked-out commit and runs the OCI image
+# smoke, and never touches a GitHub Release, the registry, or attestations.
+# Pull requests run scripts/validate-release.sh through `make validate`.
+# Assets land on a draft release that the finalize job publishes after
+# attesting them.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Signed vX.Y.Z or vX.Y.Z-rc.N tag to release from main; empty for a dry run
+        required: false
+        default: ""
+        type: string
+
+# One run per tag. A second dispatch for the same tag waits for the first.
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  # Resolves the release commit every later job checks out. A tagged run must
+  # come from main: main's verify-release-tag.sh checks the signed tag against
+  # the allowlist on origin/main and the tagged commit's Cargo.toml, and that
+  # commit must be on main. A dry run resolves the checked-out commit.
   verify-tag:
     name: Verify signed tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
-      # Full history: the signer allowlist is read from origin/main, and the
-      # tagged commit must be on main or a release/v* branch.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Refuse a tagged run that is not from main
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$WORKFLOW_REF" == refs/heads/main ]] || { echo "tagged release runs must start from refs/heads/main, not ${WORKFLOW_REF}" >&2; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta)\.[0-9]+)?$ ]] || { echo "invalid release tag: ${TAG}" >&2; exit 1; }
+      - name: Check out main's release-tag verifier
+        if: inputs.tag != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          path: main-tree
+      # Full history: the signer allowlist is read from origin/main.
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || '' }}
+          path: source
           fetch-depth: 0
       # checkout may leave a lightweight ref; fetch the real tag object.
-      - name: Fetch annotated tag object
-        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
       - name: Refuse unsigned, lightweight, or mismatched tags
-        run: bash scripts/verify-release-tag.sh verify "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
+        if: inputs.tag != ''
+        working-directory: source
+        env:
+          TAG: ${{ inputs.tag }}
+          MAIN_TREE: ${{ github.workspace }}/main-tree
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}" "+refs/heads/main:refs/remotes/origin/main"
+          sha="$(git rev-parse "${TAG}^{commit}")"
+          RELEASE_TRUST_REF=origin/main bash "${MAIN_TREE}/scripts/verify-release-tag.sh" verify "$TAG" "$sha"
+          git merge-base --is-ancestor "$sha" refs/remotes/origin/main || { echo "tag ${TAG} commit ${sha} is not on main" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$sha"
+      - name: Refuse a published release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
+            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+            exit 1
+          fi
+      - name: Resolve release commit
+        id: resolve
+        working-directory: source
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "tag=${TAG}" >>"$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >>"$GITHUB_OUTPUT"
+          fi
 
   create-release:
     name: Create draft GitHub release
     needs: verify-tag
+    if: needs.verify-tag.outputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # The action below deletes and recreates an existing release; only
-      # allow that for a draft left by an earlier failed run.
+        with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
+      - name: Require HEAD at the release commit
+        shell: bash
+        env:
+          SHA: ${{ needs.verify-tag.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA"
+      # Release notes come from the matching CHANGELOG.md section. A re-run
+      # resumes the draft an earlier run left, keeping its uploaded assets.
       - name: Refuse to replace a published release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify-tag.outputs.tag }}
+          PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)" && [[ "$draft" != true ]]; then
-            echo "release ${GITHUB_REF_NAME} is already published" >&2
-            exit 1
+          python3 scripts/changelog-notes.py "${TAG#v}" >"${RUNNER_TEMP}/notes.md"
+          # A tag with a "-" (vX.Y.Z-rc.N) is a pre-release and never latest.
+          kind=()
+          if [[ "$PRERELEASE" == true ]]; then
+            kind=(--prerelease --latest=false)
           fi
-      # Release notes come from the matching CHANGELOG.md section.
-      - uses: taiki-e/create-gh-release-action@eba8ea96c86cca8a37f1b56e94b4d13301fba651 # v1
-        with:
-          changelog: CHANGELOG.md
-          draft: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo absent)"
+          case "$draft" in
+            true)
+              gh release edit "$TAG" --title "$TAG" --notes-file "${RUNNER_TEMP}/notes.md" --draft "${kind[@]}"
+              ;;
+            absent)
+              gh release create "$TAG" --draft --verify-tag "${kind[@]}" \
+                --title "$TAG" --notes-file "${RUNNER_TEMP}/notes.md"
+              ;;
+            *)
+              echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+              exit 1
+              ;;
+          esac
 
   shikigami-binaries:
     name: shikigami (${{ matrix.target }})
-    needs: create-release
+    needs: [verify-tag, create-release]
+    if: needs.verify-tag.outputs.tag != ''
     permissions:
       contents: write
     strategy:
@@ -72,11 +166,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
+      - name: Require HEAD at the release commit
+        shell: bash
+        env:
+          SHA: ${{ needs.verify-tag.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA"
       - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
         with:
           bin: shikigami
           target: ${{ matrix.target }}
-          archive: shikigami-${{ github.ref_name }}-${{ matrix.target }}
+          ref: refs/tags/${{ needs.verify-tag.outputs.tag }}
+          archive: shikigami-${{ needs.verify-tag.outputs.tag }}-${{ matrix.target }}
           checksum: sha256
           locked: true
           build-tool: ${{ matrix.build_tool || 'cargo' }}
@@ -84,7 +186,8 @@ jobs:
 
   oci-smoke:
     name: OCI image smoke
-    needs: create-release
+    # Runs on a dry run too; only a tagged run publishes the image.
+    needs: verify-tag
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release.outputs.version }}
@@ -93,20 +196,31 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
+      - name: Require HEAD at the release commit
+        shell: bash
+        env:
+          SHA: ${{ needs.verify-tag.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA"
 
       - name: Verify supported release version
         id: release
         shell: bash
+        env:
+          TAG: ${{ needs.verify-tag.outputs.tag }}
         run: |
           version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="shikigami") | .version')"
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [[ "$version" != "$tag_version" ]]; then
-            echo "release tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+          if [[ -n "$TAG" && "$version" != "${TAG#v}" ]]; then
+            echo "release tag $TAG does not match Cargo.toml version $version" >&2
             exit 1
           fi
-          # Pre-releases ship binaries only; the image is published for stable versions.
+          # Pre-releases ship binaries only; the image is published for stable
+          # versions, and never from a dry run.
           publish=true
-          if [[ "$version" == *-* ]]; then
+          if [[ -z "$TAG" ]]; then
+            publish=false
+          elif [[ "$version" == *-* ]]; then
             echo "Pre-release $version: skipping OCI publication"
             publish=false
           fi
@@ -135,15 +249,18 @@ jobs:
           tags: shikigami:release-smoke
           build-args: |
             VERSION=${{ steps.release.outputs.version }}
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ needs.verify-tag.outputs.sha }}
 
       - name: Run deterministic image smoke
-        run: bash scripts/oci-image-smoke.sh shikigami:release-smoke "${{ steps.release.outputs.version }}" "${{ github.sha }}"
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA: ${{ needs.verify-tag.outputs.sha }}
+        run: bash scripts/oci-image-smoke.sh shikigami:release-smoke "$VERSION" "$SHA"
 
   oci-image:
     name: Publish OCI image
-    needs: [create-release, oci-smoke]
-    if: needs.oci-smoke.outputs.publish == 'true'
+    needs: [verify-tag, create-release, oci-smoke]
+    if: needs.verify-tag.outputs.tag != '' && needs.oci-smoke.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -152,6 +269,13 @@ jobs:
       image: ${{ steps.reference.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
+      - name: Require HEAD at the release commit
+        shell: bash
+        env:
+          SHA: ${{ needs.verify-tag.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$SHA"
 
       - name: Resolve repository-scoped image name
         id: image
@@ -176,15 +300,15 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+            ${{ steps.image.outputs.name }}:${{ needs.verify-tag.outputs.tag }}
             ${{ steps.image.outputs.name }}:${{ needs.oci-smoke.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.verify-tag.outputs.sha }}
             org.opencontainers.image.version=${{ needs.oci-smoke.outputs.version }}
           build-args: |
             VERSION=${{ needs.oci-smoke.outputs.version }}
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ needs.verify-tag.outputs.sha }}
           provenance: mode=max
           sbom: true
 
@@ -195,7 +319,8 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.build.outputs.digest }}
           VERSION: ${{ needs.oci-smoke.outputs.version }}
-          REVISION: ${{ github.sha }}
+          REVISION: ${{ needs.verify-tag.outputs.sha }}
+          TAG: ${{ needs.verify-tag.outputs.tag }}
         shell: bash
         run: |
           if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -210,7 +335,7 @@ jobs:
             --arg revision "$REVISION" \
             '{schema_version: 1, image: $image, digest: $digest, reference: ($image + "@" + $digest), version: $version, revision: $revision, architecture: "linux/amd64", provenance: "BuildKit provenance mode=max", sbom: "BuildKit SBOM attestation"}' \
             > "$metadata_file"
-          gh release upload "$GITHUB_REF_NAME" "$metadata_file" --clobber
+          gh release upload "$TAG" "$metadata_file" --clobber
           echo "image=${IMAGE}:${VERSION}=${DIGEST}" >>"$GITHUB_OUTPUT"
           {
             echo "### OCI image"
@@ -222,9 +347,9 @@ jobs:
 
   finalize:
     name: Attest, write manifest, and publish
-    needs: [shikigami-binaries, oci-smoke, oci-image]
+    needs: [verify-tag, shikigami-binaries, oci-smoke, oci-image]
     # oci-image is skipped, not failed, for a pre-release.
-    if: ${{ !cancelled() && needs.shikigami-binaries.result == 'success' && needs.oci-smoke.result == 'success' && (needs.oci-image.result == 'success' || (needs.oci-image.result == 'skipped' && needs.oci-smoke.outputs.publish == 'false')) }}
+    if: ${{ !cancelled() && needs.verify-tag.outputs.tag != '' && needs.shikigami-binaries.result == 'success' && needs.oci-smoke.result == 'success' && (needs.oci-image.result == 'success' || (needs.oci-image.result == 'skipped' && needs.oci-smoke.outputs.publish == 'false')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -233,11 +358,17 @@ jobs:
       attestations: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.verify-tag.outputs.tag }}
+      SHA: ${{ needs.verify-tag.outputs.sha }}
+      PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.verify-tag.outputs.sha }}
           fetch-depth: 0
+      - name: Require HEAD at the release commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$SHA"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
@@ -272,11 +403,11 @@ jobs:
           # also carries gates first seen in its release candidates.
           # Without a final tag, start at the first pull request: the commits
           # before it are the repository bootstrap and carry no labels.
-          prev="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' "${GITHUB_SHA}^" 2>/dev/null || true)"
+          prev="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' "${SHA}^" 2>/dev/null || true)"
           if [[ -z "$prev" ]]; then
-            prev="$(git log --reverse --format='%H %s' "$GITHUB_SHA" | awk '!found && /\(#[0-9]+\)$/ { print $1; found = 1 }')^"
+            prev="$(git log --reverse --format='%H %s' "$SHA" | awk '!found && /\(#[0-9]+\)$/ { print $1; found = 1 }')^"
           fi
-          subjects="$(git log --format='%h %s' "${prev}..${GITHUB_SHA}")"
+          subjects="$(git log --format='%h %s' "${prev}..${SHA}")"
           # Fail closed: a commit with no pull request, or any lookup error,
           # fails the step instead of dropping a gate.
           if unattributed="$(grep -vE '\(#[0-9]+\)$' <<<"$subjects")"; then
@@ -295,7 +426,7 @@ jobs:
           image=()
           if [[ -n "$IMAGE" ]]; then image=(--image "$IMAGE"); fi
           python3 scripts/release-manifest.py \
-            --version "${TAG#v}" --git-sha "$GITHUB_SHA" --tag "$TAG" \
+            --version "${TAG#v}" --git-sha "$SHA" --tag "$TAG" \
             --dist dist --out dist/shikigami-release.json \
             --attestation "$PROVENANCE" --attestation "$SBOM" \
             "${image[@]}" "${labels[@]}"
@@ -309,8 +440,12 @@ jobs:
           set -euo pipefail
           # A published release is immutable; never replace its assets.
           if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != true ]]; then
-            echo "release ${TAG} is already published" >&2
+            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
             exit 1
           fi
           gh release upload "$TAG" dist/shikigami.cdx.json dist/shikigami-release.json --clobber
-          gh release edit "$TAG" --draft=false
+          if [[ "$PRERELEASE" == true ]]; then
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$TAG" --draft=false
+          fi
