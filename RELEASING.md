@@ -50,9 +50,10 @@ To retry a failed release, fix the workflow on `main` and run the same
 command for the same tag. A retry picks up fixes to `release.yml` and to the
 tag verifier. Everything else (the release scripts, `CHANGELOG.md`, the
 Dockerfile, and the sources) comes from the tagged commit, so a bug there needs
-a new rc or patch version. A re-run resumes the draft release and keeps the
-assets already uploaded. It refuses a release that is already published, both before
-it builds and before it publishes. Only one run per tag executes at a time.
+a new rc or patch version. A re-run resumes the draft release and replaces its
+assets. Every job that uploads, pushes the image, or publishes refuses a
+release that is already published, so neither a new run nor "Re-run failed
+jobs" on an old one can change it. Only one run per tag executes at a time.
 
 `gh workflow run release.yml --ref <branch>` without a tag is a dry run: it
 resolves that commit and runs the OCI image smoke, and never touches a GitHub
@@ -72,7 +73,7 @@ Release, the registry, or attestations.
    The binaries, the image tags, labels and `VCS_REF`, the gate flags and the
    manifest `git_sha` all come from it.
 3. Creates a draft GitHub Release with `gh release create <tag> --verify-tag`,
-   or resumes the draft an earlier run left. The body is the matching
+   or resumes the draft an earlier run left and drops its assets. The body is the matching
    `CHANGELOG.md` section.
 4. Builds and uploads the binaries. For a stable version it also publishes
    the OCI image by version (never `latest`) with BuildKit provenance and

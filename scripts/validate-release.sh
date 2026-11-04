@@ -72,6 +72,24 @@ grep -E -- '--latest( |$|")' "$workflow" >/dev/null && fail "${workflow} must ne
 grep -F 'create-gh-release-action' "$workflow" >/dev/null && fail "${workflow} must resume a draft, not delete and recreate it"
 (($(grep -c 'is already published; cut a new tag instead of re-running' "$workflow") >= 3)) ||
   fail "${workflow} must refuse a published release early, when drafting, and before publishing"
+# "Re-run failed jobs" reuses verify-tag's outputs, so every job that changes a
+# release or pushes an image refuses a published release itself.
+python3 - "$workflow" <<'PY' || fail "${workflow} must refuse a published release in every job that uploads, publishes, or pushes"
+import re, sys
+body = open(sys.argv[1]).read().split("\njobs:\n", 1)[1]
+mutating = ("gh release upload", "gh release create", "gh release edit", "upload-rust-binary-action", "push: true")
+missing = [
+    block.split(":", 1)[0].strip()
+    for block in re.split(r"(?m)^(?=  [a-z][a-z0-9-]*:\n)", body)
+    if any(m in block for m in mutating)
+    and "is already published; cut a new tag instead of re-running" not in block
+]
+if missing:
+    sys.exit("unguarded jobs: " + ", ".join(missing))
+PY
+# shellcheck disable=SC2016 # literal workflow text
+grep -F 'gh release delete-asset "$TAG" "$name" --yes' "$workflow" >/dev/null ||
+  fail "${workflow} must drop an earlier run's assets when it resumes a draft"
 sed -n '1,/^jobs:/p' "$workflow" | grep -E 'attestations: write|id-token: write|packages: write|contents: write' >/dev/null &&
   fail "${workflow} must not grant write scopes at workflow level"
 grep -E ':latest\b|--tag[= ]latest' "$workflow" >/dev/null && fail "${workflow} must not produce a latest tag"
