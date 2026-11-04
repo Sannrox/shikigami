@@ -1,9 +1,10 @@
 name: release-dispatch
 
 # A v* tag push only starts release.yml from main for that tag. The release
-# itself runs main's workflow, so a workflow bug is fixed on main and the same
-# tag re-run, instead of burning the version. Keep this file tiny: no
-# checkout, no actions, nothing but the dispatch.
+# runs main's workflow and tag verifier, so a bug in either is fixed on main
+# and the same tag re-run instead of burning the version; release scripts and
+# sources still come from the tagged commit. Keep this file tiny: no checkout,
+# no actions, nothing but the dispatch.
 on:
   push:
     tags: ["v*"]

@@ -46,9 +46,12 @@ So a release always runs **main's** `release.yml` and verifier, never the
 copies at the tagged commit. `release.yml` refuses a tagged run that does not
 start from `main`.
 
-To retry a failed release, fix the cause on `main` and run the same command
-for the same tag. A re-run resumes the draft release and keeps the assets
-already uploaded. It refuses a release that is already published, both before
+To retry a failed release, fix the workflow on `main` and run the same
+command for the same tag. A retry picks up fixes to `release.yml` and to the
+tag verifier. Everything else (the release scripts, `CHANGELOG.md`, the
+Dockerfile, and the sources) comes from the tagged commit, so a bug there needs
+a new rc or patch version. A re-run resumes the draft release and keeps the
+assets already uploaded. It refuses a release that is already published, both before
 it builds and before it publishes. Only one run per tag executes at a time.
 
 `gh workflow run release.yml --ref <branch>` without a tag is a dry run: it
