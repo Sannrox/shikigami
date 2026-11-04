@@ -365,7 +365,8 @@ Rows beyond `## Testing Guidelines`:
   heading agree (`scripts/validate-changelog-version.sh`);
 - changelog section drafted with `scripts/changelog-draft.sh <version>` and
   committed with the version bump on a release branch; the `v<version>` tag
-  starts `.github/workflows/release.yml`;
+  makes `.github/workflows/release-dispatch.yml` run `release.yml` from
+  `main` for that tag;
 - `sekai-client` and kekkai pins and their upgrade notes;
 - OCI image publication needs a stable version;
 - tagging: [RELEASING.md](RELEASING.md). Agents never push `v*` tags.

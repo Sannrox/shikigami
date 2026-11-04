@@ -10,13 +10,14 @@ set -o pipefail
 ROOT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${ROOT_PATH}"
 
-version="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/p' Cargo.toml | head -n1)"
+# A release candidate (X.Y.Z-rc.N or -beta.N) has its own dated heading.
+version="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+(-(rc|beta)\.[0-9]+)?)"/\1/p' Cargo.toml | head -n1)"
 if [[ -z "${version}" ]]; then
     echo "validate-changelog-version: could not read Cargo.toml version" >&2
     exit 1
 fi
 
-heading="$(awk '/^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {
+heading="$(awk '/^## \[[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta)\.[0-9]+)?\]/ {
     gsub(/[][]/, "", $2)
     print $2
     exit
