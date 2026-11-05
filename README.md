@@ -1,22 +1,12 @@
-# shikigami
+# shikigami (式神)
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+**A local-first headless agent harness: autonomous agent work as countable, governable runs.**
 
-**shikigami** (式神) is an open-source, local-first **headless agent harness**.
+[![CI](https://img.shields.io/github/actions/workflow/status/Sannrox/shikigami/ci.yml?branch=main&label=ci)](https://github.com/Sannrox/shikigami/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sannrox/shikigami)](https://github.com/Sannrox/shikigami/releases)
+[![License](https://img.shields.io/github/license/Sannrox/shikigami)](LICENSE)
 
-It runs autonomous agent work as countable **runs**: materialize a workspace,
-call a model, execute jailed tools, emit progress, and finish with a structured
-result — without a desktop UI.
-
-Use it offline for demos and CI, or wire it to a governance control plane for
-production. The loop is fixed; **settings select adapters** so different use
-cases do not require forking the core.
-
-| Path | What you get |
-| --- | --- |
-| **Local / OSS** | No external plane. Scripted or HTTP models. Deterministic tests. |
-| **Governed** | First-party adapter for [sekai-chisei](https://github.com/Sannrox/sekai-chisei): policy, budget, PlanExecution, audit-oriented events. |
-| **Delivery** | Optional packaging via [tenkai](https://github.com/Sannrox/tenkai). Delivery is not a runtime dependency. |
+[Try it](#try-it) · [Docs](docs/README.md) · [Design](DESIGN.md) · [Settings](docs/settings.md) · [Decisions](docs/decisions/README.md)
 
 > **Status:** `v3.0.0`. Freeze-core library, settings, run, doctor JSON, and
 > offline OSS paths follow semver under
@@ -24,35 +14,43 @@ cases do not require forking the core.
 > allowed on documented evolving/host-only surfaces (e.g. MCP). Offline
 > `cargo test` is the supported baseline; live plane tests are ignored by default.
 
+Shikigami (式神, the conjured familiar that carries out tasks for its
+summoner) runs autonomous agent work as countable **runs**: materialize a
+workspace, call a model, execute jailed tools, emit progress, and finish with
+a structured result — without a desktop UI. Use it offline for demos and CI,
+or wire it to a governance control plane for production.
+
+- **Headless by default.** The same runs execute unattended in CI, on fleet
+  hosts, or under an operator; a desktop shell is a client, never the runtime.
+- **One shared core.** CLI, `serve` daemon, MCP, ACP, TUI, and in-process
+  embedders all drive the same `Harness` library instead of reimplementing
+  the loop.
+- **Settings select adapters.** The loop is fixed; governance, model,
+  workspace, and event adapters are picked by versioned TOML, so different
+  use cases do not require forking the core
+  ([ADR 0001](docs/decisions/0001-ports-and-settings.md)).
+- **Fail closed when governed.** With a governed profile, a missing or
+  unhealthy control plane fails `doctor` and `run` instead of silently
+  degrading.
+- **Jailed tools.** Tools operate inside the run workspace; Bash and other
+  high-risk tools are opt-in, with settings-selected OS sandbox backends
+  ([ADR 0013](docs/decisions/0013-os-sandbox-adapter.md)).
+- **Offline deterministic baseline.** `cargo test` and the quickstart below
+  pass with no control plane and no API keys.
+
 Library upgrades from 2.x: see the [3.0 upgrade notes](CHANGELOG.md#300--2026-10-30)
 for worker credentials, claim runtime tokens, fail-closed remote governance,
 and the explicit namespace. 1.x to 2.0: see the
 [2.0 upgrade notes](CHANGELOG.md#200--2026-10-08) for the shared binary
 resolver payload and public enum changes.
 
-## Why
+| Path | What you get |
+| --- | --- |
+| **Local / OSS** | No external plane. Scripted or HTTP models. Deterministic tests. |
+| **Governed** | First-party adapter for [sekai-chisei](https://github.com/Sannrox/sekai-chisei): policy, budget, PlanExecution, audit-oriented events. |
+| **Delivery** | Optional packaging via [tenkai](https://github.com/Sannrox/tenkai). Delivery is not a runtime dependency. |
 
-Most coding agents stop at a chat window or a one-off CLI:
-
-- Governance is missing or bolted on after the fact.
-- The same execution core cannot run unattended in CI or on a fleet host.
-- Desktop shells reimplement the loop instead of sharing a testable library.
-
-Shikigami is the **execution plane**: built on one shared library core,
-headless by default, fail-closed when governance is required, and pluggable
-when it is not.
-
-## Requirements
-
-- [Rust](https://rustup.rs/) toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) (Rust 2024)
-- macOS or Linux (primary targets today)
-- Optional: a running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) for the governed path
-- Optional: OpenAI-compatible HTTP endpoint for ungoverned `http` model turns
-
-The governed adapter uses the pinned upstream `sekai-client` Rust facade and
-canonical `sekai-proto` dependency; no local `protoc` installation is needed.
-
-## Quickstart (offline)
+## Try it
 
 No control plane, no API keys — uses the built-in **scripted** model:
 
@@ -65,8 +63,25 @@ cargo build --release
 ./target/release/shikigami --config examples/local-run.toml run "demo" --keep-workspace
 ```
 
-Expect a successful run that writes `SHIKIGAMI_OK.txt` under the run workspace
-and prints `success=true`.
+`doctor` prints the effective profile, adapters, and tool set and ends with
+`status: ok`. The run writes `SHIKIGAMI_OK.txt` under the run workspace and
+reports success (paths shortened):
+
+```text
+run b7d182a5-273a-4082-87d3-5eebd355eb85 turns=2 success=true termination=completed summary=scripted run complete
+workspace .../runs/b7d182a5-273a-4082-87d3-5eebd355eb85/workspace
+artifacts .../runs/b7d182a5-273a-4082-87d3-5eebd355eb85/artifacts
+```
+
+### Requirements
+
+- [Rust](https://rustup.rs/) toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) (Rust 2024)
+- macOS or Linux (primary targets today)
+- Optional: a running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) for the governed path
+- Optional: OpenAI-compatible HTTP endpoint for ungoverned `http` model turns
+
+The governed adapter uses the pinned upstream `sekai-client` Rust facade and
+canonical `sekai-proto` dependency; no local `protoc` installation is needed.
 
 ### Prebuilt binaries
 
@@ -82,6 +97,43 @@ Tagged releases publish multi-arch archives from GitHub Actions
 
 Each archive includes a `sha256` checksum. Prefer building from source when
 you need a custom feature set.
+
+## How it works
+
+```mermaid
+flowchart LR
+  O[operator / CI / embedder] --> H[Harness]
+  H --> W[materialize workspace]
+  W --> T[turn loop]
+  T --> M[model adapter<br>scripted / http / plane-owned]
+  T --> X[jailed tools]
+  T --> E[progress events]
+  T --> R[structured outcome]
+  G[governance adapter<br>none / local / http-callback / sekai-chisei] -. authorizes runs and tools,<br>fails closed when required .-> T
+```
+
+A **run** is one countable unit of work: a materialized **workspace**, a
+model turn loop, jailed tool calls, and a structured outcome. Every external
+dependency sits behind a **port**; settings select the **adapter** for each
+port, so the same binary covers offline tests and governed production
+([ADR 0001](docs/decisions/0001-ports-and-settings.md)).
+
+- **Core owns** run lifecycle, workspace materialization, tool jail, event
+  emission.
+- **Adapters own** governance, model source (when not plane-owned), workspace
+  kind, and event sinks.
+- **sekai-chisei** (when selected) owns policy, budget, governed model
+  execution, and durable operational truth.
+- **tenkai** (when used) owns shipping the binary — never process config.
+
+**Why not a chat window or a one-off CLI?** Most coding agents stop there:
+governance is missing or bolted on after the fact, the same execution core
+cannot run unattended in CI or on a fleet host, and desktop shells
+reimplement the loop instead of sharing a testable library. Shikigami is the
+**execution plane**: built on one shared library core, headless by default,
+fail-closed when governance is required, and pluggable when it is not.
+Details: [VISION.md](VISION.md), [DESIGN.md](DESIGN.md),
+[docs/adapters.md](docs/adapters.md).
 
 ## Next steps
 
@@ -106,34 +158,6 @@ Examples:
 - [`examples/cliproxy-http.toml`](examples/cliproxy-http.toml) — ungoverned `http` model through a local OpenAI-compatible gateway (CLIProxyAPI)
 - [`examples/governed-sekai-chisei.toml`](examples/governed-sekai-chisei.toml) — plane-backed; follow the [governed guide](docs/governed-path.md)
 - [`examples/tenkai-product.toml`](examples/tenkai-product.toml) — binary delivery only
-
-## Architecture (short)
-
-```text
-  operator / CI / embedder
-            │
-            ▼
-   ┌─────────────────┐     governance port      ┌───────────────────┐
-   │  shikigami core  │────────────────────────▶│ none / local /    │
-   │  run · tools ·   │                         │ http-callback /   │
-   │  workspace       │                         │ sekai-chisei      │
-   └─────────────────┘                         └───────────────────┘
-            │
-            │  (optional) install/upgrade binary
-            ▼
-         tenkai
-```
-
-- **Core owns** run lifecycle, workspace materialization, tool jail, event
-  emission.
-- **Adapters own** governance, model source (when not plane-owned), workspace
-  kind, and event sinks.
-- **sekai-chisei** (when selected) owns policy, budget, governed model
-  execution, and durable operational truth.
-- **tenkai** (when used) owns shipping the binary — never process config.
-
-Details: [DESIGN.md](DESIGN.md), [ADR 0001](docs/decisions/0001-ports-and-settings.md),
-[docs/adapters.md](docs/adapters.md).
 
 ## Contributing
 
