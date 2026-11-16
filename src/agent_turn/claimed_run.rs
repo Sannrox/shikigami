@@ -1,5 +1,6 @@
 //! One acquired agent-turn claim's durable execution protocol.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
@@ -88,6 +89,11 @@ pub(super) async fn execute(
         return Ok(Execution::Shutdown);
     }
 
+    // Action ids known before this claim ran belong to earlier claims; the
+    // plane refuses a park on any of them. Kept as ids, not a message index,
+    // because compaction rewrites the history mid-run.
+    let earlier_actions = earlier_action_ids(harness, &claim, request.resume_run_id.as_deref());
+
     let (cancel_tx, cancel_rx) = watch::channel(false);
     request.cancel = Some(cancel_rx);
     let job_handle = request.job_credential.clone();
@@ -167,7 +173,7 @@ pub(super) async fn execute(
 
     let (ack, governance_abort) = match run_result {
         Ok(result) if result.termination == RunTermination::Parked => {
-            match parked_action_instance_id(harness, &claim, &result) {
+            match parked_action_instance_id(harness, &result, &earlier_actions) {
                 Ok(action_id) => (
                     AgentTurnAck {
                         outcome: PlaneAckOutcome::Parked,
@@ -356,45 +362,69 @@ fn continuation_answer(continuation: &AgentTurnContinuation) -> String {
     )
 }
 
-fn parked_action_instance_id(
+/// Every Action id this turn saw before the current claim: the claim's parked
+/// Action, the continuation's, and any in the resumed checkpoint.
+fn earlier_action_ids(
     harness: &Harness,
     claim: &ClaimedAgentTurn,
+    resume_run_id: Option<&str>,
+) -> HashSet<String> {
+    let mut ids: HashSet<String> = [
+        claim.parked_action_instance_id.as_str(),
+        claim
+            .continuation
+            .as_ref()
+            .map_or("", |continuation| continuation.action_instance_id.as_str()),
+    ]
+    .into_iter()
+    .map(str::trim)
+    .filter(|id| !id.is_empty())
+    .map(String::from)
+    .collect();
+    if let Some(checkpoint) = resume_run_id
+        .and_then(|id| crate::checkpoint::Checkpoint::load(&harness.state.runs_dir(), id).ok())
+    {
+        for message in checkpoint.messages.iter().filter(|m| m.role == "tool") {
+            ids.extend(action_instance_ids_in_json(&message.content));
+        }
+    }
+    ids
+}
+
+/// The Action a park acknowledges: the newest one this claim produced, from
+/// the park itself or this run's tool output, never one from `earlier` (#495).
+fn parked_action_instance_id(
+    harness: &Harness,
     result: &crate::run::RunResult,
+    earlier: &HashSet<String>,
 ) -> Result<String, String> {
-    if let Some(id) = result
-        .park
-        .as_ref()
+    let park = result.park.as_ref();
+    let from_park = park
         .and_then(|park| park.approval_id.as_deref())
         .map(str::trim)
         .filter(|id| !id.is_empty())
-    {
-        return Ok(id.to_string());
-    }
-    if let Some(id) = result
-        .park
-        .as_ref()
-        .and_then(|park| park.args_json.as_deref())
-        .and_then(action_instance_id_in_json)
-    {
-        return Ok(id);
-    }
-    if let Some(id) = action_instance_id_from_checkpoint(harness, &result.run_id) {
-        return Ok(id);
-    }
-    if result.run_id != claim.turn_id
-        && let Some(id) = action_instance_id_from_checkpoint(harness, &claim.turn_id)
-    {
-        return Ok(id);
-    }
-    if !claim.parked_action_instance_id.trim().is_empty() {
-        return Ok(claim.parked_action_instance_id.clone());
-    }
-    if let Some(continuation) = &claim.continuation
-        && !continuation.action_instance_id.trim().is_empty()
-    {
-        return Ok(continuation.action_instance_id.clone());
-    }
-    Err("parked turn has no Action submitted under this claim".into())
+        .map(String::from)
+        .into_iter()
+        .chain(
+            park.and_then(|park| park.args_json.as_deref())
+                .map(action_instance_ids_in_json)
+                .unwrap_or_default(),
+        );
+    let from_tools = crate::checkpoint::Checkpoint::load(&harness.state.runs_dir(), &result.run_id)
+        .map(|checkpoint| {
+            checkpoint
+                .messages
+                .iter()
+                .rev()
+                .filter(|message| message.role == "tool")
+                .flat_map(|message| action_instance_ids_in_json(&message.content))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    from_park
+        .chain(from_tools)
+        .find(|id| !earlier.contains(id))
+        .ok_or_else(|| "parked turn has no Action submitted under this claim".into())
 }
 
 fn action_instance_id_from_checkpoint(harness: &Harness, turn_id: &str) -> Option<String> {
@@ -409,16 +439,29 @@ fn action_instance_id_from_checkpoint(harness: &Harness, turn_id: &str) -> Optio
 }
 
 fn action_instance_id_in_json(text: &str) -> Option<String> {
-    action_instance_id_in_value(&serde_json::from_str(text).ok()?)
+    action_instance_ids_in_json(text).into_iter().next()
 }
 
-fn action_instance_id_in_value(value: &serde_json::Value) -> Option<String> {
+/// Action ids in a tool output or park args, newest first.
+fn action_instance_ids_in_json(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Ok(value) = serde_json::from_str(text) {
+        collect_action_instance_ids(&value, &mut ids);
+    }
+    ids
+}
+
+fn collect_action_instance_ids(value: &serde_json::Value, ids: &mut Vec<String>) {
     match value {
-        serde_json::Value::String(text) => action_instance_id_in_json(text),
-        serde_json::Value::Array(items) => items.iter().rev().find_map(action_instance_id_in_value),
+        serde_json::Value::String(text) => ids.extend(action_instance_ids_in_json(text)),
+        serde_json::Value::Array(items) => {
+            for item in items.iter().rev() {
+                collect_action_instance_ids(item, ids);
+            }
+        }
         serde_json::Value::Object(map) => {
             if let Some(id) = nonempty_id(map.get("action_instance_id")) {
-                return Some(id);
+                ids.push(id);
             }
             // SubmitActionInstance tool output: `{ "instance": { "instance_id": ... } }`.
             if let Some(id) = map
@@ -426,11 +469,10 @@ fn action_instance_id_in_value(value: &serde_json::Value) -> Option<String> {
                 .and_then(|instance| instance.get("instance_id"))
                 .and_then(nonempty_id_value)
             {
-                return Some(id);
+                ids.push(id);
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
 }
 

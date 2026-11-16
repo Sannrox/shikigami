@@ -58,6 +58,18 @@ impl AgentTurnPort for FakeAgentTurnPlane {
                 ));
             }
         }
+        // Part of the plane's park rule: a turn parks only on an Action
+        // submitted under this claim generation. The fake sees no submits, so
+        // it refuses the Action an earlier generation parked on.
+        if ack.outcome == PlaneAckOutcome::Parked
+            && !claim.parked_action_instance_id.is_empty()
+            && ack.parked_action_instance_id == claim.parked_action_instance_id
+        {
+            return Err(PlaneIntakeError::Source(format!(
+                "AckAgentTurn: InvalidArgument: action {} was submitted under an earlier claim",
+                ack.parked_action_instance_id
+            )));
+        }
         self.acks.lock().unwrap().push(ack.clone());
         if ack.outcome == PlaneAckOutcome::Parked {
             let mut resumed = claim.clone();
@@ -258,6 +270,60 @@ async fn park_without_submitted_action_is_refused() {
             .contains("no Action submitted under this claim"),
         "{}",
         acks[0].reason
+    );
+}
+
+/// #495: a resumed turn that escalates again without a new Action, naming the
+/// Action it just read, acked the previous claim's Action; the plane refused
+/// it and serve exited.
+#[tokio::test]
+async fn resumed_turn_parking_again_does_not_reuse_the_previous_action() {
+    let dir = tempdir().unwrap();
+    let harness = site_agent_harness(
+        &dir,
+        json!([
+            {
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": "{\"reason\":\"approval required\",\"question\":\"awaiting Action decision\",\"action_instance_id\":\"action-1\"}"
+                }]
+            },
+            {
+                "tool_calls": [{
+                    "name": "escalate",
+                    "args_json": "{\"reason\":\"follow-up\",\"question\":\"what next?\",\"action_instance_id\":\"action-1\"}"
+                }]
+            }
+        ]),
+    );
+    let intake = FakeAgentTurnPlane {
+        claims: Mutex::new(VecDeque::from([sample_turn("turn-repark")])),
+        acks: Mutex::new(Vec::new()),
+        shutdown_on_claim: None,
+        ack_failures_remaining: Mutex::new(0),
+    };
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let completed = run_agent_turn_serve(
+        &harness,
+        &intake,
+        AgentTurnServeOptions {
+            max_jobs: Some(2),
+            ..Default::default()
+        },
+        rx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed, 2);
+    let acks = intake.acks.lock().unwrap();
+    assert_eq!(acks[0].outcome, PlaneAckOutcome::Parked);
+    assert_eq!(acks[1].outcome, PlaneAckOutcome::Failed);
+    assert!(
+        acks[1]
+            .reason
+            .contains("no Action submitted under this claim"),
+        "{}",
+        acks[1].reason
     );
 }
 
