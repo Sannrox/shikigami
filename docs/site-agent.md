@@ -14,12 +14,18 @@ fail-closed runtime settings for those turns (#487).
 | Setting | Value | Why |
 | --- | --- | --- |
 | `profile.name` | `site-agent` | Selects governance `sekai-chisei` with `fail_closed`. A run refuses to start without healthy governance. |
-| `governance.principal` | The instance's `principal_id` | The turn acts as the instance, never as the operator. |
-| `governance.client_secret_env` | A service principal secret | A static bearer (`governance.token_env`) is refused. |
-| `tools.mcp_gateway` | Required | Every remote tool call goes through the governed gateway with the run's job credential. Third-party credentials stay in the gateway. |
+| `governance.principal` | The worker's registered service principal, never an instance's `principal_id` | It lists and claims turns for every instance it serves. A turn acts as its instance only through the turn's runtime token. The plane refuses a worker that is the turn's own instance principal. |
+| `governance.client_secret_env` | The worker principal's secret | A static bearer (`governance.token_env`) is refused. No credential acts as an instance outside a claimed turn. |
+| `tools.mcp_gateway` | Required | Every remote tool call goes through the governed gateway with the turn's runtime token. Third-party credentials stay in the gateway. |
 | `tools.mcp_servers` | Refused | No direct route to a site system. |
 | `run.nested` | Refused | A child run's preset tools would reach past the gateway; a request-level nested flag is ignored too. |
 | `tools.enabled` | Only `mcp.gateway.*`, `report`, `escalate` | No shell, write or filesystem tool. A tool outside the list is refused at load with its name. Only the gateway tools named here are registered, whatever else the gateway lists. |
+
+The runtime token admits `SubmitActionInstance` and the claim's own lease
+calls, not `GetObject` or `GetOperationReceipt`. Enable
+`mcp.gateway.sekai.actions.submit` for a turn; the plane refuses
+`sekai.objects.get` and `chisei.receipt.read` under the token until it admits
+a turn-scoped read set.
 
 ## Enforced by the plane
 
@@ -32,11 +38,10 @@ fail-closed runtime settings for those turns (#487).
 
 ## Claiming turns
 
-`serve --intake agent-turn` claims due turns, loads the instance and its
-published agent definition, and runs as the instance principal with the
-turn's runtime token. `governance.principal` is the worker's registered
-service principal; it authenticates list/claim. Each turn's runtime token
-is the instance principal.
+`serve --intake agent-turn` claims due turns as the worker principal, loads
+the instance and its published agent definition, and runs the turn with that
+turn's runtime token, whose subject is the instance. Host planning (loading
+the instance and definition) stays on the worker principal.
 
 ```bash
 shikigami --config examples/site-agent-turn.toml serve --intake agent-turn
@@ -44,6 +49,15 @@ shikigami --config examples/site-agent-turn.toml serve --intake agent-turn
 
 The specialised `security-triage` profile ([security-triage.md](security-triage.md))
 uses these same bounds and is also valid for `--intake agent-turn`.
+
+How a turn ends decides its acknowledgement:
+
+| Run ends with | Ack outcome | Ack fields |
+| --- | --- | --- |
+| `report` with `success` true or omitted | `completed` | `reason` is the report summary |
+| `report` with `success` false, or an error | `failed` | `reason` is the summary or error |
+| A park (`escalate`, or an Action awaiting approval) with an Action submitted under the claim | `parked` | `parked_action_instance_id` is that Action; the turn resumes from the continuation once it is decided |
+| A park with no Action submitted under the claim | `failed` | `reason` names the missing Action |
 
 A frozen or kill-switched instance is refused without a further apply; the
 refusal is acknowledged on the turn. A parked Action is acknowledged `parked`
