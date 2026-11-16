@@ -1,5 +1,7 @@
 //! Agent-turn serve admission / poll loop behind the thin host entry point.
 
+use std::time::Duration;
+
 use tokio::sync::watch;
 
 use super::{AgentTurnPort, AgentTurnServeOptions, Harness, PlaneIntakeError, claimed_run};
@@ -27,6 +29,7 @@ pub(super) async fn run_until_shutdown(
     }
 
     let mut completed = 0u64;
+    let mut idle = IdleBackoff::new(options.poll_interval);
     loop {
         if *shutdown.borrow() {
             if let Some(lc) = &options.lifecycle {
@@ -82,7 +85,7 @@ pub(super) async fn run_until_shutdown(
         })?
         else {
             tokio::select! {
-                _ = tokio::time::sleep(options.poll_interval) => {}
+                _ = tokio::time::sleep(idle.next_delay()) => {}
                 _ = wait_for_shutdown(shutdown.clone()) => {
                     if let Some(lc) = &options.lifecycle {
                         lifecycle_set_draining(lc);
@@ -98,6 +101,7 @@ pub(super) async fn run_until_shutdown(
             }
             return Ok(completed);
         }
+        idle.reset();
         completed += 1;
         match claimed_run::execute(harness, intake, claim, options, &shutdown).await? {
             claimed_run::Execution::Continue => {
@@ -116,6 +120,35 @@ pub(super) async fn run_until_shutdown(
     }
 }
 
+/// Longest idle wait between empty polls, unless `poll_interval` is longer.
+const IDLE_BACKOFF_CAP: Duration = Duration::from_secs(5);
+
+/// Delay between polls that found no claimable turn: doubles from
+/// `poll_interval` up to [`IDLE_BACKOFF_CAP`], with ±20% jitter so idle
+/// workers do not poll in step. A claimed turn resets it.
+struct IdleBackoff {
+    base: Duration,
+    next: Duration,
+}
+
+impl IdleBackoff {
+    fn new(base: Duration) -> Self {
+        Self { base, next: base }
+    }
+
+    fn reset(&mut self) {
+        self.next = self.base;
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = (self.next * 2).min(IDLE_BACKOFF_CAP.max(self.base));
+        // 0.8..1.2 of the delay.
+        let jitter = 0.8 + 0.4 * (uuid::Uuid::new_v4().as_u128() % 1_000) as f64 / 1_000.0;
+        delay.mul_f64(jitter)
+    }
+}
+
 fn observe_claim_error(options: &AgentTurnServeOptions, error: &PlaneIntakeError) {
     let Some(lifecycle) = &options.lifecycle else {
         return;
@@ -128,5 +161,25 @@ fn observe_claim_error(options: &AgentTurnServeOptions, error: &PlaneIntakeError
             let _ = lifecycle.set_governance_ok(false);
         }
         PlaneIntakeError::Mapping(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #494: idle workers polled every 200 ms forever. The delay grows to the
+    /// cap and a claimed turn brings it back to `poll_interval`.
+    #[test]
+    fn idle_polls_back_off_to_the_cap_and_reset_on_work() {
+        let base = Duration::from_millis(200);
+        let mut idle = IdleBackoff::new(base);
+        let delays: Vec<_> = (0..10).map(|_| idle.next_delay()).collect();
+        assert!(delays[0] >= base.mul_f64(0.8) && delays[0] <= base.mul_f64(1.2));
+        let last = *delays.last().unwrap();
+        assert!(last >= IDLE_BACKOFF_CAP.mul_f64(0.8) && last <= IDLE_BACKOFF_CAP.mul_f64(1.2));
+
+        idle.reset();
+        assert!(idle.next_delay() <= base.mul_f64(1.2));
     }
 }

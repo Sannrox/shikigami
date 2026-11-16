@@ -47,6 +47,11 @@ the instance and definition) stays on the worker principal.
 shikigami --config examples/site-agent-turn.toml serve --intake agent-turn
 ```
 
+Each poll lists up to eight claimable turns and claims from a random one,
+moving on when another worker won it. A poll that finds nothing waits
+`--poll-ms` (200 ms), doubling to 5 s with ±20% jitter; a claimed turn resets
+the wait.
+
 The specialised `security-triage` profile ([security-triage.md](security-triage.md))
 uses these same bounds and is also valid for `--intake agent-turn`.
 
