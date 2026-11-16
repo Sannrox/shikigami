@@ -118,20 +118,37 @@ pub(super) async fn claim_next(
         wall_now_ms(),
     )?;
     let continuation = project_continuation(claimed.continuation);
-    let instance = load_instance(
-        plane_slot.as_ref().expect("connected plane is inserted"),
-        client,
-        &claimed_turn.instance_id,
-    )
-    .await?;
-    let definition = load_definition(
-        plane_slot.as_ref().expect("connected plane is inserted"),
-        client,
-        &claimed_turn.namespace,
-        &instance.definition_revision_digest,
-        &instance.agent_member,
-    )
-    .await?;
+    let plane = plane_slot.as_ref().expect("connected plane is inserted");
+    let loaded = match load_instance(plane, client, &claimed_turn.instance_id).await {
+        Ok(instance) => load_definition(
+            plane,
+            client,
+            &claimed_turn.namespace,
+            &instance.definition_revision_digest,
+            &instance.agent_member,
+        )
+        .await
+        .map(|definition| (instance, definition)),
+        Err(error) => Err(error),
+    };
+    let (instance, definition) = match loaded {
+        Ok(loaded) => loaded,
+        Err(TurnLoadError::Transport(error)) => return Err(error),
+        // Bad plane data fails every worker the same way. End the turn
+        // failed instead of leaving it to be re-offered (#496).
+        Err(TurnLoadError::Data(reason)) => {
+            fail_unloadable_turn(
+                &mut plane_slot,
+                client,
+                runtime_id,
+                &claimed_turn,
+                &runtime_token,
+                &reason,
+            )
+            .await?;
+            return Ok(None);
+        }
+    };
 
     let renew_started = Instant::now();
     let claim_plane = with_runtime_token(
@@ -302,11 +319,69 @@ pub(super) async fn ack(
     Ok(())
 }
 
+/// Why a granted turn's instance or definition did not load. `Data` fails the
+/// same way on every worker; `Transport` may succeed on a retry.
+enum TurnLoadError {
+    Data(String),
+    Transport(crate::plane_intake::PlaneIntakeError),
+}
+
+impl TurnLoadError {
+    fn from_rpc(rpc: &str, error: &SdkError) -> Self {
+        match error.code {
+            SdkErrorCode::NotFound | SdkErrorCode::InvalidArgument => {
+                Self::Data(format!("{rpc}: {error}"))
+            }
+            _ => Self::Transport(crate::plane_intake::PlaneIntakeError::Source(format!(
+                "{rpc}: {error}"
+            ))),
+        }
+    }
+}
+
+/// Ack a granted turn `failed` under its runtime token before it reaches the
+/// host, so a turn whose data cannot load is not re-offered forever.
+async fn fail_unloadable_turn(
+    plane_slot: &mut Option<super::PlaneClient>,
+    client: &SekaiClaimClient,
+    runtime_id: &str,
+    turn: &proto::sekai::AgentTurn,
+    runtime_token: &RuntimeToken,
+    reason: &str,
+) -> Result<(), crate::plane_intake::PlaneIntakeError> {
+    let mut plane_slot = plane_slot;
+    let claim_plane = with_runtime_token(
+        plane_slot.as_ref().expect("connected plane is inserted"),
+        runtime_token,
+    )?;
+    let _: proto::sekai::AckAgentTurnResponse = cached_unary!(
+        plane_slot,
+        claim_plane
+            .raw()
+            .unary(
+                "/sekai.SekaiService/AckAgentTurn",
+                proto::sekai::AckAgentTurnRequest {
+                    turn_id: turn.turn_id.clone(),
+                    runtime_id: runtime_id.into(),
+                    claim_generation: turn.claim_generation,
+                    fencing_token: turn.fencing_token.clone(),
+                    outcome: crate::plane_intake::PlaneAckOutcome::Failed.as_str().into(),
+                    reason: format!("turn could not load: {reason}"),
+                    parked_action_instance_id: String::new(),
+                },
+                plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
+            )
+            .await
+    )
+    .map_err(|error| map_lease_rpc_error("AckAgentTurn", &error))?;
+    Ok(())
+}
+
 async fn load_instance(
     plane: &super::PlaneClient,
     client: &SekaiClaimClient,
     instance_id: &str,
-) -> Result<SiteAgentInstanceView, crate::plane_intake::PlaneIntakeError> {
+) -> Result<SiteAgentInstanceView, TurnLoadError> {
     let response: proto::sekai::GetObjectResponse = plane
         .raw()
         .unary(
@@ -317,35 +392,27 @@ async fn load_instance(
             plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
         )
         .await
-        .map_err(|error| {
-            crate::plane_intake::PlaneIntakeError::Source(format!("GetObject: {error}"))
-        })?;
-    let object = response.object.ok_or_else(|| {
-        crate::plane_intake::PlaneIntakeError::Source("GetObject returned no object".into())
-    })?;
-    instance_view(&object)
+        .map_err(|error| TurnLoadError::from_rpc("GetObject", &error))?;
+    let object = response
+        .object
+        .ok_or_else(|| TurnLoadError::Data("GetObject returned no object".into()))?;
+    instance_view(&object).map_err(TurnLoadError::Data)
 }
 
-fn instance_view(
-    object: &proto::sekai::Object,
-) -> Result<SiteAgentInstanceView, crate::plane_intake::PlaneIntakeError> {
+fn instance_view(object: &proto::sekai::Object) -> Result<SiteAgentInstanceView, String> {
     if object.kind != INSTANCE_KIND {
-        return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
+        return Err(format!(
             "claimed instance kind must be {INSTANCE_KIND}, got {:?}",
             object.kind
-        )));
+        ));
     }
-    let property = |name: &'static str| -> Result<String, crate::plane_intake::PlaneIntakeError> {
+    let property = |name: &'static str| -> Result<String, String> {
         object
             .properties
             .get(name)
             .filter(|value| !value.trim().is_empty())
             .cloned()
-            .ok_or_else(|| {
-                crate::plane_intake::PlaneIntakeError::Source(format!(
-                    "site agent instance missing {name}"
-                ))
-            })
+            .ok_or_else(|| format!("site agent instance missing {name}"))
     };
     Ok(SiteAgentInstanceView {
         instance_id: object.id.clone(),
@@ -363,7 +430,7 @@ async fn load_definition(
     namespace: &str,
     revision_digest: &str,
     agent_member: &str,
-) -> Result<PublishedAgentDefinition, crate::plane_intake::PlaneIntakeError> {
+) -> Result<PublishedAgentDefinition, TurnLoadError> {
     let response: proto::sekai::GetDefinitionMemberResponse = plane
         .raw()
         .unary(
@@ -377,41 +444,26 @@ async fn load_definition(
             plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
         )
         .await
-        .map_err(|error| {
-            crate::plane_intake::PlaneIntakeError::Source(format!("GetDefinitionMember: {error}"))
-        })?;
-    let member = response.member.ok_or_else(|| {
-        crate::plane_intake::PlaneIntakeError::Source(
-            "GetDefinitionMember returned no member".into(),
-        )
-    })?;
-    published_definition(&member.definition_json)
+        .map_err(|error| TurnLoadError::from_rpc("GetDefinitionMember", &error))?;
+    let member = response
+        .member
+        .ok_or_else(|| TurnLoadError::Data("GetDefinitionMember returned no member".into()))?;
+    published_definition(&member.definition_json).map_err(TurnLoadError::Data)
 }
 
-fn published_definition(
-    definition_json: &str,
-) -> Result<PublishedAgentDefinition, crate::plane_intake::PlaneIntakeError> {
-    let value: Value = serde_json::from_str(definition_json).map_err(|error| {
-        crate::plane_intake::PlaneIntakeError::Source(format!(
-            "agent definition is not JSON: {error}"
-        ))
-    })?;
-    let object = value.as_object().ok_or_else(|| {
-        crate::plane_intake::PlaneIntakeError::Source(
-            "agent definition must be a JSON object".into(),
-        )
-    })?;
-    let field = |name: &'static str| -> Result<String, crate::plane_intake::PlaneIntakeError> {
+fn published_definition(definition_json: &str) -> Result<PublishedAgentDefinition, String> {
+    let value: Value = serde_json::from_str(definition_json)
+        .map_err(|error| format!("agent definition is not JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or("agent definition must be a JSON object")?;
+    let field = |name: &'static str| -> Result<String, String> {
         object
             .get(name)
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
-            .ok_or_else(|| {
-                crate::plane_intake::PlaneIntakeError::Source(format!(
-                    "agent definition missing {name}"
-                ))
-            })
+            .ok_or_else(|| format!("agent definition missing {name}"))
     };
     Ok(PublishedAgentDefinition {
         name: field("name")?,
@@ -647,6 +699,27 @@ mod tests {
         assert!(view.frozen);
         assert!(view.kill_switched);
         assert_eq!(view.principal_id, "agent:line-7");
+    }
+
+    /// #496: bad plane data killed serve and the turn was re-offered to the
+    /// next worker forever. Only data errors end the turn; a transport error
+    /// still propagates so a healthy worker can retry it.
+    #[test]
+    fn only_data_errors_fail_an_unloadable_turn() {
+        for code in [SdkErrorCode::NotFound, SdkErrorCode::InvalidArgument] {
+            let error = SdkError::new(code);
+            assert!(matches!(
+                TurnLoadError::from_rpc("GetDefinitionMember", &error),
+                TurnLoadError::Data(_)
+            ));
+        }
+        for code in [SdkErrorCode::Unavailable, SdkErrorCode::DeadlineExceeded] {
+            let error = SdkError::new(code);
+            assert!(matches!(
+                TurnLoadError::from_rpc("GetObject", &error),
+                TurnLoadError::Transport(_)
+            ));
+        }
     }
 
     #[test]
