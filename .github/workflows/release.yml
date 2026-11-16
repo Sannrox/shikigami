@@ -494,11 +494,19 @@ jobs:
           done <<<"$prs"
           image=()
           if [[ -n "$IMAGE" ]]; then image=(--image "$IMAGE"); fi
+          # The manifest refuses a break declared in the published notes or a
+          # `type!:` subject when no merged pull request carries its gate.
+          python3 scripts/changelog-notes.py "${TAG#v}" >"${RUNNER_TEMP}/manifest-notes.md"
+          breaks=()
+          while IFS= read -r subject; do
+            if [[ -n "$subject" ]]; then breaks+=(--subject "$subject"); fi
+          done <<<"$subjects"
           python3 scripts/release-manifest.py \
             --version "${TAG#v}" --git-sha "$SHA" --tag "$TAG" \
             --dist dist --out dist/shikigami-release.json \
             --attestation "$PROVENANCE" --attestation "$SBOM" \
-            "${image[@]}" "${labels[@]}"
+            --notes "${RUNNER_TEMP}/manifest-notes.md" \
+            "${image[@]}" "${labels[@]}" "${breaks[@]}"
       # The manifest's own provenance attestation is its signature for Tenkai.
       - name: Sign release manifest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

@@ -9,6 +9,7 @@ referenced by digest; a `latest` tag is refused.
 Usage:
   release-manifest.py --version V --git-sha SHA --dist DIR --out FILE
       [--tag vV] [--image NAME=sha256:...] [--attestation URL] [--label NAME]
+      [--notes FILE] [--subject "type!: ..."]
   release-manifest.py --self-test
 """
 
@@ -37,6 +38,10 @@ GATE_LABELS = {
     "risk:realm": "realm",
     "gate:realm": "realm",
 }
+# A release declares a break in its notes (a Breaking or Upgrade heading) or
+# in a squashed Conventional Commit subject (`type!:` / `type(scope)!:`).
+BREAK_HEADING_RE = re.compile(r"^#{2,4}[ \t]+(breaking|upgrade)\b", re.I | re.M)
+BREAK_SUBJECT_RE = re.compile(r"^(?:[0-9a-f]{7,40} )?[a-z]+(?:\([^)]*\))?!:")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta)\.[0-9]+)?")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -51,6 +56,10 @@ def sha256_file(path: pathlib.Path) -> str:
 
 def gate_flags(labels: list[str]) -> list[str]:
     return sorted({GATE_LABELS[n] for n in (l.strip().lower() for l in labels) if n in GATE_LABELS})
+
+
+def declares_break(notes: str, subjects: list[str]) -> bool:
+    return bool(BREAK_HEADING_RE.search(notes)) or any(BREAK_SUBJECT_RE.match(s) for s in subjects)
 
 
 def parse_image(raw: str) -> dict[str, str]:
@@ -71,6 +80,8 @@ def build_manifest(
     images: list[dict[str, str]],
     attestations: list[str],
     labels: list[str],
+    notes: str = "",
+    subjects: list[str] | None = None,
 ) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40}", git_sha):
         raise SystemExit("git_sha must be a full lowercase SHA")
@@ -85,6 +96,14 @@ def build_manifest(
     ]
     if not files:
         raise SystemExit(f"no release files in {dist}")
+    flags = gate_flags(labels)
+    # Fail closed: a documented break the manifest omits would let an
+    # automated delivery policy admit it without human approval (#514).
+    if "breaking" not in flags and declares_break(notes, subjects or []):
+        raise SystemExit(
+            "release declares a breaking change but no merged pull request carries "
+            "risk:breaking or gate:break; label the pull request, then re-run"
+        )
     return {
         "schema": SCHEMA,
         "component": COMPONENT,
@@ -94,7 +113,7 @@ def build_manifest(
         "binaries": files,
         "images": images,
         "attestations": attestations,
-        "gate_flags": gate_flags(labels),
+        "gate_flags": flags,
     }
 
 
@@ -141,6 +160,16 @@ def self_test() -> None:
         assert manifest["images"] == [image]
         assert manifest["gate_flags"] == ["migration"]
         assert "latest" not in json.dumps(manifest)
+        # #514: v3.0.0 notes declared a break and its manifest had no gate.
+        breaking_notes = "### Breaking changes and upgrade\n\n- `token_env` is removed.\n"
+        expect_exit(lambda: build_manifest(**{**args, "notes": breaking_notes}), "risk:breaking")
+        expect_exit(
+            lambda: build_manifest(**{**args, "subjects": ["a1b2c3d feat(governance)!: drop the bearer (#9)"]}),
+            "risk:breaking",
+        )
+        gated = build_manifest(**{**args, "notes": breaking_notes, "labels": ["risk:breaking"]})
+        assert gated["gate_flags"] == ["breaking"]
+        assert not declares_break("### Fixed\n\n- breaking news in a bullet\n", ["a1b2c3d fix: x (#1)"])
     print("release-manifest self-test passed")
 
 
@@ -157,6 +186,8 @@ def main(argv: list[str]) -> None:
     parser.add_argument("--image", action="append", default=[])
     parser.add_argument("--attestation", action="append", default=[])
     parser.add_argument("--label", action="append", default=[])
+    parser.add_argument("--notes", type=pathlib.Path, help="release notes as published")
+    parser.add_argument("--subject", action="append", default=[], help="a squashed commit subject")
     args = parser.parse_args(argv)
     manifest = build_manifest(
         version=args.version,
@@ -166,6 +197,8 @@ def main(argv: list[str]) -> None:
         images=[parse_image(raw) for raw in args.image],
         attestations=args.attestation,
         labels=args.label,
+        notes=args.notes.read_text() if args.notes else "",
+        subjects=args.subject,
     )
     args.out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(args.out)
