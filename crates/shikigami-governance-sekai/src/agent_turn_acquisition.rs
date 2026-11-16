@@ -27,6 +27,16 @@ macro_rules! cached_unary {
 const MEMBER_KIND_AGENT: &str = "agent";
 const INSTANCE_KIND: &str = "site_agent_instance";
 const MAX_GENERATION_BUMP: u64 = 1;
+/// Claimable turns listed per attempt, so contending workers spread out.
+const CLAIM_CANDIDATES: i32 = 8;
+
+/// A uniformly random index below `len` (0 when `len` is 0).
+fn random_index(len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    (uuid::Uuid::new_v4().as_u128() % len as u128) as usize
+}
 
 pub(super) async fn claim_next(
     client: &SekaiClaimClient,
@@ -45,7 +55,7 @@ pub(super) async fn claim_next(
                 "/sekai.SekaiService/ListClaimableAgentTurns",
                 proto::sekai::ListClaimableAgentTurnsRequest {
                     namespace: client.namespace.clone(),
-                    limit: 1,
+                    limit: CLAIM_CANDIDATES,
                 },
                 plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
             )
@@ -58,34 +68,45 @@ pub(super) async fn claim_next(
             )));
         }
     };
-    let Some(candidate) = listed.turns.into_iter().next() else {
-        return Ok(None);
-    };
-    let claimed: proto::sekai::ClaimAgentTurnResponse = match cached_unary!(
-        plane_slot,
-        plane_slot
-            .as_ref()
-            .expect("connected plane is inserted")
-            .raw()
-            .unary(
-                "/sekai.SekaiService/ClaimAgentTurn",
-                proto::sekai::ClaimAgentTurnRequest {
-                    namespace: client.namespace.clone(),
-                    runtime_id: runtime_id.into(),
-                    turn_id: candidate.turn_id.clone(),
-                    ttl_ms,
-                },
-                plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
-            )
-            .await
-    ) {
-        Ok(response) => response,
-        Err(error) if is_claim_contention(&error) => return Ok(None),
-        Err(error) => {
-            return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
-                "ClaimAgentTurn: {error}"
-            )));
+    // Workers that all took the oldest turn would all race for it. Start at a
+    // random candidate and move on when another worker won it.
+    let turns = listed.turns;
+    let start = random_index(turns.len());
+    let mut granted = None;
+    for candidate in turns.iter().cycle().skip(start).take(turns.len()) {
+        let result: Result<proto::sekai::ClaimAgentTurnResponse, SdkError> = cached_unary!(
+            plane_slot,
+            plane_slot
+                .as_ref()
+                .expect("connected plane is inserted")
+                .raw()
+                .unary(
+                    "/sekai.SekaiService/ClaimAgentTurn",
+                    proto::sekai::ClaimAgentTurnRequest {
+                        namespace: client.namespace.clone(),
+                        runtime_id: runtime_id.into(),
+                        turn_id: candidate.turn_id.clone(),
+                        ttl_ms,
+                    },
+                    plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
+                )
+                .await
+        );
+        match result {
+            Ok(response) => {
+                granted = Some((candidate, response));
+                break;
+            }
+            Err(error) if is_claim_contention(&error) => continue,
+            Err(error) => {
+                return Err(crate::plane_intake::PlaneIntakeError::Source(format!(
+                    "ClaimAgentTurn: {error}"
+                )));
+            }
         }
+    }
+    let Some((candidate, claimed)) = granted else {
+        return Ok(None);
     };
     let claimed_turn = claimed.turn.ok_or_else(|| {
         crate::plane_intake::PlaneIntakeError::Source("ClaimAgentTurn returned no turn".into())
