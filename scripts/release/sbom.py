@@ -6,8 +6,7 @@ package through normal and build dependencies (not dev-dependencies), for
 each release target. The OCI image carries its own BuildKit SBOM attestation.
 
 Usage:
-  release-sbom.py OUT
-  release-sbom.py --self-test
+  sbom.py OUT
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import sys
 import uuid
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 ROOT_PACKAGE = "shikigami"
 # The release workflow's binary targets.
 TARGETS = (
@@ -81,62 +80,9 @@ def bom(metas: list[dict]) -> dict:
     return document
 
 
-def self_test() -> None:
-    def dep(pkg: str, *kinds: str | None) -> dict:
-        return {"pkg": pkg, "dep_kinds": [{"kind": k, "target": None} for k in kinds]}
-
-    def meta(extra_dep: str) -> dict:
-        root, types = "path+file:///w#shikigami@3.0.0", "path+file:///w/crates/shikigami-types#3.0.0"
-        packages = [
-            {"id": root, "name": "shikigami", "version": "3.0.0", "license": "Apache-2.0"},
-            {"id": types, "name": "shikigami-types", "version": "3.0.0"},
-            {"id": "r#serde@1.0.0", "name": "serde", "version": "1.0.0", "license": "MIT OR Apache-2.0"},
-            {"id": "r#memchr@2.0.0", "name": "memchr", "version": "2.0.0", "license": "MIT/Unlicense"},
-            {"id": "r#cc@1.0.0", "name": "cc", "version": "1.0.0", "license": "MIT"},
-            {"id": "r#proptest@1.0.0", "name": "proptest", "version": "1.0.0", "license": "MIT"},
-            {"id": "r#windows@1.0.0", "name": "windows", "version": "1.0.0", "license": "MIT"},
-            {"id": "r#unused@1.0.0", "name": "unused", "version": "1.0.0", "license": "MIT"},
-        ]
-        nodes = [
-            {"id": root, "deps": [dep(types, None), dep("r#cc@1.0.0", "build"), dep("r#proptest@1.0.0", "dev"), dep(extra_dep, None)]},
-            {"id": types, "deps": [dep("r#serde@1.0.0", None, "dev")]},
-        ] + [{"id": p["id"], "deps": []} for p in packages[2:]]
-        return {"workspace_members": [root, types], "packages": packages, "resolve": {"nodes": nodes}}
-
-    metas = [meta("r#memchr@2.0.0"), meta("r#windows@1.0.0")]
-    out = bom(metas)
-    serial = out["serialNumber"]
-    assert serial.startswith("urn:uuid:")
-    assert uuid.UUID(serial.removeprefix("urn:uuid:")).version == 5
-    assert bom(metas)["serialNumber"] == serial
-    changed = meta("r#memchr@2.0.0")
-    changed["packages"][2]["version"] = "1.0.1"
-    assert bom([changed])["serialNumber"] != bom([metas[0]])["serialNumber"]
-    assert out["metadata"]["component"]["name"] == "shikigami"
-    by_ref = {c["bom-ref"]: c for c in out["components"]}
-    assert set(by_ref) == {
-        "pkg:cargo/serde@1.0.0",
-        "pkg:cargo/memchr@2.0.0",
-        "pkg:cargo/cc@1.0.0",
-        "pkg:cargo/windows@1.0.0",
-    }, set(by_ref)
-    assert by_ref["pkg:cargo/serde@1.0.0"]["licenses"] == [{"expression": "MIT OR Apache-2.0"}]
-    assert by_ref["pkg:cargo/memchr@2.0.0"]["licenses"] == [{"expression": "MIT OR Unlicense"}]
-    try:
-        bom([{"workspace_members": [], "packages": [], "resolve": {"nodes": []}}])
-    except SystemExit as exc:
-        assert "shikigami package" in str(exc)
-    else:
-        raise AssertionError("expected missing shikigami package to fail")
-    print("release-sbom self-test passed")
-
-
 def main(argv: list[str]) -> None:
-    if argv == ["--self-test"]:
-        self_test()
-        return
     if len(argv) != 1:
-        raise SystemExit("usage: release-sbom.py OUT")
+        raise SystemExit("usage: sbom.py OUT")
     metas = [
         json.loads(
             subprocess.check_output(

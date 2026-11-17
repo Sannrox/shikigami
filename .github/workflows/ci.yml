@@ -79,7 +79,31 @@ jobs:
           persist-credentials: false
       - run: bash scripts/validate-workflow-skills.sh
 
-  # Runs every scripts/validate-*.sh (format, Clippy, docs, changelog, release).
+  # Pinned workflow linter and security auditor, the same binaries as a local run.
+  workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: bash scripts/check-workflows.sh
+
+  # scripts/release/ behavior and the release workflows' structure.
+  release-tests:
+    name: Release tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --require-hashes -r scripts/tests/requirements.txt
+      - run: python -m unittest discover -s scripts/tests -t . -v
+
+  # Runs every scripts/validate-*.sh (format, Clippy, docs, changelog).
   validate:
     name: Validate
     runs-on: ubuntu-latest
