@@ -30,6 +30,9 @@ pub struct McpRunSummary {
     pub run_id: String,
     pub success: bool,
     pub summary: String,
+    /// The terminal report's structured answer, when the run gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Map<String, serde_json::Value>>,
     pub turns: u32,
     pub workspace: String,
     pub termination: String,
@@ -45,6 +48,7 @@ impl From<&RunResult> for McpRunSummary {
             run_id: r.run_id.clone(),
             success: r.success,
             summary: r.summary.clone(),
+            data: r.data.clone(),
             turns: r.turns,
             workspace: r.workspace.display().to_string(),
             termination: r.termination.as_str().to_string(),

@@ -1256,6 +1256,8 @@ pub mod harvest {
     pub const KIND_MODEL: &str = "model_called";
     pub const KIND_TOOL: &str = "action_performed";
     pub const KIND_COMPLETE: &str = "outcome_recorded";
+    /// Largest `report.data` sent inline as the `data` attribute, as JSON.
+    pub const MAX_DATA_ATTRIBUTE_BYTES: usize = 4000;
 
     pub fn attempt_attributes(run_id: &str, logical_operation_id: &str) -> HashMap<String, String> {
         HashMap::from([
@@ -1321,6 +1323,19 @@ pub mod harvest {
             "summary".into(),
             outcome.summary.chars().take(4000).collect(),
         );
+        if let Some(data) = &outcome.data {
+            // Attributes are strings. A structured answer that does not fit is
+            // named as omitted rather than cut into invalid JSON.
+            let json = serde_json::Value::Object(data.clone()).to_string();
+            if json.len() <= MAX_DATA_ATTRIBUTE_BYTES {
+                attributes.insert("data".into(), json);
+            } else {
+                attributes.insert(
+                    "data_omitted".into(),
+                    format!("exceeds {MAX_DATA_ATTRIBUTE_BYTES} bytes"),
+                );
+            }
+        }
         attributes.insert("turns".into(), outcome.turns.to_string());
         attributes.insert("termination".into(), outcome.termination.clone());
         attributes.insert(
@@ -1670,10 +1685,28 @@ mod tests {
     }
 
     #[test]
+    fn harvest_complete_attributes_carry_report_data_or_say_it_was_omitted() {
+        let mut outcome = complete_outcome();
+        outcome.data = serde_json::json!({"proposal": "p-1"}).as_object().cloned();
+        let attrs = harvest::complete_attributes(&outcome);
+        assert_eq!(
+            attrs.get("data").map(String::as_str),
+            Some(r#"{"proposal":"p-1"}"#)
+        );
+
+        let big = "x".repeat(harvest::MAX_DATA_ATTRIBUTE_BYTES);
+        outcome.data = serde_json::json!({ "big": big }).as_object().cloned();
+        let attrs = harvest::complete_attributes(&outcome);
+        assert!(!attrs.contains_key("data"));
+        assert!(attrs.contains_key("data_omitted"));
+    }
+
+    #[test]
     fn harvest_complete_attributes_include_termination() {
         let outcome = RunOutcome {
             success: false,
             summary: "timed out".into(),
+            data: None,
             turns: 3,
             termination: "timed_out".into(),
             workspace: "/tmp/ws".into(),
@@ -2085,6 +2118,7 @@ mod tests {
         RunOutcome {
             success: true,
             summary: "done".into(),
+            data: None,
             turns: 1,
             termination: "completed".into(),
             workspace: String::new(),

@@ -109,6 +109,10 @@ enum Command {
         /// Reject a parked plan and complete the run as failed.
         #[arg(long, conflicts_with = "plan_accept")]
         plan_reject: bool,
+        /// Print the run result as JSON on stdout, including the report's
+        /// structured `data`. Exit status is unchanged.
+        #[arg(long)]
+        json: bool,
     },
     /// List or inspect durable local run records.
     Runs {
@@ -370,6 +374,7 @@ async fn run() -> anyhow::Result<()> {
             nested,
             plan_accept,
             plan_reject,
+            json,
         } => {
             let task = match (task.is_empty(), task_file) {
                 (false, Some(_)) => {
@@ -409,6 +414,20 @@ async fn run() -> anyhow::Result<()> {
                 _ => None,
             };
             let result = harness.run(request).await?;
+            if json {
+                let summary = shikigami::McpRunSummary::from(&result);
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                if result.park.is_some() {
+                    anyhow::bail!(
+                        "run parked; resume with: shikigami run --resume {}",
+                        result.run_id
+                    );
+                }
+                if !result.success {
+                    anyhow::bail!("run reported failure");
+                }
+                return Ok(());
+            }
             human_println!(
                 "run {} turns={} success={} termination={} summary={}",
                 result.run_id,

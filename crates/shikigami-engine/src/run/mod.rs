@@ -191,6 +191,8 @@ pub struct RunResult {
     pub run_id: String,
     pub success: bool,
     pub summary: String,
+    /// The terminal report's structured answer (`report.data`), if any.
+    pub data: Option<serde_json::Map<String, serde_json::Value>>,
     pub turns: u32,
     pub workspace: PathBuf,
     /// Durable local artifact directory, retained after workspace cleanup.

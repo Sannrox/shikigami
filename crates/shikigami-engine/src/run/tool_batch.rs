@@ -25,8 +25,15 @@ use super::{Engine, ParkInfo, ParkKind, RunError, RunRequest};
 
 pub(super) enum ToolBatchOutcome {
     Continue,
-    Completed { summary: String, success: bool },
-    Parked { info: ParkInfo, summary: String },
+    Completed {
+        summary: String,
+        success: bool,
+        data: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+    Parked {
+        info: ParkInfo,
+        summary: String,
+    },
 }
 
 /// Stamp canonical signatures on a successful typed-profile report.
@@ -1111,7 +1118,7 @@ impl<'a> DurableToolBatch<'a> {
                             call_id: report_call_id.clone(),
                         },
                     );
-                    terminal_report = Some((report.summary, report.success));
+                    terminal_report = Some(report);
                 }
                 Ok(ToolOutput::Park(park)) => {
                     let detail = format!("parked: {}", park.reason);
@@ -1215,7 +1222,7 @@ impl<'a> DurableToolBatch<'a> {
         }
         session.save(tools.as_ref())?;
         match terminal_report {
-            Some((summary, _success)) if request.session_wait => {
+            Some(report) if request.session_wait => {
                 let parked = ParkedState {
                     reason: "end_turn".into(),
                     question: String::new(),
@@ -1237,10 +1244,14 @@ impl<'a> DurableToolBatch<'a> {
                         args_json: None,
                         plan_digest: String::new(),
                     },
-                    summary,
+                    summary: report.summary,
                 })
             }
-            Some((summary, success)) => Ok(ToolBatchOutcome::Completed { summary, success }),
+            Some(report) => Ok(ToolBatchOutcome::Completed {
+                summary: report.summary,
+                success: report.success,
+                data: report.data,
+            }),
             None => Ok(ToolBatchOutcome::Continue),
         }
     }

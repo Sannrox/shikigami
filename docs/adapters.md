@@ -145,7 +145,7 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 | `web_fetch` | Opt-in HTTP(S) GET; not in the coding default |
 | `bash` | Opt-in shell in workspace (timeout-bounded) |
 | `bash_background` / `bash_job_status` / `bash_job_logs` | Implicit when `bash` is enabled |
-| `report` / `escalate` | Finish or park; exclusive batch |
+| `report` / `escalate` | Finish or park; exclusive batch. `report` takes `summary`, `success`, and an optional `data` JSON object for a structured answer |
 
 API: `ToolRegistry::from_config` → `definitions()` + `execute()`.
 The registry is the only execution interface: it owns resolved tool authority

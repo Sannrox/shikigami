@@ -5,7 +5,7 @@ Every harness run writes host-local operational state under
 keyed by cwd; see [cli.md](cli.md)):
 
 ~~~
-run.json       # status, outcome, digests, usage, workspace, artifact path
+run.json       # status, outcome, report data, digests, usage, workspace, artifact path
 events.jsonl   # redacted event journal; tool arguments are not persisted
 checkpoint.json # resumable conversation plus optional replay binding
 snapshots/
@@ -26,7 +26,7 @@ Local checkpoints are not governed receipts. After an abrupt host death,
 authorizing-only tool markers may retry the original identity; a started or
 completed host effect is in-doubt and is not redispatched; staged tool reports
 are replayed without repeating the effect; a checkpointed terminal `report`
-completes the same run. A `require_approval` park keeps the staged tool
+completes the same run, with its `data`. A `require_approval` park keeps the staged tool
 `Authorizing`, records the plane approval identity, and resumes without
 `--answer`; the next wake re-validates current authority. The process-kill
 matrix lives in `tests/governed_tool_crash_recovery.rs`.
