@@ -207,6 +207,9 @@ pub(super) async fn prepare(
         request.job_credential.as_ref(),
     )?;
     tools.set_todos(todos);
+    if let Some(jobs) = engine.registry.take_parked_background_jobs(&run_id) {
+        tools.adopt_background_jobs(jobs);
+    }
     if lazy_skills {
         tools.enable_skill_loading(engine.config.context.clone());
     }

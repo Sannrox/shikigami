@@ -55,8 +55,14 @@ is a per-prompt budget on session waits, including ask/escalate resumes of
 the same prompt. Hitting the budget parks `end_turn` with
 `stopReason: max_turn_requests` so the next prompt can continue. A readable
 session run that is not waiting fails closed instead of starting a new run.
-Background bash jobs are reaped when a run parks; they do not survive
-ask=park. Nested `child_run` is a tool event on the parent session; there is
+Background bash jobs stay running across the session's parks (prompt wait,
+ask, escalate, plan) and stay addressable by `bash_job_status`. They end
+when the run completes or fails, when `session/cancel` interrupts a turn
+or a permission wait, and when the host exits on EOF, SIGINT, or SIGTERM.
+A host killed with SIGKILL cannot reap them. A host restart loses them:
+their ids report `status=unknown`, and nothing restarts them. Exited jobs
+stay readable and stop counting against the four-job limit once their
+shell exits; leftover children are killed then. Nested `child_run` is a tool event on the parent session; there is
 no extra ACP method.
 `session/cancel` keeps the session run and parks it for the next prompt.
 A later prompt on an outstanding ask/escalate park restores the permission

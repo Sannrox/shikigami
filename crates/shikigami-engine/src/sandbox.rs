@@ -171,19 +171,17 @@ impl Sandbox {
     /// Kill the process group created by the sandbox backend. This is a
     /// best-effort cleanup path used for timeout and run shutdown.
     pub fn kill_process_group(&self, pid: Option<u32>) {
-        #[cfg(unix)]
-        if matches!(
+        if self.starts_process_group() {
+            kill_process_group(pid);
+        }
+    }
+
+    /// Whether children run as the leader of their own process group.
+    pub(crate) fn starts_process_group(&self) -> bool {
+        matches!(
             self.settings.backend,
             SandboxBackend::Rlimit | SandboxBackend::LinuxNative
-        ) && let Some(pid) = pid
-            && pid > 1
-        {
-            // Negative pid targets the process group. Ignore ESRCH: the child
-            // may have already exited between the timeout and this call.
-            unsafe {
-                let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-            }
-        }
+        )
     }
 
     pub fn scratch_dir(&self) -> Option<&Path> {
@@ -350,6 +348,22 @@ fn map_backend_back(backend: kekkai::Backend) -> SandboxBackend {
         kekkai::Backend::LinuxNative => SandboxBackend::LinuxNative,
         _ => SandboxBackend::None,
     }
+}
+
+/// SIGKILL the process group led by `pid`. Ignores ESRCH: the group may have
+/// already exited.
+pub(crate) fn kill_process_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid
+        && pid > 1
+    {
+        // Negative pid targets the process group.
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 #[cfg(test)]

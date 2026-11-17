@@ -877,9 +877,19 @@ async fn run() -> anyhow::Result<()> {
         Command::Acp => {
             human_eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
-            shikigami::acp::run_stdio(harness)
+            // SIGINT/SIGTERM cancel the in-flight prompt and reap session jobs
+            // like EOF does. Then exit at once: the stdin reader cannot be
+            // cancelled, so runtime shutdown would wait for stdin to close.
+            let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel();
+            let shutdown = async move {
+                let _ = signalled_tx.send(shutdown_signal().await);
+            };
+            shikigami::acp::run_stdio_until(harness, shutdown)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
+            if let Ok(code) = signalled_rx.await {
+                std::process::exit(code);
+            }
         }
         Command::Tui => {
             let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
@@ -1039,4 +1049,28 @@ fn read_bounded_json<T: serde::de::DeserializeOwned>(
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| anyhow::anyhow!("input {}: {error}", path.display()))
+}
+
+/// Resolves on SIGINT, or SIGTERM on Unix, with the shell exit code for it.
+async fn shutdown_signal() -> i32 {
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => 130,
+            () = terminate => 143,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        130
+    }
 }

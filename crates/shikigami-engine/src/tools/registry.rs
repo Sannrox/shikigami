@@ -184,6 +184,20 @@ impl ToolRegistry {
         })
     }
 
+    /// Move this run's background jobs out, leaving an empty table. A session
+    /// host parks them in the run registry so they outlive the park.
+    pub(crate) fn take_background_jobs(&self) -> Option<BackgroundJobs> {
+        let mut guard = self.bg_jobs.lock().ok()?;
+        Some(std::mem::replace(&mut *guard, BackgroundJobs::new()))
+    }
+
+    /// Adopt jobs parked by an earlier attempt of this run.
+    pub(crate) fn adopt_background_jobs(&self, jobs: BackgroundJobs) {
+        if let Ok(mut guard) = self.bg_jobs.lock() {
+            *guard = jobs;
+        }
+    }
+
     /// Kill all background bash jobs (run end cleanup).
     pub async fn kill_background_jobs(&self) {
         let jobs: Vec<BgJob> = {
@@ -194,8 +208,7 @@ impl ToolRegistry {
             guard.jobs.drain().map(|(_id, job)| job).collect()
         };
         for mut job in jobs {
-            self.executor.sandbox.kill_process_group(job.child.id());
-            let _ = job.child.start_kill();
+            job.kill();
             let _ = job.child.wait().await;
         }
     }
@@ -362,11 +375,12 @@ impl ToolRegistry {
             .bg_jobs
             .lock()
             .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
-        if guard.jobs.len() >= MAX_BG_JOBS {
+        if guard.running() >= MAX_BG_JOBS {
             return Err(ToolError::Message(format!(
                 "bash_background: at most {MAX_BG_JOBS} concurrent jobs"
             )));
         }
+        guard.forget_oldest_exited();
         let job_id = format!("job-{}", guard.next_id);
         guard.next_id += 1;
         let log_dir = self.executor.workspace.join(".shikigami/jobs");
@@ -378,12 +392,16 @@ impl ToolRegistry {
         let (mut command, applied) = self.executor.bash_command(&args.command)?;
         command.stdout(stdout).stderr(stderr);
         let child = command.spawn()?;
+        let process_group = child
+            .id()
+            .filter(|_| self.executor.sandbox.starts_process_group());
         guard.jobs.insert(
             job_id.clone(),
             BgJob {
                 child,
                 log_path: log_path.clone(),
                 _applied: applied,
+                process_group,
             },
         );
         Ok(format!("job_id={job_id}\nlog={}", log_path.display()))
@@ -400,9 +418,10 @@ impl ToolRegistry {
             .lock()
             .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
         let Some(job) = guard.jobs.get_mut(&args.job_id) else {
+            // Includes jobs lost to a host restart: they are never restarted.
             return Ok(format!("job_id={} status=unknown", args.job_id));
         };
-        match job.child.try_wait() {
+        match job.try_wait() {
             Ok(Some(status)) => Ok(format!(
                 "job_id={} status=exited code={}",
                 args.job_id,
@@ -480,14 +499,10 @@ impl ToolRegistry {
 impl Drop for ToolRegistry {
     fn drop(&mut self) {
         // Fence-loss / cancel can drop the harness future before the async
-        // reaper runs. Reap process groups here so bash descendants cannot
-        // outlive the claim.
-        let Ok(mut guard) = self.bg_jobs.lock() else {
-            return;
-        };
-        for (_, mut job) in guard.jobs.drain() {
-            self.executor.sandbox.kill_process_group(job.child.id());
-            let _ = job.child.start_kill();
+        // reaper runs. Dropping a job kills its process group, so bash
+        // descendants cannot outlive the claim.
+        if let Ok(mut guard) = self.bg_jobs.lock() {
+            guard.jobs.clear();
         }
     }
 }
