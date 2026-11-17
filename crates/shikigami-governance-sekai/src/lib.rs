@@ -1256,7 +1256,8 @@ pub mod harvest {
     pub const KIND_MODEL: &str = "model_called";
     pub const KIND_TOOL: &str = "action_performed";
     pub const KIND_COMPLETE: &str = "outcome_recorded";
-    /// Largest `report.data` sent inline as the `data` attribute, as JSON.
+    /// Largest JSON value (`report.data`, `artifacts`) sent inline as an
+    /// attribute.
     pub const MAX_DATA_ATTRIBUTE_BYTES: usize = 4000;
 
     pub fn attempt_attributes(run_id: &str, logical_operation_id: &str) -> HashMap<String, String> {
@@ -1324,17 +1325,24 @@ pub mod harvest {
             outcome.summary.chars().take(4000).collect(),
         );
         if let Some(data) = &outcome.data {
-            // Attributes are strings. A structured answer that does not fit is
-            // named as omitted rather than cut into invalid JSON.
-            let json = serde_json::Value::Object(data.clone()).to_string();
-            if json.len() <= MAX_DATA_ATTRIBUTE_BYTES {
-                attributes.insert("data".into(), json);
-            } else {
-                attributes.insert(
-                    "data_omitted".into(),
-                    format!("exceeds {MAX_DATA_ATTRIBUTE_BYTES} bytes"),
-                );
-            }
+            insert_json(
+                &mut attributes,
+                "data",
+                serde_json::Value::Object(data.clone()),
+            );
+        }
+        if !outcome.artifacts.is_empty() {
+            insert_json(
+                &mut attributes,
+                "artifacts",
+                serde_json::json!(outcome.artifacts),
+            );
+        }
+        if !outcome.model.is_empty() {
+            attributes.insert("model".into(), outcome.model.clone());
+        }
+        if let Some(preset_id) = &outcome.preset_id {
+            attributes.insert("preset_id".into(), preset_id.clone());
         }
         attributes.insert("turns".into(), outcome.turns.to_string());
         attributes.insert("termination".into(), outcome.termination.clone());
@@ -1347,11 +1355,28 @@ pub mod harvest {
             "authoritative".into(),
             "plane".into(), // local state is non-authoritative for governed truth
         );
-        attributes.insert(
-            "prompt_id".into(),
-            crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT),
-        );
+        // A run that ended before it chose a prompt reports the default.
+        let prompt_id = if outcome.prompt_id.is_empty() {
+            crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT)
+        } else {
+            outcome.prompt_id.clone()
+        };
+        attributes.insert("prompt_id".into(), prompt_id);
         attributes
+    }
+
+    /// Attributes are strings. A JSON value that does not fit is named as
+    /// `<key>_omitted` rather than cut into invalid JSON.
+    fn insert_json(attributes: &mut HashMap<String, String>, key: &str, value: serde_json::Value) {
+        let json = value.to_string();
+        if json.len() <= MAX_DATA_ATTRIBUTE_BYTES {
+            attributes.insert(key.into(), json);
+        } else {
+            attributes.insert(
+                format!("{key}_omitted"),
+                format!("exceeds {MAX_DATA_ATTRIBUTE_BYTES} bytes"),
+            );
+        }
     }
 
     pub fn complete_references(
@@ -1702,6 +1727,33 @@ mod tests {
     }
 
     #[test]
+    fn harvest_complete_attributes_name_what_produced_the_run_and_its_artifacts() {
+        let mut outcome = complete_outcome();
+        outcome.model = "model-a".into();
+        outcome.prompt_id = "prompt:abc".into();
+        outcome.preset_id = Some("narrow@sha256:00".into());
+        outcome.artifacts = vec![shikigami_engine::tools::ArtifactReference {
+            tool: "mcp.m.create".into(),
+            call_id: "call-1".into(),
+            uri: "example://proposals/p-1".into(),
+        }];
+        let attrs = harvest::complete_attributes(&outcome);
+        let get = |key: &str| attrs.get(key).map(String::as_str);
+        assert_eq!(get("model"), Some("model-a"));
+        assert_eq!(get("prompt_id"), Some("prompt:abc"));
+        assert_eq!(get("preset_id"), Some("narrow@sha256:00"));
+        let artifacts: serde_json::Value =
+            serde_json::from_str(get("artifacts").unwrap_or_default()).unwrap();
+        assert_eq!(
+            artifacts,
+            serde_json::json!([{"tool": "mcp.m.create", "call_id": "call-1", "uri": "example://proposals/p-1"}])
+        );
+
+        let bare = harvest::complete_attributes(&complete_outcome());
+        assert!(!bare.contains_key("artifacts") && !bare.contains_key("preset_id"));
+    }
+
+    #[test]
     fn harvest_complete_attributes_include_termination() {
         let outcome = RunOutcome {
             success: false,
@@ -1710,6 +1762,10 @@ mod tests {
             turns: 3,
             termination: "timed_out".into(),
             workspace: "/tmp/ws".into(),
+            model: String::new(),
+            prompt_id: String::new(),
+            preset_id: None,
+            artifacts: Vec::new(),
         };
         let attrs = harvest::complete_attributes(&outcome);
         assert_eq!(attrs.get("status").map(String::as_str), Some("failed"));
@@ -2122,6 +2178,10 @@ mod tests {
             turns: 1,
             termination: "completed".into(),
             workspace: String::new(),
+            model: String::new(),
+            prompt_id: String::new(),
+            preset_id: None,
+            artifacts: Vec::new(),
         }
     }
 

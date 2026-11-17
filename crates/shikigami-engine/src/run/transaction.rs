@@ -391,6 +391,10 @@ impl<'a> RunTransaction<'a> {
                                 turns: session.turns,
                                 termination: e.termination().as_str().into(),
                                 workspace: ws.path.display().to_string(),
+                                model: crate::model::effective_model_name(&self.engine.config),
+                                prompt_id: prompt_id.clone(),
+                                preset_id: crate::checkpoint::preset_id(&session.preset),
+                                artifacts: session.artifacts.clone(),
                             },
                         )
                         .await;
@@ -501,6 +505,10 @@ impl<'a> RunTransaction<'a> {
                         turns: session.turns,
                         termination: termination.as_str().into(),
                         workspace: ws.path.display().to_string(),
+                        model: crate::model::effective_model_name(&self.engine.config),
+                        prompt_id: prompt_id.clone(),
+                        preset_id: crate::checkpoint::preset_id(&session.preset),
+                        artifacts: session.artifacts.clone(),
                     },
                 )
                 .await;
@@ -610,6 +618,9 @@ impl<'a> RunTransaction<'a> {
             usage,
             cost,
             todos: tools.todos(),
+            model: crate::model::effective_model_name(&self.engine.config),
+            preset_id: crate::checkpoint::preset_id(&session.preset),
+            artifacts: session.artifacts.clone(),
         })
     }
 

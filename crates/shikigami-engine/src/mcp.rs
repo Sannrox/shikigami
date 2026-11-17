@@ -162,16 +162,27 @@ impl ExternalTool for MockEchoTool {
         ToolDef {
             name: self.name.clone(),
             description: format!("Mock MCP echo tool from server {}", self.server),
-            schema:
-                r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#
-                    .into(),
+            schema: r#"{"type":"object","properties":{"text":{"type":"string"},"link":{"type":"string"}},"required":["text"]}"#
+                .into(),
         }
     }
 
     async fn call(&self, args_json: &str) -> Result<String, ToolError> {
+        self.call_linked(args_json).await.map(|(text, _)| text)
+    }
+
+    /// Echoes `text`; an optional `link` comes back as a resource link, the
+    /// way a real server names a resource it created.
+    async fn call_linked(&self, args_json: &str) -> Result<(String, Vec<String>), ToolError> {
         let v: Value = serde_json::from_str(args_json).unwrap_or(json!({}));
         let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
-        Ok(format!("echo:{text}"))
+        let links = v
+            .get("link")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
+        Ok((format!("echo:{text}"), links))
     }
 }
 

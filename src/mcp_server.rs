@@ -40,6 +40,15 @@ pub struct McpRunSummary {
     pub park: Option<ParkInfo>,
     pub prompt_id: String,
     pub usage: TokenUsage,
+    /// Model the run used.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Narrowing preset id, if the run had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    /// External resources tool results named, attributed to their calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::tools::ArtifactReference>,
 }
 
 impl From<&RunResult> for McpRunSummary {
@@ -55,6 +64,9 @@ impl From<&RunResult> for McpRunSummary {
             park: r.park.clone(),
             prompt_id: r.prompt_id.clone(),
             usage: r.usage,
+            model: r.model.clone(),
+            preset_id: r.preset_id.clone(),
+            artifacts: r.artifacts.clone(),
         }
     }
 }

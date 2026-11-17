@@ -65,6 +65,8 @@ pub(super) struct RunSession {
     pub stop_repairs: u32,
     /// Selected preset id, empty without one (ADR 0022).
     pub preset: String,
+    /// External resources tool results named so far, in call order.
+    pub artifacts: Vec<crate::tools::ArtifactReference>,
     pub spans: RunSpanTrace,
     /// `wait=false` child tasks for this attempt. Terminal completion joins
     /// them. Session-host park detaches the handles; resume cannot recover
@@ -130,6 +132,7 @@ impl RunSession {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
             spans: RunSpanTrace::disabled(),
             background_joins: Vec::new(),
         }
@@ -778,6 +781,7 @@ impl RunSession {
             tools_enabled: self.tools_enabled.clone(),
             stop_repairs: self.stop_repairs,
             preset: self.preset.clone(),
+            artifacts: self.artifacts.clone(),
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {

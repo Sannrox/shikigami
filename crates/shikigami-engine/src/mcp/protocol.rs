@@ -121,7 +121,11 @@ impl<T: Transport> Client<T> {
     /// The run's tool catalog is fixed at attach, so a re-list after a
     /// list-changed notice never adds tools; it refuses a call to a tool the
     /// server stopped offering instead of sending it.
-    async fn call_tool(&mut self, name: &str, args_json: &str) -> Result<String, ToolError> {
+    async fn call_tool(
+        &mut self,
+        name: &str,
+        args_json: &str,
+    ) -> Result<(String, Vec<String>), ToolError> {
         // A tool missing from the last list is re-checked on every call, so
         // one the server offers again becomes callable without a new notice.
         let withdrawn = |offered: &Option<HashSet<String>>| {
@@ -164,7 +168,7 @@ impl<T: Transport> Client<T> {
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             return Err(ToolError::Message(format!("mcp tool error: {body}")));
         }
-        Ok(body)
+        Ok((body, resource_links(&result)))
     }
 
     /// One JSON-RPC request bounded by the configured deadline. On expiry the
@@ -209,6 +213,20 @@ impl<T: Transport> Client<T> {
             }))
             .await
     }
+}
+
+/// URIs of the `resource_link` content items in a `tools/call` result: the
+/// standard way for a tool to name a resource it created or found.
+fn resource_links(result: &Value) -> Vec<String> {
+    result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|content| content.get("type").and_then(Value::as_str) == Some("resource_link"))
+        .filter_map(|content| content.get("uri").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Registers the server's listed tools. With `allowed`, only tools whose
@@ -262,6 +280,10 @@ impl<T: Transport + 'static> ExternalTool for RemoteTool<T> {
     }
 
     async fn call(&self, args_json: &str) -> Result<String, ToolError> {
+        self.call_linked(args_json).await.map(|(text, _)| text)
+    }
+
+    async fn call_linked(&self, args_json: &str) -> Result<(String, Vec<String>), ToolError> {
         self.client
             .lock()
             .await
@@ -310,7 +332,8 @@ mod tests {
                     "name":"ping","description":"Ping","inputSchema":{"type":"object"}
                 }]}}),
                 json!({"jsonrpc":"2.0","id":3,"result":{"content":[
-                    {"type":"text","text":"one"},{"type":"text","text":"two"}
+                    {"type":"text","text":"one"},{"type":"text","text":"two"},
+                    {"type":"resource_link","uri":"example://proposals/p-1","name":"p-1"}
                 ]}}),
             ]),
             sent: Vec::new(),
@@ -321,7 +344,10 @@ mod tests {
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "ping");
-        assert_eq!(client.call_tool("ping", "{}").await.unwrap(), "one\ntwo");
+        assert_eq!(
+            client.call_tool("ping", "{}").await.unwrap(),
+            ("one\ntwo".into(), vec!["example://proposals/p-1".into()])
+        );
         assert_eq!(client.transport.sent.len(), 4);
         assert_eq!(
             client.transport.sent[1]["method"],

@@ -268,6 +268,15 @@ pub struct Checkpoint {
     /// select the same preset. Empty when the run has none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub preset: String,
+    /// External resources tool results named, attributed to their calls.
+    /// Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::tools::ArtifactReference>,
+}
+
+/// A checkpoint stores "no preset" as an empty id.
+pub(crate) fn preset_id(preset: &str) -> Option<String> {
+    (!preset.is_empty()).then(|| preset.to_owned())
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -513,6 +522,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -563,6 +573,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -610,6 +621,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -672,6 +684,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         }
     }
 

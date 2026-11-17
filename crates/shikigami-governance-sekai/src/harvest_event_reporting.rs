@@ -256,6 +256,10 @@ pub(super) async fn abort_uncheckpointed_receipt(
         turns: 0,
         termination: "aborted_before_model".into(),
         workspace: String::new(),
+        model: String::new(),
+        prompt_id: String::new(),
+        preset_id: None,
+        artifacts: Vec::new(),
     };
     let response = report(
         governance,
