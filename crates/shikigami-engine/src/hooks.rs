@@ -1,6 +1,8 @@
 //! Operator-trusted lifecycle hooks (settings-driven subprocesses).
 //!
-//! Hooks are **not** a sandbox. Only run commands you trust.
+//! Hooks are **not** a sandbox. Only run commands you trust. The exception is
+//! `stop`: it checks code the model wrote, so it runs in the workspace under
+//! the tool sandbox and returns a verdict ([`stop_verdict`]).
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,6 +12,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::config::HookSettings;
+use crate::events::{VerificationCase, VerificationOutcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
@@ -109,6 +112,193 @@ async fn invoke_hook(hook: &HookSettings, event: HookEvent, payload: &Value) -> 
     }
 }
 
+/// Hook event that gates a successful completion. It is not a [`HookEvent`]:
+/// [`run_hooks`] skips it, and the run loop runs it through the sandbox.
+pub const STOP_EVENT: &str = "stop";
+
+/// Ceiling for a `stop` hook's `timeout_ms`. A test suite needs longer than
+/// the two minutes other hooks get.
+pub const STOP_HOOK_MAX_TIMEOUT_MS: u64 = 3_600_000;
+
+/// Longest failure text kept for the model and the event, from the end.
+const STOP_REASON_CHARS: usize = 4_000;
+
+/// What one `stop` hook decided. `reason` goes back to the model on failure.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StopVerdict {
+    pub passed: bool,
+    pub reason: String,
+    pub cases: Vec<VerificationCase>,
+}
+
+/// JSON a `stop` hook may print on stdout.
+#[derive(serde::Deserialize)]
+struct StopReply {
+    #[serde(default)]
+    passed: Option<bool>,
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    cases: Vec<VerificationCase>,
+}
+
+/// Resolve a `stop` hook command on the host, before the sandbox applies. A
+/// path is taken relative to the harness process, never to the workspace, so
+/// the model cannot rewrite the check that judges it. A bare name uses `PATH`.
+pub fn stop_hook_program(command: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(command);
+    if path.components().count() > 1 {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Judge one `stop` hook run. `Err` is a hook that did not finish.
+///
+/// Pass: exit 0 with no JSON, or JSON that neither blocks, says
+/// `"passed": false`, nor lists a failing case. Fail: exit 2, a block, a
+/// failing case, malformed JSON, any other exit, or no exit at all. A broken
+/// hook never lets a run finish as a success.
+pub fn stop_verdict(command: &str, output: Result<std::process::Output, String>) -> StopVerdict {
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return failed_hook(
+                command,
+                VerificationOutcome::Error,
+                format!("stop hook `{command}` did not finish: {error}"),
+            );
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reply = if stdout.trim_start().starts_with('{') {
+        match serde_json::from_str::<StopReply>(stdout.trim()) {
+            Ok(reply) => Some(reply),
+            Err(error) => {
+                return failed_hook(
+                    command,
+                    VerificationOutcome::Error,
+                    format!("stop hook `{command}` printed malformed JSON: {error}"),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let code = output.status.code();
+    let reply_blocks = reply.as_ref().is_some_and(|reply| {
+        reply.decision.as_deref() == Some("block")
+            || reply.passed == Some(false)
+            || reply.cases.iter().any(|case| {
+                matches!(
+                    case.outcome,
+                    VerificationOutcome::Fail | VerificationOutcome::Error
+                )
+            })
+    });
+    let (reply_reason, mut cases) = reply
+        .map(|reply| (reply.reason, reply.cases))
+        .unwrap_or_default();
+    for case in &mut cases {
+        case.message = clean_tail(&case.message);
+    }
+    let outcome = match code {
+        Some(0) if !reply_blocks => None,
+        Some(0) | Some(2) => Some(VerificationOutcome::Fail),
+        _ => Some(VerificationOutcome::Error),
+    };
+    let Some(outcome) = outcome else {
+        if cases.is_empty() {
+            cases.push(hook_case(command, VerificationOutcome::Pass, String::new()));
+        }
+        return StopVerdict {
+            passed: true,
+            reason: String::new(),
+            cases,
+        };
+    };
+    let detail = reply_reason
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| {
+            if stderr.trim().is_empty() {
+                stdout.into_owned()
+            } else {
+                stderr.into_owned()
+            }
+        });
+    let reason = clean_tail(&match (outcome, code) {
+        (VerificationOutcome::Error, Some(code)) => {
+            format!("stop hook `{command}` exited {code}: {detail}")
+        }
+        (VerificationOutcome::Error, None) => {
+            format!("stop hook `{command}` was killed by a signal: {detail}")
+        }
+        _ => detail,
+    });
+    if cases.is_empty() {
+        cases.push(hook_case(command, outcome, reason.clone()));
+    }
+    StopVerdict {
+        passed: false,
+        reason,
+        cases,
+    }
+}
+
+fn failed_hook(command: &str, outcome: VerificationOutcome, reason: String) -> StopVerdict {
+    let reason = clean_tail(&reason);
+    StopVerdict {
+        passed: false,
+        cases: vec![hook_case(command, outcome, reason.clone())],
+        reason,
+    }
+}
+
+fn hook_case(command: &str, outcome: VerificationOutcome, message: String) -> VerificationCase {
+    VerificationCase {
+        suite: STOP_EVENT.into(),
+        name: command.into(),
+        outcome,
+        message,
+    }
+}
+
+/// Strip ANSI escape sequences and keep the last [`STOP_REASON_CHARS`].
+fn clean_tail(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            clean.push(c);
+            continue;
+        }
+        // CSI: ESC [ params final-byte; other escapes: ESC + one char.
+        if chars.next_if_eq(&'[').is_some() {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    let clean = clean.trim();
+    let count = clean.chars().count();
+    if count <= STOP_REASON_CHARS {
+        return clean.to_owned();
+    }
+    let tail: String = clean.chars().skip(count - STOP_REASON_CHARS).collect();
+    format!(
+        "[... {} characters cut ...]{tail}",
+        count - STOP_REASON_CHARS
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +367,59 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_verdict_fails_closed() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stdout: &str, stderr: &str| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        };
+        let block = r#"{"decision":"block","reason":"2 tests failed"}"#;
+        let failing_case = r#"{"cases":[{"suite":"unit","name":"adds","outcome":"fail","message":"\u001b[31mleft != right\u001b[0m"}]}"#;
+        let cases = [
+            ("exit 0, no output", out(0, "", ""), true, ""),
+            ("exit 0, plain text", out(0, "all good", ""), true, ""),
+            ("exit 0, passed", out(0, r#"{"passed":true}"#, ""), true, ""),
+            ("exit 0, block", out(0, block, ""), false, "2 tests failed"),
+            (
+                "exit 0, failing case",
+                out(0, failing_case, "boom"),
+                false,
+                "boom",
+            ),
+            (
+                "exit 2, stderr",
+                out(2, "", "test x failed"),
+                false,
+                "test x failed",
+            ),
+            ("exit 1", out(1, "", "oops"), false, "exited 1: oops"),
+            (
+                "malformed JSON",
+                out(0, "{not json", ""),
+                false,
+                "malformed JSON",
+            ),
+            (
+                "did not finish",
+                Err("timed out after 1s".into()),
+                false,
+                "did not finish: timed out",
+            ),
+        ];
+        for (label, output, passed, reason) in cases {
+            let verdict = stop_verdict("verify", output);
+            assert_eq!(verdict.passed, passed, "{label}: {verdict:?}");
+            assert!(verdict.reason.contains(reason), "{label}: {verdict:?}");
+            assert!(!verdict.cases.is_empty(), "{label}: no cases");
+        }
+        let verdict = stop_verdict("verify", out(0, failing_case, ""));
+        assert_eq!(verdict.cases[0].message, "left != right");
     }
 }

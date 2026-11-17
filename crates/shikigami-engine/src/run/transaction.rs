@@ -26,6 +26,23 @@ use super::supervision::check_bounds;
 use super::tool_batch::{DurableToolBatch, ToolBatchOutcome};
 use super::{ContentExecution, Engine, ParkInfo, RunError, RunRequest, RunResult, RunTermination};
 
+/// What the run loop does after the `stop` gate.
+enum StopDecision {
+    Finish,
+    /// The refusal is in the messages; run another model turn.
+    Repair,
+    /// Repairs are used up; finish failed with this summary.
+    Fail(String),
+}
+
+/// Run-wide inputs the `stop` gate needs for supervision.
+struct StopGate<'r> {
+    request: &'r RunRequest,
+    started: tokio::time::Instant,
+    timeout: Option<Duration>,
+    replay: bool,
+}
+
 pub(super) struct RunTransaction<'a> {
     engine: &'a Engine,
 }
@@ -117,7 +134,35 @@ impl<'a> RunTransaction<'a> {
             .then_some(self.engine.config.security_finder.role.as_deref())
             .flatten();
         let triage = self.engine.config.profile.name == SECURITY_TRIAGE_PROFILE;
-        let recovered_text_report = recovered_text_report(&session.messages, finder_role, triage);
+        let stop = StopGate {
+            request: &request,
+            started,
+            timeout,
+            replay: replay.is_some(),
+        };
+        // A report recovered from the checkpoint may predate its `stop` check
+        // (crash between the two), so the check runs again here.
+        let mut gate_error = None;
+        let recovered_text_report =
+            match recovered_text_report(&session.messages, finder_role, triage) {
+                Some((true, summary)) => {
+                    match self.stop_gate(&stop, &mut session, &tools, &summary).await {
+                        Ok(StopDecision::Finish) => {
+                            Some((true, summary, RunTermination::Completed))
+                        }
+                        Ok(StopDecision::Repair) => None,
+                        Ok(StopDecision::Fail(summary)) => {
+                            Some((false, summary, RunTermination::Failed))
+                        }
+                        Err(error) => {
+                            gate_error = Some(error);
+                            None
+                        }
+                    }
+                }
+                Some((false, summary)) => Some((false, summary, RunTermination::Completed)),
+                None => None,
+            };
 
         // Ok(Some(park)) when parked (escalate or approval); Ok(None) when
         // finished normally.
@@ -137,10 +182,13 @@ impl<'a> RunTransaction<'a> {
             success = terminal.success;
             termination = terminal.termination;
             Ok(None)
-        } else if let Some((report_success, summary)) = recovered_text_report {
+        } else if let Some(error) = gate_error {
+            Err(error)
+        } else if let Some((report_success, summary, recovered_termination)) = recovered_text_report
+        {
             final_summary = summary;
             success = report_success;
-            termination = RunTermination::Completed;
+            termination = recovered_termination;
             Ok(None)
         } else if request.resume_plan == Some(super::PlanDecision::Reject) {
             final_summary = "plan rejected".into();
@@ -200,6 +248,21 @@ impl<'a> RunTransaction<'a> {
                         } else {
                             turn.content
                         };
+                        if !request.session_wait {
+                            match self
+                                .stop_gate(&stop, &mut session, &tools, &final_summary)
+                                .await?
+                            {
+                                StopDecision::Finish => {}
+                                StopDecision::Repair => continue,
+                                StopDecision::Fail(summary) => {
+                                    final_summary = summary;
+                                    success = false;
+                                    termination = RunTermination::Failed;
+                                    return Ok(None);
+                                }
+                            }
+                        }
                         success = true;
                         if request.session_wait {
                             let parked = ParkedState {
@@ -254,6 +317,21 @@ impl<'a> RunTransaction<'a> {
                             summary,
                             success: report_success,
                         } => {
+                            if report_success {
+                                match self
+                                    .stop_gate(&stop, &mut session, &tools, &summary)
+                                    .await?
+                                {
+                                    StopDecision::Finish => {}
+                                    StopDecision::Repair => continue,
+                                    StopDecision::Fail(summary) => {
+                                        final_summary = summary;
+                                        success = false;
+                                        termination = RunTermination::Failed;
+                                        return Ok(None);
+                                    }
+                                }
+                            }
                             final_summary = summary;
                             success = report_success;
                             termination = RunTermination::Completed;
@@ -521,6 +599,101 @@ impl<'a> RunTransaction<'a> {
             cost,
             todos: tools.todos(),
         })
+    }
+
+    /// Run the `stop` hooks before a run finishes as a success. A refusal
+    /// appends the hook's reason as the next user message and asks the loop
+    /// to continue, until `run.max_stop_repairs` refusals; the next one fails
+    /// the run. The refusal count is saved before the loop continues, so a
+    /// restart keeps the bound. Content runs, session hosts, and replays
+    /// finish without the gate.
+    async fn stop_gate(
+        &self,
+        stop: &StopGate<'_>,
+        session: &mut super::session::RunSession,
+        tools: &crate::tools::ToolRegistry,
+        last_assistant_message: &str,
+    ) -> Result<StopDecision, RunError> {
+        let config = &self.engine.config;
+        let stop_hooks: Vec<_> = config
+            .hooks
+            .iter()
+            .filter(|hook| hook.event == hooks::STOP_EVENT && !hook.command.is_empty())
+            .collect();
+        if stop_hooks.is_empty() || stop.replay || session.is_content() || stop.request.session_wait
+        {
+            return Ok(StopDecision::Finish);
+        }
+        let attempt = session.stop_repairs + 1;
+        let input = json!({
+            "event": hooks::STOP_EVENT,
+            "payload": {
+                "run_id": session.run_id,
+                "attempt": attempt,
+                "stop_hook_active": session.stop_repairs > 0,
+                "last_assistant_message": last_assistant_message,
+            }
+        })
+        .to_string();
+        let mut reasons = Vec::new();
+        let mut cases = Vec::new();
+        for hook in stop_hooks {
+            let limit =
+                Duration::from_millis(hook.timeout_ms.clamp(1, hooks::STOP_HOOK_MAX_TIMEOUT_MS));
+            let output = super::supervision::run_until_cancelled(
+                self.engine,
+                &session.run_id,
+                stop.request,
+                stop.started,
+                stop.timeout,
+                &session.parent_run_id,
+                tools.run_sandboxed(
+                    &hooks::stop_hook_program(&hook.command),
+                    &hook.args,
+                    &[("SHIKIGAMI_HOOK_EVENT", hooks::STOP_EVENT)],
+                    input.as_bytes(),
+                    limit,
+                ),
+            )
+            .await?;
+            let verdict = hooks::stop_verdict(&hook.command, output);
+            if !verdict.passed {
+                reasons.push(verdict.reason);
+            }
+            cases.extend(verdict.cases);
+        }
+        let passed = reasons.is_empty();
+        self.engine.emit(
+            &session.run_id,
+            HarnessEvent::VerificationFinished {
+                attempt,
+                passed,
+                cases,
+            },
+        );
+        if passed {
+            return Ok(StopDecision::Finish);
+        }
+        let reason = reasons.join("\n\n");
+        let max = config.run.max_stop_repairs;
+        session.stop_repairs = attempt;
+        if attempt > max {
+            session.save(tools)?;
+            return Ok(StopDecision::Fail(format!(
+                "verification failed after {max} repair attempts: {reason}"
+            )));
+        }
+        session.messages.push(ChatMessage {
+            role: "user".into(),
+            content: format!(
+                "[stop hook: verification failed, repair {attempt} of {max}] \
+                 Fix the cause, then finish again.\n\n{reason}"
+            ),
+            tool_call_id: String::new(),
+            tool_calls: vec![],
+        });
+        session.save(tools)?;
+        Ok(StopDecision::Repair)
     }
 
     /// Root cancel/timeout keeps the tree for resume. Nested git-worktree

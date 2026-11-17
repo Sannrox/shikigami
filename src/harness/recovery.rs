@@ -471,6 +471,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         }
     }
 

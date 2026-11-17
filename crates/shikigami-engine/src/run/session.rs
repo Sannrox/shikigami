@@ -61,6 +61,8 @@ pub(super) struct RunSession {
     pub tools_mode: String,
     /// Spawn-time enabled tool names for nested children (restored on resume).
     pub tools_enabled: Vec<String>,
+    /// Completions refused by a `stop` hook (restored on resume).
+    pub stop_repairs: u32,
     pub spans: RunSpanTrace,
     /// `wait=false` child tasks for this attempt. Terminal completion joins
     /// them. Session-host park detaches the handles; resume cannot recover
@@ -124,6 +126,7 @@ impl RunSession {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
             spans: RunSpanTrace::disabled(),
             background_joins: Vec::new(),
         }
@@ -770,6 +773,7 @@ impl RunSession {
             nested_profile: self.nested_profile.clone(),
             tools_mode: self.tools_mode.clone(),
             tools_enabled: self.tools_enabled.clone(),
+            stop_repairs: self.stop_repairs,
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {

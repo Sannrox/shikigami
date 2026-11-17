@@ -292,6 +292,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         };
         cp.save(&runs).unwrap();
 
@@ -362,6 +363,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         };
         cp.save(&runs).unwrap();
         let jsonl = export_run_transcript(&runs, "run-compact", &ExportOptions::default()).unwrap();
@@ -424,6 +426,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         };
         cp.save(&runs).unwrap();
 

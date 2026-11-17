@@ -259,6 +259,11 @@ pub struct Checkpoint {
     /// Spawn-time enabled tool names for nested children. Empty on root / old checkpoints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools_enabled: Vec<String>,
+    /// Completions a `stop` hook has refused so far. Durable so a restart
+    /// does not reset the `run.max_stop_repairs` bound. Absent on older
+    /// checkpoints.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub stop_repairs: u32,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -502,6 +507,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -550,6 +556,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -595,6 +602,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -655,6 +663,7 @@ mod tests {
             nested_profile: String::new(),
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
+            stop_repairs: 0,
         }
     }
 

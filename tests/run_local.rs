@@ -654,3 +654,144 @@ async fn compaction_without_a_summary_drops_and_says_why() {
         "{events:?}"
     );
 }
+
+/// A `stop` hook that passes once the workspace's value.txt says `fixed`.
+/// It lives outside the workspace, as a real check script would.
+fn verify_hook(dir: &std::path::Path) -> serde_json::Value {
+    let script = dir.join("verify.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncat >/dev/null\ngrep -q fixed value.txt && exit 0\necho 'value.txt is still broken' >&2\nexit 2\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    serde_json::json!({"event": "stop", "command": script, "timeout_ms": 30_000})
+}
+
+fn verified_config(dir: &std::path::Path, script: serde_json::Value, max_repairs: u32) -> Config {
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(script.to_string());
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.join("ws").to_string_lossy().into();
+    config.hooks = vec![serde_json::from_value(verify_hook(dir)).unwrap()];
+    config.run.max_stop_repairs = max_repairs;
+    config
+}
+
+fn write_value(content: &str) -> serde_json::Value {
+    let args = serde_json::json!({"path": "value.txt", "content": content}).to_string();
+    serde_json::json!({"tool_calls": [{"name": "write_file", "args_json": args}]})
+}
+
+fn report_done() -> serde_json::Value {
+    serde_json::json!({"tool_calls": [{"name": "report", "args_json": "{\"summary\":\"done\",\"success\":true}"}]})
+}
+
+async fn verified_run(
+    config: Config,
+    state: StateRoot,
+    request: RunRequest,
+) -> (shikigami::RunResult, Vec<shikigami::HarnessEvent>) {
+    use shikigami::ChannelSink;
+    use std::sync::Arc;
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    (result, std::iter::from_fn(|| rx.try_recv().ok()).collect())
+}
+
+fn verification_results(events: &[shikigami::HarnessEvent]) -> Vec<(u32, bool)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            shikigami::HarnessEvent::VerificationFinished {
+                attempt, passed, ..
+            } => Some((*attempt, *passed)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stop_hook_sends_a_regression_back_until_it_is_repaired() {
+    let dir = tempdir().unwrap();
+    let script = serde_json::json!([
+        write_value("broken"),
+        report_done(),
+        write_value("fixed"),
+        report_done(),
+    ]);
+    let (result, events) = verified_run(
+        verified_config(dir.path(), script, 3),
+        StateRoot::new(dir.path().join("state")),
+        RunRequest::new("make value.txt pass"),
+    )
+    .await;
+    assert!(result.success, "{result:?}");
+    assert_eq!(verification_results(&events), [(1, false), (2, true)]);
+}
+
+#[tokio::test]
+async fn stop_hook_fails_the_run_when_repairs_run_out() {
+    let dir = tempdir().unwrap();
+    let script = serde_json::json!([write_value("broken"), report_done(), report_done()]);
+    let (result, events) = verified_run(
+        verified_config(dir.path(), script, 1),
+        StateRoot::new(dir.path().join("state")),
+        RunRequest::new("make value.txt pass"),
+    )
+    .await;
+    assert!(!result.success, "{result:?}");
+    assert_eq!(result.termination, shikigami::RunTermination::Failed);
+    assert!(
+        result
+            .summary
+            .starts_with("verification failed after 1 repair attempts"),
+        "{}",
+        result.summary
+    );
+    assert!(result.summary.contains("value.txt is still broken"));
+    assert_eq!(verification_results(&events), [(1, false), (2, false)]);
+}
+
+#[tokio::test]
+async fn stop_hook_repair_bound_survives_a_restart() {
+    let dir = tempdir().unwrap();
+    let state = || StateRoot::new(dir.path().join("state"));
+    // The script ends right after the first refusal, so the run stops there
+    // with one repair spent, as a crash would leave it.
+    let first = serde_json::json!([write_value("broken"), report_done()]);
+    let harness = Harness::from_config(verified_config(dir.path(), first, 1), state()).unwrap();
+    let mut request = RunRequest::new("make value.txt pass");
+    request.keep_workspace = true;
+    let stopped = harness.run(request).await;
+    assert!(stopped.is_err(), "script should run out: {stopped:?}");
+    let run_ids: Vec<_> = std::fs::read_dir(state().runs_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let [run_id] = run_ids.as_slice() else {
+        panic!("expected one run: {run_ids:?}");
+    };
+    let run_id = run_id.clone();
+    let checkpoint = shikigami::checkpoint::Checkpoint::load(&state().runs_dir(), &run_id).unwrap();
+    assert_eq!(checkpoint.stop_repairs, 1);
+
+    let resumed = serde_json::json!([write_value("broken"), report_done(), report_done()]);
+    let mut request = RunRequest::new("make value.txt pass");
+    request.resume_run_id = Some(run_id);
+    let (result, events) =
+        verified_run(verified_config(dir.path(), resumed, 1), state(), request).await;
+    assert!(!result.success, "{result:?}");
+    assert_eq!(verification_results(&events), [(2, false)]);
+}
