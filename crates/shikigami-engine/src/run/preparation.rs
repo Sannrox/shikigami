@@ -148,15 +148,6 @@ pub(super) async fn prepare(
         &stored_parent_run_id,
         stored_nested,
     );
-    let (prompt_id, system_prompt) = compose_context(
-        engine,
-        &run_id,
-        &workspace,
-        plan_jail,
-        nested_tools,
-        nested_profile,
-    );
-
     let explore = nested_profile == Some(super::ChildProfile::Explore);
     let host_enabled = engine.config.tools.effective_enabled();
     // `tools_mode` present means this checkpoint recorded spawn-time authority,
@@ -199,6 +190,16 @@ pub(super) async fn prepare(
             }
         }
     }
+    let lazy_skills = enabled.iter().any(|tool| tool == "load_skill");
+    let (prompt_id, system_prompt, lazy_skills) = compose_context(
+        engine,
+        &run_id,
+        &workspace,
+        plan_jail,
+        nested_tools,
+        nested_profile,
+        lazy_skills,
+    );
     let mut tools = ToolRegistry::from_config_enabled_with_job(
         &workspace.path,
         &engine.config,
@@ -206,6 +207,9 @@ pub(super) async fn prepare(
         request.job_credential.as_ref(),
     )?;
     tools.set_todos(todos);
+    if lazy_skills {
+        tools.enable_skill_loading(engine.config.context.clone());
+    }
     if !explore
         && !plan_jail
         && (!engine.config.tools.mcp_servers.is_empty()
@@ -656,11 +660,16 @@ fn compose_context(
     plan_jail: bool,
     nested_tools: bool,
     nested_profile: Option<super::ChildProfile>,
-) -> (String, String) {
+    lazy_skills: bool,
+) -> (String, String, bool) {
     let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
     let rules = crate::context::load_project_rules(&workspace.path, &engine.config.context);
-    let skills = crate::context::load_skills(&workspace.path, &engine.config.context);
+    let crate::context::SkillContext {
+        eager: skills,
+        catalog,
+    } = crate::context::skill_context(&workspace.path, &engine.config.context, lazy_skills);
     let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &skills);
+    crate::context::append_skill_catalog(&mut prompt, &catalog);
     let finder_role = (engine.config.profile.name == SECURITY_FINDER_PROFILE)
         .then_some(engine.config.security_finder.role.as_deref())
         .flatten()
@@ -766,7 +775,7 @@ fn compose_context(
             text: format!("workspace {}", workspace.path.display()),
         },
     );
-    (prompt_id, prompt)
+    (prompt_id, prompt, !catalog.is_empty())
 }
 
 async fn persist_initial_state(

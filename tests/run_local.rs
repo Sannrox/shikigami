@@ -443,3 +443,70 @@ async fn edit_outcomes_are_redacted_and_attributed_in_the_run_journal() {
         }
     }
 }
+
+#[tokio::test]
+async fn load_skill_attributes_each_pack_once_at_load() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let skills_root = dir.path().join("skills");
+    for id in ["listed", "idle", "unlisted"] {
+        let pack = skills_root.join(id);
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("SKILL.md"), format!("{id} procedure\n")).unwrap();
+    }
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"load_skill","args_json":"{\"id\":\"listed\"}"}]},
+        {"tool_calls":[{"name":"load_skill","args_json":"{\"id\":\"listed\"}"}]},
+        {"tool_calls":[{"name":"load_skill","args_json":"{\"id\":\"unlisted\"}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+    config.context.skills_root = Some(skills_root.to_string_lossy().into());
+    config.context.skills = vec!["listed".into(), "idle".into()];
+    config.events.adapter = "none".into();
+    config.workspace.root = ws.to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let result = harness
+        .run_with_events(RunRequest::new("use a skill"), Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let digests: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, event)| match event {
+            HarnessEvent::Message { text, .. } if text.starts_with("skill ") => Some((at, text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(digests.len(), 1, "{events:?}");
+    assert!(digests[0].1.starts_with("skill listed digest="));
+    let first_load = events
+        .iter()
+        .position(
+            |event| matches!(event, HarnessEvent::ToolStart { name, .. } if name == "load_skill"),
+        )
+        .unwrap();
+    assert!(digests[0].0 > first_load, "digest logs at load: {events:?}");
+    let load_results: Vec<bool> = events
+        .iter()
+        .filter_map(|event| match event {
+            HarnessEvent::ToolEnd { name, ok, .. } if name == "load_skill" => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(load_results, [true, true, false], "{events:?}");
+}

@@ -49,6 +49,7 @@ timeout_secs = 900
 load_project_rules = false
 skills_root = "examples/red-team/skills"
 skills = ["red-team"]
+eager_skills = ["red-team"]
 
 [events]
 adapter = "jsonl"

@@ -189,10 +189,23 @@ fn append_tool_authority(harness: &Harness, lines: &mut Vec<String>) {
         "tools.excluded:   {}",
         display_tools(&authority.excluded_by_intersection)
     ));
-    let visible = model_visible_builtin_definitions(&authority.effective_enabled)
+    let mut visible = model_visible_builtin_definitions(&authority.effective_enabled)
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
+    // Runs offer `load_skill` for lazy packs (listed, not eager) found on disk.
+    let context = &harness.config.context;
+    if authority
+        .effective_enabled
+        .iter()
+        .any(|tool| tool == "load_skill")
+        && context
+            .skills
+            .iter()
+            .any(|id| !context.eager_skills.contains(id))
+    {
+        visible.push("load_skill".into());
+    }
     let implicit = visible
         .iter()
         .filter(|tool| !authority.effective_enabled.contains(tool))

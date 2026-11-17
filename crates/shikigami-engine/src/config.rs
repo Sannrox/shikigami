@@ -271,7 +271,7 @@ pub enum PermissionMode {
     /// Use `enabled` if set, otherwise the safe coding default (no bash).
     #[default]
     Custom,
-    /// Read/search only (+ `todo_write`, `handoff`, report, escalate).
+    /// Read/search only (+ `load_skill`, `todo_write`, `handoff`, report, escalate).
     Read,
     /// Read + write/edit (no bash).
     Workspace,
@@ -525,6 +525,7 @@ impl ToolsSettings {
             "apply_patch".into(),
             "glob".into(),
             "grep".into(),
+            "load_skill".into(),
             "todo_write".into(),
             "handoff".into(),
             "report".into(),
@@ -539,6 +540,7 @@ impl ToolsSettings {
                 "read_file".into(),
                 "glob".into(),
                 "grep".into(),
+                "load_skill".into(),
                 "todo_write".into(),
                 "handoff".into(),
                 "report".into(),
@@ -897,8 +899,14 @@ pub struct ContextSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_root: Option<String>,
     /// Skill directory names under `skills_root` (each contains `SKILL.md`).
+    /// When the run may call `load_skill`, the prompt lists each id with a
+    /// description and the model loads a body on demand; otherwise every
+    /// listed body goes into the system prompt.
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Ids from `skills` whose bodies go into the system prompt at run start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eager_skills: Vec<String>,
     /// Max bytes per skill body.
     #[serde(default = "default_max_rules_bytes")]
     pub max_skill_bytes: usize,
@@ -967,6 +975,7 @@ impl Default for ContextSettings {
             max_rules_bytes: default_max_rules_bytes(),
             skills_root: None,
             skills: Vec::new(),
+            eager_skills: Vec::new(),
             max_skill_bytes: default_max_rules_bytes(),
             session_prompt: None,
         }

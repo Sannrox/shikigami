@@ -46,6 +46,7 @@ timeout_secs = 600
 load_project_rules = false
 skills_root = "examples/security-finder/skills"
 skills = ["security-finder"]
+eager_skills = ["security-finder"]
 
 [events]
 adapter = "jsonl"

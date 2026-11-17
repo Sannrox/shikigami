@@ -51,7 +51,7 @@ pub const PLAN_JAIL_PATH: &str = ".shikigami/plan.md";
 pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
     match name {
         "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "handoff" | "report"
-        | "escalate" | "bash_job_status" | "bash_job_logs" | "child_status" => true,
+        | "escalate" | "bash_job_status" | "bash_job_logs" | "child_status" | "load_skill" => true,
         "child_run" => child_run_plan_jail_ok(args_json),
         "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
         "apply_patch" => apply_patch_is_plan(args_json),
@@ -399,6 +399,16 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
     ]
 }
 
+/// `load_skill` is not in [`builtin_catalog`]: the registry offers it only
+/// when the run has lazy skill packs, not through `tools.enabled`.
+pub(crate) fn load_skill_definition() -> ToolDef {
+    def(
+        "load_skill",
+        "Load a skill pack's procedure by id from the Skills list in the system prompt.",
+        r#"{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}"#,
+    )
+}
+
 /// Whether this tool must be the only call in a model batch.
 pub fn must_be_exclusive_batch(name: &str) -> bool {
     matches!(name, "report" | "escalate")
@@ -418,7 +428,7 @@ pub fn is_parallel_safe_tool(name: &str) -> bool {
 /// Conservative replay classification. Unknown and external tools are denied.
 pub(crate) fn replay_tool_authority(name: &str) -> ReplayToolAuthority {
     match name {
-        "read_file" | "glob" | "grep" => ReplayToolAuthority::Observation,
+        "read_file" | "glob" | "grep" | "load_skill" => ReplayToolAuthority::Observation,
         "report" => ReplayToolAuthority::Terminal,
         _ => ReplayToolAuthority::Denied,
     }
@@ -839,7 +849,7 @@ mod tests {
     fn replay_authority_allows_only_observation_and_terminal_tools() {
         for definition in builtin_catalog() {
             let expected = match definition.name.as_str() {
-                "read_file" | "glob" | "grep" => ReplayToolAuthority::Observation,
+                "read_file" | "glob" | "grep" | "load_skill" => ReplayToolAuthority::Observation,
                 "report" => ReplayToolAuthority::Terminal,
                 _ => ReplayToolAuthority::Denied,
             };

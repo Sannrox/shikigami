@@ -1,16 +1,20 @@
 //! Tool registry: enabled builtins, external tools, todos, web_fetch, background bash.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::config::{Config, NetworkSettings, SandboxSettings};
+use crate::config::{Config, ContextSettings, NetworkSettings, SandboxSettings};
 
 use super::JobCredentialHandle;
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
-use super::catalog::{BASH_HELPER_TOOLS, builtin_is_authorized, model_visible_builtin_definitions};
+use super::catalog::{
+    BASH_HELPER_TOOLS, builtin_is_authorized, load_skill_definition,
+    model_visible_builtin_definitions,
+};
 use super::executor::{BashArgs, ToolExecutor};
 use super::handoff::{apply_handoff, format_handoff_summary};
 use super::todo::{TodoItem, apply_todo_write, format_todo_summary};
@@ -37,6 +41,21 @@ pub struct ToolRegistry {
     network: NetworkSettings,
     web_fetcher: Arc<dyn WebFetcher>,
     bg_jobs: Arc<Mutex<BackgroundJobs>>,
+    /// Set when the run lists lazy skill packs; enables `load_skill`.
+    skills: Option<SkillLoader>,
+}
+
+/// `load_skill` state: the allow-list plus which packs this run has loaded.
+struct SkillLoader {
+    settings: ContextSettings,
+    loaded: Mutex<LoadedSkills>,
+}
+
+#[derive(Default)]
+struct LoadedSkills {
+    seen: HashSet<String>,
+    /// `skill <id> digest=<sha256>` lines not yet emitted as events.
+    pending: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -161,6 +180,7 @@ impl ToolRegistry {
             network,
             web_fetcher,
             bg_jobs: Arc::new(Mutex::new(BackgroundJobs::new())),
+            skills: None,
         })
     }
 
@@ -201,9 +221,55 @@ impl ToolRegistry {
         self.todos.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
+    /// Offer `load_skill` for the packs in `settings.skills`. Call when the
+    /// run prompt carries a lazy skill catalog.
+    pub fn enable_skill_loading(&mut self, settings: ContextSettings) {
+        self.skills = Some(SkillLoader {
+            settings,
+            loaded: Mutex::default(),
+        });
+    }
+
+    /// Drain attribution lines for packs loaded since the last call. Each
+    /// pack yields one line, at its first load in this run.
+    pub fn take_skill_loads(&self) -> Vec<String> {
+        self.skills
+            .as_ref()
+            .and_then(|skills| skills.loaded.lock().ok())
+            .map(|mut loaded| std::mem::take(&mut loaded.pending))
+            .unwrap_or_default()
+    }
+
+    fn load_skill(&self, args_json: &str) -> Result<String, ToolError> {
+        #[derive(Deserialize)]
+        struct LoadSkillArgs {
+            id: String,
+        }
+        let Some(skills) = &self.skills else {
+            return Err(ToolError::Disabled("load_skill".into()));
+        };
+        let args: LoadSkillArgs = parse("load_skill", args_json)?;
+        let pack =
+            crate::context::load_listed_skill(&self.executor.workspace, &skills.settings, &args.id)
+                .ok_or_else(|| ToolError::Message(format!("load_skill: no skill `{}`", args.id)))?;
+        let mut loaded = skills
+            .loaded
+            .lock()
+            .map_err(|_| ToolError::Message("skill loads lock poisoned".into()))?;
+        if loaded.seen.insert(pack.id.clone()) {
+            loaded
+                .pending
+                .push(format!("skill {} digest={}", pack.id, pack.digest));
+        }
+        Ok(format!("# Skill `{}`\n\n{}", pack.id, pack.body))
+    }
+
     /// Model-facing tool definitions for enabled builtins + external tools.
     pub fn definitions(&self) -> Vec<ToolDef> {
         let mut defs = model_visible_builtin_definitions(&self.executor.enabled);
+        if self.skills.is_some() {
+            defs.push(load_skill_definition());
+        }
         for t in &self.external {
             defs.push(t.definition());
         }
@@ -216,6 +282,7 @@ impl ToolRegistry {
 
     pub fn is_enabled(&self, name: &str) -> bool {
         builtin_is_authorized(&self.executor.enabled, name)
+            || (name == "load_skill" && self.skills.is_some())
             || self.external.iter().any(|t| t.definition().name == name)
     }
 
@@ -233,6 +300,12 @@ impl ToolRegistry {
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(t.call(args_json).await?),
+                edit_outcome: None,
+            });
+        }
+        if name == "load_skill" {
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(self.load_skill(args_json)?),
                 edit_outcome: None,
             });
         }
