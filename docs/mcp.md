@@ -97,7 +97,7 @@ timeout_secs = 30         # per tools/list + tools/call deadline
 
 Responses are accepted in either framing regardless of the setting.
 
-HTTP JSON-RPC (POST) transport:
+Streamable HTTP transport (one POST per message):
 
 ```toml
 [[tools.mcp_servers]]
@@ -108,8 +108,25 @@ token_env = "MCP_TOKEN"   # optional Bearer
 ```
 
 HTTP URLs are checked with `[network]` egress (`deny` / `allowlist` / `unrestricted`).
-`timeout_secs` (default 30) bounds every request on both transports. Full SSE
-streaming is not required for v1 list/call.
+`timeout_secs` (default 30) bounds every request on both transports, including
+a re-initialize after a lost session.
+
+The client accepts either reply shape the server picks per request: a JSON body
+or an event stream. It reads an event stream until the reply to its request
+arrives. When `initialize` returns an `Mcp-Session-Id`, every later request
+carries it, along with the negotiated `MCP-Protocol-Version`. If the server answers 404 for that session, the client
+re-initializes once and retries, without a session if the server no longer
+issues one; a second loss fails the call.
+
+The run's tool catalog is fixed when the server attaches. After a
+`notifications/tools/list_changed` arrives with a reply, the next call re-lists,
+and a call to a tool the server stopped offering fails without being sent.
+Each such call re-lists first, so a tool the server offers again works again. An
+event stream is bounded by the same 1 MiB limit as a stdio frame. The client does
+not follow redirects, so a session id never reaches a host the egress check did
+not approve. Tools the server adds
+mid-run are not offered until the next run. Servers that only answer with JSON
+need no setting change.
 
 ### Gateway mode
 
