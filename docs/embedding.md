@@ -84,6 +84,11 @@ fields as above. Struct literals do not compile outside the engine crate.
 `McpServerSettings::stdio` / `::http`, `McpGatewaySettings::new`, and
 `HookSettings::new` build the entries that have required fields.
 
+`HarnessEvent` and `ContentRunRequestV1` are `#[non_exhaustive]` too. A
+`match` on events needs a wildcard arm, and a content request starts from
+`ContentRunRequestV1::new` with fields assigned after it. New event variants
+and request fields are then not breaking changes.
+
 ## Resolving settings like the CLI
 
 ```rust

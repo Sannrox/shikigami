@@ -23,6 +23,7 @@ pub struct EditOutcomeRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HarnessEvent {
     Status {
         status: String,

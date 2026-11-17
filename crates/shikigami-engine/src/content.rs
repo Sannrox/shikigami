@@ -303,6 +303,7 @@ pub trait ContentResolver: Send + Sync {
 }
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ContentRunRequestV1 {
     pub task: String,
     pub messages: Vec<ContentMessageV1>,
