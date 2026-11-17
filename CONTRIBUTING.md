@@ -66,8 +66,7 @@ the default suite.
 GitHub Actions CI must stay green. Required checks on `main`:
 
 - Build & Test
-- Rustfmt
-- Clippy
+- Validate (`make validate`: format, Clippy, docs, changelog, release)
 
 ## Architecture rules
 

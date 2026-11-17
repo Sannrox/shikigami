@@ -1,18 +1,12 @@
 name: CodeQL
 
+# Not a pull request gate: findings arrive as code-scanning alerts, and it was
+# the slowest pull request job. Default-branch pushes still scan every merge.
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   schedule:
     - cron: "27 4 * * 1"
-
-# A new push to a pull request cancels its previous run; other events run
-# every commit. The workflow name keeps workflows from cancelling each other.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
