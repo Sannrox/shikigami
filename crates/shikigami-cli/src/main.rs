@@ -408,6 +408,15 @@ async fn run() -> anyhow::Result<()> {
             request.resume_answer = answer;
             request.plan_jail = plan_jail;
             request.nested = nested;
+            // OpenTelemetry's convention for passing trace context to a process.
+            request.trace_context = std::env::var("TRACEPARENT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|traceparent| shikigami::tracing_export::TraceContext {
+                    traceparent,
+                    tracestate: std::env::var("TRACESTATE").ok(),
+                    source: shikigami::tracing_export::TraceSource::Env,
+                });
             request.resume_plan = match (plan_accept, plan_reject) {
                 (true, false) => Some(shikigami::PlanDecision::Accept),
                 (false, true) => Some(shikigami::PlanDecision::Reject),

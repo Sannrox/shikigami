@@ -100,12 +100,27 @@ impl<'a> RunTransaction<'a> {
             .as_ref()
             .map(|checkpoint| checkpoint.operation_id.as_str())
             .unwrap_or("");
+        if session
+            .trace_context
+            .take_if(|context| !context.is_valid())
+            .is_some()
+        {
+            // A bad header never fails a run: it starts its own trace.
+            self.engine.emit(
+                &session.run_id,
+                HarnessEvent::Message {
+                    level: "warn".into(),
+                    text: "ignoring malformed traceparent; the run starts its own trace".into(),
+                },
+            );
+        }
         session.spans = RunSpanTrace::begin(
             &self.engine.config,
             &handle,
             plan_operation_id,
             &prompt_id,
             &session.preset,
+            session.trace_context.as_ref(),
         )
         .map_err(|error| RunError::Message(error.to_string()))?;
         if request.resume_run_id.is_some() {

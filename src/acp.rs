@@ -6048,6 +6048,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         }
     }
 

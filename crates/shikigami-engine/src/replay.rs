@@ -1890,6 +1890,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         checkpoint.save(&state.runs_dir()).unwrap();
         if finish {

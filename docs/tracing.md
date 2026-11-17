@@ -48,9 +48,29 @@ Each attempt adds its own `run` span to it.
 
 | Span | Parent | When |
 | --- | --- | --- |
-| `run` | (root) | Begin after admission; end at the durable run outcome |
+| `run` | (root), or the caller's span | Begin after admission; end at the durable run outcome |
 | `turn` | `run` | One model turn |
 | `tool` | `turn` | One tool call, keyed by the durable call id |
+
+## Caller trace context
+
+A caller that already has a trace can hand it to the run as a W3C
+`traceparent` (with an optional `tracestate`). The run then uses the caller's
+trace id, and its `run` span takes the caller's span as parent.
+
+| Source | How | `parent.source` |
+| --- | --- | --- |
+| Library | `RunRequest.trace_context` | `request` |
+| CLI | `TRACEPARENT` / `TRACESTATE` environment | `env` |
+| `serve` | `traceparent` / `tracestate` headers on `POST /runs`; a context in the JSON body is ignored | `header` |
+| none | No context given | `none` |
+
+Plane intake passes no context: the claim carries none.
+
+The context is stored in the run checkpoint, so a resume or takeover keeps
+the original parent. A malformed `traceparent` logs a warning and the run
+starts its own trace; it never fails the run. `tracestate` is kept but never
+exported as an attribute.
 
 ## Attribute allowlist
 
@@ -72,6 +92,7 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `shikigami.prompt_id` | Versioned prompt id (run span) |
 | `shikigami.preset_id` | Narrowing preset id, when the run has one (run span) |
 | `shikigami.termination` | How the run ended: `completed`, `failed`, `parked`, … (run span) |
+| `parent.source` | Where the caller trace context came from: `request`, `env`, `header`, or `none` (run span) |
 
 Resource attributes are `service.name=shikigami` and `service.version`.
 No other keys are exported. A defense-in-depth filter drops unknown keys at

@@ -295,6 +295,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         cp.save(&runs).unwrap();
 
@@ -368,6 +369,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         cp.save(&runs).unwrap();
         let jsonl = export_run_transcript(&runs, "run-compact", &ExportOptions::default()).unwrap();
@@ -433,6 +435,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         cp.save(&runs).unwrap();
 

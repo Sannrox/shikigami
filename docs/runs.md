@@ -188,3 +188,7 @@ Routes:
 Use Authorization: Bearer <token> on every request. Tokens are required even
 for loopback binds to prevent browser-based cross-site task submission. The HTTP surface does not admit governed work or
 override governance; plane intake remains the explicit --intake plane path.
+
+`POST /runs` accepts a W3C `traceparent` (and optional `tracestate`) header.
+The queued run then continues the caller's trace; see
+[tracing.md](tracing.md#caller-trace-context).

@@ -9,6 +9,7 @@ use tokio::sync::{Semaphore, watch};
 use super::queue::{Admission, FilesystemQueue};
 use super::{ControlOptions, QueueJob, ServeError, wait_shutdown};
 use crate::harness::Harness;
+use crate::tracing_export::{TraceContext, TraceSource};
 
 const MAX_CONTROL_CONNECTIONS: usize = 64;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -157,6 +158,9 @@ struct Request {
     method: String,
     path: String,
     authorization: Option<String>,
+    /// W3C `traceparent` / `tracestate` headers, passed to the queued run.
+    traceparent: Option<String>,
+    tracestate: Option<String>,
     body: Vec<u8>,
 }
 
@@ -202,6 +206,8 @@ async fn read_request(
     }
     let mut content_length = 0usize;
     let mut authorization = None;
+    let mut traceparent = None;
+    let mut tracestate = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -214,6 +220,8 @@ async fn read_request(
                     .map_err(|_| ServeError::Message("invalid content length".into()))?
             }
             "authorization" => authorization = Some(value.trim().to_string()),
+            "traceparent" => traceparent = Some(value.trim().to_string()),
+            "tracestate" => tracestate = Some(value.trim().to_string()),
             _ => {}
         }
     }
@@ -235,6 +243,8 @@ async fn read_request(
         method,
         path,
         authorization,
+        traceparent,
+        tracestate,
         body: raw[body_start..body_start + content_length].to_vec(),
     })
 }
@@ -279,7 +289,7 @@ fn route(
                 b"{\"error\":\"body too large\"}".to_vec(),
             ));
         }
-        let job: QueueJob = match serde_json::from_slice(&request.body) {
+        let mut job: QueueJob = match serde_json::from_slice(&request.body) {
             Ok(job) => job,
             Err(error) => {
                 return Ok(Response::json(
@@ -290,6 +300,12 @@ fn route(
                 ));
             }
         };
+        // Only the header supplies trace context; the body cannot.
+        job.trace_context = request.traceparent.clone().map(|traceparent| TraceContext {
+            traceparent,
+            tracestate: request.tracestate.clone(),
+            source: TraceSource::Header,
+        });
         return Ok(match queue.admit(job, options.queue_capacity)? {
             Admission::Accepted(job) => Response::json("202 Accepted", serde_json::to_vec(&job)?),
             Admission::MissingTask => Response::json(
@@ -402,6 +418,8 @@ mod tests {
             method: method.into(),
             path: path.into(),
             authorization: Some("Bearer secret".into()),
+            traceparent: None,
+            tracestate: None,
             body,
         }
     }
@@ -438,13 +456,21 @@ mod tests {
             keep_workspace: false,
             logical_operation_id: None,
             timeout_secs: None,
+            trace_context: None,
         })
         .unwrap();
-        let accepted = request("POST", "/runs", body);
+        let accepted = Request {
+            traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into()),
+            ..request("POST", "/runs", body)
+        };
         assert!(authorized(&accepted, options.auth_token.as_deref()));
+        let response = route(&accepted, &harness, &queue, &options).unwrap();
+        assert_eq!(response.status, "202 Accepted");
+        // The header, not the body, gives the queued run its trace context.
+        let queued: QueueJob = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(
-            route(&accepted, &harness, &queue, &options).unwrap().status,
-            "202 Accepted"
+            queued.trace_context.map(|context| context.source),
+            Some(TraceSource::Header)
         );
         assert_eq!(queue.depth().unwrap(), 1);
         let unauthorized = Request {
@@ -463,6 +489,7 @@ mod tests {
                 keep_workspace: false,
                 logical_operation_id: None,
                 timeout_secs: None,
+                trace_context: None,
             })
             .unwrap(),
         );
