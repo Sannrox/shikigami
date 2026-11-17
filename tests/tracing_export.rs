@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -9,7 +10,7 @@ const SECRET_INPUT: &str = "SECRET_TOOL_INPUT_284";
 const SECRET_OUTPUT: &str = "SECRET_TOOL_OUTPUT_284";
 
 #[tokio::test]
-async fn scripted_run_exports_identity_spans_without_payloads() {
+async fn scripted_run_exports_metadata_spans_without_payloads() {
     let dir = tempdir().unwrap();
     let spans_path = dir.path().join("spans.json");
     let mut config = offline_config(dir.path());
@@ -18,8 +19,10 @@ async fn scripted_run_exports_identity_spans_without_payloads() {
     config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
     config.model.script_json = Some(
         r#"[
-        {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"SECRET_TOOL_OUTPUT_284 SECRET_TOOL_INPUT_284\"}"}]},
-        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"SECRET_TASK_PAYLOAD_284\",\"success\":true}"}]}
+        {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"SECRET_TOOL_OUTPUT_284 SECRET_TOOL_INPUT_284\"}"}],
+         "usage":{"input_tokens":11,"output_tokens":7}},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"SECRET_TASK_PAYLOAD_284\",\"success\":true}"}],
+         "usage":{"input_tokens":13,"output_tokens":5}}
     ]"#
         .into(),
     );
@@ -49,6 +52,35 @@ async fn scripted_run_exports_identity_spans_without_payloads() {
     );
     assert!(exported.contains("\"key\": \"call_id\""), "{exported}");
     assert!(exported.contains("tool-"), "{exported}");
+
+    let spans = spans_by_name(&exported);
+    let [run] = spans["run"].as_slice() else {
+        panic!("{exported}")
+    };
+    assert_eq!(run["shikigami.prompt_id"], result.prompt_id);
+    assert_eq!(run["shikigami.termination"], "completed");
+    assert!(
+        !run.contains_key("shikigami.preset_id"),
+        "no preset: {run:?}"
+    );
+    let turns = &spans["turn"];
+    let tokens: Vec<_> = turns
+        .iter()
+        .map(|turn| {
+            assert_eq!(turn["gen_ai.request.model"], result.model);
+            (
+                turn["gen_ai.usage.input_tokens"].as_str(),
+                turn["gen_ai.usage.output_tokens"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(tokens, [("11", "7"), ("13", "5")]);
+    let mut tools: Vec<_> = spans["tool"]
+        .iter()
+        .map(|tool| tool["gen_ai.tool.name"].as_str())
+        .collect();
+    tools.sort_unstable();
+    assert_eq!(tools, ["report", "write_file"]);
     for secret in [SECRET_TASK, SECRET_INPUT, SECRET_OUTPUT] {
         assert!(
             !exported.contains(secret),
@@ -96,4 +128,34 @@ fn offline_config(root: &Path) -> Config {
     config.events.adapter = "none".into();
     config.workspace.root = root.join("ws").to_string_lossy().into();
     config
+}
+
+/// Attributes of each exported span, grouped by span name in export order.
+fn spans_by_name(exported: &str) -> HashMap<String, Vec<BTreeMap<String, String>>> {
+    let payload: serde_json::Value = serde_json::from_str(exported).unwrap();
+    let mut spans: HashMap<String, Vec<_>> = HashMap::new();
+    for span in payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .unwrap()
+    {
+        let attributes = span["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attribute| {
+                (
+                    attribute["key"].as_str().unwrap().to_owned(),
+                    attribute["value"]["stringValue"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                )
+            })
+            .collect();
+        spans
+            .entry(span["name"].as_str().unwrap().to_owned())
+            .or_default()
+            .push(attributes);
+    }
+    spans
 }

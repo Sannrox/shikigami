@@ -547,7 +547,10 @@ impl<'a> DurableModelTurn<'a> {
             self.timeout,
             &session.parent_run_id,
         )?;
-        session.spans.end_turn();
+        session.spans.end_turn(
+            &crate::model::effective_model_name(&self.engine.config),
+            turn.usage,
+        );
         Ok(turn)
     }
 

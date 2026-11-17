@@ -273,7 +273,7 @@ impl<'a> DurableToolBatch<'a> {
                 continue;
             }
             let call_id = stable_tool_call_id(call, session.turns, index);
-            session.spans.start_tool(&call_id);
+            session.spans.start_tool(&call_id, &call.name);
             self.engine.emit(
                 &session.run_id,
                 HarnessEvent::ToolStart {
