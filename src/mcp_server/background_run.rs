@@ -215,5 +215,10 @@ fn format_event(event: &HarnessEvent) -> String {
             format!("session_mode={mode} model={model}")
         }
         HarnessEvent::Message { level, text } => format!("message[{level}]={text}"),
+        // Events added later show only their type until they get a line here.
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "event".into()),
     }
 }
