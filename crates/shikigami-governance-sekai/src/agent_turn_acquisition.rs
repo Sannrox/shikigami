@@ -56,6 +56,9 @@ pub(super) async fn claim_next(
                 proto::sekai::ListClaimableAgentTurnsRequest {
                     namespace: client.namespace.clone(),
                     limit: CLAIM_CANDIDATES,
+                    // Parked turns resume only through a continuation, which this
+                    // intake does not handle yet; the plane omits them.
+                    accepts_continuation: false,
                 },
                 plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
             )
@@ -87,6 +90,7 @@ pub(super) async fn claim_next(
                         runtime_id: runtime_id.into(),
                         turn_id: candidate.turn_id.clone(),
                         ttl_ms,
+                        accepts_continuation: false,
                     },
                     plane_session::call_options(&client.inner, Some(&client.namespace), None, None),
                 )

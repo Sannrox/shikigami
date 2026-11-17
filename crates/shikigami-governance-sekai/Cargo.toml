@@ -20,7 +20,7 @@ tokio = { version = "1", default-features = false, features = [
   "time",
 ] }
 uuid = { version = "1", features = ["v4"] }
-sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", rev = "084f5e7d20f942ea11be662090bbc52f46255713", version = "0.1.1" }
+sekai-client = { git = "https://github.com/Sannrox/sekai-chisei.git", tag = "v3.1.0", version = "1.0.0" }
 
 [dev-dependencies]
 tempfile = "3"
