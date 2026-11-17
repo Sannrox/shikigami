@@ -44,6 +44,7 @@ timeout_secs = 30
 load_project_rules = false
 skills_root = "examples/security-triage/skills"
 skills = ["security-triage"]
+eager_skills = ["security-triage"]
 
 [events]
 adapter = "jsonl"

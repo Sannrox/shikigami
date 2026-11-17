@@ -20,6 +20,7 @@ The `site-agent` bounds apply, plus a typed verdict and the triage skill.
 | `tools.mcp_gateway` | Required | Catalog, delivery criticality, lineage, markings, findings, and dispositions are gateway reads. |
 | `tools.enabled` | Only `mcp.gateway.*`, `report`, `escalate` | No shell, write or filesystem tool. |
 | `context.skills` | `security-triage` | Procedure and report format, from [`examples/security-triage/skills`](../examples/security-triage/skills/security-triage/SKILL.md). |
+| `context.eager_skills` | `security-triage` | In the system prompt from the first turn. |
 | `run.nested` | Refused | A child run's preset tools would reach past the gateway. |
 
 ## Output

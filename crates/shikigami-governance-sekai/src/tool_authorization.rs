@@ -278,7 +278,7 @@ pub(super) fn risk_class(name: &str) -> &'static str {
     match name {
         "bash" | "bash_background" | "bash_job_status" | "bash_job_logs" => "destructive",
         "write_file" | "edit" | "multi_edit" | "apply_patch" => "write",
-        "read_file" | "glob" | "grep" | "web_fetch" => "read",
+        "read_file" | "glob" | "grep" | "web_fetch" | "load_skill" => "read",
         _ => "write",
     }
 }

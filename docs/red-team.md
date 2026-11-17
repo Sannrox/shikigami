@@ -16,6 +16,7 @@ and no route to a deployment.
 | `workspace.adapter` | `inplace` on the input directory | Inputs are read where they are; nothing can write them. |
 | `context.load_project_rules` | `false` | Inputs are untrusted text; a rules file among them is not loaded. |
 | `context.skills` | `red-team` | The procedure and spec format, from [`examples/red-team/skills`](../examples/red-team/skills/red-team/SKILL.md). |
+| `context.eager_skills` | `red-team` | In the system prompt from the first turn. |
 | `run.max_turns` / `run.timeout_secs` | `16` / `900` | The run budget. |
 
 `doctor` shows `tools.visible` as exactly the four tools above and no

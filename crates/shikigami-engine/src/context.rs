@@ -110,8 +110,8 @@ fn scan_skill_ids(root: &Path) -> Vec<String> {
 ///
 /// Configured `context.skills` is an allow-list. When that list is empty,
 /// ids are discovered from `skills_root` and `<workspace>/.agents/skills`
-/// directories that contain `SKILL.md`. [`load_skills`] still injects only
-/// configured ids into the system prompt.
+/// directories that contain `SKILL.md`. Runs still see only configured ids
+/// ([`skill_context`]).
 pub fn list_skill_ids(workspace: &Path, settings: &ContextSettings) -> Vec<String> {
     let roots = skill_search_roots(workspace, settings);
     if !settings.skills.is_empty() {
@@ -163,16 +163,100 @@ pub fn load_skill(workspace: &Path, settings: &ContextSettings, id: &str) -> Opt
     None
 }
 
-/// Load configured skill packs from `skills_root/<id>/SKILL.md`.
+/// Load every configured skill pack from `skills_root/<id>/SKILL.md`.
 pub fn load_skills(workspace: &Path, settings: &ContextSettings) -> Vec<SkillPack> {
-    if settings.skills.is_empty() {
-        return Vec::new();
-    }
     settings
         .skills
         .iter()
         .filter_map(|id| load_skill(workspace, settings, id))
         .collect()
+}
+
+/// A lazy skill pack as the model first sees it: id plus one-line description.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSummary {
+    pub id: String,
+    pub description: String,
+}
+
+/// How a run's configured packs reach the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillContext {
+    /// Bodies composed into the system prompt.
+    pub eager: Vec<SkillPack>,
+    /// Packs the model loads on demand with `load_skill`.
+    pub catalog: Vec<SkillSummary>,
+}
+
+const MAX_DESCRIPTION_CHARS: usize = 200;
+
+/// Split configured packs into eager bodies and a lazy catalog. With
+/// `lazy = false` (the run may not call `load_skill`) every pack is eager.
+pub fn skill_context(workspace: &Path, settings: &ContextSettings, lazy: bool) -> SkillContext {
+    let mut context = SkillContext::default();
+    for pack in load_skills(workspace, settings) {
+        if lazy && !settings.eager_skills.contains(&pack.id) {
+            context.catalog.push(SkillSummary {
+                description: skill_description(&pack.body),
+                id: pack.id,
+            });
+        } else {
+            context.eager.push(pack);
+        }
+    }
+    context
+}
+
+/// Load a pack for the `load_skill` tool. Only ids in `context.skills` load,
+/// even when that list is empty (unlike [`load_skill`], which then allows any
+/// pack on disk for the TUI).
+pub fn load_listed_skill(
+    workspace: &Path,
+    settings: &ContextSettings,
+    id: &str,
+) -> Option<SkillPack> {
+    if !settings.skills.iter().any(|listed| listed == id) {
+        return None;
+    }
+    load_skill(workspace, settings, id)
+}
+
+/// `description:` from YAML-style front matter, else the first content line.
+fn skill_description(body: &str) -> String {
+    let mut lines = body.lines();
+    let mut front_matter = None;
+    if lines.clone().next().map(str::trim) == Some("---") {
+        lines.next();
+        for line in lines.by_ref() {
+            if line.trim() == "---" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("description:") {
+                front_matter = Some(value.trim().trim_matches(['"', '\'']).to_string());
+            }
+        }
+    }
+    let description = front_matter.unwrap_or_else(|| {
+        lines
+            .map(|line| line.trim().trim_start_matches('#').trim())
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    });
+    description.chars().take(MAX_DESCRIPTION_CHARS).collect()
+}
+
+/// Append the lazy skill catalog to a composed system prompt.
+pub fn append_skill_catalog(prompt: &mut String, catalog: &[SkillSummary]) {
+    if catalog.is_empty() {
+        return;
+    }
+    prompt.push_str(
+        "\n\n# Skills\n\nCall `load_skill` with an id to read that procedure before you follow it.\n",
+    );
+    for skill in catalog {
+        prompt.push_str(&format!("\n- `{}`: {}", skill.id, skill.description));
+    }
 }
 
 fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String, String, bool)> {
@@ -238,6 +322,76 @@ mod tests {
             ..Default::default()
         };
         assert!(load_project_rules(dir.path(), &s).is_none());
+    }
+
+    fn write_pack(workspace: &Path, id: &str, body: &str) {
+        let pack = workspace.join(".shikigami/skills").join(id);
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("SKILL.md"), body).unwrap();
+    }
+
+    #[test]
+    fn listed_packs_reach_the_prompt_as_descriptions_only() {
+        let dir = tempdir().unwrap();
+        let ids: Vec<String> = (0..10).map(|n| format!("pack-{n}")).collect();
+        for id in &ids {
+            write_pack(
+                dir.path(),
+                id,
+                &format!("---\nname: {id}\ndescription: when to use {id}\n---\n\nBODY of {id}\n"),
+            );
+        }
+        let s = ContextSettings {
+            skills: ids.clone(),
+            ..Default::default()
+        };
+        let skills = skill_context(dir.path(), &s, true);
+        let mut prompt = compose_system_prompt("BASE", None, &skills.eager);
+        append_skill_catalog(&mut prompt, &skills.catalog);
+        for id in &ids {
+            assert!(
+                prompt.contains(&format!("- `{id}`: when to use {id}")),
+                "{prompt}"
+            );
+        }
+        assert!(!prompt.contains("BODY"), "{prompt}");
+    }
+
+    #[test]
+    fn eager_packs_stay_whole_and_leave_the_catalog() {
+        let dir = tempdir().unwrap();
+        write_pack(dir.path(), "always", "ALWAYS body\n");
+        write_pack(dir.path(), "later", "# Later\n\nLATER body\n");
+        let s = ContextSettings {
+            skills: vec!["always".into(), "later".into()],
+            eager_skills: vec!["always".into()],
+            ..Default::default()
+        };
+        let skills = skill_context(dir.path(), &s, true);
+        assert_eq!(skills.eager.len(), 1);
+        assert_eq!(skills.eager[0].id, "always");
+        assert_eq!(
+            skills.catalog,
+            [SkillSummary {
+                id: "later".into(),
+                description: "Later".into()
+            }]
+        );
+        let without_tool = skill_context(dir.path(), &s, false);
+        assert_eq!(without_tool.eager.len(), 2);
+        assert!(without_tool.catalog.is_empty());
+    }
+
+    #[test]
+    fn load_listed_skill_requires_the_allow_list() {
+        let dir = tempdir().unwrap();
+        write_pack(dir.path(), "on-disk", "body\n");
+        assert!(load_listed_skill(dir.path(), &ContextSettings::default(), "on-disk").is_none());
+        let s = ContextSettings {
+            skills: vec!["on-disk".into()],
+            ..Default::default()
+        };
+        assert!(load_listed_skill(dir.path(), &s, "on-disk").is_some());
     }
 
     #[test]

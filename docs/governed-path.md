@@ -134,7 +134,7 @@ authorized through the plane’s host-executed external-action API
 | --- | --- | --- |
 | `bash` / `bash_background` / `bash_job_status` / `bash_job_logs` | yes | `destructive` |
 | `write_file` / `edit` / `multi_edit` / `apply_patch` | yes | `write` |
-| `read_file` / `glob` / `grep` / `web_fetch` | yes | `read` |
+| `read_file` / `glob` / `grep` / `web_fetch` / `load_skill` | yes | `read` |
 | unknown / MCP names | yes | `write` (default) |
 | `report` / `escalate` / `todo_write` / `handoff` | no | — (harness-internal terminate, park, checklist, or brief) |
 

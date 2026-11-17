@@ -33,6 +33,7 @@ failed `tool_end` in the run journal (`events.jsonl`).
 | `workspace.adapter` | `inplace` on the input directory | Inputs are read where they are. |
 | `context.load_project_rules` | `false` | Inputs are untrusted text. |
 | `context.skills` | `security-finder` | Procedure and report format, from [`examples/security-finder/skills`](../examples/security-finder/skills/security-finder/SKILL.md). |
+| `context.eager_skills` | `security-finder` | In the system prompt from the first turn. |
 
 `doctor` shows `tools.visible` as exactly the enabled role tools and no
 `tools.external` line.

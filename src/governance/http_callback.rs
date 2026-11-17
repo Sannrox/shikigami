@@ -54,6 +54,7 @@ fn tool_skips_host_authz(name: &str) -> bool {
         "read_file"
             | "glob"
             | "grep"
+            | "load_skill"
             | "report"
             | "escalate"
             | "todo_write"

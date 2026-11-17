@@ -1050,6 +1050,9 @@ impl<'a> DurableToolBatch<'a> {
                     {
                         self.engine.emit(&session.run_id, event);
                     }
+                    if call.name == "load_skill" {
+                        emit_skill_loads(self.engine, &session.run_id, tools.as_ref());
+                    }
                     session.spans.end_tool(&report_call_id, true);
                     self.engine.emit(
                         &session.run_id,
@@ -1541,6 +1544,9 @@ impl<'a> DurableToolBatch<'a> {
             {
                 self.engine.emit(&session.run_id, event);
             }
+            if name == "load_skill" {
+                emit_skill_loads(self.engine, &session.run_id, self.tools.as_ref());
+            }
             session.spans.end_tool(&prefix_call_id, ok);
             self.engine.emit(
                 &session.run_id,
@@ -1641,6 +1647,19 @@ fn project_brief_list(content_run: bool, items: &[String]) -> Vec<String> {
         .iter()
         .map(|item| projected_detail(content_run, item))
         .collect()
+}
+
+/// Attribute skill packs at their first `load_skill` in this run.
+fn emit_skill_loads(engine: &Engine, run_id: &str, tools: &ToolRegistry) {
+    for text in tools.take_skill_loads() {
+        engine.emit(
+            run_id,
+            HarnessEvent::Message {
+                level: "info".into(),
+                text,
+            },
+        );
+    }
 }
 
 /// Per-call brief from that call's args. Content runs keep only projected text.

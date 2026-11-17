@@ -312,7 +312,7 @@ pub fn export_replay_inputs(
         ));
     }
     let (snapshot, inputs_digest) = snapshot.expect("inputs retained");
-    let prompt_body = {
+    let (prompt_body, skill_loading) = {
         if !skill_sources_are_retained(&snapshot, &config.context) {
             return Ok(incomplete_export_with_approval(
                 run_id,
@@ -322,19 +322,23 @@ pub fn export_replay_inputs(
             ));
         }
         let rules = crate::context::load_project_rules(&snapshot, &config.context);
-        let skills = crate::context::load_skills(&snapshot, &config.context);
-        crate::context::compose_system_prompt(
+        // Replay offers `load_skill` (see `replay_config`), so packs are lazy.
+        let skills = crate::context::skill_context(&snapshot, &config.context, true);
+        let mut prompt = crate::context::compose_system_prompt(
             prompt_base.expect("prompt retained"),
             rules.as_ref(),
-            &skills,
-        )
+            &skills.eager,
+        );
+        crate::context::append_skill_catalog(&mut prompt, &skills.catalog);
+        (prompt, !skills.catalog.is_empty())
     };
     let checkpoint_path = crate::checkpoint::path_for(&state.runs_dir(), run_id);
     let checkpoint_bytes = std::fs::read(&checkpoint_path)?;
-    let bindings = ReplayBindings::for_replay(
+    let bindings = ReplayBindings::for_replay_surface(
         config,
         &checkpoint.task,
         &prompt_body,
+        skill_loading,
         inputs_digest,
         digest_bytes(&checkpoint_bytes),
     )?;
@@ -595,8 +599,31 @@ impl ReplayBindings {
         inputs_digest: impl Into<String>,
         retained_evidence_digest: impl Into<String>,
     ) -> Result<Self, ReplayError> {
+        Self::for_replay_surface(
+            config,
+            task,
+            system_prompt,
+            false,
+            inputs_digest,
+            retained_evidence_digest,
+        )
+    }
+
+    /// [`Self::for_replay`] for a prompt that carries a lazy skill catalog,
+    /// where the replay registry also offers `load_skill`.
+    pub(crate) fn for_replay_surface(
+        config: &Config,
+        task: &str,
+        system_prompt: &str,
+        skill_loading: bool,
+        inputs_digest: impl Into<String>,
+        retained_evidence_digest: impl Into<String>,
+    ) -> Result<Self, ReplayError> {
         let replay = replay_config(config);
-        let tools = crate::tools::definitions_for_enabled(&replay.tools.effective_enabled());
+        let mut tools = crate::tools::definitions_for_enabled(&replay.tools.effective_enabled());
+        if skill_loading {
+            tools.push(crate::tools::load_skill_definition());
+        }
         let mut bindings = Self::from_runtime(
             &replay,
             task,
@@ -641,6 +668,7 @@ pub fn replay_config(config: &Config) -> Config {
         "read_file".into(),
         "glob".into(),
         "grep".into(),
+        "load_skill".into(),
         "report".into(),
     ];
     replay.tools.mcp_servers.clear();
@@ -1969,6 +1997,40 @@ mod tests {
         let composed = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &[]);
         assert_eq!(evidence.bindings.prompt_digest, text_digest(&composed));
         assert_ne!(evidence.bindings.prompt_digest, text_digest(SYSTEM_PROMPT));
+    }
+
+    #[test]
+    fn export_binds_the_lazy_skill_surface_the_replay_registry_builds() {
+        let (_directory, state, _workspace) = seed_export_run(
+            "run-1",
+            crate::checkpoint::prompt_id(SYSTEM_PROMPT),
+            vec![],
+            None,
+            true,
+        );
+        write_initial_snapshot(&state, "run-1", b"original");
+        let snapshot = state.runs_dir().join("run-1/snapshots/initial");
+        let pack = snapshot.join(".shikigami/skills/pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("SKILL.md"), "how to pack\n").unwrap();
+        let mut config = Config::default();
+        config.context.skills = vec!["pack".into()];
+        let report = export_replay_inputs(&state, "run-1", &config).unwrap();
+        assert!(report.complete, "{:?}", report.missing);
+        let bindings = report.evidence.expect("complete evidence").bindings;
+
+        let replay = replay_config(&config);
+        let mut tools = crate::tools::ToolRegistry::from_config(&snapshot, &replay).unwrap();
+        tools.enable_skill_loading(replay.context.clone());
+        assert_eq!(
+            bindings.tool_catalog_digest,
+            tool_catalog_digest(&tools.definitions()).unwrap()
+        );
+        let skills = crate::context::skill_context(&snapshot, &replay.context, true);
+        assert!(skills.eager.is_empty());
+        let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, None, &[]);
+        crate::context::append_skill_catalog(&mut prompt, &skills.catalog);
+        assert_eq!(bindings.prompt_digest, text_digest(&prompt));
     }
 
     #[test]
