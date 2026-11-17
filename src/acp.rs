@@ -1601,6 +1601,7 @@ async fn run_and_forward(
         persist_session_run(host, session_id, id).await;
     }
     let mut held = Vec::new();
+    let mut streamed = HashSet::new();
     let run_fut = async {
         match drive {
             PromptDrive::Text(request) => harness.run_with_events(request, Some(sink)).await,
@@ -1619,7 +1620,7 @@ async fn run_and_forward(
                     break (&mut run_fut).await;
                 };
                 let (mut updates, event_run_id) =
-                    drain_event_batch(session_id, Some(first), events);
+                    drain_event_batch(session_id, Some(first), events, &mut streamed);
                 held.append(&mut updates);
                 if let Some(id) = event_run_id.clone() {
                     seen_run_id = Some(id.clone());
@@ -1656,7 +1657,7 @@ async fn run_and_forward(
             }
         }
     };
-    let (mut updates, event_run_id) = drain_updates(session_id, events);
+    let (mut updates, event_run_id) = drain_updates(session_id, events, &mut streamed);
     held.append(&mut updates);
     if let Some(id) = event_run_id.clone() {
         seen_run_id = Some(id.clone());
@@ -1766,7 +1767,9 @@ fn apply_assistant_content<E>(
 ) {
     let chunk_count = updates
         .iter()
-        .filter(|update| update["update"]["sessionUpdate"] == "agent_message_chunk")
+        .filter(|update| {
+            update["update"]["sessionUpdate"] == "agent_message_chunk" && !is_delta(update)
+        })
         .count();
     if chunk_count == 0 {
         return;
@@ -1798,7 +1801,7 @@ fn apply_assistant_content<E>(
     };
     let mut index = 0usize;
     for update in updates.iter_mut() {
-        if update["update"]["sessionUpdate"] == "agent_message_chunk" {
+        if update["update"]["sessionUpdate"] == "agent_message_chunk" && !is_delta(update) {
             if let Some(text) = assistants.get(index) {
                 update["update"]["content"]["text"] = json!(*text);
             }
@@ -2053,22 +2056,29 @@ fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value
     updates
 }
 
-fn drain_updates(session_id: &str, events: &mut AsyncChannelRx) -> (Vec<Value>, Option<String>) {
-    drain_event_batch(session_id, None, events)
+fn drain_updates(
+    session_id: &str,
+    events: &mut AsyncChannelRx,
+    streamed: &mut HashSet<u32>,
+) -> (Vec<Value>, Option<String>) {
+    drain_event_batch(session_id, None, events, streamed)
 }
 
+/// `streamed` remembers turns whose text already went out as deltas, across
+/// batches of one prompt drive.
 fn drain_event_batch(
     session_id: &str,
     first: Option<HarnessEvent>,
     events: &mut AsyncChannelRx,
+    streamed: &mut HashSet<u32>,
 ) -> (Vec<Value>, Option<String>) {
     let mut updates = Vec::new();
     let mut run_id = None;
     if let Some(event) = first {
-        consume_event(session_id, event, &mut updates, &mut run_id);
+        consume_event(session_id, event, &mut updates, &mut run_id, streamed);
     }
     while let Some(event) = events.try_recv() {
-        consume_event(session_id, event, &mut updates, &mut run_id);
+        consume_event(session_id, event, &mut updates, &mut run_id, streamed);
     }
     (updates, run_id)
 }
@@ -2078,10 +2088,12 @@ fn consume_event(
     event: HarnessEvent,
     updates: &mut Vec<Value>,
     run_id: &mut Option<String>,
+    streamed: &mut HashSet<u32>,
 ) {
     match &event {
         HarnessEvent::ToolStart { run_id: id, .. }
         | HarnessEvent::ToolEnd { run_id: id, .. }
+        | HarnessEvent::AssistantDelta { run_id: id, .. }
         | HarnessEvent::RunFinished { run_id: id, .. }
             if !id.is_empty() =>
         {
@@ -2090,6 +2102,20 @@ fn consume_event(
         _ => {}
     }
     let update = match event {
+        HarnessEvent::AssistantDelta { turn, text, .. } => {
+            streamed.insert(turn);
+            json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": text },
+                    "messageId": format!("turn-{turn}"),
+                    DELTA_MARK: true
+                }
+            })
+        }
+        // A streamed turn's chunk still takes its place in the assistant
+        // text fill, then is dropped before sending: its text went out.
         HarnessEvent::ModelTurn {
             turn,
             content_preview,
@@ -2098,7 +2124,8 @@ fn consume_event(
             "update": {
                 "sessionUpdate": "agent_message_chunk",
                 "content": { "type": "text", "text": content_preview },
-                "messageId": format!("turn-{turn}")
+                "messageId": format!("turn-{turn}"),
+                STREAMED_MARK: streamed.remove(&turn)
             }
         }),
         HarnessEvent::ContentTurn { turn, .. } => json!({
@@ -2160,8 +2187,24 @@ fn consume_event(
     updates.push(update);
 }
 
+/// Host-internal markers on `agent_message_chunk` updates, removed before
+/// sending: a live delta, and the whole-turn chunk of a streamed turn.
+const DELTA_MARK: &str = "_shikigamiDelta";
+const STREAMED_MARK: &str = "_shikigamiStreamed";
+
+fn is_delta(update: &Value) -> bool {
+    update["update"][DELTA_MARK] == true
+}
+
 async fn send_updates(client: &dyn AcpClient, updates: Vec<Value>) -> Result<(), Value> {
-    for update in updates {
+    for mut update in updates {
+        if update["update"][STREAMED_MARK] == true {
+            continue;
+        }
+        if let Some(inner) = update.get_mut("update").and_then(Value::as_object_mut) {
+            inner.remove(DELTA_MARK);
+            inner.remove(STREAMED_MARK);
+        }
         client
             .notify("session/update", update)
             .await
@@ -2932,6 +2975,40 @@ impl AcpClient for CancelOnAskClient {
             )
             .await;
         Ok(json!({ "outcome": { "outcome": "cancelled" } }))
+    }
+}
+
+/// Cancels its session when the first streamed text chunk arrives.
+#[cfg(test)]
+struct CancelOnChunkClient {
+    host: Arc<AcpHost>,
+    session_id: String,
+    updates: Mutex<Vec<Value>>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl AcpClient for CancelOnChunkClient {
+    async fn notify(&self, _method: &str, params: Value) -> Result<(), String> {
+        let chunk = params["update"]["sessionUpdate"] == "agent_message_chunk";
+        self.updates.lock().await.push(params);
+        if chunk {
+            self.host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/cancel",
+                        "params": { "sessionId": self.session_id }
+                    }),
+                    self,
+                )
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn request(&self, method: &str, _params: Value) -> Result<Value, String> {
+        Err(format!("unexpected agent request {method}"))
     }
 }
 
@@ -5241,6 +5318,108 @@ mod tests {
         );
     }
 
+    fn chunk_texts(updates: &[Value]) -> Vec<String> {
+        updates
+            .iter()
+            .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
+            .map(|u| u["update"]["content"]["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn streamed_turn_reaches_the_client_in_order_once() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[{"chunks":["Hel","lo ","world"],"chunk_delay_ms":50}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let reply = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": { "sessionId": session_id, "prompt": [{"type":"text","text":"hi"}] }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn");
+        let updates = client.updates.lock().await;
+        let chunks = chunk_texts(&updates);
+        assert!(
+            chunks.len() >= 2,
+            "text arrived before the turn ended: {chunks:?}"
+        );
+        assert_eq!(chunks.concat(), "Hello world");
+        assert!(
+            updates.iter().all(|u| u["update"]
+                .as_object()
+                .is_some_and(|o| o.keys().all(|k| !k.starts_with("_shikigami")))),
+            "host markers leaked: {updates:?}"
+        );
+        let run_id = host.sessions.lock().await[&session_id]
+            .run_id
+            .clone()
+            .unwrap();
+        let checkpoint = Checkpoint::load(&host.harness.state.runs_dir(), &run_id).unwrap();
+        let assistant = checkpoint
+            .messages
+            .iter()
+            .rfind(|m| m.role == "assistant")
+            .unwrap();
+        assert_eq!(assistant.content, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn cancel_during_a_streamed_turn_keeps_the_session_usable() {
+        let dir = tempdir().unwrap();
+        let host = Arc::new(scripted_host(
+            dir.path(),
+            r#"[{"chunks":["a","b","c","d","e","f","g","h"],"chunk_delay_ms":50}]"#,
+        ));
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let setup = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &setup, &cwd).await;
+        let client = CancelOnChunkClient {
+            host: Arc::clone(&host),
+            session_id: session_id.clone(),
+            updates: Mutex::new(Vec::new()),
+        };
+        let prompt = |id: u64| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/prompt",
+                "params": { "sessionId": session_id, "prompt": [{"type":"text","text":"go"}] }
+            })
+        };
+        let reply = host.handle(prompt(3), &client).await.unwrap();
+        assert_eq!(rpc_ok(&reply)["stopReason"], "cancelled");
+        let partial = chunk_texts(&client.updates.lock().await).concat();
+        assert!(partial.len() < 8, "cancel stopped the stream: {partial}");
+
+        // The cancelled turn is not durable; the follow-up plans it again.
+        let reply = host.handle(prompt(4), &setup).await.unwrap();
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
+        assert_eq!(
+            chunk_texts(&setup.updates.lock().await).concat(),
+            "abcdefgh"
+        );
+    }
+
     #[tokio::test]
     async fn session_cancel_honors_cancel_marker() {
         let dir = tempdir().unwrap();
@@ -6057,7 +6236,7 @@ mod tests {
             turn: 2,
             content_preview: "done".into(),
         });
-        let (updates, run_id) = drain_updates("sess", &mut rx);
+        let (updates, run_id) = drain_updates("sess", &mut rx, &mut HashSet::new());
         assert_eq!(run_id.as_deref(), Some("run-1"));
         let kinds: Vec<&str> = updates
             .iter()
@@ -6085,7 +6264,7 @@ mod tests {
                 content_preview: format!("t{turn}"),
             });
         }
-        let (overflowed, _) = drain_updates("sess", &mut rx);
+        let (overflowed, _) = drain_updates("sess", &mut rx, &mut HashSet::new());
         assert!(
             overflowed.len() <= capacity,
             "forwarder channel grew to {}",

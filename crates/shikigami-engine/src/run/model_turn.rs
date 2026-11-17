@@ -284,15 +284,40 @@ impl<'a> DurableModelTurn<'a> {
             session.save(self.tools.as_ref())?;
             turn
         } else {
-            let (planned, retries) =
-                crate::model::collect_retry_notes(self.engine.governance.plan_turn(
-                    self.handle,
-                    self.system_prompt,
-                    &session.messages,
-                    self.tool_defs,
-                    self.engine.model.as_ref(),
-                ))
-                .await;
+            let plan = crate::model::collect_retry_notes(self.engine.governance.plan_turn(
+                self.handle,
+                self.system_prompt,
+                &session.messages,
+                self.tool_defs,
+                self.engine.model.as_ref(),
+            ));
+            let (planned, retries) = if self.engine.events.wants_text_deltas() {
+                // A streamed turn shows text early, so it can also be cancelled
+                // early. Dropping it leaves the checkpoint at the last durable
+                // turn, which a resume plans again.
+                let events = std::sync::Arc::clone(&self.engine.events);
+                let turn = session.turns + 1;
+                let run_id = session.run_id.clone();
+                let sink = std::sync::Arc::new(move |text: &str| {
+                    events.emit(HarnessEvent::AssistantDelta {
+                        run_id: run_id.clone(),
+                        turn,
+                        text: text.to_owned(),
+                    });
+                });
+                super::supervision::run_until_cancelled(
+                    self.engine,
+                    &session.run_id,
+                    self.request,
+                    self.started,
+                    self.timeout,
+                    &session.parent_run_id,
+                    crate::model::stream_text_deltas(sink, plan),
+                )
+                .await?
+            } else {
+                plan.await
+            };
             self.emit_model_retries(&session.run_id, retries);
             let turn = planned?;
             session.turns += 1;
