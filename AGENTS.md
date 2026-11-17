@@ -46,6 +46,11 @@ Human documentation index: [docs/README.md](docs/README.md).
   the networked `validate-workflow-skills.sh` (run it directly).
 - `make test` runs unit tests; `make test-integration` runs integration tests.
 - `make test-e2e` runs the offline library host proof (`make embed` is an alias).
+- `bash scripts/check-workflows.sh` lints `.github/workflows/` with pinned
+  actionlint and zizmor (CI job `Lint workflows`).
+- `python3 -m pip install --require-hashes -r scripts/tests/requirements.txt`
+  once, then `python3 -m unittest discover -s scripts/tests -t .` runs the
+  release tests (CI job `Release tests`).
   See [docs/project-verification.md](docs/project-verification.md).
 - `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
   runs the ignored live plane probe when a local sekai-chisei is available.
@@ -183,7 +188,9 @@ planned work with neither is not a running lane.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
 ports and settings, governance adapters, the workspace jail, the
-sekai-client proto pin, and the kekkai pin. Lanes that would both change one of these surfaces run
+sekai-client proto pin, the kekkai pin, and the release path
+(`.github/workflows/`, `scripts/release/`, `scripts/tests/release/`,
+`scripts/check-workflows.sh`, `RELEASING.md`). Lanes that would both change one of these surfaces run
 in sequence, not in parallel.
 
 A lane publishes its first Verified commit to the claim branch as a draft Pull
@@ -245,6 +252,13 @@ deterministic tests that do not require external services. Mark plane- or
 provider-dependent tests ignored, following `tests/plane_live.rs`, and document
 required local services in the test or related docs. Offline `cargo test` must
 stay green without sekai-chisei.
+
+Release scripts live in `scripts/release/`, one `unittest` file per script in
+`scripts/tests/release/` (the root `tests/` belongs to Cargo). Workflow YAML
+only calls scripts: a release invariant is enforced in the script at the step
+that would break it, and `test_workflows.py` asserts the workflows' structure
+on the parsed YAML, never by grepping text or pinning step names. Tests use
+temp paths that include the process id, so parallel runs do not collide.
 
 ## Commit & Pull Request Guidelines
 
@@ -356,9 +370,9 @@ Rows beyond `## Testing Guidelines`:
 | sekai-chisei governance adapter | ignored `tests/plane_live.rs` probe when a local plane is available; otherwise report skipped |
 | docs, ADRs | `make validate` (Markdown links, changelog version) |
 | Skills / `AGENTS.md` | `bash scripts/validate-workflow-skills.sh` |
-| `.github/` workflows, Dependabot | `bash scripts/validate-workflows.sh` (pinned actionlint and zizmor; part of `make validate`) |
 | packaging | `cargo build --locked`; `scripts/oci-image-smoke.sh` for the image |
-| `v*` release path | `bash scripts/validate-release.sh` |
+| `.github/` workflows | `bash scripts/check-workflows.sh` (pinned actionlint and zizmor) |
+| `v*` release path | `python3 -m unittest discover -s scripts/tests -t .` |
 
 ### Release audit
 

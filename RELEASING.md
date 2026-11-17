@@ -18,8 +18,9 @@ git push origin vX.Y.Z
 ```
 
 A tag is never moved, deleted, or reused; a bad release gets a new patch
-version. The tagged commit must be on `main`. `bash scripts/validate-release.sh`
-checks the release path without publishing.
+version. The tagged commit must be on `main`. The release tests
+(`python3 -m unittest discover -s scripts/tests -t .`, see `AGENTS.md`) check
+the release scripts and workflow structure without publishing.
 
 ## Release candidates
 
@@ -64,7 +65,7 @@ Release, the registry, or attestations.
 `.github/workflows/release.yml`, from `main`:
 
 1. Checks out the tag and fetches the annotated tag object. Main's
-   `scripts/verify-release-tag.sh` refuses a lightweight or unsigned tag, a
+   `scripts/release/verify-tag.sh` refuses a lightweight or unsigned tag, a
    signer outside the fingerprint list, an expired or revoked key, or a tag
    that is not the tagged commit's `[workspace.package]` version. The key and
    fingerprint list are read from `main`, so changing them takes a reviewed
@@ -73,7 +74,9 @@ Release, the registry, or attestations.
    The binaries, the image tags, labels and `VCS_REF`, the gate flags and the
    manifest `git_sha` all come from it.
 3. Creates a draft GitHub Release with `gh release create <tag> --verify-tag`,
-   or resumes the draft an earlier run left and drops its assets. The body is the matching
+   or resumes the draft an earlier run left and drops its assets.
+   `scripts/release/github-release.sh` makes every release change and refuses
+   a published release or one it cannot read. The body is the matching
    `CHANGELOG.md` section.
 4. Builds and uploads the binaries. For a stable version it also publishes
    the OCI image by version (never `latest`) with BuildKit provenance and
