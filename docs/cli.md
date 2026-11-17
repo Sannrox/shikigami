@@ -19,7 +19,6 @@ shikigami [--state DIR] [--config FILE] [--model MODEL] [--preset PRESET] <COMMA
 | `runs [ID] [--diagnose], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([runs.md](runs.md)) |
 | `artifacts ID [--patch]` | Export retained artifact metadata or a captured patch |
 | `metrics [--json\|--prometheus]` | Export aggregate durable metrics ([metrics.md](metrics.md)) |
-| `eval FIXTURE [--json]` | Run offline scripted golden fixtures ([eval.md](eval.md)) |
 | `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host; filesystem supports bounded worker/control options ([serve.md](serve.md)) |
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([mcp.md](mcp.md)) |
 | `acp` | ACP session host, newline JSON-RPC ([acp.md](acp.md)). Evolving; not freeze-core |
