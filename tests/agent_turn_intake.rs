@@ -115,7 +115,7 @@ fn sample_turn(turn_id: &str) -> ClaimedAgentTurn {
             runtime_id: "shikigami".into(),
             generation: 1,
             fencing_token: "fence-1".into(),
-            expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+            expires_at_ms: shikigami::governance::now_unix_ms() + 60_000,
             valid_until: std::time::Instant::now() + Duration::from_secs(60),
             runtime_token: RuntimeToken::from_grant("rt-turn".into(), i64::MAX, 0).unwrap(),
         },
