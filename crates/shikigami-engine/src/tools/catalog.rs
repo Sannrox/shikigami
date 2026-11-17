@@ -363,8 +363,8 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
         ),
         def(
             "report",
-            "Finish the run with a structured summary. Must be the only call in the batch.",
-            r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"}},"required":["summary"]}"#,
+            "Finish the run with a summary. Put a structured answer in `data` (a JSON object). Must be the only call in the batch.",
+            r#"{"type":"object","properties":{"summary":{"type":"string"},"success":{"type":"boolean"},"data":{"type":"object"}},"required":["summary"]}"#,
         ),
         def(
             "escalate",

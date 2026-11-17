@@ -33,6 +33,8 @@ actionable governance errors. There is no separate reporter-preflight RPC.
 | `completion_reason` | same string as `termination` |
 | `success` | bool string |
 | `summary` | truncated final summary / error |
+| `data` | the report's `data` as compact JSON, when present and at most 4000 bytes |
+| `data_omitted` | set instead of `data` when it is larger; the full value stays in local `run.json` |
 | `turns` | completed model turns |
 | `termination` | `completed` \| `failed` |
 | `workspace` | host path (reference only; not plane storage) |

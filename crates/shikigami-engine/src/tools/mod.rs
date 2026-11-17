@@ -68,6 +68,10 @@ pub struct Report {
     pub summary: String,
     #[serde(default)]
     pub success: bool,
+    /// The run's structured answer, when it has one. A JSON object; any other
+    /// JSON value fails argument parsing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Payload produced by the `escalate` tool (operator decision required).

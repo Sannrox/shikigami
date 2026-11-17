@@ -783,6 +783,9 @@ pub(crate) fn recover_terminal_replay(
             run_id: checkpoint.run_id,
             success: terminal.success,
             summary: terminal.summary.clone(),
+            // Replay checkpoints reject unknown fields, so storing report data
+            // would break older readers across a rollback. Not kept here.
+            data: None,
             turns: checkpoint.completed_turns,
             workspace: checkpoint.workspace,
             artifact_dir,
@@ -1890,6 +1893,7 @@ mod tests {
                     run_id: run_id.into(),
                     success: true,
                     summary: "done".into(),
+                    data: None,
                     turns: 1,
                     workspace: workspace.clone(),
                     artifact_dir: None,

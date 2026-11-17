@@ -237,6 +237,7 @@ impl<'a> RunSupervision<'a> {
             run_id: run_id.into(),
             success: terminal.success,
             summary,
+            data: None,
             turns: sidecar.completed_turns,
             workspace: checkpoint.workspace,
             artifact_dir: terminal

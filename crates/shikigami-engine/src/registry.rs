@@ -82,6 +82,9 @@ pub struct RunRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub termination: Option<String>,
     pub summary: String,
+    /// The terminal report's structured answer, when the run gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Map<String, serde_json::Value>>,
     pub task_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logical_operation_id: Option<String>,
@@ -275,6 +278,7 @@ impl RunRegistry {
                     success: None,
                     termination: None,
                     summary: String::new(),
+                    data: None,
                     task_digest: digest(task),
                     logical_operation_id: logical_operation_id
                         .filter(|value| !value.is_empty())
@@ -494,6 +498,7 @@ impl RunRegistry {
         record.success = Some(result.success);
         record.termination = Some(result.termination.as_str().into());
         record.summary = result.summary.clone();
+        record.data = result.data.clone();
         record.workspace = Some(result.workspace.display().to_string());
         record.artifact_dir = result
             .artifact_dir

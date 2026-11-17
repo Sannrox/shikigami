@@ -107,6 +107,7 @@ impl<'a> RunTransaction<'a> {
         }
 
         let mut final_summary = String::from("completed without report");
+        let mut final_data = None;
         let mut success = false;
         let mut termination = RunTermination::Completed;
 
@@ -145,22 +146,28 @@ impl<'a> RunTransaction<'a> {
         let mut gate_error = None;
         let recovered_text_report =
             match recovered_text_report(&session.messages, finder_role, triage) {
-                Some((true, summary)) => {
-                    match self.stop_gate(&stop, &mut session, &tools, &summary).await {
-                        Ok(StopDecision::Finish) => {
-                            Some((true, summary, RunTermination::Completed))
-                        }
+                Some(report) if report.success => {
+                    match self
+                        .stop_gate(&stop, &mut session, &tools, &report.summary)
+                        .await
+                    {
+                        Ok(StopDecision::Finish) => Some((report, RunTermination::Completed)),
                         Ok(StopDecision::Repair) => None,
-                        Ok(StopDecision::Fail(summary)) => {
-                            Some((false, summary, RunTermination::Failed))
-                        }
+                        Ok(StopDecision::Fail(summary)) => Some((
+                            crate::tools::Report {
+                                summary,
+                                success: false,
+                                data: None,
+                            },
+                            RunTermination::Failed,
+                        )),
                         Err(error) => {
                             gate_error = Some(error);
                             None
                         }
                     }
                 }
-                Some((false, summary)) => Some((false, summary, RunTermination::Completed)),
+                Some(report) => Some((report, RunTermination::Completed)),
                 None => None,
             };
 
@@ -184,10 +191,10 @@ impl<'a> RunTransaction<'a> {
             Ok(None)
         } else if let Some(error) = gate_error {
             Err(error)
-        } else if let Some((report_success, summary, recovered_termination)) = recovered_text_report
-        {
-            final_summary = summary;
-            success = report_success;
+        } else if let Some((report, recovered_termination)) = recovered_text_report {
+            final_summary = report.summary;
+            final_data = report.data;
+            success = report.success;
             termination = recovered_termination;
             Ok(None)
         } else if request.resume_plan == Some(super::PlanDecision::Reject) {
@@ -316,6 +323,7 @@ impl<'a> RunTransaction<'a> {
                         ToolBatchOutcome::Completed {
                             summary,
                             success: report_success,
+                            data,
                         } => {
                             if report_success {
                                 match self
@@ -333,6 +341,7 @@ impl<'a> RunTransaction<'a> {
                                 }
                             }
                             final_summary = summary;
+                            final_data = data;
                             success = report_success;
                             termination = RunTermination::Completed;
                             return Ok(None);
@@ -378,6 +387,7 @@ impl<'a> RunTransaction<'a> {
                             RunOutcome {
                                 success: false,
                                 summary: projected_summary.clone(),
+                                data: None,
                                 turns: session.turns,
                                 termination: e.termination().as_str().into(),
                                 workspace: ws.path.display().to_string(),
@@ -487,6 +497,7 @@ impl<'a> RunTransaction<'a> {
                     RunOutcome {
                         success,
                         summary: governance_summary,
+                        data: final_data.clone(),
                         turns: session.turns,
                         termination: termination.as_str().into(),
                         workspace: ws.path.display().to_string(),
@@ -589,6 +600,7 @@ impl<'a> RunTransaction<'a> {
             run_id: session.run_id.clone(),
             success,
             summary: final_summary,
+            data: final_data,
             turns: session.turns,
             workspace: ws.path,
             artifact_dir,
@@ -922,11 +934,14 @@ async fn wait_for_child_idle(mut rx: watch::Receiver<bool>, already_idle: bool) 
     }
 }
 
+/// The terminal `report` the checkpoint already holds, when the last turn is
+/// one successfully executed `report` call. Typed profiles get their
+/// canonical summary back.
 fn recovered_text_report(
     messages: &[ChatMessage],
     finder_role: Option<&str>,
     triage: bool,
-) -> Option<(bool, String)> {
+) -> Option<crate::tools::Report> {
     let assistant_idx = messages
         .iter()
         .rposition(|message| message.role == "assistant")?;
@@ -942,48 +957,35 @@ fn recovered_text_report(
     if tool.role != "tool" || tool.tool_call_id != call.id || assistant_idx + 2 != messages.len() {
         return None;
     }
-    let report: crate::tools::Report = serde_json::from_str(&call.args_json).ok()?;
+    let mut report: crate::tools::Report = serde_json::from_str(&call.args_json).ok()?;
+    let canonical = |summary: &str| {
+        if triage {
+            crate::security_triage::canonicalize_report(summary).ok()
+        } else {
+            crate::security_finder::canonicalize_report(summary, finder_role?).ok()
+        }
+    };
+    let typed = triage || finder_role.is_some();
     // A matching tool-call id is not enough: denied, hook-blocked, and failed
     // executions also append a tool message. Successful `report` results use
     // this prefix; anything else must resume through the normal turn loop.
     if tool.content == format!("report: {}", report.summary) {
-        if let Some(role) = finder_role {
-            if !report.success {
-                return Some((false, report.summary));
-            }
-            let canonical =
-                crate::security_finder::canonicalize_report(&report.summary, role).ok()?;
-            return Some((true, canonical));
+        if typed && report.success {
+            report.summary = canonical(&report.summary)?;
         }
-        if triage {
-            if !report.success {
-                return Some((false, report.summary));
-            }
-            let canonical = crate::security_triage::canonicalize_report(&report.summary).ok()?;
-            return Some((true, canonical));
-        }
-        return Some((report.success, report.summary));
+        return Some(report);
     }
-    if triage {
-        if !report.success {
-            return None;
-        }
-        let canonical = crate::security_triage::canonicalize_report(&report.summary).ok()?;
-        if tool.content != format!("report: {canonical}") {
-            return None;
-        }
-        return Some((true, canonical));
-    }
-    // Security-finder stamps signatures into the tool result, not the call args.
-    let role = finder_role?;
-    if !report.success {
+    // Typed profiles stamp the canonical summary into the tool result, not the
+    // call args.
+    if !typed || !report.success {
         return None;
     }
-    let canonical = crate::security_finder::canonicalize_report(&report.summary, role).ok()?;
-    if tool.content != format!("report: {canonical}") {
+    let summary = canonical(&report.summary)?;
+    if tool.content != format!("report: {summary}") {
         return None;
     }
-    Some((true, canonical))
+    report.summary = summary;
+    Some(report)
 }
 
 fn projected_summary(content_run: bool, summary: &str) -> String {
@@ -1340,7 +1342,8 @@ mod tests {
                 tool_calls: vec![crate::model::ToolCall {
                     id: "call_0".into(),
                     name: "report".into(),
-                    args_json: r#"{"summary":"done","success":true}"#.into(),
+                    args_json: r#"{"summary":"done","success":true,"data":{"proposal":"p-1"}}"#
+                        .into(),
                 }],
             },
             ChatMessage {
@@ -1350,10 +1353,11 @@ mod tests {
                 tool_calls: vec![],
             },
         ];
-        assert_eq!(
-            recovered_text_report(&messages, None, false),
-            Some((true, "done".into()))
-        );
+        // A crash after the report keeps its structured answer.
+        let report = recovered_text_report(&messages, None, false).unwrap();
+        assert!(report.success);
+        assert_eq!(report.summary, "done");
+        assert_eq!(report.data.unwrap()["proposal"], "p-1");
     }
 
     #[test]
@@ -1444,7 +1448,8 @@ mod tests {
                 &messages,
                 Some(crate::security_finder::ROLE_DEPENDENCY_ADVISORY),
                 false
-            ),
+            )
+            .map(|report| (report.success, report.summary)),
             Some((true, canonical.clone()))
         );
         assert_eq!(

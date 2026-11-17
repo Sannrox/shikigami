@@ -252,6 +252,7 @@ pub(super) async fn abort_uncheckpointed_receipt(
     let outcome = RunOutcome {
         success: false,
         summary: reason.chars().take(4000).collect(),
+        data: None,
         turns: 0,
         termination: "aborted_before_model".into(),
         workspace: String::new(),

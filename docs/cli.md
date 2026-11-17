@@ -40,6 +40,7 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 | `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
 | `--preset` / `SHIKIGAMI_PRESET` | Narrow tools and add a procedure: a built-in name or a preset `.toml` file; `code` means none. See [presets.md](presets.md) |
 | `run --keep-workspace` | Keep the workspace after a successful run |
+| `run --json` | Print the run result as JSON on stdout (same shape as the MCP `run` result, including report `data`); exit status unchanged |
 | `run --plan-jail` / `SHIKIGAMI_RUN_PLAN_JAIL` | Restrict mutating tools to `.shikigami/plan.md` until `--plan-accept` |
 | `run --plan-accept` / `--plan-reject` | Resume a parked plan: Accept restores execute authority on the same run; Reject completes failed and keeps the jail so a later `--resume` stays write-jailed |
 | `run --nested` / `SHIKIGAMI_RUN_NESTED` | Enable `child_run` / `child_status` for this run (default off) |

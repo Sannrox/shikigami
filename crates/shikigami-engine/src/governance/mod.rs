@@ -68,6 +68,8 @@ pub struct RunHandle {
 pub struct RunOutcome {
     pub success: bool,
     pub summary: String,
+    /// The terminal report's structured answer (`report.data`), if any.
+    pub data: Option<serde_json::Map<String, serde_json::Value>>,
     /// Completed model turns (0 if failed before any turn).
     pub turns: u32,
     /// Termination kind: completed | cancelled | timed_out | max_turns | failed

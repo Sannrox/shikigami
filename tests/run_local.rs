@@ -858,3 +858,40 @@ async fn a_fact_from_the_compacted_span_survives_only_with_a_summary() {
         "compaction without a summary kept the fact: {dropped:?}"
     );
 }
+
+#[tokio::test]
+async fn report_data_reaches_the_result_and_run_record_and_non_objects_are_refused() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "none".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        serde_json::json!([
+            {"tool_calls":[{"name":"report","args_json":
+                r#"{"summary":"too early","success":true,"data":"p-1"}"#}]},
+            {"tool_calls":[{"name":"report","args_json":
+                r#"{"summary":"proposed","success":true,"data":{"proposal":"p-1"}}"#}]}
+        ])
+        .to_string(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state.clone()).unwrap();
+    let result = harness.run(RunRequest::new("propose")).await.unwrap();
+
+    // The string `data` was refused as a tool error, so the run went on to
+    // the second report instead of finishing on the first.
+    let expected = serde_json::json!({"proposal":"p-1"});
+    assert_eq!(result.summary, "proposed");
+    assert_eq!(
+        result.data.clone().map(serde_json::Value::Object),
+        Some(expected.clone())
+    );
+    let record = shikigami::registry::RunRegistry::new(state.path())
+        .unwrap()
+        .load(&result.run_id)
+        .unwrap();
+    assert_eq!(record.data.map(serde_json::Value::Object), Some(expected));
+}
