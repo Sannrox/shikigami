@@ -356,6 +356,7 @@ Rows beyond `## Testing Guidelines`:
 | sekai-chisei governance adapter | ignored `tests/plane_live.rs` probe when a local plane is available; otherwise report skipped |
 | docs, ADRs | `make validate` (Markdown links, changelog version) |
 | Skills / `AGENTS.md` | `bash scripts/validate-workflow-skills.sh` |
+| `.github/` workflows, Dependabot | `bash scripts/validate-workflows.sh` (pinned actionlint and zizmor; part of `make validate`) |
 | packaging | `cargo build --locked`; `scripts/oci-image-smoke.sh` for the image |
 | `v*` release path | `bash scripts/validate-release.sh` |
 
