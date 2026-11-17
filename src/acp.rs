@@ -88,15 +88,55 @@ struct SessionContent {
     resolver: Arc<SessionContentStore>,
 }
 
+/// Payloads of one ACP content session (ADR 0021). Memory is a cache; with a
+/// directory every payload is also written there, private to the session, so
+/// a restarted host can resolve the same references.
 struct SessionContentStore {
     values: std::sync::Mutex<HashMap<String, (ContentPartKind, Bytes)>>,
+    dir: Option<PathBuf>,
 }
 
 impl SessionContentStore {
-    fn new() -> Self {
+    fn new(dir: Option<PathBuf>) -> Self {
         Self {
             values: std::sync::Mutex::new(HashMap::new()),
+            dir,
         }
+    }
+
+    /// File for `reference` of `kind`. The name hashes the reference, so no
+    /// part id reaches the path.
+    fn payload_path(&self, reference: &str, kind: ContentPartKind) -> Option<PathBuf> {
+        let digest = sha256_digest(reference.as_bytes());
+        let hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
+        Some(
+            self.dir
+                .as_ref()?
+                .join(format!("{hex}-{}", kind.proto_value())),
+        )
+    }
+
+    fn put(&self, reference: &str, kind: ContentPartKind, bytes: &Bytes) -> Result<(), String> {
+        if let Some(path) = self.payload_path(reference, kind) {
+            write_private(&path, bytes).map_err(|e| format!("attachment store: {e}"))?;
+        }
+        self.values
+            .lock()
+            .map_err(|_| "content store lock poisoned".to_string())?
+            .insert(reference.to_string(), (kind, bytes.clone()));
+        Ok(())
+    }
+
+    fn get(&self, reference: &str, kind: ContentPartKind) -> Option<Bytes> {
+        if let Some((stored, bytes)) = self.values.lock().ok()?.get(reference).cloned() {
+            return (stored == kind).then_some(bytes);
+        }
+        let bytes = Bytes::from(fs::read(self.payload_path(reference, kind)?).ok()?);
+        self.values
+            .lock()
+            .ok()?
+            .insert(reference.to_string(), (kind, bytes.clone()));
+        Some(bytes)
     }
 
     fn insert(
@@ -114,10 +154,8 @@ impl SessionContentStore {
             ));
         }
         let reference = format!("acp-{part_id}");
-        self.values
-            .lock()
-            .map_err(|_| rpc_error(-32603, "content store lock poisoned"))?
-            .insert(reference.clone(), (kind, payload.clone()));
+        self.put(&reference, kind, &payload)
+            .map_err(|e| rpc_error(-32603, e))?;
         Ok(ContentPartDescriptor {
             part_id: part_id.into(),
             kind,
@@ -137,11 +175,40 @@ impl SessionContentStore {
     }
 
     fn text(&self, reference: &str) -> Option<String> {
-        let (kind, bytes) = self.values.lock().ok()?.get(reference).cloned()?;
-        if kind == ContentPartKind::Text {
-            std::str::from_utf8(&bytes).ok().map(str::to_owned)
-        } else {
-            None
+        let bytes = self.get(reference, ContentPartKind::Text)?;
+        std::str::from_utf8(&bytes).ok().map(str::to_owned)
+    }
+}
+
+/// Write `bytes` to `path` owner-only, replacing any file there atomically.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("payload"),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let result = options.open(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    match result.and_then(|()| fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            Err(error)
         }
     }
 }
@@ -156,22 +223,16 @@ impl ContentResolver for SessionContentStore {
         &self,
         descriptor: &ContentPartDescriptor,
     ) -> Result<ResolvedContent, crate::content::ContentError> {
-        let (kind, bytes) = self
-            .values
-            .lock()
-            .map_err(|_| {
-                crate::content::ContentError::Resolver("content store lock poisoned".into())
-            })?
-            .get(&descriptor.reference)
-            .cloned()
+        let bytes = self
+            .get(&descriptor.reference, descriptor.kind)
             .ok_or_else(|| {
                 crate::content::ContentError::Resolver(
-                    "attachment payload is no longer in session memory".into(),
+                    "attachment payload is no longer available to the session".into(),
                 )
             })?;
-        if kind == ContentPartKind::Text {
-            std::str::from_utf8(&bytes)
-                .map(|text| ResolvedContent::Text(text.to_owned()))
+        if descriptor.kind == ContentPartKind::Text {
+            String::from_utf8(bytes.to_vec())
+                .map(ResolvedContent::Text)
                 .map_err(|_| {
                     crate::content::ContentError::Resolver(
                         "text attachment is not valid utf-8".into(),
@@ -191,12 +252,8 @@ impl ContentResolver for SessionContentStore {
             ResolvedContent::Bytes(bytes) => bytes,
         };
         let reference = format!("acp-{}", content.part_id);
-        self.values
-            .lock()
-            .map_err(|_| {
-                crate::content::ContentError::Resolver("content store lock poisoned".into())
-            })?
-            .insert(reference.clone(), (content.kind, bytes.clone()));
+        self.put(&reference, content.kind, &bytes)
+            .map_err(crate::content::ContentError::Resolver)?;
         Ok(ContentPartDescriptor {
             part_id: content.part_id,
             kind: content.kind,
@@ -227,11 +284,13 @@ pub struct AcpHost {
 
 impl AcpHost {
     pub fn new(harness: Harness) -> Self {
-        Self {
+        let host = Self {
             harness,
             initialized: AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
-        }
+        };
+        host.sweep_orphan_payloads();
+        host
     }
 
     /// Handle one client JSON-RPC message. Notifications return `None`.
@@ -344,13 +403,17 @@ impl AcpHost {
             let persisted = self
                 .load_persisted(session_id)
                 .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            let content = persisted
+                .run_id
+                .as_deref()
+                .and_then(|run_id| self.restore_session_content(session_id, run_id));
             let live = LiveSession {
                 cwd: PathBuf::from(&persisted.cwd),
                 run_id: persisted.run_id.clone(),
                 cancel: None,
                 mode: persisted.mode.clone(),
                 mode_frozen: persisted.mode_is_frozen(),
-                content: None,
+                content,
             };
             self.sessions
                 .lock()
@@ -506,18 +569,23 @@ impl AcpHost {
                 .map_err(|e| rpc_error(-32603, e))?;
             let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
-            // Attachments ride the first session/prompt of a session. Later
-            // prompts are text follow-ups on the same run (Issue #401).
-            if parsed.has_attachments() && resume_run_id.is_some() {
-                return Err(rpc_error(
-                    -32602,
-                    "attachments cannot be added to an existing session run",
-                ));
+            // A session that starts with attachments is a content run and
+            // takes attachments on any later prompt (ADR 0021). A text run
+            // stays text.
+            if parsed.has_attachments() {
+                if resume_run_id.is_some() && existing_content.is_none() {
+                    return Err(rpc_error(
+                        -32602,
+                        "attachments need a session that started with attachments; start a new session to attach",
+                    ));
+                }
+                parsed.require_supported(harness.model_port().content_kinds())?;
             }
-            let mut drive = if parsed.has_attachments() {
-                let kinds = harness.model_port().content_kinds();
-                parsed.require_supported(kinds)?;
-                let store = Arc::new(SessionContentStore::new());
+            let mut drive = if parsed.has_attachments() && resume_run_id.is_none() {
+                let _ = fs::remove_dir_all(self.content_dir(&session_id));
+                let store = Arc::new(SessionContentStore::new(Some(
+                    self.content_dir(&session_id),
+                )));
                 let messages = parsed.messages(&store, &session_id)?;
                 let content = SessionContent {
                     task: parsed.text.clone(),
@@ -542,7 +610,7 @@ impl AcpHost {
                     &harness,
                     &session_id,
                     run_id,
-                    &parsed.text,
+                    &parsed,
                     existing_content,
                     cancel_rx,
                     client,
@@ -567,11 +635,14 @@ impl AcpHost {
         }
         .await;
         if outcome.is_err() {
-            let mut sessions = self.sessions.lock().await;
-            if let Some(live) = sessions.get_mut(&session_id)
-                && live.run_id.is_none()
-            {
-                live.content = None;
+            let no_run = self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|live| live.run_id.is_none());
+            if no_run {
+                self.end_session_content(&session_id).await;
             }
         }
         self.clear_cancel(&session_id).await;
@@ -622,6 +693,9 @@ impl AcpHost {
                 self.retain_cancelled_run(session_id, &harness, Some(result.run_id.clone()))
                     .await;
                 return Ok("cancelled");
+            }
+            if result.park.is_none() {
+                self.end_session_content(session_id).await;
             }
             if result.termination == RunTermination::Failed && result.summary == "plan rejected" {
                 self.set_run_id(session_id, None)
@@ -778,6 +852,62 @@ impl AcpHost {
         self.harness.state.path().join("acp-sessions")
     }
 
+    /// Private payload directory of one content session (ADR 0021).
+    fn content_dir(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(format!("{session_id}.content"))
+    }
+
+    /// Drop a session's payloads once its content run has ended.
+    async fn end_session_content(&self, session_id: &str) {
+        if let Some(live) = self.sessions.lock().await.get_mut(session_id) {
+            live.content = None;
+        }
+        let _ = fs::remove_dir_all(self.content_dir(session_id));
+    }
+
+    /// Remove payload directories whose session record is gone.
+    fn sweep_orphan_payloads(&self) {
+        let Ok(entries) = fs::read_dir(self.sessions_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(session_id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".content"))
+                && !self
+                    .sessions_dir()
+                    .join(format!("{session_id}.json"))
+                    .exists()
+            {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    /// Rebuild the payload custody of a persisted content session from its
+    /// sidecar and payload directory. `None` for text runs or lost payloads.
+    fn restore_session_content(&self, session_id: &str, run_id: &str) -> Option<SessionContent> {
+        let dir = self.content_dir(session_id);
+        if !dir.is_dir() {
+            return None;
+        }
+        let runs = self.harness.state.runs_dir();
+        let checkpoint = Checkpoint::load(&runs, run_id).ok()?;
+        let binding = checkpoint.content.as_ref()?;
+        let sidecar = crate::content::load_sidecar(&runs, run_id, binding).ok()?;
+        let initial = sidecar
+            .messages
+            .get(..sidecar.initial_message_count as usize)?
+            .to_vec();
+        Some(SessionContent {
+            task: checkpoint.task,
+            messages: initial,
+            resolver: Arc::new(SessionContentStore::new(Some(dir))),
+        })
+    }
+
     fn persist(&self, session_id: &str, live: &LiveSession) -> Result<(), String> {
         let dir = self.sessions_dir();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -803,7 +933,7 @@ impl AcpHost {
     }
 
     /// Persisted ACP session ids for `cwd`, newest mtime first, omitting
-    /// content runs whose in-memory payload custody is no longer available.
+    /// content runs whose payloads are no longer available.
     pub fn session_ids_for_cwd(&self, cwd: &Path) -> Vec<String> {
         let dir = self.sessions_dir();
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -839,6 +969,7 @@ impl AcpHost {
                 continue;
             }
             if !live_content_ids.contains(&persisted.session_id)
+                && !self.content_dir(&persisted.session_id).is_dir()
                 && let Some(run_id) = persisted.run_id.as_deref()
                 && let Ok(checkpoint) = Checkpoint::load(&self.harness.state.runs_dir(), run_id)
                 && checkpoint.content.is_some()
@@ -865,6 +996,10 @@ impl AcpHost {
         let live = sessions
             .get_mut(session_id)
             .ok_or_else(|| "unknown session".to_string())?;
+        if live.run_id.is_some() && live.run_id != run_id {
+            live.content = None;
+            let _ = fs::remove_dir_all(self.content_dir(session_id));
+        }
         live.run_id = run_id;
         self.persist(session_id, live)
     }
@@ -1339,7 +1474,7 @@ async fn resume_prompt_drive(
     harness: &Harness,
     session_id: &str,
     run_id: String,
-    prompt_text: &str,
+    prompt: &ParsedPrompt,
     existing_content: Option<SessionContent>,
     cancel_rx: watch::Receiver<bool>,
     client: &dyn AcpClient,
@@ -1375,10 +1510,30 @@ async fn resume_prompt_drive(
         request.cancel = Some(cancel_rx.clone());
         PromptDrive::Text(request)
     };
+    if prompt.has_attachments() && !checkpoint.is_prompt_wait() {
+        return Err(rpc_error(
+            -32602,
+            "attachments are accepted only when the session waits for a prompt",
+        ));
+    }
     if checkpoint.is_prompt_wait() {
         match &mut drive {
-            PromptDrive::Text(request) => request.resume_prompt = Some(prompt_text.to_string()),
-            PromptDrive::Content(request) => request.resume_prompt = Some(prompt_text.to_string()),
+            PromptDrive::Text(request) => request.resume_prompt = Some(prompt.text.clone()),
+            PromptDrive::Content(request) => {
+                if let (Some(store), Some(binding)) =
+                    (content_store.as_deref(), checkpoint.content.as_ref())
+                {
+                    let sidecar = crate::content::load_sidecar(
+                        &harness.state.runs_dir(),
+                        &run_id,
+                        binding,
+                    )
+                    .map_err(|_| rpc_error(-32603, "session content sidecar is unreadable"))?;
+                    prompt.admit_follow_up(&sidecar.messages)?;
+                    request.resume_parts = prompt.follow_up_parts(store, session_id)?;
+                }
+                request.resume_prompt = Some(prompt.text.clone());
+            }
         }
         return Ok(ResumeOutcome::Drive(Box::new(drive)));
     }
@@ -2062,6 +2217,54 @@ impl ParsedPrompt {
             }
         }
         Ok(())
+    }
+
+    /// Fail closed before admission when this follow-up would take the
+    /// session past the ADR 0006 bounds, which hold over the whole
+    /// conversation because every model call resolves all of it.
+    fn admit_follow_up(&self, history: &[ContentMessageV1]) -> Result<(), Value> {
+        let held = history.iter().flat_map(|message| &message.parts);
+        let text = (!self.text.is_empty()).then_some(self.text.len() as u64);
+        let added = self
+            .attachments
+            .iter()
+            .map(|attachment| attachment.payload.len() as u64)
+            .chain(text);
+        let parts = held.clone().count() + added.clone().count();
+        let bytes = held
+            .map(|part| part.byte_length)
+            .chain(added)
+            .fold(0_u64, u64::saturating_add);
+        if parts > MAX_CONTENT_PARTS || bytes > MAX_CONTENT_AGGREGATE_BYTES {
+            return Err(rpc_error(
+                -32602,
+                "attachments exceed the session content bound (32 parts, 16 MiB)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Store this follow-up's attachments under fresh part ids. The engine
+    /// adds the prompt text as its own part.
+    fn follow_up_parts(
+        &self,
+        store: &SessionContentStore,
+        session_id: &str,
+    ) -> Result<Vec<ContentPartDescriptor>, Value> {
+        let prompt = uuid::Uuid::new_v4().simple().to_string();
+        self.attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| {
+                store.insert(
+                    &format!("f{}-part-{index}", &prompt[..12]),
+                    attachment.kind,
+                    &attachment.media_type,
+                    attachment.payload.clone(),
+                    session_id,
+                )
+            })
+            .collect()
     }
 
     fn messages(
@@ -2797,7 +3000,7 @@ mod tests {
         ]))
         .unwrap();
         let pointer = parsed.attachments[0].payload.as_ptr();
-        let store = SessionContentStore::new();
+        let store = SessionContentStore::new(None);
         let messages = parsed.messages(&store, "session").unwrap();
         let descriptor = &messages[0].parts[1];
         let first = store.resolve(descriptor).await.unwrap();
@@ -3954,8 +4157,113 @@ mod tests {
         assert_eq!(rpc_ok(&follow)["stopReason"], "end_turn");
     }
 
+    async fn prompt(
+        host: &AcpHost,
+        client: &dyn AcpClient,
+        session_id: &str,
+        parts: Value,
+    ) -> Value {
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "session/prompt",
+                "params": { "sessionId": session_id, "prompt": parts }
+            }),
+            client,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// `initialize` a fresh (restarted) host, then `session/load`.
+    async fn load(host: &AcpHost, client: &dyn AcpClient, session_id: &str, cwd: &Path) -> Value {
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": 1, "capabilities": {} }
+            }),
+            client,
+        )
+        .await
+        .unwrap();
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "session/load",
+                "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
+            }),
+            client,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// ADR 0021: attachments on later prompts, kept across a host restart,
+    /// gone with the session's run; a text session stays text.
     #[tokio::test]
-    async fn session_load_fails_closed_without_content_store() {
+    async fn content_session_takes_later_attachments_and_survives_restart() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[{"content":"one"},{"content":"two"},{"content":"three"},{"content":"text"}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let png = b"\x89PNG UNIQUE-ACP-537-FIRST";
+        let pdf = b"%PDF UNIQUE-ACP-537-THIRD";
+        let image = json!([
+            {"type":"text","text":"inspect"},
+            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
+        ]);
+        let document = json!([
+            {"type":"text","text":"and this"},
+            {"type":"resource","resource":{
+                "uri":"attachment://doc.pdf","mimeType":"application/pdf","blob": encode_base64(pdf)
+            }}
+        ]);
+        let text = json!([{"type":"text","text":"go on"}]);
+        for parts in [&image, &text, &document] {
+            let reply = prompt(&host, &client, &session_id, parts.clone()).await;
+            assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
+        }
+        assert_no_payload_bytes(&cwd, pdf);
+        let payloads = host.content_dir(&session_id);
+        assert!(std::fs::read_dir(&payloads).unwrap().count() >= 2);
+
+        let text_session = init_and_new(&host, &client, &cwd).await;
+        let reply = prompt(&host, &client, &text_session, text.clone()).await;
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn");
+        let refused = prompt(&host, &client, &text_session, image.clone()).await;
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+
+        // A restarted host loads the session and resolves every part again.
+        // The scripted model indexes its script by the run's turn number.
+        let restarted = scripted_host(
+            dir.path(),
+            r#"[{"content":"1"},{"content":"2"},{"content":"3"},{"content":"after-restart"}]"#,
+        );
+        assert!(restarted.session_ids_for_cwd(&cwd).contains(&session_id));
+        let loaded = load(&restarted, &client, &session_id, &cwd).await;
+        assert_eq!(rpc_ok(&loaded)["sessionId"], session_id.as_str());
+        let reply = prompt(&restarted, &client, &session_id, text.clone()).await;
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
+
+        // Ending the session's run drops its payloads.
+        restarted.set_run_id(&session_id, None).await.unwrap();
+        assert!(!payloads.exists());
+    }
+
+    #[tokio::test]
+    async fn session_load_fails_closed_when_payloads_are_lost() {
         let dir = tempdir().unwrap();
         let host = scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#);
         let client = RecordingClient {
@@ -3965,56 +4273,79 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let session_id = init_and_new(&host, &client, &cwd).await;
-        let png = b"\x89PNG UNIQUE-ACP-401-LOST";
-        let prompt = host
-            .handle(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "session/prompt",
-                    "params": {
-                        "sessionId": session_id,
-                        "prompt": [
-                            {"type":"text","text":"inspect"},
-                            {"type":"image","mimeType":"image/png","data": encode_base64(png)}
-                        ]
-                    }
-                }),
-                &client,
-            )
-            .await
-            .unwrap();
-        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
-        let text_session = init_and_new(&host, &client, &cwd).await;
-        assert!(host.session_ids_for_cwd(&cwd).contains(&session_id));
+        let reply = prompt(
+            &host,
+            &client,
+            &session_id,
+            json!([
+                {"type":"text","text":"inspect"},
+                {"type":"image","mimeType":"image/png","data": encode_base64(b"\x89PNG LOST")}
+            ]),
+        )
+        .await;
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn");
+        std::fs::remove_dir_all(host.content_dir(&session_id)).unwrap();
         let restarted = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
-        let available = restarted.session_ids_for_cwd(&cwd);
-        assert!(!available.contains(&session_id), "{available:?}");
-        assert!(available.contains(&text_session), "{available:?}");
-        host.sessions.lock().await.remove(&session_id);
-        assert!(!host.session_ids_for_cwd(&cwd).contains(&session_id));
-        let loaded = host
-            .handle(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 10,
-                    "method": "session/load",
-                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
-                }),
-                &client,
-            )
-            .await
-            .unwrap();
-        assert_eq!(loaded["error"]["code"], -32603);
+        assert!(!restarted.session_ids_for_cwd(&cwd).contains(&session_id));
+        let loaded = load(&restarted, &client, &session_id, &cwd).await;
+        assert_eq!(loaded["error"]["code"], -32603, "{loaded}");
+    }
+
+    #[tokio::test]
+    async fn host_start_sweeps_payloads_without_a_session_record() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), "[]");
+        let orphan = host.content_dir("sess-gone");
+        write_private(&orphan.join("payload"), b"x").unwrap();
+        drop(host);
+        let _restarted = scripted_host(dir.path(), "[]");
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn follow_up_admission_holds_the_session_bounds() {
+        let part = |bytes: u64| ContentPartDescriptor {
+            part_id: "p".into(),
+            kind: ContentPartKind::Image,
+            media_type: "image/png".into(),
+            byte_length: bytes,
+            sha256_digest: String::new(),
+            reference: String::new(),
+            provenance: ContentProvenanceV1 {
+                source: "acp".into(),
+                source_id: "s".into(),
+                source_version: "v1".into(),
+                observed_at_ms: 0,
+            },
+            disclosure_state: ContentDisclosureState::Accepted,
+            disclosure_reason: String::new(),
+        };
+        let history = |parts: Vec<ContentPartDescriptor>| {
+            vec![ContentMessageV1 {
+                role: "user".into(),
+                parts,
+                tool_call_id: String::new(),
+                tool_calls: Vec::new(),
+            }]
+        };
+        let follow_up = ParsedPrompt {
+            text: "more".into(),
+            attachments: vec![StagedAttachment {
+                kind: ContentPartKind::Image,
+                media_type: "image/png".into(),
+                payload: Bytes::from(vec![0; 4 * 1024 * 1024]),
+            }],
+        };
+        let mib = 1024 * 1024;
         assert!(
-            loaded["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("no longer in session memory"),
-            "{}",
-            loaded["error"]["message"]
+            follow_up
+                .admit_follow_up(&history(vec![part(8 * mib)]))
+                .is_ok()
         );
-        assert!(!host.session_ids_for_cwd(&cwd).contains(&session_id));
+        let full = follow_up.admit_follow_up(&history(vec![part(8 * mib), part(5 * mib)]));
+        assert_eq!(full.unwrap_err()["code"], -32602);
+        let many = follow_up.admit_follow_up(&history((0..31).map(|_| part(1)).collect()));
+        assert_eq!(many.unwrap_err()["code"], -32602);
     }
 
     #[tokio::test]
@@ -4415,6 +4746,10 @@ mod tests {
 
     fn assert_no_payload_bytes(root: &Path, needle: &[u8]) {
         fn walk(path: &Path, needle: &[u8]) {
+            // Session payload custody (ADR 0021) is the one allowed copy.
+            if path.extension().is_some_and(|ext| ext == "content") {
+                return;
+            }
             if path.is_dir() {
                 let Ok(entries) = std::fs::read_dir(path) else {
                     return;

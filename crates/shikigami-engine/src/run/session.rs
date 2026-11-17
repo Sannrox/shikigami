@@ -11,9 +11,9 @@ use std::sync::Arc;
 use crate::checkpoint::{self, Checkpoint, ChildRunRecord, ParkKind, ParkedState};
 use crate::content::{
     ContentCapabilitiesV1, ContentCheckpointBinding, ContentCheckpointV1, ContentDisclosureState,
-    ContentError, ContentMessageV1, ContentModelTurnV1, ContentResolver, ContentTerminalCheckpoint,
-    load_sidecar, resolve_accepted, resolve_terminal_summary, save_sidecar, store_text,
-    tool_arguments_pointer, validate_descriptor, validate_messages,
+    ContentError, ContentMessageV1, ContentModelTurnV1, ContentPartDescriptor, ContentResolver,
+    ContentTerminalCheckpoint, load_sidecar, resolve_accepted, resolve_terminal_summary,
+    save_sidecar, store_text, tool_arguments_pointer, validate_descriptor, validate_messages,
 };
 use crate::governance::GovernancePort;
 use crate::model::{ChatMessage, TokenUsage};
@@ -558,39 +558,50 @@ impl RunSession {
     }
 
     /// Append a session follow-up as a content user message so the next model
-    /// call sees it. ChatMessage `resume_prompt` is not the content history.
-    pub async fn append_content_user_text(&mut self, text: String) -> Result<(), RunError> {
+    /// call sees it: the prompt text, then any host-stored `attachments`.
+    /// ChatMessage `resume_prompt` is not the content history.
+    pub async fn append_content_user_message(
+        &mut self,
+        text: String,
+        attachments: Vec<ContentPartDescriptor>,
+    ) -> Result<(), RunError> {
         let content = self
             .content
             .as_mut()
             .ok_or_else(|| RunError::Message("content session is unavailable".into()))?;
-        if text.is_empty() {
+        if text.is_empty() && attachments.is_empty() {
             return Err(RunError::Message(
                 "content follow-up prompt is empty".into(),
             ));
         }
-        let mut used_ids = content
-            .messages
-            .iter()
-            .flat_map(|message| &message.parts)
-            .map(|descriptor| descriptor.part_id.clone())
-            .collect::<HashSet<_>>();
-        let part_id = reserve_part_id(
-            &mut used_ids,
-            format!("shikigami-user-{}-{}", self.turns, content.messages.len()),
-        );
-        let descriptor = store_text(
-            content.resolver.as_ref(),
-            part_id,
-            text,
-            "session-prompt",
-            format!("prompt-{}", self.turns),
-        )
-        .await
-        .map_err(content_run_error)?;
+        let mut parts = Vec::with_capacity(attachments.len() + 1);
+        if !text.is_empty() {
+            let mut used_ids = content
+                .messages
+                .iter()
+                .flat_map(|message| &message.parts)
+                .map(|descriptor| descriptor.part_id.clone())
+                .collect::<HashSet<_>>();
+            let part_id = reserve_part_id(
+                &mut used_ids,
+                format!("shikigami-user-{}-{}", self.turns, content.messages.len()),
+            );
+            parts.push(
+                store_text(
+                    content.resolver.as_ref(),
+                    part_id,
+                    text,
+                    "session-prompt",
+                    format!("prompt-{}", self.turns),
+                )
+                .await
+                .map_err(content_run_error)?,
+            );
+        }
+        parts.extend(attachments);
         content.messages.push(ContentMessageV1 {
             role: "user".into(),
-            parts: vec![descriptor],
+            parts,
             tool_call_id: String::new(),
             tool_calls: Vec::new(),
         });

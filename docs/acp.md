@@ -79,14 +79,22 @@ fail-closed. `http-callback` and sekai-chisei stay brokered. Clients that cannot
 answer `session/request_permission` cannot complete a mutating prompt.
 
 Content parts reuse `run_content` bounds. `session/prompt` concatenates `text`
-parts and, when attachments are present on the first prompt of a session,
-resolves them for that call through a session-scoped in-memory store
-([ADR 0017](decisions/0017-acp-attachments.md)). Later prompts on that run are
-text follow-ups. Payload bytes stay private to the session. They are not copied
-into the workspace or event log lines. Unsupported types fail closed. Omit
-attachments and today's text host is unchanged. Attachment sessions inherit
-content v1: no escalate parking, and the 32-part sidecar bound includes
-follow-up text. `session/compact` still cuts ChatMessage history.
+parts. A session whose first prompt carries attachments is a content session
+([ADR 0017](decisions/0017-acp-attachments.md),
+[ADR 0021](decisions/0021-session-attachment-custody.md)): any later prompt that
+answers an end-of-turn wait may carry more, including media types the adapter
+reads that the session has not used yet. The host keeps each payload private to
+the session under its state directory (`acp-sessions/<session>.content/`,
+owner-only) so `session/load` works after a restart. Payloads are not copied
+into the workspace, a checkpoint, or event log lines, and they are deleted when
+the session's run ends or is replaced. Host start removes payload directories
+whose session record is gone. The 8MiB part, 16MiB aggregate, and 32-part
+bounds hold over the whole conversation, follow-up text included; a prompt that
+would exceed them fails with `-32602` and the session continues. An attachment
+on a session that started as text fails with `-32602`; start a new session to
+attach. Unsupported types fail closed. Omit attachments and today's text host
+is unchanged. Attachment sessions inherit content v1: no escalate parking.
+`session/compact` still cuts ChatMessage history.
 
 Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
 name a catalog mode; the mapping lives in `[session.modes]` settings. Invalid

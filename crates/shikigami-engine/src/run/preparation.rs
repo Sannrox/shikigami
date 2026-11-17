@@ -296,7 +296,7 @@ pub(super) async fn prepare(
                 let sidecar =
                     RunSession::load_content_sidecar(&engine.state_runs, &session.run_id, binding)?;
                 if !initial_messages_match(&sidecar, &content.messages)
-                    || sidecar.capabilities != content.capabilities
+                    || !sidecar.capabilities.widens(&content.capabilities)
                 {
                     return Err(RunError::Message(format!(
                         "content request changed across resume for run {}",
@@ -305,7 +305,7 @@ pub(super) async fn prepare(
                 }
                 (
                     sidecar.messages,
-                    sidecar.capabilities,
+                    sidecar.capabilities.widened_with(&content.resume_parts),
                     sidecar.initial_message_count,
                     sidecar.terminal,
                     sidecar.usage,
@@ -332,7 +332,13 @@ pub(super) async fn prepare(
         )?;
         session.revalidate_content().await?;
         if let Some(prompt) = request.resume_prompt.clone() {
-            session.append_content_user_text(prompt).await?;
+            session
+                .append_content_user_message(prompt, content.resume_parts.clone())
+                .await?;
+        } else if !content.resume_parts.is_empty() {
+            return Err(RunError::Message(
+                "content resume parts need a session follow-up prompt".into(),
+            ));
         }
         if request.resume_ask == Some(super::AskDecision::Deny) {
             let call_id = resumed_park
