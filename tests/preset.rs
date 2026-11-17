@@ -141,3 +141,60 @@ async fn resume_refuses_a_different_preset() {
     let error = unnarrowed.run(resume).await.unwrap_err().to_string();
     assert!(error.contains("this resume selects no preset"), "{error}");
 }
+
+#[tokio::test]
+async fn run_records_tool_named_artifacts_across_a_restart_and_what_produced_them() {
+    let dir = tempdir().unwrap();
+    // The first attempt's script runs out after the linked call, leaving a
+    // resumable checkpoint, as a host that dies mid-run would.
+    let linked = r#"[{"tool_calls":[{"name":"mcp.m.echo","args_json":"{\"text\":\"hi\",\"link\":\"example://proposals/p-1\"}"}]}]"#;
+    harness(&dir, linked, r#""report", "mcp.m.echo""#)
+        .run(RunRequest::new("echo"))
+        .await
+        .unwrap_err();
+    let run_id = std::fs::read_dir(StateRoot::new(dir.path().join("state")).runs_dir())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+
+    // The scripted model picks its reply by turn, so the resumed script
+    // repeats the turn already taken.
+    let report = r#"[
+        {"tool_calls":[{"name":"mcp.m.echo","args_json":"{\"text\":\"hi\"}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"created example://proposals/p-2\",\"success\":true}"}]}
+    ]"#;
+    let mut resume = RunRequest::new("");
+    resume.resume_run_id = Some(run_id);
+    let result = harness(&dir, report, r#""report", "mcp.m.echo""#)
+        .run(resume)
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let record = shikigami::RunRegistry::new(dir.path().join("state"))
+        .unwrap()
+        .load(&result.run_id)
+        .unwrap();
+    // Only the tool-observed link is recorded; the one in the report text is not.
+    let [artifact] = record.artifacts.as_slice() else {
+        panic!("{:?}", record.artifacts);
+    };
+    assert_eq!(artifact.tool, "mcp.m.echo");
+    assert_eq!(artifact.uri, "example://proposals/p-1");
+    assert!(!artifact.call_id.is_empty());
+    assert_eq!(record.model, result.model);
+    assert!(!record.model.is_empty());
+    assert_eq!(record.prompt_id, result.prompt_id);
+    assert!(
+        record
+            .preset_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("narrow@sha256:")),
+        "{:?}",
+        record.preset_id
+    );
+}

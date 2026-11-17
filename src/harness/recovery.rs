@@ -473,6 +473,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -661,6 +662,9 @@ mod tests {
                 usage: crate::model::TokenUsage::default(),
                 cost: None,
                 todos: vec![],
+                model: String::new(),
+                preset_id: None,
+                artifacts: vec![],
             })
             .unwrap();
         stale_owner(&state, "run-1");
@@ -697,6 +701,9 @@ mod tests {
                 usage: crate::model::TokenUsage::default(),
                 cost: None,
                 todos: vec![],
+                model: String::new(),
+                preset_id: None,
+                artifacts: vec![],
             })
             .unwrap();
         let diagnosis = diagnose(&state, "run-1").unwrap();
@@ -807,6 +814,9 @@ mod tests {
                 usage: crate::model::TokenUsage::default(),
                 cost: None,
                 todos: vec![],
+                model: String::new(),
+                preset_id: None,
+                artifacts: vec![],
             })
             .unwrap();
         let diagnosis = diagnose(&state, "run-1").unwrap();
@@ -862,6 +872,9 @@ mod tests {
                 usage: crate::model::TokenUsage::default(),
                 cost: None,
                 todos: vec![],
+                model: String::new(),
+                preset_id: None,
+                artifacts: vec![],
             })
             .unwrap();
         let diagnosis = diagnose(&state, "run-1").unwrap();

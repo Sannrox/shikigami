@@ -5,7 +5,8 @@ Every harness run writes host-local operational state under
 keyed by cwd; see [cli.md](cli.md)):
 
 ~~~
-run.json       # status, outcome, report data, digests, usage, workspace, artifact path
+run.json       # status, outcome, report data, model, prompt and preset ids,
+               # artifacts, digests, usage, workspace, artifact path
 events.jsonl   # redacted event journal; tool arguments are not persisted
 checkpoint.json # resumable conversation plus optional replay binding
 snapshots/
@@ -39,6 +40,18 @@ governance plane remains authoritative when used. `replay-export` may
 recompute that bundle from retained artifacts when `snapshots/initial` and the
 other bindings are present; the live workspace is not original-input proof.
 See [replay.md](replay.md).
+
+## Artifacts a run produced
+
+A finished `run.json` names what produced the run (`model`, `prompt_id`,
+`preset_id`) and what the run produced outside its workspace (`artifacts`).
+Each artifact is `{tool, call_id, uri}`: a `resource_link` that an MCP tool
+result returned, recorded as the harness observed it. A URI the model writes in
+its `report` is not an artifact. The list is kept in the checkpoint, so it
+survives a restart. Tools that name no resources leave it empty and the field
+absent. A recovered replay or content run also keeps its list. The run result
+and the MCP run summary carry the same fields, and governed harvest sends them
+too ([harvest.md](harvest.md)).
 
 ## CLI
 

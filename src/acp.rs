@@ -6047,6 +6047,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         }
     }
 

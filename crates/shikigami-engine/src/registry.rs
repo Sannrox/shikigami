@@ -85,6 +85,16 @@ pub struct RunRecord {
     /// The terminal report's structured answer, when the run gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Model, prompt id, and preset id the run used. Set when it finishes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    /// External resources tool results named, attributed to their calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::tools::ArtifactReference>,
     pub task_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logical_operation_id: Option<String>,
@@ -279,6 +289,10 @@ impl RunRegistry {
                     termination: None,
                     summary: String::new(),
                     data: None,
+                    model: String::new(),
+                    prompt_id: String::new(),
+                    preset_id: None,
+                    artifacts: Vec::new(),
                     task_digest: digest(task),
                     logical_operation_id: logical_operation_id
                         .filter(|value| !value.is_empty())
@@ -499,6 +513,10 @@ impl RunRegistry {
         record.termination = Some(result.termination.as_str().into());
         record.summary = result.summary.clone();
         record.data = result.data.clone();
+        record.model = result.model.clone();
+        record.prompt_id = result.prompt_id.clone();
+        record.preset_id = result.preset_id.clone();
+        record.artifacts = result.artifacts.clone();
         record.workspace = Some(result.workspace.display().to_string());
         record.artifact_dir = result
             .artifact_dir

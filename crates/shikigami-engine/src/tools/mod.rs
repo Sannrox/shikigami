@@ -61,6 +61,21 @@ pub enum ToolOutput {
 pub(crate) struct ExecutedTool {
     pub(crate) output: ToolOutput,
     pub(crate) edit_outcome: Option<EditOutcome>,
+    /// URIs of resources an external tool result linked to.
+    pub(crate) resource_uris: Vec<String>,
+}
+
+/// An external resource a tool result named, attributed to the call that
+/// returned it. Recorded from results the harness observed, never from text
+/// the model wrote.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactReference {
+    /// Tool that returned the reference, e.g. `mcp.sekai.create_proposal`.
+    pub tool: String,
+    /// Conversation tool call id of that call.
+    pub call_id: String,
+    /// Resource URI as the tool result gave it.
+    pub uri: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

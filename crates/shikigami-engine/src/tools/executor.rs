@@ -207,6 +207,7 @@ impl ToolExecutor {
         Ok(ExecutedTool {
             output,
             edit_outcome,
+            resource_uris: Vec::new(),
         })
     }
 

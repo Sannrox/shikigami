@@ -62,6 +62,10 @@ pub(super) async fn prepare(
     let stored_stop_repairs = resume_checkpoint
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.stop_repairs);
+    let stored_artifacts = resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.artifacts.clone())
+        .unwrap_or_default();
     let preset = engine
         .config
         .preset
@@ -314,6 +318,7 @@ pub(super) async fn prepare(
     session.plan_jail = plan_jail;
     session.stop_repairs = stored_stop_repairs;
     session.preset = preset;
+    session.artifacts = stored_artifacts;
     session.nested = nested_tools;
     session.children = stored_children;
     session.nested_depth = stored_nested_depth;

@@ -795,6 +795,10 @@ pub(crate) fn recover_terminal_replay(
             usage: terminal.usage,
             cost: terminal.cost.clone(),
             todos: checkpoint.todos,
+            // The caller holds the config and fills in the model.
+            model: String::new(),
+            preset_id: crate::checkpoint::preset_id(&checkpoint.preset),
+            artifacts: checkpoint.artifacts,
         },
         finalized: terminal.finalized,
         keep_workspace: checkpoint.keep_workspace,
@@ -1885,6 +1889,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         };
         checkpoint.save(&state.runs_dir()).unwrap();
         if finish {
@@ -1903,6 +1908,9 @@ mod tests {
                     usage: TokenUsage::default(),
                     cost: None,
                     todos: vec![],
+                    model: String::new(),
+                    preset_id: None,
+                    artifacts: vec![],
                 })
                 .unwrap();
         }

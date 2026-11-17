@@ -250,6 +250,9 @@ impl<'a> RunSupervision<'a> {
             usage: terminal.usage,
             cost,
             todos: checkpoint.todos,
+            model: crate::model::effective_model_name(&self.engine.config),
+            preset_id: crate::checkpoint::preset_id(&checkpoint.preset),
+            artifacts: checkpoint.artifacts,
         };
         let mut projected = result.clone();
         projected.summary = project_bounded_text(true, "bounded_content_result", &result.summary);

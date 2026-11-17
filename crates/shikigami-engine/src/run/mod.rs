@@ -208,6 +208,12 @@ pub struct RunResult {
     pub cost: Option<CostEstimate>,
     /// Final run-scoped todo checklist (empty if never set).
     pub todos: Vec<TodoItem>,
+    /// Model the run used (effective configured name).
+    pub model: String,
+    /// Narrowing preset id (`<name>@sha256:<hex>`), if the run had one.
+    pub preset_id: Option<String>,
+    /// External resources tool results named, attributed to their calls.
+    pub artifacts: Vec<crate::tools::ArtifactReference>,
 }
 
 pub(crate) struct ContentExecution {
@@ -387,6 +393,7 @@ impl Engine {
                 &execution,
             )?
         {
+            recovered.run.model = crate::model::effective_model_name(&self.config);
             let registry_record = self.registry.load(run_id)?;
             if self.registry.run_is_active(run_id)? {
                 return Err(ReplayError::Run(RunError::Message(format!(
@@ -528,6 +535,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         };
 
         let err =
@@ -583,6 +591,7 @@ mod tests {
             tools_enabled: Vec::new(),
             stop_repairs: 0,
             preset: String::new(),
+            artifacts: Vec::new(),
         };
 
         let err =

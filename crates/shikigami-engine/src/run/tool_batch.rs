@@ -838,6 +838,17 @@ impl<'a> DurableToolBatch<'a> {
                                         },
                                     );
                                 }
+                                if let Ok(executed) = &result {
+                                    let call_id =
+                                        conversation_tool_call_id(call, session.turns, index);
+                                    session.artifacts.extend(executed.resource_uris.iter().map(
+                                        |uri| tools::ArtifactReference {
+                                            tool: call.name.clone(),
+                                            call_id: call_id.clone(),
+                                            uri: uri.clone(),
+                                        },
+                                    ));
+                                }
                                 result
                                     .map(|executed| executed.output)
                                     .map_err(|error| error.to_string())

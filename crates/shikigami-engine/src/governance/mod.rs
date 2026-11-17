@@ -76,6 +76,14 @@ pub struct RunOutcome {
     pub termination: String,
     /// Host workspace path (non-authoritative; plane truth is events/receipts).
     pub workspace: String,
+    /// Model the run used. Empty when the run ended before a model was chosen.
+    pub model: String,
+    /// Versioned prompt id the run used. Empty when the run ended before one.
+    pub prompt_id: String,
+    /// Narrowing preset id, if the run had one.
+    pub preset_id: Option<String>,
+    /// External resources tool results named, attributed to their calls.
+    pub artifacts: Vec<crate::tools::ArtifactReference>,
 }
 
 /// Borrowed inputs for one bounded-content planning call.

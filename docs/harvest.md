@@ -40,7 +40,11 @@ actionable governance errors. There is no separate reporter-preflight RPC.
 | `workspace` | host path (reference only; not plane storage) |
 | `authoritative` | always `plane` on governed harvest |
 | `harness` | `shikigami` |
-| `prompt_id` | versioned default prompt id |
+| `prompt_id` | versioned prompt id the run used (the default prompt for a run that ended before choosing one) |
+| `model` | model the run used, when known |
+| `preset_id` | narrowing preset id, when the run had one |
+| `artifacts` | `[{tool, call_id, uri}]` as compact JSON, when tool results named resources and it is at most 4000 bytes |
+| `artifacts_omitted` | set instead of `artifacts` when it is larger; the full list stays in local `run.json` |
 
 Evidence references on complete include `run_id` and optional `workspace_path`.
 

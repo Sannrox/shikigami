@@ -28,6 +28,12 @@ use super::{ExecutedTool, ToolDef, ToolError, ToolOutput, parse};
 pub trait ExternalTool: Send + Sync {
     fn definition(&self) -> ToolDef;
     async fn call(&self, args_json: &str) -> Result<String, ToolError>;
+
+    /// [`Self::call`] plus the URIs of resources the result links to. Tools
+    /// whose results name no resources keep this default.
+    async fn call_linked(&self, args_json: &str) -> Result<(String, Vec<String>), ToolError> {
+        Ok((self.call(args_json).await?, Vec::new()))
+    }
 }
 
 /// Run-scoped tool registry: definitions + jailed execution for enabled tools.
@@ -326,15 +332,18 @@ impl ToolRegistry {
         args_json: &str,
     ) -> Result<ExecutedTool, ToolError> {
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
+            let (text, resource_uris) = t.call_linked(args_json).await?;
             return Ok(ExecutedTool {
-                output: ToolOutput::Text(t.call(args_json).await?),
+                output: ToolOutput::Text(text),
                 edit_outcome: None,
+                resource_uris,
             });
         }
         if name == "load_skill" {
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(self.load_skill(args_json)?),
                 edit_outcome: None,
+                resource_uris: Vec::new(),
             });
         }
         if !builtin_is_authorized(&self.executor.enabled, name) {
@@ -353,6 +362,7 @@ impl ToolRegistry {
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(summary),
                 edit_outcome: None,
+                resource_uris: Vec::new(),
             });
         }
         if name == "handoff" {
@@ -360,6 +370,7 @@ impl ToolRegistry {
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(format_handoff_summary(&brief)),
                 edit_outcome: None,
+                resource_uris: Vec::new(),
             });
         }
         if name == "web_fetch" {
@@ -367,6 +378,7 @@ impl ToolRegistry {
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(text),
                 edit_outcome: None,
+                resource_uris: Vec::new(),
             });
         }
         if BASH_HELPER_TOOLS.contains(&name) {
@@ -379,6 +391,7 @@ impl ToolRegistry {
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(text),
                 edit_outcome: None,
+                resource_uris: Vec::new(),
             });
         }
         self.executor.execute(name, args_json).await

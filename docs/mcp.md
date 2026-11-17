@@ -152,6 +152,7 @@ timeout_secs = 30   # optional
 | Server response | Harness outcome |
 | --- | --- |
 | `result.content[].text` | Joined text is the tool result (`ok = true`) |
+| `result.content[]` of type `resource_link` | Its `uri` is recorded as a run artifact with the tool and call id ([runs.md](runs.md#artifacts-a-run-produced)); the text result is unchanged |
 | `result.isError = true` | Failed tool call; the projected error body is the failure detail (`ok = false`) |
 | JSON-RPC `error` | Failed tool call |
 | No response within `timeout_secs` | Failed tool call `deadline_exceeded`; the remote side may still have completed — reconcile through the server's receipt surface before retrying |
@@ -177,6 +178,7 @@ describe an error.
 ### Offline tests
 
 `command = "mock"` registers a deterministic echo tool without spawning MCP.
+An optional `link` argument comes back as a `resource_link`.
 
 ## Governed ontology reads and Action calls (`sekai-mcp`)
 
