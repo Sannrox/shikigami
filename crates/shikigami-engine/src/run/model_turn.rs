@@ -1,5 +1,6 @@
 //! Durable planning and reporting for one model-produced turn.
 
+use crate::tracing_export::Outbound;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -402,14 +403,19 @@ impl<'a> DurableModelTurn<'a> {
                 .content_context()
                 .map(|(_, _, resolver)| resolver)
                 .ok_or_else(|| RunError::Message("content resolver is unavailable".into()))?;
-            self.engine.report_governance_model(self.handle).await?;
+            Outbound::scope(
+                session.spans.turn_outbound(),
+                self.engine.report_governance_model(self.handle),
+            )
+            .await?;
             session.save(self.tools.as_ref())?;
             content_to_model_turn(turn, resolver.as_ref()).await?
         } else if session.is_content() {
             let (messages, capabilities, resolver) = session
                 .content_context()
                 .ok_or_else(|| RunError::Message("content session is unavailable".into()))?;
-            let (planned, retries) =
+            let (planned, retries) = Outbound::scope(
+                session.spans.turn_outbound(),
                 crate::model::collect_retry_notes(self.engine.governance.plan_content_turn(
                     self.handle,
                     self.system_prompt,
@@ -420,8 +426,9 @@ impl<'a> DurableModelTurn<'a> {
                         resolver: resolver.as_ref(),
                         local_model: self.engine.model.as_ref(),
                     },
-                ))
-                .await;
+                )),
+            )
+            .await;
             self.emit_model_retries(&session.run_id, retries);
             let turn = planned?;
             session.turns += 1;
@@ -466,21 +473,33 @@ impl<'a> DurableModelTurn<'a> {
                 tool_calls: content_message.tool_calls,
             });
             session.save(self.tools.as_ref())?;
-            self.engine.report_governance_model(self.handle).await?;
+            Outbound::scope(
+                session.spans.turn_outbound(),
+                self.engine.report_governance_model(self.handle),
+            )
+            .await?;
             session.save(self.tools.as_ref())?;
             model_turn
         } else if let Some(turn) = self.staged_turn.take() {
-            self.engine.report_governance_model(self.handle).await?;
+            Outbound::scope(
+                session.spans.turn_outbound(),
+                self.engine.report_governance_model(self.handle),
+            )
+            .await?;
             session.save(self.tools.as_ref())?;
             turn
         } else {
-            let plan = crate::model::collect_retry_notes(self.engine.governance.plan_turn(
-                self.handle,
-                self.system_prompt,
-                &session.messages,
-                self.tool_defs,
-                self.engine.model.as_ref(),
-            ));
+            // The model and plane calls of this turn carry the turn span.
+            let plan = Outbound::scope(
+                session.spans.turn_outbound(),
+                crate::model::collect_retry_notes(self.engine.governance.plan_turn(
+                    self.handle,
+                    self.system_prompt,
+                    &session.messages,
+                    self.tool_defs,
+                    self.engine.model.as_ref(),
+                )),
+            );
             let (planned, retries) = if self.engine.events.wants_text_deltas() {
                 // A streamed turn shows text early, so it can also be cancelled
                 // early. Dropping it leaves the checkpoint at the last durable
@@ -532,7 +551,11 @@ impl<'a> DurableModelTurn<'a> {
                 tool_calls: turn.tool_calls.clone(),
             });
             session.save(self.tools.as_ref())?;
-            self.engine.report_governance_model(self.handle).await?;
+            Outbound::scope(
+                session.spans.turn_outbound(),
+                self.engine.report_governance_model(self.handle),
+            )
+            .await?;
             session.save(self.tools.as_ref())?;
             turn
         };

@@ -83,6 +83,10 @@ impl ToolEnvironment {
     ) {
         command.env_clear();
         command.envs(self.materialize(job));
+        // Inside a traced tool call the process joins the run's trace.
+        if let Some(outbound) = crate::tracing_export::Outbound::current() {
+            command.envs(outbound.env());
+        }
     }
 }
 

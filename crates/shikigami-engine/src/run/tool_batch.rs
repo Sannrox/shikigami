@@ -1,5 +1,6 @@
 //! Durable execution and reporting for one model-produced tool batch.
 
+use crate::tracing_export::Outbound;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -318,7 +319,11 @@ impl<'a> DurableToolBatch<'a> {
                 let gov = Arc::clone(&self.engine.governance);
                 let handle = handle.clone();
                 let sem = Arc::clone(&sem);
-                set.spawn(async move {
+                let outbound =
+                    session
+                        .spans
+                        .tool_outbound(&stable_tool_call_id(&call, turn_number, i));
+                set.spawn(Outbound::scope(outbound, async move {
                     let _permit = sem.acquire().await.expect("semaphore");
                     let stable_call_id = stable_tool_call_id(&call, turn_number, i);
                     if !tools.is_enabled(&call.name) {
@@ -347,7 +352,7 @@ impl<'a> DurableToolBatch<'a> {
                         Ok(out) => (i, call, Ok(out)),
                         Err(e) => (i, call, Err(e.to_string())),
                     }
-                });
+                }));
             }
             let mut raw = Vec::with_capacity(turn.tool_calls.len());
             while let Some(joined) = set.join_next().await {
@@ -559,15 +564,16 @@ impl<'a> DurableToolBatch<'a> {
                     }
                     let authorization = match parked_call_bound {
                         Ok(()) => {
-                            self.engine
-                                .governance
-                                .authorize_tool_with_id(
+                            Outbound::scope(
+                                session.spans.tool_outbound(&stable_call_id),
+                                self.engine.governance.authorize_tool_with_id(
                                     handle,
                                     &stable_call_id,
                                     &call.name,
                                     &call.args_json,
-                                )
-                                .await
+                                ),
+                            )
+                            .await
                         }
                         Err(error) => Err(error),
                     };
@@ -806,7 +812,10 @@ impl<'a> DurableToolBatch<'a> {
                             started,
                             timeout,
                             &session.parent_run_id,
-                            tools.execute_for_run(&call.name, &call.args_json),
+                            Outbound::scope(
+                                session.spans.tool_outbound(&stable_call_id),
+                                tools.execute_for_run(&call.name, &call.args_json),
+                            ),
                         )
                         .await
                         {
