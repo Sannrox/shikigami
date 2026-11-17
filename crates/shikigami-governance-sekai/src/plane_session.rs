@@ -141,8 +141,14 @@ pub(super) fn call_options(
     operation_id: Option<&str>,
     request_id: Option<&str>,
 ) -> CallOptions {
-    let context =
+    let mut context =
         CallContext::default().with_metadata(AUTH_SOURCE_METADATA, auth_source(governance));
+    // Plane spans join the run's trace.
+    if let Some(outbound) = shikigami_engine::tracing_export::Outbound::current() {
+        for (name, value) in outbound.pairs() {
+            context = context.with_metadata(name, value);
+        }
+    }
     let mut options = CallOptions::new()
         .with_timeout(RPC_TIMEOUT)
         .with_context(context);
@@ -276,6 +282,28 @@ mod tests {
         assert_eq!(options.context.namespace.as_deref(), Some("default"));
         assert_eq!(options.context.operation_id.as_deref(), Some("operation-1"));
         assert_eq!(options.request_id.as_deref(), Some("request-1"));
+    }
+
+    #[tokio::test]
+    async fn call_options_carry_the_active_trace_context() {
+        let governance = SekaiChiseiGovernance::from_config(&Config::default()).unwrap();
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let outbound = shikigami_engine::tracing_export::Outbound {
+            traceparent: traceparent.into(),
+            tracestate: Some("vendor=opaque".into()),
+        };
+        let options = shikigami_engine::tracing_export::Outbound::scope(Some(outbound), async {
+            call_options(&governance, None, None, None)
+        })
+        .await;
+        assert_eq!(
+            options.context.metadata,
+            vec![
+                (AUTH_SOURCE_METADATA.into(), "local".into()),
+                ("traceparent".into(), traceparent.into()),
+                ("tracestate".into(), "vendor=opaque".into()),
+            ]
+        );
     }
 
     fn plane_config(endpoint: &str, allow_insecure_remote: bool) -> crate::config::Config {

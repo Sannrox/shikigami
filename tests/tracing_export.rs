@@ -227,6 +227,54 @@ async fn a_malformed_traceparent_starts_the_runs_own_trace() {
     assert_eq!(spans_by_name(&exported)["run"][0]["parent.source"], "none");
 }
 
+/// Run a scripted `bash` call that saves the `TRACEPARENT` it sees, and
+/// return it with the span export (empty when tracing is off).
+async fn traceparent_seen_by_bash(tracing: bool) -> (String, String) {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.jsonl");
+    let seen_path = dir.path().join("seen");
+    let mut config = offline_config(dir.path());
+    config.tools.enabled = vec!["bash".into(), "report".into()];
+    config.tracing.enabled = tracing;
+    config.tracing.exporter = "otlp".into();
+    config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+    let command = format!("printf %s \"$TRACEPARENT\" > '{}'", seen_path.display());
+    let bash = serde_json::json!({"tool_calls": [{
+        "name": "bash",
+        "args_json": serde_json::json!({"command": command}).to_string(),
+    }]});
+    let report = r#"{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}"#;
+    config.model.script_json = Some(format!("[{bash},{report}]"));
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let result = harness.run(RunRequest::new("trace")).await.unwrap();
+    assert!(result.success, "{}", result.summary);
+    let exported = fs::read_to_string(&spans_path).unwrap_or_default();
+    (fs::read_to_string(&seen_path).unwrap(), exported)
+}
+
+#[tokio::test]
+async fn bash_sees_the_tool_spans_traceparent() {
+    let (seen, exported) = traceparent_seen_by_bash(true).await;
+    let spans = exported_spans(&exported);
+    let tool = spans
+        .iter()
+        .find(|span| span["name"] == "tool")
+        .unwrap_or_else(|| panic!("{exported}"));
+    let expected = format!(
+        "00-{}-{}-01",
+        tool["traceId"].as_str().unwrap(),
+        tool["spanId"].as_str().unwrap()
+    );
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test]
+async fn bash_sees_no_traceparent_while_tracing_is_off() {
+    let (seen, exported) = traceparent_seen_by_bash(false).await;
+    assert_eq!(seen, "");
+    assert_eq!(exported, "");
+}
+
 #[tokio::test]
 async fn an_unreachable_collector_does_not_fail_the_run() {
     let dir = tempdir().unwrap();

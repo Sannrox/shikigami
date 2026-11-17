@@ -288,14 +288,13 @@ impl HttpModel {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, AttemptError> {
-        let mut response = self
-            .client
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(body)
-            .send()
-            .await
-            .map_err(AttemptError::from_send)?;
+        let mut request = self.client.post(url).bearer_auth(&self.api_key).json(body);
+        if let Some(outbound) = shikigami_engine::tracing_export::Outbound::current() {
+            for (name, value) in outbound.pairs() {
+                request = request.header(name, value);
+            }
+        }
+        let mut response = request.send().await.map_err(AttemptError::from_send)?;
         if !response.status().is_success() {
             return Err(AttemptError::from_status(&response));
         }
@@ -822,13 +821,15 @@ mod tests {
     }
 
     /// Serve `responses` in order, one per connection, on an ephemeral port.
-    /// Returns the base URL and a handle yielding how many requests arrived.
-    fn scripted_provider(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<usize>) {
+    /// Returns the base URL and a handle yielding the requests that arrived.
+    fn scripted_provider(
+        responses: Vec<&'static str>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
-            let mut served = 0;
+            let mut served = Vec::new();
             for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
@@ -862,7 +863,7 @@ mod tests {
                     body.len()
                 )
                 .unwrap();
-                served += 1;
+                served.push(String::from_utf8_lossy(&request).into_owned());
             }
             served
         });
@@ -879,6 +880,33 @@ mod tests {
 {"choices":[{"message":{"content":"recovered"}}]}"#;
 
     #[tokio::test]
+    async fn a_traced_turn_sends_traceparent_and_an_untraced_one_does_not() {
+        let (base, server) = scripted_provider(vec![OK_TURN, OK_TURN]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_TRACEPARENT_KEY");
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let outbound = shikigami_engine::tracing_export::Outbound {
+            traceparent: traceparent.into(),
+            tracestate: None,
+        };
+        shikigami_engine::tracing_export::Outbound::scope(
+            Some(outbound),
+            model.next_turn("system", &[], &[]),
+        )
+        .await
+        .unwrap();
+        model.next_turn("system", &[], &[]).await.unwrap();
+
+        let requests = server.join().unwrap();
+        let header = format!("traceparent: {traceparent}");
+        assert!(
+            requests[0].to_ascii_lowercase().contains(&header),
+            "{}",
+            requests[0]
+        );
+        assert!(!requests[1].to_ascii_lowercase().contains("traceparent"));
+    }
+
+    #[tokio::test]
     async fn transient_provider_failures_retry_and_record_each_attempt() {
         let (base, server) = scripted_provider(vec![
             "503 Service Unavailable\n{}",
@@ -890,7 +918,7 @@ mod tests {
         let (turn, notes) = collect_retry_notes(model.next_turn("system", &[], &[])).await;
 
         assert_eq!(turn.unwrap().content, "recovered");
-        assert_eq!(server.join().unwrap(), 3);
+        assert_eq!(server.join().unwrap().len(), 3);
         assert_eq!(notes.len(), 2);
         assert!(notes[0].starts_with("model retry 1/2:") && notes[0].contains("503"));
         assert!(notes[1].starts_with("model retry 2/2:") && notes[1].contains("429"));
@@ -926,7 +954,7 @@ mod tests {
         assert_eq!(turn.tool_calls[0].name, "read_file");
         assert_eq!(turn.tool_calls[0].args_json, r#"{"path":"a"}"#);
         assert_eq!(turn.usage.unwrap().output_tokens, 2);
-        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -938,7 +966,7 @@ mod tests {
 
         let error = turn.unwrap_err();
         assert!(error.to_string().contains("401"), "{error}");
-        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(server.join().unwrap().len(), 1);
         assert!(notes.is_empty());
     }
 
@@ -951,7 +979,7 @@ mod tests {
 
         let error = turn.unwrap_err();
         assert!(error.to_string().contains("502"), "{error}");
-        assert_eq!(server.join().unwrap(), 3);
+        assert_eq!(server.join().unwrap().len(), 3);
         assert_eq!(notes.len(), 2);
     }
 

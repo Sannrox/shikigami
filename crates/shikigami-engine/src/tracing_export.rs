@@ -86,6 +86,59 @@ impl TraceContext {
     }
 }
 
+tokio::task_local! {
+    static OUTBOUND: Outbound;
+}
+
+/// The W3C context a run passes to the processes, servers, and endpoints it
+/// calls, pointing at the span that is active for the call. Set with
+/// [`Outbound::scope`]; outbound edges read it with [`Outbound::current`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outbound {
+    pub traceparent: String,
+    pub tracestate: Option<String>,
+}
+
+impl Outbound {
+    /// The context of the innermost enclosing scope; `None` outside any
+    /// scope or while tracing is disabled.
+    pub fn current() -> Option<Self> {
+        OUTBOUND.try_with(Clone::clone).ok()
+    }
+
+    /// Runs `future` with `outbound` as the current context. `None` runs it
+    /// unchanged, so a disabled trace adds nothing.
+    pub async fn scope<F: std::future::Future>(outbound: Option<Self>, future: F) -> F::Output {
+        match outbound {
+            Some(outbound) => OUTBOUND.scope(outbound, future).await,
+            None => future.await,
+        }
+    }
+
+    /// `traceparent`, then `tracestate` when present, as header or
+    /// environment pairs (environment names are the upper-case forms).
+    pub fn pairs(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        std::iter::once(("traceparent", self.traceparent.as_str())).chain(
+            self.tracestate
+                .as_deref()
+                .map(|state| ("tracestate", state)),
+        )
+    }
+
+    /// `TRACEPARENT` / `TRACESTATE` for a spawned process.
+    pub fn env(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.pairs().map(|(name, value)| match name {
+            "traceparent" => ("TRACEPARENT", value),
+            _ => ("TRACESTATE", value),
+        })
+    }
+}
+
+/// W3C `tracestate` bounds: at most 512 printable ASCII characters.
+fn is_valid_tracestate(value: &str) -> bool {
+    value.len() <= 512 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+}
+
 /// Trace id and parent span id of a W3C `traceparent`
 /// (`version-traceid-parentid-flags`). A future version may append fields;
 /// version `ff`, uppercase hex, and all-zero ids are invalid.
@@ -128,6 +181,8 @@ struct ActiveTrace {
     destination: Destination,
     network: NetworkSettings,
     trace_id: String,
+    /// The caller's `tracestate`, passed on unchanged with outbound calls.
+    tracestate: Option<String>,
     run_span: OpenSpan,
     current_turn: Option<OpenSpan>,
     current_tools: Vec<OpenSpan>,
@@ -201,6 +256,13 @@ impl RunSpanTrace {
         let joined = parent.and_then(|context| {
             parse_traceparent(&context.traceparent).map(|ids| (ids, context.source))
         });
+        // An invalid `tracestate` is dropped: passed on as a header it would
+        // fail the outbound request.
+        let tracestate = joined
+            .is_some()
+            .then(|| parent.and_then(|context| context.tracestate.clone()))
+            .flatten()
+            .filter(|state| is_valid_tracestate(state));
         let (trace_id, parent_span_id, source) = match joined {
             Some(((trace_id, span_id), source)) => {
                 (trace_id.to_owned(), span_id.to_owned(), source.as_str())
@@ -217,6 +279,7 @@ impl RunSpanTrace {
                 destination,
                 network: config.network.clone(),
                 trace_id,
+                tracestate,
                 run_span: OpenSpan {
                     span_id: random_hex(16),
                     parent_span_id,
@@ -237,6 +300,32 @@ impl RunSpanTrace {
                 finished: false,
             }),
         })
+    }
+
+    /// Outbound context for the open turn span, else the run span.
+    pub fn turn_outbound(&self) -> Option<Outbound> {
+        let inner = self.inner.as_ref()?;
+        let span = inner.current_turn.as_ref().unwrap_or(&inner.run_span);
+        Some(inner.outbound(&span.span_id))
+    }
+
+    /// Outbound context for the open tool span `call_id`, else the turn's.
+    pub fn tool_outbound(&self, call_id: &str) -> Option<Outbound> {
+        let inner = self.inner.as_ref()?;
+        match inner
+            .current_tools
+            .iter()
+            .rfind(|span| span.attribute("call_id") == Some(call_id))
+        {
+            Some(span) => Some(inner.outbound(&span.span_id)),
+            None => self.turn_outbound(),
+        }
+    }
+
+    /// Outbound context for the run span.
+    pub fn run_outbound(&self) -> Option<Outbound> {
+        let inner = self.inner.as_ref()?;
+        Some(inner.outbound(&inner.run_span.span_id))
     }
 
     pub fn start_turn(&mut self, _turn: u32) {
@@ -367,6 +456,14 @@ impl RunSpanTrace {
 }
 
 impl ActiveTrace {
+    /// A sampled W3C context naming `span_id` in this run's trace.
+    fn outbound(&self, span_id: &str) -> Outbound {
+        Outbound {
+            traceparent: format!("00-{}-{span_id}-01", self.trace_id),
+            tracestate: self.tracestate.clone(),
+        }
+    }
+
     fn close_turn(&mut self, ok: bool) {
         while let Some(open) = self.current_tools.pop() {
             self.finished_spans.push(open.finish(false));
@@ -639,6 +736,13 @@ mod tests {
         ] {
             assert_eq!(parse_traceparent(&bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn tracestate_must_be_bounded_printable_ascii() {
+        assert!(is_valid_tracestate("vendor=opaque,other=1"));
+        assert!(!is_valid_tracestate("vendor=a\nInjected: header"));
+        assert!(!is_valid_tracestate(&"a".repeat(513)));
     }
 
     #[test]

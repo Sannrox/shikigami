@@ -150,9 +150,16 @@ impl<T: Transport> Client<T> {
             )));
         }
         let arguments = serde_json::from_str(args_json).unwrap_or_else(|_| json!({}));
-        let result = self
-            .request("tools/call", json!({"name": name, "arguments": arguments}))
-            .await?;
+        let mut params = json!({"name": name, "arguments": arguments});
+        // The server joins the run's trace through the request `_meta`.
+        if let Some(outbound) = crate::tracing_export::Outbound::current() {
+            params["_meta"] = outbound
+                .pairs()
+                .map(|(key, value)| (key.to_owned(), Value::from(value)))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
+        let result = self.request("tools/call", params).await?;
         let texts = result
             .get("content")
             .and_then(Value::as_array)

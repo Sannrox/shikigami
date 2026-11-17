@@ -72,6 +72,23 @@ the original parent. A malformed `traceparent` logs a warning and the run
 starts its own trace; it never fails the run. `tracestate` is kept but never
 exported as an attribute.
 
+## Outbound trace context
+
+While tracing is on, the run passes the W3C context of the active span to
+what it calls, so their own spans join the run's trace:
+
+| Callee | Carrier | Span |
+| --- | --- | --- |
+| `bash`, `bash_background`, and other sandboxed processes | `TRACEPARENT` / `TRACESTATE` environment | `tool` |
+| MCP servers, stdio and HTTP | `params._meta.traceparent` / `tracestate` on `tools/call` | `tool` |
+| HTTP MCP servers | `traceparent` / `tracestate` headers | `tool` |
+| HTTP model endpoint | `traceparent` / `tracestate` headers | `turn` |
+| Plane calls | `traceparent` / `tracestate` request metadata | `turn` for planning, `tool` for tool authorization |
+
+`tracestate` is the caller's, passed on unchanged; one that is not at most 512 printable ASCII characters is dropped. A stdio MCP server starts
+before the run span exists, so it receives the context per call in `_meta`,
+not in its environment. With tracing off, nothing is added.
+
 ## Attribute allowlist
 
 Correlation attributes use the same names as harvest / plane identity

@@ -510,6 +510,11 @@ impl McpHttpTransport {
         if let Some(version) = &self.protocol_version {
             req = req.header("mcp-protocol-version", version);
         }
+        if let Some(outbound) = crate::tracing_export::Outbound::current() {
+            for (name, value) in outbound.pairs() {
+                req = req.header(name, value);
+            }
+        }
         req.send()
             .await
             .map_err(|e| ToolError::Message(format!("http mcp: {e}")))
@@ -927,6 +932,8 @@ done
     async fn http_mcp_registers_with_local_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_calls = Arc::clone(&calls);
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
@@ -948,6 +955,7 @@ done
                         }
                     })
                 } else if req.contains("tools/call") {
+                    seen_calls.lock().unwrap().push(req.to_ascii_lowercase());
                     json!({
                         "jsonrpc": "2.0",
                         "id": 2,
@@ -999,6 +1007,37 @@ done
         match out {
             crate::tools::ToolOutput::Text(t) => assert_eq!(t, "pong"),
             _ => panic!("expected text"),
+        }
+        // Inside a traced tool call the header and `_meta` carry the context.
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let outbound = crate::tracing_export::Outbound {
+            traceparent: traceparent.into(),
+            tracestate: Some("vendor=opaque".into()),
+        };
+        crate::tracing_export::Outbound::scope(
+            Some(outbound),
+            reg.execute("mcp.httpdemo.ping", "{}"),
+        )
+        .await
+        .unwrap();
+        {
+            let calls = calls.lock().unwrap();
+            assert!(!calls[0].contains("traceparent"), "{}", calls[0]);
+            assert!(
+                calls[1].contains(&format!("traceparent: {traceparent}")),
+                "{}",
+                calls[1]
+            );
+            assert!(
+                calls[1].contains("tracestate: vendor=opaque"),
+                "{}",
+                calls[1]
+            );
+            assert!(
+                calls[1].contains(&format!(r#""_meta":{{"traceparent":"{traceparent}""#)),
+                "{}",
+                calls[1]
+            );
         }
 
         // egress deny
