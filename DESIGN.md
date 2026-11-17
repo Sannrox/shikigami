@@ -146,7 +146,6 @@ Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
 | `src/agent_turn.rs`, `src/agent_turn/` | Agent-turn mapping plus thin `run_agent_turn_serve` over a private claim loop that runs as the instance principal |
 | `src/governance/` | Host adapter `http-callback` (`host-authz` alias) plus `from_config` wiring for `sekai-chisei` |
 | `src/mcp_server/`, `src/acp.rs`, `crates/shikigami-tui` | MCP server host, ACP newline JSON-RPC session host, and the thin TUI ACP client |
-| `src/eval.rs` | Offline golden-fixture harness (`shikigami eval`) |
 | `crates/shikigami-cli` | CLI host (`shikigami` binary) |
 | `src/plane_host.rs` | Optional in-process plane host bootstrap for embedders |
 | `sekai-client` dependency | Versioned Rust facade over canonical sekai-chisei gRPC contracts; consumed by `shikigami-governance-sekai` |
@@ -188,7 +187,6 @@ Shipped in the **1.0** tree (medium contract; see ADR 0004):
 - Directory, in-place, and git-worktree workspaces
 - Embeddable `Harness` API + in-repo/external host proofs
 - Park/escalate resume, serve FS queue, metrics, MCP host/client (host-adjacent)
-- Offline eval golden-fixture harness (`shikigami eval`)
 
 Post-1.0 themes (not freeze-core):
 

@@ -1,4 +1,5 @@
 use shikigami::{Config, Harness, RunRequest, StateRoot};
+use std::path::Path;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -794,4 +795,66 @@ async fn stop_hook_repair_bound_survives_a_restart() {
         verified_run(verified_config(dir.path(), resumed, 1), state(), request).await;
     assert!(!result.success, "{result:?}");
     assert_eq!(verification_results(&events), [(2, false)]);
+}
+
+/// Script whose final file needs a fact (port 7341) that only the compacted
+/// span states. `with_summary` adds the summary that carries the fact forward.
+fn fact_across_compaction_script(with_summary: bool) -> serde_json::Value {
+    let write = |path: &str, content: &str| {
+        let args = serde_json::json!({"path": path, "content": content}).to_string();
+        serde_json::json!({"tool_calls": [{"name": "write_file", "args_json": args}]})
+    };
+    let mut turns = vec![
+        serde_json::json!({
+            "content": "The release port from the task notes is 7341. Writing the notes file first.",
+            "tool_calls": write("notes.txt", "draft")["tool_calls"],
+        }),
+        write("a.txt", "a"),
+        write("b.txt", "b"),
+        write("c.txt", "c"),
+        write("d.txt", "d"),
+    ];
+    if with_summary {
+        turns.push(serde_json::json!({
+            "summary": "Task: write the service config. Found earlier: the release port is 7341."
+        }));
+    }
+    let mut needs_port = write("service.conf", "port=7341\n");
+    needs_port["requires_context"] = serde_json::json!(["7341"]);
+    turns.push(needs_port);
+    turns.push(report_turn());
+    serde_json::Value::Array(turns)
+}
+
+async fn run_fact_across_compaction(
+    dir: &Path,
+    with_summary: bool,
+) -> Result<shikigami::RunResult, shikigami::HarnessError> {
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(fact_across_compaction_script(with_summary).to_string());
+    config.events.adapter = "none".into();
+    config.run.compact_after_messages = Some(10);
+    config.workspace.root = dir.join("ws").to_string_lossy().into();
+    let harness = Harness::from_config(config, StateRoot::new(dir.join("state"))).unwrap();
+    let mut request = RunRequest::new("Write service.conf with the release port.");
+    request.keep_workspace = true;
+    harness.run(request).await
+}
+
+#[tokio::test]
+async fn a_fact_from_the_compacted_span_survives_only_with_a_summary() {
+    let dir = tempdir().unwrap();
+    let result = run_fact_across_compaction(dir.path(), true).await.unwrap();
+    assert!(result.success, "{result:?}");
+    let conf = std::fs::read_to_string(result.workspace.join("service.conf")).unwrap();
+    assert!(conf.contains("port=7341"));
+
+    let dir = tempdir().unwrap();
+    let dropped = run_fact_across_compaction(dir.path(), false).await;
+    assert!(
+        !dropped.as_ref().is_ok_and(|result| result.success),
+        "compaction without a summary kept the fact: {dropped:?}"
+    );
 }

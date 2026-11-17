@@ -149,12 +149,6 @@ enum Command {
         #[arg(long, conflicts_with = "json")]
         prometheus: bool,
     },
-    /// Run an offline scripted golden-fixture suite.
-    Eval {
-        fixture: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
     /// Long-running filesystem-queue, plane-claim, or agent-turn host (see docs/serve.md).
     Serve {
         /// Work intake source. Filesystem remains the offline default.
@@ -584,34 +578,6 @@ async fn run() -> anyhow::Result<()> {
             } else {
                 let _ = json;
                 println!("{}", serde_json::to_string_pretty(&snapshot)?);
-            }
-        }
-        Command::Eval { fixture, json } => {
-            let result = shikigami::run_fixture(&fixture).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                human_println!(
-                    "eval {} passed={} cases={}/{}",
-                    result.suite,
-                    result.passed,
-                    result.passed_cases,
-                    result.passed_cases + result.failed_cases
-                );
-                for case in &result.cases {
-                    human_println!(
-                        "  {}: {}{}",
-                        case.name,
-                        if case.passed { "ok" } else { "fail" },
-                        case.failure
-                            .as_deref()
-                            .map(|failure| format!(" — {failure}"))
-                            .unwrap_or_default()
-                    );
-                }
-            }
-            if !result.passed {
-                anyhow::bail!("eval suite failed");
             }
         }
         Command::Serve {

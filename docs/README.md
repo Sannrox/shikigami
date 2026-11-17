@@ -23,7 +23,6 @@ Operator and contributor documentation for **shikigami**.
 | Inspect runs, cancel, artifacts, and HTTP control | [runs.md](runs.md) |
 | Run with bounded image, audio, and document parts | [content.md](content.md) |
 | Replay a run from content-bound evidence | [replay.md](replay.md) |
-| Run deterministic offline golden fixtures | [eval.md](eval.md) |
 | Propose isolation probe specs from RPC diffs | [red-team.md](red-team.md) |
 | Run specialised read-only security reviews | [security-finder.md](security-finder.md) |
 | Turn findings into evidence-backed exposure verdicts | [security-triage.md](security-triage.md) |

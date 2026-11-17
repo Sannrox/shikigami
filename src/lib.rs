@@ -31,7 +31,6 @@ pub(crate) use shikigami_engine::digest;
 
 pub mod acp;
 pub mod agent_turn;
-pub mod eval;
 pub mod governance;
 pub mod harness;
 pub mod mcp_server;
@@ -62,7 +61,6 @@ pub use content::{
     MAX_CONTENT_PROCESS_REQUEST_BYTES, ResolvedContent, ResolvedContentPart,
     export_content_transcript,
 };
-pub use eval::{EVAL_SCHEMA_VERSION, EvalCaseResult, EvalError, EvalSuiteResult, run_fixture};
 pub use events::{ChannelSink, EventSink, FanoutSink, HarnessEvent};
 pub use governance::AvailableModel;
 pub use harness::{
