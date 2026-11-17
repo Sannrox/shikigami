@@ -82,7 +82,6 @@ harness = false
 
 [dev-dependencies]
 async-trait = "0.1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
 proptest = { version = "1", features = ["std"] }
 sha2 = "0.11"
