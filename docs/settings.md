@@ -13,6 +13,8 @@ Later sources override earlier ones where documented:
    - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: platform user-state directory keyed by cwd; see [cli.md](cli.md))
 3. Environment variables
 4. CLI flags (where provided)
+5. A preset (`--preset` / `SHIKIGAMI_PRESET`), which only narrows tools and
+   adds a prompt section; see [presets.md](presets.md)
 
 A `shikigami.toml` in the current working directory is never loaded
 implicitly. It is repository content that can add hooks and MCP servers or
@@ -512,6 +514,7 @@ hooks. See [hooks.md](hooks.md).
 | `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
 | `SHIKIGAMI_MODEL` | Override the configured model name; `auto` for plane routing |
 | `SHIKIGAMI_MODEL_SCRIPT` | Scripted JSON (inline) |
+| `SHIKIGAMI_PRESET` | Preset name or file; see [presets.md](presets.md) |
 | `SHIKIGAMI_RUN_TIMEOUT_SECS` | Overall run wall-clock limit |
 | `SHIKIGAMI_SERVE_LISTEN` | Filesystem-serve HTTP control bind |
 | `SHIKIGAMI_SERVE_AUTH_TOKEN_ENV` | Env var name holding the serve HTTP bearer token |

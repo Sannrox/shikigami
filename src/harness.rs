@@ -147,15 +147,27 @@ impl Harness {
         cwd: &Path,
         model: Option<&str>,
     ) -> Result<Self, HarnessError> {
+        Self::resolve_with_preset(explicit_config, state, cwd, model, None)
+    }
+
+    /// Resolve settings, apply an optional model selection, then narrow them
+    /// with an optional preset (`--preset`, see ADR 0022). The preset is the
+    /// last step, so it narrows what the file, profile, and env resolved.
+    pub fn resolve_with_preset(
+        explicit_config: Option<&Path>,
+        state: StateRoot,
+        cwd: &Path,
+        model: Option<&str>,
+        preset: Option<&str>,
+    ) -> Result<Self, HarnessError> {
         let (config, source) =
-            Config::resolve_search_with_model(explicit_config, state.path(), cwd, model).map_err(
-                |error| match error {
-                    ConfigResolutionError::Search(error) => {
-                        HarnessError::State(StateError::Config(error))
-                    }
-                    ConfigResolutionError::Override(error) => HarnessError::Config(error),
-                },
-            )?;
+            Config::resolve_search_with_preset(explicit_config, state.path(), cwd, model, preset)
+                .map_err(|error| match error {
+                ConfigResolutionError::Search(error) => {
+                    HarnessError::State(StateError::Config(error))
+                }
+                ConfigResolutionError::Override(error) => HarnessError::Config(error),
+            })?;
         Self::new(config, source, state)
     }
 

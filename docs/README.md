@@ -17,6 +17,7 @@ Operator and contributor documentation for **shikigami**.
 | Correlate run / operation / attempt ids | [identity.md](identity.md) |
 | Versioned prompts and attribution | [prompts.md](prompts.md) |
 | Runtime skill packs | [skills.md](skills.md) |
+| Narrow tools per task with presets | [presets.md](presets.md) |
 | Plane/model credential patterns | [credentials.md](credentials.md) |
 | Run serve (queue or plane claim) + worker lifecycle | [serve.md](serve.md) |
 | Inspect runs, cancel, artifacts, and HTTP control | [runs.md](runs.md) |

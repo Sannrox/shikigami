@@ -46,14 +46,19 @@ pub(super) fn resolve_search(
     resolve(&path, None)
 }
 
-pub(super) fn resolve_search_with_model(
+/// Host overrides come last: the model, then a narrowing preset (ADR 0022).
+pub(super) fn resolve_search_with_overrides(
     explicit: Option<&Path>,
     state_root: &Path,
     model_override: Option<&str>,
+    preset: Option<&str>,
 ) -> Result<(Config, ConfigSource), ConfigResolutionError> {
     let (mut config, source) =
         resolve_search(explicit, state_root).map_err(ConfigResolutionError::Search)?;
     apply_model_override(&mut config, model_override).map_err(ConfigResolutionError::Override)?;
+    if let Some(preset) = preset {
+        super::preset::apply(&mut config, preset).map_err(ConfigResolutionError::Override)?;
+    }
     config.validate().map_err(ConfigResolutionError::Override)?;
     Ok((config, source))
 }

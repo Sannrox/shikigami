@@ -12,7 +12,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod preset;
 mod resolution;
+
+pub use preset::{AppliedPreset, DEFAULT_PRESET, built_in_presets};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +57,10 @@ pub struct Config {
     /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
     #[serde(default)]
     pub hooks: Vec<HookSettings>,
+    /// Narrowing preset the host selected (ADR 0022). Never read from or
+    /// written to the settings file.
+    #[serde(skip)]
+    pub preset: Option<AppliedPreset>,
 }
 
 /// One lifecycle hook entry (`command` is operator-trusted).
@@ -1009,6 +1016,7 @@ impl Default for Config {
             network: NetworkSettings::default(),
             sandbox: SandboxSettings::default(),
             hooks: Vec::new(),
+            preset: None,
         }
     }
 }
@@ -1159,7 +1167,19 @@ impl Config {
         _cwd: &Path,
         model: Option<&str>,
     ) -> Result<(Self, ConfigSource), ConfigResolutionError> {
-        resolution::resolve_search_with_model(explicit, state_root, model)
+        resolution::resolve_search_with_overrides(explicit, state_root, model, None)
+    }
+
+    /// [`Self::resolve_search_with_model`] plus a narrowing preset, applied
+    /// last (ADR 0022). `None` or `code` leaves the config unchanged.
+    pub fn resolve_search_with_preset(
+        explicit: Option<&Path>,
+        state_root: &Path,
+        _cwd: &Path,
+        model: Option<&str>,
+        preset: Option<&str>,
+    ) -> Result<(Self, ConfigSource), ConfigResolutionError> {
+        resolution::resolve_search_with_overrides(explicit, state_root, model, preset)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {

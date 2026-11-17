@@ -25,6 +25,7 @@ Accepted decisions that must outlive a single PR.
 | [0019](0019-skill-context-boundaries.md) | No skill-declared context boundaries | Accepted |
 | [0020](0020-kekkai-sandbox-pin.md) | Pin kekkai for OS sandbox enforcement | Accepted |
 | [0021](0021-session-attachment-custody.md) | ACP sessions keep their attachments | Accepted |
+| [0022](0022-narrowing-presets.md) | Presets narrow the operator config | Accepted |
 
 ## When to write an ADR
 

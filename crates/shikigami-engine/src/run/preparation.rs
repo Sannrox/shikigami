@@ -62,6 +62,29 @@ pub(super) async fn prepare(
     let stored_stop_repairs = resume_checkpoint
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.stop_repairs);
+    let preset = engine
+        .config
+        .preset
+        .as_ref()
+        .map_or_else(String::new, |preset| preset.id.clone());
+    // A resume, including a takeover elsewhere, keeps the authority the run
+    // started with (ADR 0022).
+    if let Some(checkpoint) = &resume_checkpoint
+        && checkpoint.preset != preset
+    {
+        let named = |id: &str| {
+            if id.is_empty() {
+                "no preset".to_owned()
+            } else {
+                format!("preset `{id}`")
+            }
+        };
+        return Err(RunError::Message(format!(
+            "run started with {}; this resume selects {}",
+            named(&checkpoint.preset),
+            named(&preset)
+        )));
+    }
     let stored_plan_jail = resume_checkpoint
         .as_ref()
         .is_some_and(|checkpoint| checkpoint.plan_jail);
@@ -223,6 +246,21 @@ pub(super) async fn prepare(
     {
         crate::mcp::attach_mcp_servers(&mut tools, &engine.config, request.job_credential.as_ref())
             .await?;
+        if let Some(preset) = &engine.config.preset {
+            let missing: Vec<_> = preset
+                .mcp_tools
+                .iter()
+                .filter(|name| !tools.is_enabled(name))
+                .map(String::as_str)
+                .collect();
+            if !missing.is_empty() {
+                return Err(RunError::Message(format!(
+                    "preset `{}`: MCP servers do not offer {}",
+                    preset.name,
+                    missing.join(", ")
+                )));
+            }
+        }
     }
     let tool_defs = tools.definitions();
     let tools = Arc::new(tools);
@@ -275,6 +313,7 @@ pub(super) async fn prepare(
     }
     session.plan_jail = plan_jail;
     session.stop_repairs = stored_stop_repairs;
+    session.preset = preset;
     session.nested = nested_tools;
     session.children = stored_children;
     session.nested_depth = stored_nested_depth;
@@ -726,6 +765,14 @@ fn compose_context(
         prompt.push_str("\n\n# Session mode\n\n");
         prompt.push_str(extra);
     }
+    if let Some(preset) = &engine.config.preset
+        && !preset.prompt.is_empty()
+    {
+        prompt.push_str("\n\n# Preset: ");
+        prompt.push_str(&preset.name);
+        prompt.push_str("\n\n");
+        prompt.push_str(&preset.prompt);
+    }
     if nested_profile.is_none()
         && let Some(mode) = engine.config.session.selected.as_deref()
     {
@@ -745,6 +792,15 @@ fn compose_context(
             prompt_id: prompt_id.clone(),
         },
     );
+    if let Some(preset) = &engine.config.preset {
+        engine.emit(
+            run_id,
+            HarnessEvent::Message {
+                level: "info".into(),
+                text: format!("preset {}", preset.id),
+            },
+        );
+    }
     if let Some(rules) = rules {
         engine.emit(
             run_id,

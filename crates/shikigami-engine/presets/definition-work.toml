@@ -1,0 +1,23 @@
+# Built-in preset (ADR 0022). Narrows the base config to the definition-branch
+# tools of a `sekai` MCP server; the base config must attach that server.
+name = "definition-work"
+description = "Model a domain on a definition branch and open a proposal for human review."
+prompt = """
+Model the requested domain on a definition branch and open a proposal.
+
+Use only the definition tools. Create one branch from the published parent,
+apply the member edits the task needs, inspect the diff and the consumer
+impact, then open a proposal. Stop after the proposal is created. Do not
+approve or merge: a human reviews the diff and impact, then approves and
+merges. Finish with `report`, naming the branch and the proposal.
+"""
+
+[tools]
+enabled = [
+  "report",
+  "mcp.sekai.sekai.definitions.branch.create",
+  "mcp.sekai.sekai.definitions.branch.edit",
+  "mcp.sekai.sekai.definitions.diff",
+  "mcp.sekai.sekai.definitions.impact",
+  "mcp.sekai.sekai.definitions.proposal.create",
+]
