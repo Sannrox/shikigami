@@ -875,6 +875,92 @@ mod tests {
         assert_eq!(checkpoint.messages.last().unwrap().content, "done");
     }
 
+    /// Scripted model that notes one retry per turn.
+    struct RetryingModel(crate::model::ScriptedModel);
+
+    #[async_trait::async_trait]
+    impl crate::model::ModelPort for RetryingModel {
+        fn id(&self) -> &'static str {
+            "retrying"
+        }
+        async fn next_turn(
+            &self,
+            system: &str,
+            messages: &[crate::model::ChatMessage],
+            tools: &[crate::tools::ToolDef],
+        ) -> Result<crate::model::ModelTurn, crate::model::ModelError> {
+            crate::model::note_model_retry("model retry 1/2: 503".into());
+            self.0.next_turn(system, messages, tools).await
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<events::HarnessEvent>>);
+
+    impl events::EventSink for RecordingSink {
+        fn id(&self) -> &'static str {
+            "recording"
+        }
+        fn emit(&self, event: events::HarnessEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+        fn health_detail(&self) -> String {
+            String::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn model_retries_surface_as_status_events() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+        config.model.script_json = Some(r#"[{"content":"done"}]"#.into());
+        let model = RetryingModel(crate::model::ScriptedModel::from_config(&config).unwrap());
+        let sink = Arc::new(RecordingSink::default());
+        let registry = Arc::new(RunRegistry::new(state.path()).unwrap());
+        let engine = Engine::new(
+            config.clone(),
+            Arc::from(governance::from_config(&config).unwrap()),
+            Arc::from(workspace::from_config(&config).unwrap()),
+            Arc::new(model),
+            sink.clone(),
+            state.runs_dir(),
+            Arc::clone(&registry),
+        );
+        registry.start("retry-events", "task", None, None).unwrap();
+
+        RunTransaction::new(&engine)
+            .execute(
+                RunRequest::new("task"),
+                "retry-events".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let statuses: Vec<_> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                events::HarnessEvent::Status { status } => Some(status.clone()),
+                _ => None,
+            })
+            .collect();
+        let planning = statuses.iter().position(|s| s == "planning").unwrap();
+        let retry = statuses
+            .iter()
+            .position(|s| s == "model retry 1/2: 503")
+            .unwrap();
+        assert!(planning < retry, "{statuses:?}");
+    }
+
     fn nested_idle_fixture(
         dir: &tempfile::TempDir,
         parent_id: &str,

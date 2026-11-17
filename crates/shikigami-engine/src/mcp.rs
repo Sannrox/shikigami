@@ -172,6 +172,8 @@ struct McpStdioTransport {
     /// which marks the stream unusable: the next write fails closed and kills
     /// the server instead of appending a new request to a partial frame.
     write_in_flight: bool,
+    /// Set when the server announced a tool-list change while we waited.
+    list_changed: bool,
 }
 
 impl McpStdioTransport {
@@ -218,6 +220,7 @@ impl McpStdioTransport {
             frames,
             framing: server.framing,
             write_in_flight: false,
+            list_changed: false,
         })
     }
 
@@ -257,7 +260,12 @@ impl Transport for McpStdioTransport {
             if response.get("id").and_then(Value::as_u64) == id {
                 return Ok(response);
             }
+            self.list_changed |= protocol::is_list_changed(&response);
         }
+    }
+
+    fn take_list_changed(&mut self) -> bool {
+        std::mem::take(&mut self.list_changed)
     }
 
     async fn send(&mut self, notification: &Value) -> Result<(), ToolError> {
@@ -288,10 +296,87 @@ impl HttpAuth {
     }
 }
 
-/// Minimal HTTP JSON-RPC MCP client (POST body; not full SSE streaming).
+/// Incremental event-stream decoder. Bytes carry across chunks and are
+/// decoded per complete line, so a chunk boundary inside a character or a
+/// CRLF never corrupts an event. Lines end in LF, CRLF, or CR. Buffered bytes
+/// are bounded by the MCP frame limit, so a server cannot grow memory freely.
+#[cfg_attr(not(feature = "model-http"), allow(dead_code))]
+#[derive(Default)]
+struct SseDecoder {
+    pending: Vec<u8>,
+    data: Option<String>,
+    /// The last line ended in CR; an LF that follows belongs to it.
+    skip_lf: bool,
+}
+
+#[cfg_attr(not(feature = "model-http"), allow(dead_code))]
+impl SseDecoder {
+    /// Feed bytes; returns the data of every event this completed.
+    fn push(&mut self, mut bytes: &[u8]) -> Result<Vec<String>, ToolError> {
+        if std::mem::take(&mut self.skip_lf) && bytes.first() == Some(&b'\n') {
+            bytes = &bytes[1..];
+        }
+        self.pending.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        while let Some(end) = self.pending.iter().position(|b| *b == b'\n' || *b == b'\r') {
+            let mut terminator = 1;
+            if self.pending[end] == b'\r' {
+                match self.pending.get(end + 1) {
+                    Some(b'\n') => terminator = 2,
+                    Some(_) => {}
+                    None => self.skip_lf = true,
+                }
+            }
+            let raw: Vec<u8> = self.pending.drain(..end + terminator).collect();
+            let line = String::from_utf8_lossy(&raw[..end]);
+            // A stream may open with a byte-order mark.
+            let line = line.strip_prefix('\u{feff}').unwrap_or(&line);
+            if line.is_empty() {
+                // A blank line ends the event.
+                events.extend(self.data.take());
+            } else if let Some(value) = line.strip_prefix("data:") {
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                let data = match &mut self.data {
+                    Some(data) => {
+                        data.push('\n');
+                        data.push_str(value);
+                        data
+                    }
+                    None => self.data.insert(value.to_owned()),
+                };
+                Self::bound(data.len())?;
+            }
+        }
+        Self::bound(self.pending.len())?;
+        Ok(events)
+    }
+
+    fn bound(len: usize) -> Result<(), ToolError> {
+        if len > framing::MAX_FRAME_BYTES {
+            return Err(ToolError::Message(format!(
+                "http mcp event exceeds {} bytes",
+                framing::MAX_FRAME_BYTES
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Streamable-HTTP MCP client. Each message is one POST; the server answers
+/// with a JSON body or an event stream, and may bind the client to a session.
 struct McpHttpTransport {
     url: String,
     auth: HttpAuth,
+    /// `Mcp-Session-Id` the server issued at initialize, sent on every later request.
+    session_id: Option<String>,
+    /// The initialize request, replayed once when the server forgets the session.
+    initialize: Option<Value>,
+    /// Version the server chose at initialize, sent as `MCP-Protocol-Version`.
+    protocol_version: Option<String>,
+    /// A re-initialize failed; the next request retries it first.
+    reinitialize_pending: bool,
+    /// Set when the server announced a tool-list change in a reply stream.
+    list_changed: bool,
     #[cfg(feature = "model-http")]
     client: reqwest::Client,
 }
@@ -335,11 +420,26 @@ impl McpHttpTransport {
             .map_err(ToolError::Message)?;
         #[cfg(feature = "model-http")]
         {
+            // No redirects: one would carry the session id to another host
+            // and skip the egress check made on `url`.
             let client = reqwest::Client::builder()
                 .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| ToolError::Message(format!("http mcp client: {e}")))?;
-            Ok(McpClient::new(Self { url, auth, client }, timeout))
+            Ok(McpClient::new(
+                Self {
+                    url,
+                    auth,
+                    session_id: None,
+                    initialize: None,
+                    protocol_version: None,
+                    reinitialize_pending: false,
+                    list_changed: false,
+                    client,
+                },
+                timeout,
+            ))
         }
         #[cfg(not(feature = "model-http"))]
         {
@@ -348,6 +448,138 @@ impl McpHttpTransport {
                 "http mcp requires the model-http feature".into(),
             ))
         }
+    }
+}
+
+#[cfg(feature = "model-http")]
+const MCP_SESSION_HEADER: &str = "mcp-session-id";
+
+#[cfg(feature = "model-http")]
+impl McpHttpTransport {
+    /// POST one JSON-RPC message with the headers streamable HTTP requires.
+    async fn post(&self, message: &Value) -> Result<reqwest::Response, ToolError> {
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .json(message);
+        if let Some(tok) = self.auth.bearer()? {
+            req = req.bearer_auth(tok);
+        }
+        if let Some(session) = &self.session_id {
+            req = req.header(MCP_SESSION_HEADER, session);
+        }
+        if let Some(version) = &self.protocol_version {
+            req = req.header("mcp-protocol-version", version);
+        }
+        req.send()
+            .await
+            .map_err(|e| ToolError::Message(format!("http mcp: {e}")))
+    }
+
+    /// POST a request and return its reply, adopting any session id issued.
+    /// `None` means the server answered 404 to the session we sent: it lost it.
+    async fn round_trip(&mut self, request: &Value) -> Result<Option<Value>, ToolError> {
+        let resp = self.post(request).await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND && self.session_id.is_some() {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(ToolError::Message(format!(
+                "http mcp status {}",
+                resp.status()
+            )));
+        }
+        if let Some(session) = resp
+            .headers()
+            .get(MCP_SESSION_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            self.session_id = Some(session.to_owned());
+        }
+        let is_stream = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
+        let reply = if is_stream {
+            self.read_event_stream(resp, request.get("id")).await?
+        } else {
+            resp.json()
+                .await
+                .map_err(|e| ToolError::Message(format!("http mcp body: {e}")))?
+        };
+        if request.get("method").and_then(Value::as_str) == Some("initialize")
+            && let Some(version) = reply
+                .pointer("/result/protocolVersion")
+                .and_then(Value::as_str)
+        {
+            self.protocol_version = Some(version.to_owned());
+        }
+        Ok(Some(reply))
+    }
+
+    /// Read events until the reply to `id` arrives. Notifications on the way
+    /// are kept for the protocol layer; anything else is ignored.
+    async fn read_event_stream(
+        &mut self,
+        mut resp: reqwest::Response,
+        id: Option<&Value>,
+    ) -> Result<Value, ToolError> {
+        let mut decoder = SseDecoder::default();
+        loop {
+            let chunk = resp
+                .chunk()
+                .await
+                .map_err(|e| ToolError::Message(format!("http mcp stream: {e}")))?
+                .ok_or_else(|| {
+                    ToolError::Message("http mcp stream ended before the reply".into())
+                })?;
+            for data in decoder.push(&chunk)? {
+                let Ok(message) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                // A server request may reuse our id; only a response has no method.
+                if message.get("id") == id && message.get("method").is_none() {
+                    return Ok(message);
+                }
+                self.list_changed |= protocol::is_list_changed(&message);
+            }
+        }
+    }
+
+    /// Start a fresh session after the server forgot ours.
+    async fn reinitialize(&mut self, initialize: &Value) -> Result<(), ToolError> {
+        self.session_id = None;
+        self.reinitialize_pending = true;
+        // A server that restarted stateless issues no new session; later
+        // requests then go without one.
+        let reply = self
+            .round_trip(initialize)
+            .await?
+            .ok_or_else(|| ToolError::Message("http mcp session lost".into()))?;
+        if let Some(error) = reply.get("error") {
+            return Err(ToolError::Message(format!(
+                "http mcp re-initialize refused: {error}"
+            )));
+        }
+        let initialized = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        });
+        let accepted = self.post(&initialized).await?;
+        if !accepted.status().is_success() {
+            return Err(ToolError::Message(format!(
+                "http mcp re-initialize: initialized notice got {}",
+                accepted.status()
+            )));
+        }
+        self.reinitialize_pending = false;
+        Ok(())
     }
 }
 
@@ -363,23 +595,28 @@ impl Transport for McpHttpTransport {
         }
         #[cfg(feature = "model-http")]
         {
-            let mut req = self.client.post(&self.url).json(request);
-            if let Some(tok) = self.auth.bearer()? {
-                req = req.bearer_auth(tok);
+            if request.get("method").and_then(Value::as_str) == Some("initialize") {
+                self.initialize = Some(request.clone());
+                self.reinitialize_pending = false;
+            } else if self.reinitialize_pending
+                && let Some(initialize) = self.initialize.clone()
+            {
+                self.reinitialize(&initialize).await?;
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| ToolError::Message(format!("http mcp: {e}")))?;
-            if !resp.status().is_success() {
-                return Err(ToolError::Message(format!(
-                    "http mcp status {}",
-                    resp.status()
-                )));
+            if let Some(reply) = self.round_trip(request).await? {
+                return Ok(reply);
             }
-            resp.json()
-                .await
-                .map_err(|e| ToolError::Message(format!("http mcp body: {e}")))
+            // The server forgot the session. Re-initialize once and retry;
+            // a second loss fails the call instead of looping.
+            let initialize = self
+                .initialize
+                .clone()
+                .filter(|init| init.get("id") != request.get("id"))
+                .ok_or_else(|| ToolError::Message("http mcp session lost".into()))?;
+            self.reinitialize(&initialize).await?;
+            self.round_trip(request).await?.ok_or_else(|| {
+                ToolError::Message("http mcp session lost again after re-initialize".into())
+            })
         }
     }
 
@@ -393,13 +630,13 @@ impl Transport for McpHttpTransport {
         }
         #[cfg(feature = "model-http")]
         {
-            let mut req = self.client.post(&self.url).json(notification);
-            if let Some(tok) = self.auth.bearer()? {
-                req = req.bearer_auth(tok);
-            }
-            let _ = req.send().await;
+            let _ = self.post(notification).await;
             Ok(())
         }
+    }
+
+    fn take_list_changed(&mut self) -> bool {
+        std::mem::take(&mut self.list_changed)
     }
 }
 
@@ -752,6 +989,356 @@ done
             err.to_string().contains("denied") || err.to_string().contains("egress"),
             "{err}"
         );
+    }
+
+    /// What the streamable-HTTP test server does with a request.
+    #[cfg(feature = "model-http")]
+    #[derive(Default)]
+    struct StreamableServer {
+        /// Session ids issued so far; the last one is the live session.
+        sessions: Vec<String>,
+        /// Answer 404 to every session id, as a server that keeps restarting would.
+        forget_every_session: bool,
+        /// Issue no sessions: accept requests without one, 404 any that carry one.
+        stateless: bool,
+        /// Answer the next initialize with 503, as a server mid-restart would.
+        fail_next_initialize: bool,
+        /// Tools the server currently offers.
+        tools: Vec<&'static str>,
+        /// (method, session header, accept header) per request.
+        seen: Vec<(String, Option<String>, String)>,
+        /// `mcp-protocol-version` header per request.
+        versions: Vec<Option<String>>,
+    }
+
+    /// Read one HTTP request: lower-cased headers and the JSON body.
+    #[cfg(feature = "model-http")]
+    async fn read_http_request(
+        sock: &mut tokio::net::TcpStream,
+    ) -> Option<(std::collections::HashMap<String, String>, Value)> {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        let head_end = loop {
+            let n = sock.read(&mut buf).await.ok().filter(|n| *n > 0)?;
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers: std::collections::HashMap<_, _> = String::from_utf8_lossy(&raw[..head_end])
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        let len: usize = headers.get("content-length")?.parse().ok()?;
+        while raw.len() < head_end + len {
+            let n = sock.read(&mut buf).await.ok().filter(|n| *n > 0)?;
+            raw.extend_from_slice(&buf[..n]);
+        }
+        Some((
+            headers,
+            serde_json::from_slice(&raw[head_end..head_end + len]).ok()?,
+        ))
+    }
+
+    /// Serve the streamable HTTP transport on an ephemeral port: replies are
+    /// event streams, `initialize` issues a session, and every later request
+    /// must carry it. Calling `ping` withdraws it and announces the change.
+    #[cfg(feature = "model-http")]
+    async fn streamable_server(state: Arc<std::sync::Mutex<StreamableServer>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let Some((headers, body)) = read_http_request(&mut sock).await else {
+                    continue;
+                };
+                let method = body["method"].as_str().unwrap_or("").to_string();
+                let session = headers.get("mcp-session-id").cloned();
+                let response = {
+                    let mut state = state.lock().unwrap();
+                    state
+                        .versions
+                        .push(headers.get("mcp-protocol-version").cloned());
+                    state.seen.push((
+                        method.clone(),
+                        session.clone(),
+                        headers.get("accept").cloned().unwrap_or_default(),
+                    ));
+                    let live = if state.stateless {
+                        session.is_none()
+                    } else {
+                        !state.forget_every_session
+                            && session.is_some()
+                            && session.as_ref() == state.sessions.last()
+                    };
+                    if method == "initialize" && std::mem::take(&mut state.fail_next_initialize) {
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
+                    } else if method == "initialize" {
+                        let header = if state.stateless {
+                            String::new()
+                        } else {
+                            let id = format!("session-{}", state.sessions.len() + 1);
+                            state.sessions.push(id.clone());
+                            format!("Mcp-Session-Id: {id}\r\n")
+                        };
+                        let reply = json!({"jsonrpc":"2.0","id":body["id"],"result":{"protocolVersion":"2025-03-26"}});
+                        format!(
+                            "HTTP/1.1 200 OK\r\n{header}Content-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: message\r\ndata: {reply}\r\n\r\n"
+                        )
+                    } else if !live {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .into()
+                    } else if body.get("id").is_none() {
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .into()
+                    } else {
+                        let mut events = String::new();
+                        let result = if method == "tools/list" {
+                            let tools: Vec<_> = state
+                                .tools
+                                .iter()
+                                .map(|name| json!({"name": name, "inputSchema": {"type":"object"}}))
+                                .collect();
+                            json!({"tools": tools})
+                        } else {
+                            let name = body["params"]["name"].as_str().unwrap_or("").to_string();
+                            if name == "ping" {
+                                state.tools.retain(|tool| *tool != "ping");
+                                let notice = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+                                events.push_str(&format!("data: {notice}\n\n"));
+                            }
+                            json!({"content":[{"type":"text","text": format!("{name} ok ✓")}]})
+                        };
+                        let reply = json!({"jsonrpc":"2.0","id":body["id"],"result":result});
+                        // One data line per pretty-printed line exercises multi-line reassembly.
+                        let data: String = serde_json::to_string_pretty(&reply)
+                            .unwrap()
+                            .lines()
+                            .map(|line| format!("data: {line}\n"))
+                            .collect();
+                        events.push_str(&format!("event: message\n{data}\n"));
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}"
+                        )
+                    }
+                };
+                // Trickle a few bytes at a time so chunks split CRLFs and the
+                // multibyte check mark.
+                let _ = sock.set_nodelay(true);
+                for piece in response.as_bytes().chunks(3) {
+                    let _ = sock.write_all(piece).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    #[cfg(feature = "model-http")]
+    async fn attach_streamable(
+        state: &Arc<std::sync::Mutex<StreamableServer>>,
+        dir: &tempfile::TempDir,
+    ) -> ToolRegistry {
+        let url = streamable_server(Arc::clone(state)).await;
+        let mut config = Config::default();
+        config.tools.mcp_servers = vec![McpServerSettings {
+            name: "remote".into(),
+            command: String::new(),
+            args: vec![],
+            transport: "http".into(),
+            url: Some(url),
+            token_env: None,
+            framing: McpFraming::ContentLength,
+            timeout_secs: 10,
+        }];
+        let mut reg = ToolRegistry::with_builtins(
+            dir.path(),
+            vec!["read_file".into()],
+            30,
+            config.network.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            attach_mcp_servers(&mut reg, &config, None).await.unwrap(),
+            2
+        );
+        reg
+    }
+
+    #[cfg(feature = "model-http")]
+    async fn call_text(reg: &ToolRegistry, tool: &str) -> Result<String, String> {
+        match reg.execute(tool, "{}").await {
+            Ok(crate::tools::ToolOutput::Text(text)) => Ok(text),
+            Ok(_) => Err("expected text".into()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[cfg(feature = "model-http")]
+    #[tokio::test]
+    async fn streamable_http_lists_calls_and_follows_list_changes_in_a_session() {
+        let state = Arc::new(std::sync::Mutex::new(StreamableServer {
+            tools: vec!["ping", "pong"],
+            ..Default::default()
+        }));
+        let dir = tempdir().unwrap();
+        let reg = attach_streamable(&state, &dir).await;
+
+        assert_eq!(
+            call_text(&reg, "mcp.remote.ping").await.unwrap(),
+            "ping ok ✓"
+        );
+        // The server withdrew `ping` and said so; the client re-lists and refuses it.
+        let refused = call_text(&reg, "mcp.remote.ping").await.unwrap_err();
+        assert!(refused.contains("no longer offered"), "{refused}");
+        assert_eq!(
+            call_text(&reg, "mcp.remote.pong").await.unwrap(),
+            "pong ok ✓"
+        );
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.sessions, ["session-1"]);
+        let methods: Vec<_> = state.seen.iter().map(|(m, _, _)| m.as_str()).collect();
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call",
+                "tools/list",
+                "tools/call"
+            ]
+        );
+        assert_eq!(state.versions[0], None);
+        assert!(
+            state.versions[1..]
+                .iter()
+                .all(|v| v.as_deref() == Some("2025-03-26"))
+        );
+        for (method, session, accept) in &state.seen[1..] {
+            assert_eq!(session.as_deref(), Some("session-1"), "{method}");
+            assert!(accept.contains("text/event-stream") && accept.contains("application/json"));
+        }
+    }
+
+    #[cfg(feature = "model-http")]
+    #[tokio::test]
+    async fn a_lost_session_reinitializes_once_then_fails() {
+        let state = Arc::new(std::sync::Mutex::new(StreamableServer {
+            tools: vec!["pong", "other"],
+            ..Default::default()
+        }));
+        let dir = tempdir().unwrap();
+        let reg = attach_streamable(&state, &dir).await;
+
+        // The server restarts and forgets session-1: one re-initialize recovers.
+        state.lock().unwrap().sessions.push("restarted".into());
+        assert_eq!(
+            call_text(&reg, "mcp.remote.pong").await.unwrap(),
+            "pong ok ✓"
+        );
+        assert_eq!(state.lock().unwrap().sessions.last().unwrap(), "session-3");
+
+        // A server that never keeps a session gets one retry, not a loop.
+        state.lock().unwrap().forget_every_session = true;
+        let error = call_text(&reg, "mcp.remote.pong").await.unwrap_err();
+        assert!(error.contains("re-initialize"), "{error}");
+        let state = state.lock().unwrap();
+        let tail: Vec<_> = state
+            .seen
+            .iter()
+            .rev()
+            .take(3)
+            .map(|(m, _, _)| m.as_str())
+            .collect();
+        assert_eq!(
+            tail,
+            ["notifications/initialized", "initialize", "tools/call"]
+        );
+    }
+
+    #[cfg(feature = "model-http")]
+    #[tokio::test]
+    async fn a_failed_reinitialize_is_retried_by_the_next_call() {
+        let state = Arc::new(std::sync::Mutex::new(StreamableServer {
+            tools: vec!["pong", "other"],
+            ..Default::default()
+        }));
+        let dir = tempdir().unwrap();
+        let reg = attach_streamable(&state, &dir).await;
+
+        {
+            let mut state = state.lock().unwrap();
+            state.sessions.push("restarted".into());
+            state.fail_next_initialize = true;
+        }
+        assert!(call_text(&reg, "mcp.remote.pong").await.is_err());
+        assert_eq!(
+            call_text(&reg, "mcp.remote.pong").await.unwrap(),
+            "pong ok ✓"
+        );
+        let state = state.lock().unwrap();
+        let (_, session, _) = state.seen.last().unwrap();
+        assert_eq!(session.as_deref(), Some("session-3"));
+    }
+
+    #[cfg(feature = "model-http")]
+    #[tokio::test]
+    async fn a_server_that_restarts_stateless_recovers_without_a_session() {
+        let state = Arc::new(std::sync::Mutex::new(StreamableServer {
+            tools: vec!["pong", "other"],
+            ..Default::default()
+        }));
+        let dir = tempdir().unwrap();
+        let reg = attach_streamable(&state, &dir).await;
+
+        state.lock().unwrap().stateless = true;
+        assert_eq!(
+            call_text(&reg, "mcp.remote.pong").await.unwrap(),
+            "pong ok ✓"
+        );
+        let state = state.lock().unwrap();
+        let (method, session, _) = state.seen.last().unwrap();
+        assert_eq!((method.as_str(), session), ("tools/call", &None));
+    }
+
+    #[test]
+    fn event_stream_decoder_handles_split_bytes_and_every_line_ending() {
+        let stream =
+            "\u{feff}data: {\"a\":\r\ndata: \"✓\"}\r\n\r\nevent: x\rdata: 2\r\rdata: 3\n\n";
+        let mut decoder = SseDecoder::default();
+        let mut events = Vec::new();
+        for byte in stream.as_bytes().chunks(1) {
+            events.extend(decoder.push(byte).unwrap());
+        }
+        assert_eq!(events, ["{\"a\":\n\"✓\"}", "2", "3"]);
+    }
+
+    #[test]
+    fn event_stream_decoder_finishes_an_event_ended_by_cr() {
+        let mut decoder = SseDecoder::default();
+        assert_eq!(decoder.push(b"data: 1\r\r").unwrap(), ["1"]);
+        assert!(decoder.push(b"\ndata: 2\n\n").unwrap() == ["2"]);
+    }
+
+    #[test]
+    fn event_stream_decoder_bounds_unterminated_input() {
+        let mut decoder = SseDecoder::default();
+        let line = vec![b'x'; 64 * 1024];
+        let error = (0..)
+            .find_map(|_| decoder.push(&line).err())
+            .unwrap()
+            .to_string();
+        assert!(error.contains("exceeds"), "{error}");
+        let mut decoder = SseDecoder::default();
+        let error = (0..)
+            .find_map(|_| decoder.push(b"data: xxxxxxxxxxxxxxxx\n").err())
+            .unwrap()
+            .to_string();
+        assert!(error.contains("exceeds"), "{error}");
     }
 
     #[test]
