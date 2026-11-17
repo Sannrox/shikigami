@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -80,6 +81,68 @@ fn http_err(error: reqwest::Error) -> ModelError {
     ModelError::Http(error.to_string())
 }
 
+/// Retries after the first attempt for a transient provider failure.
+const MAX_RETRIES: u32 = 2;
+const BASE_BACKOFF: Duration = Duration::from_millis(500);
+/// Upper bound for both computed backoff and a provider's `Retry-After`.
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Why one request attempt failed, and whether sending it again may succeed.
+struct AttemptError {
+    error: ModelError,
+    transient: bool,
+    retry_after: Option<Duration>,
+}
+
+impl AttemptError {
+    fn permanent(error: reqwest::Error) -> Self {
+        Self {
+            error: http_err(error),
+            transient: false,
+            retry_after: None,
+        }
+    }
+
+    /// Timeouts and refused connections never produced a provider answer.
+    fn from_send(error: reqwest::Error) -> Self {
+        let transient = error.is_timeout() || error.is_connect();
+        Self {
+            error: http_err(error),
+            transient,
+            retry_after: None,
+        }
+    }
+
+    /// 408, 429, and 5xx are the provider saying "not now"; other statuses are final.
+    fn from_status(response: &reqwest::Response) -> Self {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|secs| Duration::from_secs(secs).min(MAX_BACKOFF));
+        Self {
+            error: ModelError::Http(format!("model provider returned {status}")),
+            transient: status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error(),
+            retry_after,
+        }
+    }
+}
+
+/// Exponential backoff with ±20% jitter so parallel runs do not retry in lockstep.
+fn backoff(retry: u32) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let base = BASE_BACKOFF
+        .saturating_mul(1 << retry.min(6))
+        .min(MAX_BACKOFF);
+    let unit = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish() as f64
+        / u64::MAX as f64;
+    base.mul_f64(0.8 + 0.4 * unit)
+}
+
 #[async_trait]
 impl ModelPort for HttpModel {
     fn id(&self) -> &'static str {
@@ -138,6 +201,30 @@ impl ModelPort for HttpModel {
 }
 
 impl HttpModel {
+    /// One chat-completions request. Nothing is streamed, so a retry never
+    /// splices a partial answer into the next attempt.
+    async fn attempt(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, AttemptError> {
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(AttemptError::from_send)?;
+        if !response.status().is_success() {
+            return Err(AttemptError::from_status(&response));
+        }
+        response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(AttemptError::permanent)
+    }
+
     async fn complete(
         &self,
         api_messages: Vec<serde_json::Value>,
@@ -165,19 +252,22 @@ impl HttpModel {
             "messages": api_messages,
             "tools": api_tools,
         });
-        let resp = self
-            .client
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(http_err)?
-            .error_for_status()
-            .map_err(http_err)?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(http_err)?;
+        let mut retry = 0;
+        let resp = loop {
+            let failure = match self.attempt(&url, &body).await {
+                Ok(resp) => break resp,
+                Err(failure) => failure,
+            };
+            if !failure.transient || retry == MAX_RETRIES {
+                return Err(failure.error);
+            }
+            retry += 1;
+            shikigami_engine::model::note_model_retry(format!(
+                "model retry {retry}/{MAX_RETRIES}: {}",
+                failure.error
+            ));
+            tokio::time::sleep(failure.retry_after.unwrap_or_else(|| backoff(retry - 1))).await;
+        };
 
         let choice = resp
             .pointer("/choices/0/message")
@@ -613,6 +703,7 @@ mod tests {
 
     use super::*;
     use shikigami_engine::config::Config;
+    use shikigami_engine::model::collect_retry_notes;
 
     fn http_config(key_env: &str, key: &str) -> Config {
         // SAFETY: unique env name per test; this process does not unset it.
@@ -624,6 +715,102 @@ mod tests {
         config.model.api_key_env = key_env.into();
         config.model.base_url = Some("https://api.openai.com/v1".into());
         config
+    }
+
+    /// Serve `responses` in order, one per connection, on an ephemeral port.
+    /// Returns the base URL and a handle yielding how many requests arrived.
+    fn scripted_provider(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<usize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut served = 0;
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read headers, then the declared body, so the client sees a clean exchange.
+                let body_len = loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                        break end + 4 + len;
+                    }
+                };
+                while request.len() < body_len {
+                    let n = stream.read(&mut buf).unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let (status, body) = response.split_once('\n').unwrap_or((response, ""));
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                served += 1;
+            }
+            served
+        });
+        (base, handle)
+    }
+
+    fn provider_model(base: &str, key_env: &str) -> HttpModel {
+        let mut config = http_config(key_env, "test-key");
+        config.model.base_url = Some(base.into());
+        HttpModel::from_config(&config).unwrap()
+    }
+
+    const OK_TURN: &str = r#"200 OK
+{"choices":[{"message":{"content":"recovered"}}]}"#;
+
+    #[tokio::test]
+    async fn transient_provider_failures_retry_and_record_each_attempt() {
+        let (base, server) = scripted_provider(vec![
+            "503 Service Unavailable\n{}",
+            "429 Too Many Requests\n{}",
+            OK_TURN,
+        ]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_RETRY_TRANSIENT_KEY");
+
+        let (turn, notes) = collect_retry_notes(model.next_turn("system", &[], &[])).await;
+
+        assert_eq!(turn.unwrap().content, "recovered");
+        assert_eq!(server.join().unwrap(), 3);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].starts_with("model retry 1/2:") && notes[0].contains("503"));
+        assert!(notes[1].starts_with("model retry 2/2:") && notes[1].contains("429"));
+    }
+
+    #[tokio::test]
+    async fn permanent_provider_failure_fails_without_retry() {
+        let (base, server) = scripted_provider(vec!["401 Unauthorized\n{}"]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_RETRY_PERMANENT_KEY");
+
+        let (turn, notes) = collect_retry_notes(model.next_turn("system", &[], &[])).await;
+
+        let error = turn.unwrap_err();
+        assert!(error.to_string().contains("401"), "{error}");
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(notes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retries_stop_at_the_bound_with_the_last_error() {
+        let (base, server) = scripted_provider(vec!["502 Bad Gateway\n{}"; 3]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_RETRY_BOUND_KEY");
+
+        let (turn, notes) = collect_retry_notes(model.next_turn("system", &[], &[])).await;
+
+        let error = turn.unwrap_err();
+        assert!(error.to_string().contains("502"), "{error}");
+        assert_eq!(server.join().unwrap(), 3);
+        assert_eq!(notes.len(), 2);
     }
 
     #[test]

@@ -161,6 +161,14 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 
 When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
 
+The `http` adapter retries a transient provider failure up to 2 times per turn:
+a timeout, a refused connection, or a 408, 429, or 5xx response. It waits with
+jittered exponential backoff from 0.5s, or for the provider's `Retry-After`
+seconds, capped at 30s. Each retry emits a `status` event such as
+`model retry 1/2: model provider returned 503 Service Unavailable`. Any other
+failure, such as 401 or a malformed body, fails the turn at once. Responses are
+not streamed, so a retry never joins two partial answers.
+
 #### `[model.fallback]`
 
 Opt-in governed local-model fallback ([ADR 0007](decisions/0007-governed-local-fallback.md)).
