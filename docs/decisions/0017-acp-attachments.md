@@ -1,6 +1,6 @@
 # ADR 0017: ACP prompt attachments, fail closed
 
-- Status: Accepted
+- Status: Accepted; §3 amended for ACP sessions by [ADR 0021](0021-session-attachment-custody.md)
 - Date: 2026-10-06
 - Resolves: [#369](https://github.com/Sannrox/shikigami/issues/369)
 - Does not amend: [ADR 0004](0004-v1-contract.md) freeze-core,
