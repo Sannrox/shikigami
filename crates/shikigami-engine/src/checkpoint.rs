@@ -272,6 +272,10 @@ pub struct Checkpoint {
     /// Absent on older checkpoints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<crate::tools::ArtifactReference>,
+    /// Caller's trace context the run joined. A resume keeps it, so every
+    /// attempt writes into the caller's trace. Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<crate::tracing_export::TraceContext>,
 }
 
 /// A checkpoint stores "no preset" as an empty id.
@@ -523,6 +527,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -574,6 +579,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -622,6 +628,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -685,6 +692,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         }
     }
 

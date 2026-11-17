@@ -40,10 +40,76 @@ pub const ALLOWED_SPAN_ATTRIBUTES: &[&str] = &[
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
     // Run span.
+    "parent.source",
     "shikigami.prompt_id",
     "shikigami.preset_id",
     "shikigami.termination",
 ];
+
+/// Where a run's parent trace context came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceSource {
+    /// The library caller set it on the request.
+    Request,
+    /// `shikigami run` read the `TRACEPARENT` environment variable.
+    Env,
+    /// `POST /runs` read the `traceparent` header.
+    Header,
+}
+
+impl TraceSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Env => "env",
+            Self::Header => "header",
+        }
+    }
+}
+
+/// A caller's W3C trace context. The run's `run` span becomes a child of it.
+/// Kept in the checkpoint so every attempt at the run keeps the same parent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TraceContext {
+    pub traceparent: String,
+    /// Passed through unchanged; never a span attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
+    pub source: TraceSource,
+}
+
+impl TraceContext {
+    /// Whether `traceparent` is a well-formed W3C value the run can join.
+    pub fn is_valid(&self) -> bool {
+        parse_traceparent(&self.traceparent).is_some()
+    }
+}
+
+/// Trace id and parent span id of a W3C `traceparent`
+/// (`version-traceid-parentid-flags`). A future version may append fields;
+/// version `ff`, uppercase hex, and all-zero ids are invalid.
+fn parse_traceparent(value: &str) -> Option<(&str, &str)> {
+    let hex = |part: &str, len: usize| {
+        part.len() == len
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut parts = value.trim().split('-');
+    let (version, trace_id, span_id, flags) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let extra = parts.next().is_some();
+    let valid = hex(version, 2)
+        && version != "ff"
+        && !(version == "00" && extra)
+        && hex(trace_id, 32)
+        && trace_id.bytes().any(|b| b != b'0')
+        && hex(span_id, 16)
+        && span_id.bytes().any(|b| b != b'0')
+        && hex(flags, 2);
+    valid.then_some((trace_id, span_id))
+}
 
 #[derive(Debug, Error)]
 pub enum TracingExportError {
@@ -110,13 +176,16 @@ impl RunSpanTrace {
         Self { inner: None }
     }
 
-    /// Opens the run span. `preset_id` is empty when the run has no preset.
+    /// Opens the run span, as a child of `parent` when it is a valid W3C
+    /// context; otherwise in the run's own trace. `preset_id` is empty when
+    /// the run has no preset.
     pub fn begin(
         config: &Config,
         handle: &RunHandle,
         plan_operation_id: &str,
         prompt_id: &str,
         preset_id: &str,
+        parent: Option<&TraceContext>,
     ) -> Result<Self, TracingExportError> {
         let settings = &config.tracing;
         if !settings.enabled {
@@ -129,6 +198,16 @@ impl RunSpanTrace {
             plan_operation_id,
             None,
         );
+        let joined = parent.and_then(|context| {
+            parse_traceparent(&context.traceparent).map(|ids| (ids, context.source))
+        });
+        let (trace_id, parent_span_id, source) = match joined {
+            Some(((trace_id, span_id), source)) => {
+                (trace_id.to_owned(), span_id.to_owned(), source.as_str())
+            }
+            None => (trace_id_for(&handle.run_id), String::new(), "none"),
+        };
+        run_attributes.extend(allow_attribute("parent.source", source));
         run_attributes.extend(allow_attribute("shikigami.prompt_id", prompt_id));
         if !preset_id.is_empty() {
             run_attributes.extend(allow_attribute("shikigami.preset_id", preset_id));
@@ -137,10 +216,10 @@ impl RunSpanTrace {
             inner: Some(ActiveTrace {
                 destination,
                 network: config.network.clone(),
-                trace_id: trace_id_for(&handle.run_id),
+                trace_id,
                 run_span: OpenSpan {
                     span_id: random_hex(16),
-                    parent_span_id: String::new(),
+                    parent_span_id,
                     name: "run".into(),
                     start_unix_nano: unix_nano(),
                     attributes: run_attributes,
@@ -539,6 +618,30 @@ mod tests {
     use crate::config::TracingSettings;
 
     #[test]
+    fn traceparent_parses_only_well_formed_w3c_values() {
+        let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let span = "00f067aa0ba902b7";
+        assert_eq!(
+            parse_traceparent(&format!("00-{trace}-{span}-01")),
+            Some((trace, span))
+        );
+        // A later version may append fields.
+        assert!(parse_traceparent(&format!("01-{trace}-{span}-01-extra")).is_some());
+        for bad in [
+            String::new(),
+            "garbage".into(),
+            format!("00-{trace}-{span}-01-extra"),
+            format!("ff-{trace}-{span}-01"),
+            format!("00-{}-{span}-01", "0".repeat(32)),
+            format!("00-{trace}-{}-01", "0".repeat(16)),
+            format!("00-{}-{span}-01", trace.to_uppercase()),
+            format!("00-{trace}-{span}"),
+        ] {
+            assert_eq!(parse_traceparent(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn ended_spans_reach_the_file_before_the_run_finishes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("spans.jsonl");
@@ -551,7 +654,7 @@ mod tests {
             operation_id: "run-1".into(),
             namespace: String::new(),
         };
-        let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "").unwrap();
+        let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
         trace.start_turn(1);
         trace.end_turn("model", None);
         trace.start_tool("tool-1-0", "read_file");

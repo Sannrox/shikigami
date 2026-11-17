@@ -123,6 +123,9 @@ pub struct RunRequest {
     /// ungoverned local runs. Never holds the worker client secret. Clone shares
     /// the same slot so plane heartbeats can refresh the grant mid-run.
     pub job_credential: Option<JobCredentialHandle>,
+    /// Caller's W3C trace context; the run's spans join that trace. Used only
+    /// when the run starts: a resume keeps the context the run started with.
+    pub trace_context: Option<crate::tracing_export::TraceContext>,
 }
 
 /// Session-host decision for an ask=park mutating tool.
@@ -182,6 +185,7 @@ impl RunRequest {
             nested_profile: None,
             assigned_run_id: None,
             job_credential: None,
+            trace_context: None,
         }
     }
 }
@@ -536,6 +540,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
 
         let err =
@@ -592,6 +597,7 @@ mod tests {
             stop_repairs: 0,
             preset: String::new(),
             artifacts: Vec::new(),
+            trace_context: None,
         };
 
         let err =
@@ -635,6 +641,7 @@ mod tests {
         let err = eng
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: "t".into(),
                 keep_workspace: true,
                 timeout: None,
@@ -677,6 +684,7 @@ mod tests {
         let err = eng
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: "t".into(),
                 keep_workspace: true,
                 timeout: Some(Duration::from_secs(0)),
@@ -731,6 +739,7 @@ mod tests {
         let err = eng
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: "partial".into(),
                 keep_workspace: true,
                 timeout: None,
@@ -801,6 +810,7 @@ mod tests {
         let result = eng2
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: String::new(),
                 keep_workspace: true,
                 timeout: None,
@@ -920,6 +930,7 @@ mod tests {
         let err = eng
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: "with todos".into(),
                 keep_workspace: true,
                 timeout: None,
@@ -1004,6 +1015,7 @@ mod tests {
         let result = eng2
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: String::new(),
                 keep_workspace: true,
                 timeout: None,
@@ -1105,6 +1117,7 @@ mod tests {
         let err = eng2
             .run(RunRequest {
                 job_credential: None,
+                trace_context: None,
                 task: String::new(),
                 keep_workspace: true,
                 timeout: None,

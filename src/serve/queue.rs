@@ -156,6 +156,7 @@ impl FilesystemQueue {
         request.keep_workspace = job.keep_workspace;
         request.logical_operation_id = job.logical_operation_id.clone();
         request.timeout = job.timeout_secs.map(Duration::from_secs);
+        request.trace_context = job.trace_context.clone();
 
         let result = match harness.run(request).await {
             Ok(result) => result,
@@ -439,6 +440,7 @@ mod tests {
             keep_workspace: false,
             logical_operation_id: None,
             timeout_secs: None,
+            trace_context: None,
         }
     }
 

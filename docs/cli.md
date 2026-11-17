@@ -43,6 +43,7 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 | `run --json` | Print the run result as JSON on stdout (same shape as the MCP `run` result, including report `data`); exit status unchanged |
 | `run --plan-jail` / `SHIKIGAMI_RUN_PLAN_JAIL` | Restrict mutating tools to `.shikigami/plan.md` until `--plan-accept` |
 | `run --plan-accept` / `--plan-reject` | Resume a parked plan: Accept restores execute authority on the same run; Reject completes failed and keeps the jail so a later `--resume` stays write-jailed |
+| `TRACEPARENT` / `TRACESTATE` | W3C trace context: with span export on, `run` continues the caller's trace. See [tracing.md](tracing.md#caller-trace-context) |
 | `run --nested` / `SHIKIGAMI_RUN_NESTED` | Enable `child_run` / `child_status` for this run (default off) |
 
 There is **no** `init` command. Config is optional; disk state is created when a

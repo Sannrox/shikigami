@@ -62,6 +62,10 @@ pub(super) async fn prepare(
     let stored_stop_repairs = resume_checkpoint
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.stop_repairs);
+    let stored_trace_context = match &resume_checkpoint {
+        Some(checkpoint) => checkpoint.trace_context.clone(),
+        None => request.trace_context.clone(),
+    };
     let stored_artifacts = resume_checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.artifacts.clone())
@@ -319,6 +323,7 @@ pub(super) async fn prepare(
     session.stop_repairs = stored_stop_repairs;
     session.preset = preset;
     session.artifacts = stored_artifacts;
+    session.trace_context = stored_trace_context;
     session.nested = nested_tools;
     session.children = stored_children;
     session.nested_depth = stored_nested_depth;

@@ -38,6 +38,10 @@ pub struct QueueJob {
     pub logical_operation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Caller's W3C trace context, from the `traceparent` header of
+    /// `POST /runs`. The run's spans join that trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<crate::tracing_export::TraceContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +278,7 @@ mod tests {
             keep_workspace: true,
             logical_operation_id: None,
             timeout_secs: None,
+            trace_context: None,
         };
         std::fs::write(
             layout.inbox.join("001.json"),
@@ -316,6 +321,7 @@ mod tests {
             keep_workspace: true,
             logical_operation_id: None,
             timeout_secs: None,
+            trace_context: None,
         };
         let payload = serde_json::to_string_pretty(&job).unwrap();
         std::fs::write(layout.inbox.join("001.json"), &payload).unwrap();

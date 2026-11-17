@@ -63,6 +63,7 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
         !run.contains_key("shikigami.preset_id"),
         "no preset: {run:?}"
     );
+    assert_eq!(run["parent.source"], "none");
     let turns = &spans["turn"];
     let tokens: Vec<_> = turns
         .iter()
@@ -136,6 +137,94 @@ async fn a_resumed_run_writes_into_the_same_trace() {
     assert_eq!(trace_ids.len(), 1, "{exported}");
     let runs = spans.iter().filter(|span| span["name"] == "run").count();
     assert_eq!(runs, 2, "one run span per attempt: {exported}");
+}
+
+const CALLER_TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+const CALLER_SPAN: &str = "00f067aa0ba902b7";
+
+fn caller_context(traceparent: &str) -> Option<shikigami::tracing_export::TraceContext> {
+    Some(shikigami::tracing_export::TraceContext {
+        traceparent: traceparent.into(),
+        tracestate: Some("vendor=opaque".into()),
+        source: shikigami::tracing_export::TraceSource::Request,
+    })
+}
+
+#[tokio::test]
+async fn a_run_joins_the_callers_trace_and_keeps_it_across_resume() {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.jsonl");
+    let attempt = |script: &str| {
+        let mut config = offline_config(dir.path());
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+        config.model.script_json = Some(script.into());
+        Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap()
+    };
+    let write = r#"{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\"}"}]}"#;
+    let report = r#"{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}"#;
+
+    let mut first = RunRequest::new("trace");
+    first.trace_context = caller_context(&format!("00-{CALLER_TRACE}-{CALLER_SPAN}-01"));
+    attempt(&format!("[{write}]")).run(first).await.unwrap_err();
+    let run_id = fs::read_dir(StateRoot::new(dir.path().join("state")).runs_dir())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    // The resume carries no context of its own: the checkpoint supplies it.
+    let mut resume = RunRequest::new("");
+    resume.resume_run_id = Some(run_id);
+    let result = attempt(&format!("[{write},{report}]"))
+        .run(resume)
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.summary);
+
+    let exported = fs::read_to_string(&spans_path).unwrap();
+    let spans = exported_spans(&exported);
+    assert!(
+        spans.iter().all(|span| span["traceId"] == CALLER_TRACE),
+        "{exported}"
+    );
+    let runs: Vec<_> = spans.iter().filter(|span| span["name"] == "run").collect();
+    assert_eq!(runs.len(), 2, "{exported}");
+    for run in runs {
+        assert_eq!(run["parentSpanId"], CALLER_SPAN);
+    }
+    for run in &spans_by_name(&exported)["run"] {
+        assert_eq!(run["parent.source"], "request");
+    }
+    assert!(
+        !exported.contains("vendor=opaque"),
+        "tracestate is never an attribute"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_traceparent_starts_the_runs_own_trace() {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.jsonl");
+    let mut config = offline_config(dir.path());
+    config.tracing.enabled = true;
+    config.tracing.exporter = "otlp".into();
+    config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let mut request = RunRequest::new("demo");
+    request.trace_context = caller_context(&format!("00-{CALLER_TRACE}-not-a-span-01"));
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success, "{}", result.summary);
+
+    let exported = fs::read_to_string(&spans_path).unwrap();
+    let spans = exported_spans(&exported);
+    let run = spans.iter().find(|span| span["name"] == "run").unwrap();
+    assert_ne!(run["traceId"], CALLER_TRACE);
+    assert_eq!(run["parentSpanId"], "");
+    assert_eq!(spans_by_name(&exported)["run"][0]["parent.source"], "none");
 }
 
 #[tokio::test]

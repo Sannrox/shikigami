@@ -164,6 +164,7 @@ impl<'a> RunSupervision<'a> {
             parent_run_id: None,
             nested_profile: None,
             assigned_run_id: None,
+            trace_context: None,
         };
         self.execute_inner(
             run_request,
