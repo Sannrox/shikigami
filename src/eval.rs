@@ -38,8 +38,11 @@ pub struct EvalSuite {
     pub cases: Vec<EvalCase>,
 }
 
+/// One fixture case. Built only by deserializing a fixture, so new optional
+/// fields are additive.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct EvalCase {
     pub name: String,
     pub task: String,
