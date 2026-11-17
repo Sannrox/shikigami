@@ -194,6 +194,37 @@ impl ContentCapabilitiesV1 {
         }
     }
 
+    /// These capabilities plus the kinds and media types of `parts`.
+    pub fn widened_with(&self, parts: &[ContentPartDescriptor]) -> Self {
+        let mut widened = self.clone();
+        for part in parts {
+            if !widened.input_kinds.contains(&part.kind) {
+                widened.input_kinds.push(part.kind);
+            }
+            if !widened.media_types.contains(&part.media_type) {
+                widened.media_types.push(part.media_type.clone());
+            }
+        }
+        widened
+    }
+
+    /// True when `self` equals `base` except for added input kinds and media
+    /// types, as a session follow-up with new attachments leaves them.
+    pub fn widens(&self, base: &Self) -> bool {
+        base.input_kinds
+            .iter()
+            .all(|kind| self.input_kinds.contains(kind))
+            && base
+                .media_types
+                .iter()
+                .all(|media_type| self.media_types.contains(media_type))
+            && Self {
+                input_kinds: base.input_kinds.clone(),
+                media_types: base.media_types.clone(),
+                ..self.clone()
+            } == *base
+    }
+
     pub fn validate(&self) -> Result<(), ContentError> {
         if self.contract_version != CONTENT_CONTRACT_VERSION
             || self.output_kinds != [ContentPartKind::Text]
@@ -320,6 +351,10 @@ pub struct ContentRunRequestV1 {
     pub session_wait: bool,
     /// Follow-up user prompt when resuming a `ParkKind::PromptWait` content run.
     pub resume_prompt: Option<String>,
+    /// Parts stored by the host that join `resume_prompt` in the follow-up
+    /// user message. Their kinds and media types widen the run's
+    /// capabilities; hard bounds still hold over the whole conversation.
+    pub resume_parts: Vec<ContentPartDescriptor>,
     /// Allow or deny a `ParkKind::Ask` mutating tool on resume.
     pub resume_ask: Option<AskDecision>,
     /// Accept or reject a `ParkKind::Plan` park on resume.
@@ -348,6 +383,7 @@ impl ContentRunRequestV1 {
             restore_snapshot: None,
             session_wait: false,
             resume_prompt: None,
+            resume_parts: Vec::new(),
             resume_ask: None,
             resume_plan: None,
             resume_answer: None,
@@ -452,6 +488,7 @@ impl ContentProcessRequestV1 {
             restore_snapshot: None,
             session_wait: false,
             resume_prompt: None,
+            resume_parts: Vec::new(),
             resume_ask: None,
             resume_plan: None,
             resume_answer: None,

@@ -212,6 +212,8 @@ pub(crate) struct ContentExecution {
     pub messages: Vec<ContentMessageV1>,
     pub capabilities: ContentCapabilitiesV1,
     pub resolver: Arc<dyn ContentResolver>,
+    /// Host-stored parts for the follow-up user message on a prompt resume.
+    pub resume_parts: Vec<crate::content::ContentPartDescriptor>,
 }
 
 pub use crate::checkpoint::ParkKind;

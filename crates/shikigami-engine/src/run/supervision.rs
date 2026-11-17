@@ -139,6 +139,7 @@ impl<'a> RunSupervision<'a> {
             restore_snapshot,
             session_wait,
             resume_prompt,
+            resume_parts,
             resume_ask,
             resume_plan,
             resume_answer,
@@ -172,6 +173,7 @@ impl<'a> RunSupervision<'a> {
                 messages,
                 capabilities,
                 resolver,
+                resume_parts,
             }),
         )
         .await
@@ -198,7 +200,7 @@ impl<'a> RunSupervision<'a> {
             return Ok(None);
         };
         if binding.resolver_id != request.resolver.id()
-            || sidecar.capabilities != request.capabilities
+            || !sidecar.capabilities.widens(&request.capabilities)
             || !initial_messages_match(&sidecar, &request.messages)
             || (!request.task.is_empty() && request.task != checkpoint.task)
         {
