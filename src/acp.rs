@@ -3166,13 +3166,11 @@ mod tests {
     async fn invalid_mode_mapping_does_not_create_session() {
         let dir = tempdir().unwrap();
         let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
-            config.session.modes.insert(
-                "low".into(),
-                crate::config::SessionModeMapping {
-                    tools: Some(vec!["not_a_host_tool".into()]),
-                    ..Default::default()
-                },
-            );
+            config.session.modes.insert("low".into(), {
+                let mut mode = crate::config::SessionModeMapping::default();
+                mode.tools = Some(vec!["not_a_host_tool".into()]);
+                mode
+            });
         });
         let client = RecordingClient {
             updates: Mutex::new(Vec::new()),
@@ -3194,13 +3192,11 @@ mod tests {
     async fn invalid_first_prompt_mode_leaves_session_unfrozen_for_retry() {
         let dir = tempdir().unwrap();
         let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
-            config.session.modes.insert(
-                "low".into(),
-                crate::config::SessionModeMapping {
-                    tools: Some(vec!["not_a_host_tool".into()]),
-                    ..Default::default()
-                },
-            );
+            config.session.modes.insert("low".into(), {
+                let mut mode = crate::config::SessionModeMapping::default();
+                mode.tools = Some(vec!["not_a_host_tool".into()]);
+                mode
+            });
         });
         let client = RecordingClient {
             updates: Mutex::new(Vec::new()),
@@ -3249,24 +3245,22 @@ mod tests {
         let dir = tempdir().unwrap();
         let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
             config.model.model = "base-model".into();
-            config.session.modes.insert(
-                "low".into(),
-                crate::config::SessionModeMapping {
-                    model: Some("model-low".into()),
-                    effort: Some("low".into()),
-                    tools: Some(vec!["read_file".into(), "report".into()]),
-                    prompt: None,
-                },
-            );
-            config.session.modes.insert(
-                "high".into(),
-                crate::config::SessionModeMapping {
-                    model: Some("model-high".into()),
-                    effort: Some("high".into()),
-                    tools: Some(vec!["read_file".into(), "report".into()]),
-                    prompt: Some("be thorough".into()),
-                },
-            );
+            config.session.modes.insert("low".into(), {
+                let mut mode = crate::config::SessionModeMapping::default();
+                mode.model = Some("model-low".into());
+                mode.effort = Some("low".into());
+                mode.tools = Some(vec!["read_file".into(), "report".into()]);
+                mode.prompt = None;
+                mode
+            });
+            config.session.modes.insert("high".into(), {
+                let mut mode = crate::config::SessionModeMapping::default();
+                mode.model = Some("model-high".into());
+                mode.effort = Some("high".into());
+                mode.tools = Some(vec!["read_file".into(), "report".into()]);
+                mode.prompt = Some("be thorough".into());
+                mode
+            });
         });
         let client = RecordingClient {
             updates: Mutex::new(Vec::new()),

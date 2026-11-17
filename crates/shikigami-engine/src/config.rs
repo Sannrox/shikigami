@@ -16,6 +16,7 @@ mod resolution;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Config {
     pub version: u32,
     #[serde(default)]
@@ -58,6 +59,7 @@ pub struct Config {
 /// One lifecycle hook entry (`command` is operator-trusted).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct HookSettings {
     /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park`
     pub event: String,
@@ -77,6 +79,7 @@ fn default_hook_timeout_ms() -> u64 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ProfileSettings {
     #[serde(default = "default_profile_name")]
     pub name: String,
@@ -96,6 +99,7 @@ impl Default for ProfileSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct GovernanceSettings {
     #[serde(default = "default_governance_adapter")]
     pub adapter: String,
@@ -133,6 +137,7 @@ pub struct GovernanceSettings {
 /// Bounded delayed-evidence spool. Disabled by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct DelayedEvidenceSettings {
     #[serde(default)]
     pub enabled: bool,
@@ -225,6 +230,7 @@ fn parse_env_flag(value: &str) -> Option<bool> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct WorkspaceSettings {
     #[serde(default = "default_workspace_adapter")]
     pub adapter: String,
@@ -294,6 +300,7 @@ pub struct ToolAuthoritySummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ToolsSettings {
     #[serde(default)]
     pub enabled: Vec<String>,
@@ -337,6 +344,7 @@ pub fn is_site_agent_profile(name: &str) -> bool {
 /// Selected reviewer role for [`SECURITY_FINDER_PROFILE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SecurityFinderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -354,6 +362,7 @@ pub const MCP_GATEWAY_NAME: &str = "gateway";
 /// Governed MCP gateway endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct McpGatewaySettings {
     /// Gateway MCP endpoint URL.
     pub url: String,
@@ -365,6 +374,7 @@ pub struct McpGatewaySettings {
 /// MCP server configuration (stdio command or HTTP URL).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct McpServerSettings {
     pub name: String,
     /// Executable for stdio transport. Special value `mock` registers an offline echo tool.
@@ -373,7 +383,7 @@ pub struct McpServerSettings {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// `stdio` (default) or `http` (JSON-RPC POST; SSE stream not required for v1).
+    /// `stdio` (default) or `http` (streamable HTTP).
     #[serde(default = "default_mcp_transport")]
     pub transport: String,
     /// Base URL for HTTP transport (e.g. `http://127.0.0.1:8080/mcp`).
@@ -433,6 +443,41 @@ impl McpServerSettings {
         let transport = self.transport.as_str();
         transport == "http"
             || (self.url.is_some() && (transport == "stdio" || transport.is_empty()))
+    }
+}
+
+impl HookSettings {
+    /// A hook for `event` running `command`, with default timeout and fail-open.
+    pub fn new(event: impl Into<String>, command: impl Into<String>) -> Self {
+        Self {
+            event: event.into(),
+            command: command.into(),
+            args: Vec::new(),
+            timeout_ms: default_hook_timeout_ms(),
+            fail_closed: false,
+        }
+    }
+}
+
+impl McpGatewaySettings {
+    /// A gateway at `url` with the default per-request deadline.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            timeout_secs: default_mcp_timeout_secs(),
+        }
+    }
+}
+
+impl McpServerSettings {
+    /// A remote server at `url` over streamable HTTP, with the default deadline.
+    pub fn http(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            transport: "http".into(),
+            url: Some(url.into()),
+            framing: McpFraming::default(),
+            ..Self::stdio(name, String::new(), Vec::new())
+        }
     }
 }
 
@@ -548,6 +593,7 @@ impl ToolsSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RunSettings {
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
@@ -582,6 +628,7 @@ pub struct RunSettings {
 /// Child-process resource and isolation policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SandboxSettings {
     #[serde(default)]
     pub backend: SandboxBackend,
@@ -685,6 +732,7 @@ fn default_nested_max_children() -> u32 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct EventsSettings {
     #[serde(default = "default_events_adapter")]
     pub adapter: String,
@@ -705,6 +753,7 @@ impl Default for EventsSettings {
 /// Optional identity-only span export (`docs/tracing.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TracingSettings {
     /// When false (default), no spans are created or exported.
     #[serde(default)]
@@ -747,6 +796,7 @@ impl TracingSettings {
 /// Model source for turns when governance does not own planning (none/local).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ModelSettings {
     /// `scripted` | `http` | `plane`. Plane planning is used when governance
     /// is `sekai-chisei` or this adapter is `plane`; it does not rewrite the
@@ -783,6 +833,7 @@ pub struct ModelSettings {
 /// Additive local-model fallback settings. Delivery systems are not a key here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ModelFallbackSettings {
     /// Permit attempting fallback when a current signed grant exists.
     #[serde(default)]
@@ -831,6 +882,7 @@ impl Default for ModelSettings {
 /// Project rules / extra context attached to runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ContextSettings {
     /// Discover and load the first matching project rules file from the workspace.
     #[serde(default = "default_true")]
@@ -861,6 +913,7 @@ pub const SESSION_MODE_CATALOG: &[&str] = &["low", "medium", "high", "ultra"];
 /// Operator mapping from a catalog name to model, effort, prompt, and tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SessionSettings {
     #[serde(default)]
     pub modes: BTreeMap<String, SessionModeMapping>,
@@ -872,6 +925,7 @@ pub struct SessionSettings {
 /// One named mode. Omitted fields inherit the rest of the config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SessionModeMapping {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -957,6 +1011,7 @@ pub enum EgressMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct NetworkSettings {
     #[serde(default)]
     pub egress: EgressMode,
