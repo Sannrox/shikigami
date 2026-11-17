@@ -1188,9 +1188,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "kekkai"
-version = "0.2.3"
-source = "git+https://github.com/Sannrox/kekkai.git?tag=v0.2.3#57eae3144b343cc9f47dd42cf97154467386a5b8"
+name = "kekkai-sandbox"
+version = "0.3.0"
+source = "git+https://github.com/Sannrox/kekkai.git?tag=v0.3.0#cd1f7f5aec0e05983957b71a95efef9e7188c2b3"
 dependencies = [
  "libc",
  "serde",
@@ -2237,7 +2237,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
- "kekkai",
+ "kekkai-sandbox",
  "libc",
  "proptest",
  "regex",
