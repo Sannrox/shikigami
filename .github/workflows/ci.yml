@@ -71,20 +71,9 @@ jobs:
           persist-credentials: false
       - run: bash scripts/validate-workflow-skills.sh
 
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: 1.97.1
-          components: rustfmt, clippy
-      - run: make validate
-
-  clippy:
-    name: Clippy
+  # Runs every scripts/validate-*.sh (format, Clippy, docs, changelog, release).
+  validate:
+    name: Validate
     runs-on: ubuntu-latest
 
     steps:
