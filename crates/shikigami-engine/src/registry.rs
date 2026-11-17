@@ -856,6 +856,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::ToolEnd { .. } => "tool_end",
         HarnessEvent::EditOutcome { .. } => "edit_outcome",
         HarnessEvent::ModelTurn { .. } => "model_turn",
+        HarnessEvent::AssistantDelta { .. } => "assistant_delta",
         HarnessEvent::ContentTurn { .. } => "content_turn",
         HarnessEvent::Message { .. } => "message",
         HarnessEvent::RunFinished { .. } => "run_finished",
@@ -869,7 +870,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
 
 fn event_detail(event: &HarnessEvent) -> Option<String> {
     let detail = match event {
-        HarnessEvent::EditOutcome { .. } => return None,
+        HarnessEvent::EditOutcome { .. } | HarnessEvent::AssistantDelta { .. } => return None,
         HarnessEvent::Status { status } => status.clone(),
         HarnessEvent::ToolStart { name, call_id, .. } => {
             if call_id.is_empty() {

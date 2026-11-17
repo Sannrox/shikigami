@@ -56,6 +56,14 @@ pub enum HarnessEvent {
         turn: u32,
         content_preview: String,
     },
+    /// Assistant text of `turn` as the model produces it, in order. Only
+    /// sinks that [`EventSink::wants_text_deltas`] receive it. It is never
+    /// durable: the completed turn is recorded once, as before.
+    AssistantDelta {
+        run_id: String,
+        turn: u32,
+        text: String,
+    },
     /// Metadata-only projection for a bounded content model turn.
     ContentTurn {
         turn: u32,
@@ -113,6 +121,11 @@ pub trait EventSink: Send + Sync {
     fn id(&self) -> &'static str;
     fn emit(&self, event: HarnessEvent);
     fn health_detail(&self) -> String;
+    /// Opt in to [`HarnessEvent::AssistantDelta`]. A run streams a model turn
+    /// only when its sink does; the default keeps whole-turn behavior.
+    fn wants_text_deltas(&self) -> bool {
+        false
+    }
 }
 
 /// Fan-out to multiple sinks (config sink + embedder subscription).
@@ -131,13 +144,19 @@ impl EventSink for FanoutSink {
         "fanout"
     }
     fn emit(&self, event: HarnessEvent) {
+        let delta = matches!(event, HarnessEvent::AssistantDelta { .. });
         for s in &self.sinks {
-            s.emit(event.clone());
+            if !delta || s.wants_text_deltas() {
+                s.emit(event.clone());
+            }
         }
     }
     fn health_detail(&self) -> String {
         let ids: Vec<_> = self.sinks.iter().map(|s| s.id()).collect();
         format!("fanout({})", ids.join("+"))
+    }
+    fn wants_text_deltas(&self) -> bool {
+        self.sinks.iter().any(|s| s.wants_text_deltas())
     }
 }
 
@@ -274,6 +293,22 @@ fn enqueue_bounded(state: &mut QueueState, event: HarnessEvent) {
     if state.closed {
         return;
     }
+    // Deltas are never dropped. A lagging receiver gets them merged, so the
+    // queue grows by at most one entry per turn while it catches up.
+    if let HarnessEvent::AssistantDelta {
+        run_id, turn, text, ..
+    } = &event
+        && let Some(HarnessEvent::AssistantDelta {
+            run_id: queued_run,
+            turn: queued_turn,
+            text: queued,
+        }) = state.events.back_mut()
+        && queued_run == run_id
+        && queued_turn == turn
+    {
+        queued.push_str(text);
+        return;
+    }
     if is_model_preview(&event) {
         if state.events.len() >= state.capacity {
             state.events.retain(|queued| !is_model_preview(queued));
@@ -297,6 +332,9 @@ impl EventSink for AsyncChannelSink {
     }
     fn health_detail(&self) -> String {
         format!("bounded async channel ({})", self.capacity)
+    }
+    fn wants_text_deltas(&self) -> bool {
+        true
     }
 }
 
@@ -665,5 +703,29 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["model_turn", "tool_start"]);
+    }
+
+    #[test]
+    fn queued_deltas_of_one_turn_merge_and_are_never_dropped() {
+        let (sink, rx) = AsyncChannelSink::bounded(1);
+        for text in ["a", "b", "c"] {
+            sink.emit(HarnessEvent::AssistantDelta {
+                run_id: "r".into(),
+                turn: 1,
+                text: text.into(),
+            });
+        }
+        sink.emit(HarnessEvent::AssistantDelta {
+            run_id: "r".into(),
+            turn: 2,
+            text: "d".into(),
+        });
+        let texts: Vec<_> = std::iter::from_fn(|| rx.try_recv())
+            .map(|event| match event {
+                HarnessEvent::AssistantDelta { turn, text, .. } => (turn, text),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, [(1, "abc".to_string()), (2, "d".to_string())]);
     }
 }

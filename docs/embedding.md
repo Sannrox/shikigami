@@ -154,7 +154,7 @@ Aligned with [ADR 0004](decisions/0004-v1-contract.md) medium 1.0 contract.
 | `RunRequest::new` + `timeout` / `cancel` / `resume_run_id` / `keep_workspace` / `logical_operation_id` / `resume_answer` | Bounds, resume, plane op correlation |
 | `RunResult` fields including `termination`, `park`, `prompt_id`, token `usage` | Structured outcomes; `ParkInfo` may include `kind` and `approval_id` |
 | `RunResult.cost` when rates configured | Optional estimate only; absent ≠ zero |
-| `HarnessEvent` + `ChannelSink` / `EventSink` | Live in-process progress (additive events OK; tool events carry `call_id`) |
+| `HarnessEvent` + `ChannelSink` / `EventSink` | Live in-process progress (additive events OK; tool events carry `call_id`). A sink that returns true from `wants_text_deltas` also gets `AssistantDelta` text while a streaming adapter produces a turn. |
 | `export_run_transcript` + export `schema_version = 1` line shapes | Offline host audit path |
 | `DoctorReport` JSON `schema_version = 1` keys | Automation contract |
 | CLI subcommands `version` / `doctor` / `run` / `serve` | Flags may grow; core names stable |

@@ -25,7 +25,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed** |
 | `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error. A `mode` different from the frozen session mode is `-32602`. Attachment parts (`image`, `audio`, `resource`) pass through under ADR 0006 bounds when the adapter can read them; unsupported types fail closed. Omit attachments for today's text host. |
 | `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. |
-| `session/update` | agent → client | One notification per completed model turn (honest streaming) until the model adapter streams |
+| `session/update` | agent → client | Assistant text streams as `agent_message_chunk` updates while the model produces it, when the adapter streams (`http` does); each chunk carries the turn's `messageId`. Other adapters send one chunk per completed turn. `session/cancel` during a streamed turn stops the request; the turn is not recorded and the next prompt plans it again. Tool-call arguments do not stream. |
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |
 

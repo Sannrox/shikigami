@@ -130,6 +130,84 @@ impl AttemptError {
     }
 }
 
+/// A streamed chat completion folded back into the whole-response shape.
+#[derive(Default)]
+struct StreamedTurn {
+    content: String,
+    /// `(id, name, arguments)` by stream index.
+    tool_calls: Vec<(String, String, String)>,
+    usage: Option<serde_json::Value>,
+}
+
+impl StreamedTurn {
+    /// Fold one server-sent event line. True at the end-of-stream marker.
+    fn read_line(&mut self, line: &[u8]) -> bool {
+        let Ok(line) = std::str::from_utf8(line) else {
+            return false;
+        };
+        let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
+            return false;
+        };
+        if data == "[DONE]" {
+            return true;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+            return false;
+        };
+        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+        let Some(delta) = event.pointer("/choices/0/delta") else {
+            return false;
+        };
+        if let Some(text) = delta.get("content").and_then(|text| text.as_str()) {
+            shikigami_engine::model::emit_text_delta(text);
+            self.content.push_str(text);
+        }
+        for call in delta
+            .get("tool_calls")
+            .and_then(|calls| calls.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let index = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+            if index >= self.tool_calls.len() {
+                self.tool_calls.resize(index + 1, Default::default());
+            }
+            let (id, name, arguments) = &mut self.tool_calls[index];
+            if let Some(value) = call.get("id").and_then(|v| v.as_str()) {
+                *id = value.to_owned();
+            }
+            if let Some(value) = call.pointer("/function/name").and_then(|v| v.as_str()) {
+                name.push_str(value);
+            }
+            if let Some(value) = call.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                arguments.push_str(value);
+            }
+        }
+        false
+    }
+
+    fn into_response(self) -> serde_json::Value {
+        let tool_calls: Vec<_> = self
+            .tool_calls
+            .into_iter()
+            .map(|(id, name, arguments)| {
+                let mut call =
+                    serde_json::json!({ "function": { "name": name, "arguments": arguments } });
+                if !id.is_empty() {
+                    call["id"] = serde_json::json!(id);
+                }
+                call
+            })
+            .collect();
+        serde_json::json!({
+            "choices": [{ "message": { "content": self.content, "tool_calls": tool_calls } }],
+            "usage": self.usage,
+        })
+    }
+}
+
 /// Exponential backoff with ±20% jitter so parallel runs do not retry in lockstep.
 fn backoff(retry: u32) -> Duration {
     use std::hash::{BuildHasher, Hasher};
@@ -201,14 +279,16 @@ impl ModelPort for HttpModel {
 }
 
 impl HttpModel {
-    /// One chat-completions request. Nothing is streamed, so a retry never
-    /// splices a partial answer into the next attempt.
+    /// One chat-completions request. A streamed response forwards text deltas
+    /// as they arrive and returns the same shape as a whole response. Only
+    /// failures before the body is read are transient, so a retry never
+    /// follows text an observer has already seen.
     async fn attempt(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, AttemptError> {
-        let response = self
+        let mut response = self
             .client
             .post(url)
             .bearer_auth(&self.api_key)
@@ -219,10 +299,30 @@ impl HttpModel {
         if !response.status().is_success() {
             return Err(AttemptError::from_status(&response));
         }
-        response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(AttemptError::permanent)
+        let event_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+        if !event_stream {
+            return response
+                .json::<serde_json::Value>()
+                .await
+                .map_err(AttemptError::permanent);
+        }
+        let mut turn = StreamedTurn::default();
+        let mut pending = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(AttemptError::permanent)? {
+            pending.extend_from_slice(&chunk);
+            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=end).collect();
+                if turn.read_line(&line) {
+                    return Ok(turn.into_response());
+                }
+            }
+        }
+        turn.read_line(&pending);
+        Ok(turn.into_response())
     }
 
     async fn complete(
@@ -247,11 +347,15 @@ impl HttpModel {
             .collect();
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": api_messages,
             "tools": api_tools,
         });
+        if shikigami_engine::model::text_deltas_observed() {
+            body["stream"] = serde_json::json!(true);
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
         let mut retry = 0;
         let resp = loop {
             let failure = match self.attempt(&url, &body).await {
@@ -747,9 +851,14 @@ mod tests {
                     request.extend_from_slice(&buf[..n]);
                 }
                 let (status, body) = response.split_once('\n').unwrap_or((response, ""));
+                let content_type = if body.starts_with("data:") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .unwrap();
@@ -785,6 +894,39 @@ mod tests {
         assert_eq!(notes.len(), 2);
         assert!(notes[0].starts_with("model retry 1/2:") && notes[0].contains("503"));
         assert!(notes[1].starts_with("model retry 2/2:") && notes[1].contains("429"));
+    }
+
+    #[tokio::test]
+    async fn streamed_turn_forwards_text_in_order_and_folds_the_whole_turn() {
+        let (base, server) = scripted_provider(vec![concat!(
+            "200 OK\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",",
+            "\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+            "\"function\":{\"arguments\":\"\\\":\\\"a\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        )]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_STREAM_KEY");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let turn = shikigami_engine::model::stream_text_deltas(
+            Arc::new(move |text: &str| sink.lock().unwrap().push(text.to_owned())),
+            model.next_turn("system", &[], &[]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), ["Hel", "lo"]);
+        assert_eq!(turn.content, "Hello");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "c1");
+        assert_eq!(turn.tool_calls[0].name, "read_file");
+        assert_eq!(turn.tool_calls[0].args_json, r#"{"path":"a"}"#);
+        assert_eq!(turn.usage.unwrap().output_tokens, 2);
+        assert_eq!(server.join().unwrap(), 1);
     }
 
     #[tokio::test]

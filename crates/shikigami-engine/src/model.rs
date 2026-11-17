@@ -215,6 +215,32 @@ pub async fn collect_retry_notes<F: std::future::Future>(turn: F) -> (F::Output,
         .await
 }
 
+tokio::task_local! {
+    static TEXT_DELTAS: std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+}
+
+/// Report assistant text of the turn this task is planning as it arrives.
+/// Adapters call this; outside [`stream_text_deltas`] the text is dropped.
+pub fn emit_text_delta(text: &str) {
+    if !text.is_empty() {
+        let _ = TEXT_DELTAS.try_with(|sink| sink(text));
+    }
+}
+
+/// True when someone observes deltas of the current turn. Adapters stream
+/// only then and otherwise request a whole turn as before.
+pub fn text_deltas_observed() -> bool {
+    TEXT_DELTAS.try_with(|_| ()).is_ok()
+}
+
+/// Await one model turn while forwarding its text deltas to `sink`.
+pub async fn stream_text_deltas<F: std::future::Future>(
+    sink: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    turn: F,
+) -> F::Output {
+    TEXT_DELTAS.scope(sink, turn).await
+}
+
 pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
     match config.model.adapter.as_str() {
         "scripted" => Ok(Box::new(ScriptedModel::from_config(config)?)),
@@ -242,6 +268,9 @@ pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
 /// Deterministic multi-turn script for tests and offline demos.
 pub struct ScriptedModel {
     turns: Vec<ModelTurn>,
+    /// Per turn: text chunks streamed through [`emit_text_delta`] before the
+    /// turn returns, and the pause before each. Empty for whole turns.
+    streams: Vec<(Vec<String>, u64)>,
     cursor: std::sync::Mutex<usize>,
     content_digest: String,
 }
@@ -269,10 +298,14 @@ impl ScriptedModel {
 
     fn from_script_json(raw: &str, config: &Config) -> Result<Self, ModelError> {
         let wire: Vec<ScriptedTurn> = serde_json::from_str(raw)?;
+        let streams = wire
+            .iter()
+            .map(|t| (t.chunks.clone(), t.chunk_delay_ms))
+            .collect();
         let turns = wire
             .into_iter()
             .map(|t| ModelTurn {
-                content: t.content.unwrap_or_default(),
+                content: t.content.unwrap_or_else(|| t.chunks.concat()),
                 usage: t.usage,
                 tool_calls: t
                     .tool_calls
@@ -288,6 +321,7 @@ impl ScriptedModel {
             .collect();
         Ok(Self {
             turns,
+            streams,
             cursor: std::sync::Mutex::new(0),
             content_digest: artifact_or_script_digest(config, raw)?,
         })
@@ -301,6 +335,7 @@ impl ScriptedModel {
             .join("\n");
         Self {
             turns,
+            streams: Vec::new(),
             cursor: std::sync::Mutex::new(0),
             content_digest: crate::fallback::sha256_hex(payload.as_bytes()),
         }
@@ -327,7 +362,12 @@ fn default_script_json() -> String {
 
 #[derive(Deserialize)]
 struct ScriptedTurn {
+    /// Defaults to the concatenated `chunks`.
     content: Option<String>,
+    #[serde(default)]
+    chunks: Vec<String>,
+    #[serde(default)]
+    chunk_delay_ms: u64,
     #[serde(default)]
     tool_calls: Vec<ScriptedCall>,
     #[serde(default)]
@@ -370,14 +410,24 @@ impl ModelPort for ScriptedModel {
         _messages: &[ChatMessage],
         _tools: &[ToolDef],
     ) -> Result<ModelTurn, ModelError> {
-        let mut cursor = self.cursor.lock().expect("script cursor lock");
-        let turn = self
-            .turns
-            .get(*cursor)
-            .cloned()
-            .ok_or(ModelError::ScriptExhausted)?;
-        *cursor += 1;
-        Ok(turn)
+        let index = {
+            let mut cursor = self.cursor.lock().expect("script cursor lock");
+            let index = *cursor;
+            if index >= self.turns.len() {
+                return Err(ModelError::ScriptExhausted);
+            }
+            *cursor += 1;
+            index
+        };
+        if let Some((chunks, delay_ms)) = self.streams.get(index) {
+            for chunk in chunks {
+                if *delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                }
+                emit_text_delta(chunk);
+            }
+        }
+        Ok(self.turns[index].clone())
     }
 
     async fn next_content_turn(
