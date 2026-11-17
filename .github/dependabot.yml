@@ -16,6 +16,8 @@ updates:
         update-types:
           - minor
           - patch
+    cooldown:
+      default-days: 7
     # Remaining major bumps (e.g. rusqlite) still get individual PRs so they
     # get the review attention a breaking change needs.
 
@@ -28,3 +30,5 @@ updates:
       github-actions:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7

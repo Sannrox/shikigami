@@ -10,6 +10,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Jobs that need more ask for it themselves.
+permissions:
+  contents: read
+
 # A new push to a pull request cancels its previous run; other events run
 # every commit. The workflow name keeps workflows from cancelling each other.
 concurrency:
@@ -23,6 +27,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -49,6 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -78,6 +86,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
@@ -90,6 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -120,7 +132,9 @@ jobs:
             VCS_REF=${{ github.sha }}
 
       - name: Run deterministic image smoke
-        run: bash scripts/oci-image-smoke.sh shikigami:ci "${{ steps.package.outputs.version }}" "${{ github.sha }}"
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: bash scripts/oci-image-smoke.sh shikigami:ci "$VERSION" "$GITHUB_SHA"
 
   # Public API of the library crates against the pull request base. Versions
   # are release-owned, so a pull request never bumps them: a reported break
@@ -138,6 +152,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
