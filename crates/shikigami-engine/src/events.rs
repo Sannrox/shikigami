@@ -56,14 +56,6 @@ pub enum HarnessEvent {
         turn: u32,
         content_preview: String,
     },
-    /// Assistant text of `turn` as the model produces it, in order. Only
-    /// sinks that [`EventSink::wants_text_deltas`] receive it. It is never
-    /// durable: the completed turn is recorded once, as before.
-    AssistantDelta {
-        run_id: String,
-        turn: u32,
-        text: String,
-    },
     /// Metadata-only projection for a bounded content model turn.
     ContentTurn {
         turn: u32,
@@ -114,6 +106,14 @@ pub enum HarnessEvent {
         effort: Option<String>,
         #[serde(default)]
         tools: Vec<String>,
+    },
+    /// Assistant text of `turn` as the model produces it, in order. Only
+    /// sinks that [`EventSink::wants_text_deltas`] receive it. It is never
+    /// durable: the completed turn is recorded once, as before.
+    AssistantDelta {
+        run_id: String,
+        turn: u32,
+        text: String,
     },
 }
 
