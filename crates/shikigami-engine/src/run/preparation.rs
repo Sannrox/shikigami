@@ -59,6 +59,9 @@ pub(super) async fn prepare(
     let stored_prompt_start = resume_checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.prompt_start_turns);
+    let stored_stop_repairs = resume_checkpoint
+        .as_ref()
+        .map_or(0, |checkpoint| checkpoint.stop_repairs);
     let stored_plan_jail = resume_checkpoint
         .as_ref()
         .is_some_and(|checkpoint| checkpoint.plan_jail);
@@ -271,6 +274,7 @@ pub(super) async fn prepare(
         session.set_resumed_ask_park(resumed_park.clone());
     }
     session.plan_jail = plan_jail;
+    session.stop_repairs = stored_stop_repairs;
     session.nested = nested_tools;
     session.children = stored_children;
     session.nested_depth = stored_nested_depth;

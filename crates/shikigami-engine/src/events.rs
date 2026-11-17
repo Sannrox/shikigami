@@ -124,6 +124,36 @@ pub enum HarnessEvent {
         after: usize,
         through_turn: u32,
     },
+    /// `stop` hooks checked a completion. `attempt` counts from 1 per run.
+    /// When `passed` is false the run either repairs or ends failed.
+    VerificationFinished {
+        attempt: u32,
+        passed: bool,
+        cases: Vec<VerificationCase>,
+    },
+}
+
+/// One check a `stop` hook reported, or the hook itself when it reported none.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VerificationCase {
+    #[serde(default)]
+    pub suite: String,
+    pub name: String,
+    pub outcome: VerificationOutcome,
+    /// Failure text, ANSI-stripped and cut to its tail.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum VerificationOutcome {
+    Pass,
+    Fail,
+    Error,
+    Skipped,
 }
 
 pub trait EventSink: Send + Sync {

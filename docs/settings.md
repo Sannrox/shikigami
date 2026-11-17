@@ -425,6 +425,7 @@ Rules and skills are **untrusted text** given to the model (not executed). Disab
 | `plan_jail` | `false` | Restrict mutating tools to `.shikigami/plan.md` until a parked plan is accepted. `report` parks `ParkKind::Plan` with the plan digest. Resume with `RunRequest.resume_plan` / `--plan-accept` / `--plan-reject`. Only Accept clears the jail; Reject completes failed and keeps it. `doctor` names the mode when selected. |
 | `nested` | `false` | Enable `child_run` / `child_status`. A child is a first-class Run with a typed profile (`explore` read-only, `plan` write-jail, `full` parent authority). Default shares the parent workspace (ACP/TUI inplace included); `worktree=true` isolates with `git-worktree` outside the parent jail (harvest is the child summary; successful isolated trees are cleaned up with `git worktree remove`, including after `--resume` of a parked plan child, unless the resume sets `keep_workspace`). Plan-jail parents may start shared-workspace children; `worktree=true` is denied because materialize mutates the parent git checkout. `full`/`plan` children inherit the parent jail (writes stay on `.shikigami/plan.md`); `explore` is read-only. Explore and plan-jailed children do not attach parent MCP servers. Children run unattended to a summary (they do not inherit `session_wait`). Session hosts ask=park before `full`/`plan` `child_run` and before any `worktree=true`. Git worktree add/remove runs with hooks disabled. Children do not inherit nested tools, including on resume, so only one nesting level is implemented (`nested_max_depth` > 1 is reserved). A parked parent restores nested tools on `--resume`. Unattended park cancels `wait=false` children and waits until their registry rows are terminal (in-flight tools drop on cancel). Session hosts leave them running until the parent completes. Parent complete keeps a shared workspace while a recorded child is still parked or running. `local`/`none` authorize the tool names; `http-callback` and `sekai-chisei` keep host/plane allow-lists. `doctor` names the mode when selected. |
 | `nested_max_depth` | `1` | Maximum nested depth (root is 0). Must be greater than zero. |
+| `max_stop_repairs` | `3` | Refused completions a `stop` hook allows before the run ends failed ([hooks.md](hooks.md#stop-verify-before-success)) |
 | `nested_max_children` | `4` | Maximum children one parent may start. Must be greater than zero. Depth and fan-out caps fail closed. Isolated `wait=false` `child_run`s in one turn start concurrently up to this cap. |
 
 CLI / env override: `shikigami run --timeout-secs N` or `SHIKIGAMI_RUN_TIMEOUT_SECS`.
@@ -491,10 +492,10 @@ hooks. See [hooks.md](hooks.md).
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `event` | required | `pre_run` \| `post_run` \| `pre_tool` \| `post_tool` \| `on_park` |
+| `event` | required | `pre_run` \| `post_run` \| `pre_tool` \| `post_tool` \| `on_park` \| `stop` ([verify before success](hooks.md#stop-verify-before-success)) |
 | `command` | required | Executable path or name on `PATH` |
 | `args` | `[]` | Extra argv |
-| `timeout_ms` | `5000` | Kill after this duration (capped at 120s) |
+| `timeout_ms` | `5000` | Kill after this duration (capped at 120s; `stop` at 1h) |
 | `fail_closed` | `false` | Fail the tool/run on hook failure or timeout |
 
 ## Environment variables

@@ -866,6 +866,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::TodosUpdated { .. } => "todos_updated",
         HarnessEvent::HandoffBrief { .. } => "handoff_brief",
         HarnessEvent::SessionMode { .. } => "session_mode",
+        HarnessEvent::VerificationFinished { .. } => "verification_finished",
     }
 }
 
@@ -911,6 +912,11 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
             format!("task_chars={} files={}", task.chars().count(), files.len())
         }
         HarnessEvent::SessionMode { mode, model, .. } => format!("mode={mode} model={model}"),
+        HarnessEvent::VerificationFinished {
+            attempt,
+            passed,
+            cases,
+        } => format!("attempt={attempt} passed={passed} cases={}", cases.len()),
     };
     Some(detail)
 }

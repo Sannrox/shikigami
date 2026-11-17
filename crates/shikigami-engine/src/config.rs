@@ -61,7 +61,7 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct HookSettings {
-    /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park`
+    /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park` | `stop`
     pub event: String,
     pub command: String,
     #[serde(default)]
@@ -625,6 +625,10 @@ pub struct RunSettings {
     /// Maximum children a single parent may start. Default 4.
     #[serde(default = "default_nested_max_children")]
     pub nested_max_children: u32,
+    /// Completions a `stop` hook may refuse before the run ends failed.
+    /// One bound shared by all `stop` hooks of the run. Default 3.
+    #[serde(default = "default_max_stop_repairs")]
+    pub max_stop_repairs: u32,
 }
 
 /// Child-process resource and isolation policy.
@@ -720,8 +724,13 @@ impl Default for RunSettings {
             nested: false,
             nested_max_depth: default_nested_max_depth(),
             nested_max_children: default_nested_max_children(),
+            max_stop_repairs: default_max_stop_repairs(),
         }
     }
+}
+
+fn default_max_stop_repairs() -> u32 {
+    3
 }
 
 fn default_nested_max_depth() -> u32 {

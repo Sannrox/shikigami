@@ -199,6 +199,21 @@ impl ToolRegistry {
     }
 
     /// Kill all background bash jobs (run end cleanup).
+    /// Run an operator command in the workspace under the tool sandbox.
+    /// See [`ToolExecutor::run_sandboxed`].
+    pub(crate) async fn run_sandboxed(
+        &self,
+        program: &std::path::Path,
+        args: &[String],
+        envs: &[(&str, &str)],
+        stdin: &[u8],
+        limit: std::time::Duration,
+    ) -> Result<std::process::Output, String> {
+        self.executor
+            .run_sandboxed(program, args, envs, stdin, limit)
+            .await
+    }
+
     pub async fn kill_background_jobs(&self) {
         let jobs: Vec<BgJob> = {
             let mut guard = match self.bg_jobs.lock() {

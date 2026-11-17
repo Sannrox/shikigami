@@ -210,6 +210,54 @@ impl ToolExecutor {
         })
     }
 
+    /// Run `program` in the workspace under the tool sandbox, with the same
+    /// environment as `bash`, feeding `stdin`. `Err` means it did not finish:
+    /// spawn failure, wait failure, or timeout.
+    pub(crate) async fn run_sandboxed(
+        &self,
+        program: &std::path::Path,
+        args: &[String],
+        envs: &[(&str, &str)],
+        stdin: &[u8],
+        limit: Duration,
+    ) -> Result<std::process::Output, String> {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .envs(envs.iter().copied())
+            .current_dir(&self.workspace)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let job = self.job.as_ref().and_then(JobCredentialHandle::snapshot);
+        self.environment.apply_job(&mut command, job.as_ref());
+        let applied = self
+            .sandbox
+            .apply(&mut command)
+            .map_err(|error| error.to_string())?;
+        let mut child = command.spawn().map_err(|error| format!("spawn: {error}"))?;
+        let _guard = ProcessGroupGuard {
+            sandbox: &self.sandbox,
+            pid: child.id(),
+            _applied: applied,
+        };
+        let input = child.stdin.take();
+        let run = async move {
+            if let Some(mut input) = input {
+                use tokio::io::AsyncWriteExt;
+                // A program that never reads stdin closes it early; not an error.
+                let _ = input.write_all(stdin).await;
+            }
+            child.wait_with_output().await
+        };
+        match timeout(limit, run).await {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error)) => Err(format!("wait: {error}")),
+            Err(_) => Err(format!("timed out after {limit:?}")),
+        }
+    }
+
     async fn bash(&self, script: &str, limit: Duration) -> Result<String, ToolError> {
         let (mut command, applied) = self.bash_command(script)?;
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
