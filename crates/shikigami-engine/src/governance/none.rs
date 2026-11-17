@@ -32,6 +32,10 @@ impl GovernancePort for NoneGovernance {
         "none"
     }
 
+    fn plans_with_local_model(&self) -> bool {
+        true
+    }
+
     fn health_detail(&self) -> String {
         "no external governance".into()
     }

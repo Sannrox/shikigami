@@ -558,3 +558,99 @@ async fn unattended_park_reaps_background_jobs() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
+
+/// Run a scripted local run that compacts after four messages and return its events.
+async fn compacting_run(script: serde_json::Value) -> Vec<shikigami::HarnessEvent> {
+    use shikigami::ChannelSink;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(script.to_string());
+    config.events.adapter = "none".into();
+    config.run.compact_after_messages = Some(4);
+    config.run.compact_keep_tail = 2;
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let result = harness
+        .run_with_events(RunRequest::new("write three files"), Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success, "run failed: {result:?}");
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+fn write_turn(path: &str) -> serde_json::Value {
+    let args = serde_json::json!({"path": path, "content": "x".repeat(400)}).to_string();
+    serde_json::json!({"tool_calls": [{"name": "write_file", "args_json": args}]})
+}
+
+fn report_turn() -> serde_json::Value {
+    serde_json::json!({"tool_calls": [{"name": "report", "args_json": "{\"summary\":\"done\",\"success\":true}"}]})
+}
+
+#[tokio::test]
+async fn compaction_replaces_older_turns_with_a_summary() {
+    use shikigami::HarnessEvent;
+
+    // The summary entry sits anywhere in the script; it never consumes a turn.
+    let events = compacting_run(serde_json::json!([
+        write_turn("a.txt"),
+        {"summary": "Wrote a.txt with 400 x characters."},
+        write_turn("b.txt"),
+        write_turn("c.txt"),
+        report_turn(),
+    ]))
+    .await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::ContextSummarized { before, after, through_turn }
+                if after < before && *through_turn >= 1
+        )),
+        "missing ContextSummarized: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ContextCompacted { .. })),
+        "dropped instead of summarizing: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_without_a_summary_drops_and_says_why() {
+    use shikigami::HarnessEvent;
+
+    let events = compacting_run(serde_json::json!([
+        write_turn("a.txt"),
+        write_turn("b.txt"),
+        write_turn("c.txt"),
+        report_turn(),
+    ]))
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ContextCompacted { .. })),
+        "missing ContextCompacted: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            HarnessEvent::Status { status } if status.starts_with("context summary unavailable")
+        )),
+        "missing fallback status: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ContextSummarized { .. })),
+        "{events:?}"
+    );
+}

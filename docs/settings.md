@@ -151,7 +151,7 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | Field | Default | Description |
 | --- | --- | --- |
 | `adapter` | `"scripted"` | `scripted` \| `http` \| `plane` |
-| `script_json` | built-in demo script | JSON array of turns for `scripted` |
+| `script_json` | built-in demo script | JSON array of turns for `scripted`. An entry `{"summary": "..."}` is not a turn; it answers compaction summaries. A turn with `requires_context: ["..."]` fails unless each text appears in a message it sees. |
 | `base_url` | OpenAI-compatible default | Base URL for `http` (Chat Completions). A local gateway such as CLIProxyAPI is typically `http://127.0.0.1:8317/v1`. |
 | `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. Set an explicit id for a gateway catalog (see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)). |
 | `api_key_env` | `"OPENAI_API_KEY"` | Env var for the HTTP API key. For a local gateway this is the gateway access key (for CLIProxyAPI, `CLIPROXY_API_KEY`), not an upstream provider token. |
@@ -419,7 +419,7 @@ Rules and skills are **untrusted text** given to the model (not executed). Disab
 | Field | Default | Description |
 | --- | --- | --- |
 | `max_turns` | `50` | Hard stop for the turn loop. Unattended `run` applies it to the run lifetime. Session hosts (`session_wait`) apply it per prompt, including ask/escalate resumes of that prompt. |
-| `compact_after_messages` | unset | Compact middle history when message count exceeds N (off by default) |
+| `compact_after_messages` | unset | Compact middle history when message count exceeds N (off by default). With `local` or `none` governance the model summarizes the compacted span and the summary replaces it (`context_summarized`). Brokered governance, a failed summary, or three failures in a row drop the span behind a marker instead (`context_compacted`). The run checkpoint keeps every message either way. |
 | `compact_keep_tail` | `8` | Messages kept after the first task message when compacting |
 | `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |
 | `plan_jail` | `false` | Restrict mutating tools to `.shikigami/plan.md` until a parked plan is accepted. `report` parks `ParkKind::Plan` with the plan digest. Resume with `RunRequest.resume_plan` / `--plan-accept` / `--plan-reject`. Only Accept clears the jail; Reject completes failed and keeps it. `doctor` names the mode when selected. |

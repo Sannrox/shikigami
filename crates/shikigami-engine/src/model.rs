@@ -158,6 +158,21 @@ pub trait ModelPort: Send + Sync {
         tools: &[ToolDef],
     ) -> Result<ModelTurn, ModelError>;
 
+    /// Summarize part of a run's history for context compaction. `transcript`
+    /// is the compacted span rendered as text; the result's `content` is the
+    /// summary. The default asks for one tool-free turn; a turn that still
+    /// calls tools or says nothing is rejected by the caller.
+    async fn summarize(&self, system: &str, transcript: &str) -> Result<ModelTurn, ModelError> {
+        let request = ChatMessage {
+            role: "user".into(),
+            content: transcript.into(),
+            tool_call_id: String::new(),
+            tool_calls: vec![],
+        };
+        self.next_turn(system, std::slice::from_ref(&request), &[])
+            .await
+    }
+
     /// Produce one bounded content turn. Adapters deny by default so content
     /// can never be silently coerced through the text interface.
     async fn next_content_turn(
@@ -268,9 +283,12 @@ pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
 /// Deterministic multi-turn script for tests and offline demos.
 pub struct ScriptedModel {
     turns: Vec<ModelTurn>,
-    /// Per turn: text chunks streamed through [`emit_text_delta`] before the
-    /// turn returns, and the pause before each. Empty for whole turns.
-    streams: Vec<(Vec<String>, u64)>,
+    /// Per turn: what happens before it returns. Empty for plain turns.
+    preludes: Vec<TurnPrelude>,
+    /// Answer to every [`ModelPort::summarize`] call, from a script entry
+    /// `{"summary": "..."}`. Summary entries are not turns, so the replay
+    /// cursor stays aligned with completed turns.
+    summary: Option<String>,
     cursor: std::sync::Mutex<usize>,
     content_digest: String,
 }
@@ -297,10 +315,16 @@ impl ScriptedModel {
     }
 
     fn from_script_json(raw: &str, config: &Config) -> Result<Self, ModelError> {
-        let wire: Vec<ScriptedTurn> = serde_json::from_str(raw)?;
-        let streams = wire
-            .iter()
-            .map(|t| (t.chunks.clone(), t.chunk_delay_ms))
+        let mut wire: Vec<ScriptedTurn> = serde_json::from_str(raw)?;
+        let summary = wire.iter().find_map(|t| t.summary.clone());
+        wire.retain(|t| t.summary.is_none());
+        let preludes = wire
+            .iter_mut()
+            .map(|t| TurnPrelude {
+                chunks: t.chunks.clone(),
+                chunk_delay_ms: t.chunk_delay_ms,
+                requires_context: std::mem::take(&mut t.requires_context),
+            })
             .collect();
         let turns = wire
             .into_iter()
@@ -321,7 +345,8 @@ impl ScriptedModel {
             .collect();
         Ok(Self {
             turns,
-            streams,
+            preludes,
+            summary,
             cursor: std::sync::Mutex::new(0),
             content_digest: artifact_or_script_digest(config, raw)?,
         })
@@ -335,7 +360,8 @@ impl ScriptedModel {
             .join("\n");
         Self {
             turns,
-            streams: Vec::new(),
+            preludes: Vec::new(),
+            summary: None,
             cursor: std::sync::Mutex::new(0),
             content_digest: crate::fallback::sha256_hex(payload.as_bytes()),
         }
@@ -362,6 +388,9 @@ fn default_script_json() -> String {
 
 #[derive(Deserialize)]
 struct ScriptedTurn {
+    /// Marks this entry as the scripted compaction summary instead of a turn.
+    #[serde(default)]
+    summary: Option<String>,
     /// Defaults to the concatenated `chunks`.
     content: Option<String>,
     #[serde(default)]
@@ -372,6 +401,18 @@ struct ScriptedTurn {
     tool_calls: Vec<ScriptedCall>,
     #[serde(default)]
     usage: Option<TokenUsage>,
+    /// Text that must appear in some message the turn sees, or the turn
+    /// fails. Lets a fixture prove a fact survived compaction.
+    #[serde(default)]
+    requires_context: Vec<String>,
+}
+
+/// Scripted behavior before a turn returns.
+struct TurnPrelude {
+    /// Text streamed through [`emit_text_delta`], with a pause before each chunk.
+    chunks: Vec<String>,
+    chunk_delay_ms: u64,
+    requires_context: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -385,6 +426,18 @@ struct ScriptedCall {
 impl ModelPort for ScriptedModel {
     fn id(&self) -> &'static str {
         "scripted"
+    }
+
+    async fn summarize(&self, _system: &str, _transcript: &str) -> Result<ModelTurn, ModelError> {
+        let content = self
+            .summary
+            .clone()
+            .ok_or_else(|| ModelError::Message("script has no summary entry".into()))?;
+        Ok(ModelTurn {
+            content,
+            tool_calls: vec![],
+            usage: None,
+        })
     }
 
     fn restore_replay_cursor(&self, completed_turns: u32) -> Result<(), ModelError> {
@@ -407,7 +460,7 @@ impl ModelPort for ScriptedModel {
     async fn next_turn(
         &self,
         _system: &str,
-        _messages: &[ChatMessage],
+        messages: &[ChatMessage],
         _tools: &[ToolDef],
     ) -> Result<ModelTurn, ModelError> {
         let index = {
@@ -419,10 +472,21 @@ impl ModelPort for ScriptedModel {
             *cursor += 1;
             index
         };
-        if let Some((chunks, delay_ms)) = self.streams.get(index) {
-            for chunk in chunks {
-                if *delay_ms > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        if let Some(prelude) = self.preludes.get(index) {
+            if let Some(missing) = prelude.requires_context.iter().find(|needle| {
+                !messages
+                    .iter()
+                    .any(|message| message.content.contains(needle.as_str()))
+            }) {
+                return Err(ModelError::Message(format!(
+                    "scripted turn {} requires `{missing}` in context",
+                    index + 1
+                )));
+            }
+            for chunk in &prelude.chunks {
+                if prelude.chunk_delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(prelude.chunk_delay_ms))
+                        .await;
                 }
                 emit_text_delta(chunk);
             }

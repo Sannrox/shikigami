@@ -46,6 +46,11 @@ Fixture schema version is 1:
 }
 ~~~
 
+A case may set `compact_after_messages` to compact its run.
+`examples/eval-compaction.json` needs a fact that only the compacted span
+holds: its final write turn sets `requires_context`, and the script's
+`summary` entry carries the fact past compaction.
+
 Each case gets an isolated temporary state/workspace and is cleaned after the
 suite. Expected paths are relative and cannot traverse outside the workspace.
 The JSON result records pass/fail, run id, summary, and assertion failures.

@@ -115,6 +115,15 @@ pub enum HarnessEvent {
         turn: u32,
         text: String,
     },
+    /// Older messages were replaced by a model-written summary for context
+    /// size. The summary covers turns 1 through `through_turn`; later turns
+    /// stay verbatim. [`HarnessEvent::ContextCompacted`] means the messages
+    /// were dropped without a summary.
+    ContextSummarized {
+        before: usize,
+        after: usize,
+        through_turn: u32,
+    },
 }
 
 pub trait EventSink: Send + Sync {

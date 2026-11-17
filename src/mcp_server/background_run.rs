@@ -201,6 +201,11 @@ fn format_event(event: &HarnessEvent) -> String {
         HarnessEvent::ContextCompacted { before, after } => {
             format!("compacted before={before} after={after}")
         }
+        HarnessEvent::ContextSummarized {
+            before,
+            after,
+            through_turn,
+        } => format!("summarized before={before} after={after} through_turn={through_turn}"),
         HarnessEvent::TodosUpdated { item_count, .. } => {
             format!("todos item_count={item_count}")
         }

@@ -17,43 +17,132 @@ use super::session::RunSession;
 use super::supervision::check_bounds;
 use super::{Engine, RunError, RunRequest};
 
-/// Compact middle of the message list when over `threshold`.
-/// Keeps the first message (task) and the last `keep_tail` messages.
-/// If the tail would start on a tool result, it expands to the assistant
-/// that issued those calls so providers still see a complete exchange.
-/// Returns `(before, after)` when compaction ran.
+/// Compact middle of the message list when over `threshold`, dropping it
+/// behind a marker. Keeps the first message (task) and the last `keep_tail`
+/// messages. If the tail would start on a tool result, it expands to the
+/// assistant that issued those calls so providers still see a complete
+/// exchange. Returns `(before, after)` when compaction ran.
 pub fn compact_messages(
     messages: &mut Vec<ChatMessage>,
     threshold: usize,
     keep_tail: usize,
 ) -> Option<(usize, usize)> {
+    let tail_start = compaction_tail_start(messages, threshold, keep_tail)?;
+    let marker = dropped_marker(tail_start - 1);
+    Some(replace_compacted_span(messages, tail_start, marker))
+}
+
+/// Where compaction cuts `messages`: `messages[1..tail_start]` is the
+/// compacted span and `messages[tail_start..]` the verbatim tail.
+fn compaction_tail_start(
+    messages: &[ChatMessage],
+    threshold: usize,
+    keep_tail: usize,
+) -> Option<usize> {
     let before = messages.len();
     if before <= threshold || before <= keep_tail + 1 {
         return None;
     }
-    let head = messages.first().cloned()?;
     let tail_start = tool_exchange_tail_start(messages, before.saturating_sub(keep_tail).max(1));
-    if tail_start <= 1 {
-        return None;
-    }
-    let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
-    let dropped = before.saturating_sub(1 + tail.len());
-    if dropped == 0 {
-        return None;
-    }
-    let summary = ChatMessage {
+    (tail_start > 1).then_some(tail_start)
+}
+
+/// Replace the compacted span with `marker`; returns `(before, after)`.
+fn replace_compacted_span(
+    messages: &mut Vec<ChatMessage>,
+    tail_start: usize,
+    marker: ChatMessage,
+) -> (usize, usize) {
+    let before = messages.len();
+    messages.splice(1..tail_start, std::iter::once(marker));
+    (before, messages.len())
+}
+
+/// Every compaction marker starts with `[context compacted:`; replay and
+/// export detect compacted history by that prefix.
+fn dropped_marker(dropped: usize) -> ChatMessage {
+    user_message(format!(
+        "[context compacted: {dropped} earlier messages omitted; continue the original task]"
+    ))
+}
+
+fn summary_marker(summarized: usize, through_turn: u32, summary: &str) -> ChatMessage {
+    user_message(format!(
+        "[context compacted: {summarized} earlier messages through turn {through_turn} summarized; \
+         the run checkpoint keeps the full record. Continue the original task.]\n\n{summary}"
+    ))
+}
+
+fn user_message(content: String) -> ChatMessage {
+    ChatMessage {
         role: "user".into(),
-        content: format!(
-            "[context compacted: {dropped} earlier messages omitted; continue the original task]"
-        ),
+        content,
         tool_call_id: String::new(),
         tool_calls: vec![],
-    };
-    *messages = std::iter::once(head)
-        .chain(std::iter::once(summary))
-        .chain(tail)
-        .collect();
-    Some((before, messages.len()))
+    }
+}
+
+/// Instructions for the compaction summarizer. The last sentence matters:
+/// without it a model sometimes calls a tool instead of writing the summary.
+const SUMMARY_PROMPT: &str = "You summarize part of an agent run so the agent can continue without it. \
+Write the summary as plain text with these sections, each complete even at the cost of length:\n\
+1. Task and constraints the user stated, kept exact.\n\
+2. Decisions made and options ruled out, with the reasons.\n\
+3. Problems hit and how each was resolved.\n\
+4. Where the work stands now.\n\
+5. What is still open.\n\
+6. Details that are hard to reconstruct: paths, names, numbers, identifiers, exact values, kept exactly.\n\
+Keep the user's words close to verbatim; condense the agent's own reasoning to what it concluded or produced. \
+Do not call any tools; respond with text only.";
+
+/// Longest text kept per message when rendering the compacted span for the
+/// summarizer. The tail of a long message (a tool result, a log) is usually
+/// the part that matters, so the head is cut.
+const SUMMARY_MESSAGE_CHARS: usize = 8_000;
+
+/// Consecutive summary failures after which a run stops asking for summaries
+/// and only drops, so a model that cannot summarize is not asked every turn.
+const SUMMARY_MISS_LIMIT: u32 = 3;
+
+/// Render messages as one plain-text transcript for the summarizer. Tool
+/// exchanges become text, so the request carries no tool definitions.
+fn render_transcript(messages: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let text = tail_chars(&message.content, SUMMARY_MESSAGE_CHARS);
+        match message.role.as_str() {
+            "tool" => out.push_str(&format!(
+                "[tool result {}]\n{text}\n\n",
+                message.tool_call_id
+            )),
+            role => {
+                out.push_str(&format!("[{role}]\n{text}\n"));
+                for call in &message.tool_calls {
+                    out.push_str(&format!(
+                        "[tool call {} {}] {}\n",
+                        call.id,
+                        call.name,
+                        tail_chars(&call.args_json, SUMMARY_MESSAGE_CHARS)
+                    ));
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+fn tail_chars(text: &str, limit: usize) -> std::borrow::Cow<'_, str> {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.into();
+    }
+    let skip = count - limit;
+    format!(
+        "[... {skip} characters cut ...]{}",
+        text.chars().skip(skip).collect::<String>()
+    )
+    .into()
 }
 
 fn is_tool_result(msg: &ChatMessage) -> bool {
@@ -98,6 +187,10 @@ pub(super) struct DurableModelTurn<'a> {
     /// `session.turns` when this prompt's loop started. Session hosts apply
     /// `max_turns` to the delta; unattended runs keep the lifetime cap.
     prompt_start_turns: u32,
+    /// Consecutive compactions whose summary failed, in this process. A
+    /// restart resets it, which costs at most [`SUMMARY_MISS_LIMIT`] more
+    /// summary attempts.
+    summary_misses: u32,
 }
 
 impl<'a> DurableModelTurn<'a> {
@@ -152,6 +245,7 @@ impl<'a> DurableModelTurn<'a> {
             } else {
                 0
             },
+            summary_misses: 0,
         }
     }
 
@@ -161,6 +255,105 @@ impl<'a> DurableModelTurn<'a> {
         for status in notes {
             self.engine.emit(run_id, HarnessEvent::Status { status });
         }
+    }
+
+    /// Replace `session.messages[1..tail_start]` with a model-written summary,
+    /// or drop it behind a marker when no summary is available. The new list
+    /// becomes durable with the next checkpoint save; a crash before that
+    /// resumes from the full list and compacts again.
+    async fn compact(
+        &mut self,
+        session: &mut RunSession,
+        tail_start: usize,
+    ) -> Result<(), RunError> {
+        let span = &session.messages[1..tail_start];
+        let summary = self.summarize_span(session, span).await?;
+        let summarized = tail_start - 1;
+        let event = match summary {
+            Some(summary) => {
+                let tail_turns = session.messages[tail_start..]
+                    .iter()
+                    .filter(|message| message.role == "assistant")
+                    .count();
+                let through_turn = session
+                    .turns
+                    .saturating_sub(u32::try_from(tail_turns).unwrap_or(u32::MAX));
+                let marker = summary_marker(summarized, through_turn, &summary);
+                let (before, after) =
+                    replace_compacted_span(&mut session.messages, tail_start, marker);
+                HarnessEvent::ContextSummarized {
+                    before,
+                    after,
+                    through_turn,
+                }
+            }
+            None => {
+                let (before, after) = replace_compacted_span(
+                    &mut session.messages,
+                    tail_start,
+                    dropped_marker(summarized),
+                );
+                HarnessEvent::ContextCompacted { before, after }
+            }
+        };
+        self.engine.emit(&session.run_id, event);
+        Ok(())
+    }
+
+    /// Ask the local model to summarize `span`. `None` means compact without
+    /// a summary: the governance adapter plans remotely, recent summaries kept
+    /// failing, or this one failed. A cancelled or timed-out run still stops.
+    async fn summarize_span(
+        &mut self,
+        session: &RunSession,
+        span: &[ChatMessage],
+    ) -> Result<Option<String>, RunError> {
+        if !self.engine.governance.plans_with_local_model()
+            || self.summary_misses >= SUMMARY_MISS_LIMIT
+        {
+            return Ok(None);
+        }
+        let transcript = render_transcript(span);
+        let result = super::supervision::run_until_cancelled(
+            self.engine,
+            &session.run_id,
+            self.request,
+            self.started,
+            self.timeout,
+            &session.parent_run_id,
+            self.engine.model.summarize(SUMMARY_PROMPT, &transcript),
+        )
+        .await?;
+        let failure = match result {
+            Ok(turn) => {
+                if let Some(usage) = turn.usage {
+                    self.usage.input_tokens =
+                        self.usage.input_tokens.saturating_add(usage.input_tokens);
+                    self.usage.output_tokens =
+                        self.usage.output_tokens.saturating_add(usage.output_tokens);
+                }
+                let summary = turn.content.trim();
+                if !turn.tool_calls.is_empty() {
+                    "the summarizer called a tool".to_owned()
+                } else if summary.is_empty() {
+                    "the summary was empty".to_owned()
+                } else if summary.len() >= transcript.len() {
+                    "the summary was not shorter than the messages it replaces".to_owned()
+                } else {
+                    self.summary_misses = 0;
+                    return Ok(Some(summary.to_owned()));
+                }
+            }
+            Err(error) => error.to_string(),
+        };
+        self.summary_misses += 1;
+        self.engine.emit(
+            &session.run_id,
+            HarnessEvent::Status {
+                status: format!("context summary unavailable ({failure}); compacting without it"),
+            },
+        );
+        Ok(None)
     }
 
     /// Return one model turn only after its result and report cursor are durable.
@@ -190,13 +383,10 @@ impl<'a> DurableModelTurn<'a> {
             && let Some(threshold) = self.engine.config.run.compact_after_messages
         {
             let keep = self.engine.config.run.compact_keep_tail.max(2) as usize;
-            if let Some((before, after)) =
-                compact_messages(&mut session.messages, threshold as usize, keep)
+            if let Some(tail_start) =
+                compaction_tail_start(&session.messages, threshold as usize, keep)
             {
-                self.engine.emit(
-                    &session.run_id,
-                    HarnessEvent::ContextCompacted { before, after },
-                );
+                self.compact(session, tail_start).await?;
             }
         }
         self.engine.emit(
