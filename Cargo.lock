@@ -2278,6 +2278,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "shikigami-engine",
+ "tokio",
 ]
 
 [[package]]

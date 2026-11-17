@@ -193,6 +193,28 @@ pub trait ModelPort: Send + Sync {
     }
 }
 
+tokio::task_local! {
+    static RETRY_NOTES: std::cell::RefCell<Vec<String>>;
+}
+
+/// Record a transient-failure retry for the turn this task is planning.
+/// Adapters call this; outside [`collect_retry_notes`] the note is dropped.
+pub fn note_model_retry(note: String) {
+    let _ = RETRY_NOTES.try_with(|notes| notes.borrow_mut().push(note));
+}
+
+/// Await one model turn and return the retries noted while planning it.
+/// Notes are task-local, so concurrent runs sharing an adapter never see
+/// each other's retries.
+pub async fn collect_retry_notes<F: std::future::Future>(turn: F) -> (F::Output, Vec<String>) {
+    RETRY_NOTES
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            let output = turn.await;
+            (output, RETRY_NOTES.with(|notes| notes.take()))
+        })
+        .await
+}
+
 pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
     match config.model.adapter.as_str() {
         "scripted" => Ok(Box::new(ScriptedModel::from_config(config)?)),

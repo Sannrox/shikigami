@@ -155,6 +155,14 @@ impl<'a> DurableModelTurn<'a> {
         }
     }
 
+    /// Surface each transient-failure retry the local model made for this turn,
+    /// whether the turn then succeeded or failed.
+    fn emit_model_retries(&self, run_id: &str, notes: Vec<String>) {
+        for status in notes {
+            self.engine.emit(run_id, HarnessEvent::Status { status });
+        }
+    }
+
     /// Return one model turn only after its result and report cursor are durable.
     pub(super) async fn next(&mut self, session: &mut RunSession) -> Result<ModelTurn, RunError> {
         check_bounds(
@@ -211,10 +219,8 @@ impl<'a> DurableModelTurn<'a> {
             let (messages, capabilities, resolver) = session
                 .content_context()
                 .ok_or_else(|| RunError::Message("content session is unavailable".into()))?;
-            let turn = self
-                .engine
-                .governance
-                .plan_content_turn(
+            let (planned, retries) =
+                crate::model::collect_retry_notes(self.engine.governance.plan_content_turn(
                     self.handle,
                     self.system_prompt,
                     ContentTurnContext {
@@ -224,8 +230,10 @@ impl<'a> DurableModelTurn<'a> {
                         resolver: resolver.as_ref(),
                         local_model: self.engine.model.as_ref(),
                     },
-                )
-                .await?;
+                ))
+                .await;
+            self.emit_model_retries(&session.run_id, retries);
+            let turn = planned?;
             session.turns += 1;
             if let Some(usage) = turn.usage {
                 self.usage.input_tokens =
@@ -276,17 +284,17 @@ impl<'a> DurableModelTurn<'a> {
             session.save(self.tools.as_ref())?;
             turn
         } else {
-            let turn = self
-                .engine
-                .governance
-                .plan_turn(
+            let (planned, retries) =
+                crate::model::collect_retry_notes(self.engine.governance.plan_turn(
                     self.handle,
                     self.system_prompt,
                     &session.messages,
                     self.tool_defs,
                     self.engine.model.as_ref(),
-                )
-                .await?;
+                ))
+                .await;
+            self.emit_model_retries(&session.run_id, retries);
+            let turn = planned?;
             session.turns += 1;
             if let Some(usage) = turn.usage {
                 self.usage.input_tokens =
