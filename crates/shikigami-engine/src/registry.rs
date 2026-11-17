@@ -862,6 +862,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::RunFinished { .. } => "run_finished",
         HarnessEvent::Prompt { .. } => "prompt",
         HarnessEvent::ContextCompacted { .. } => "context_compacted",
+        HarnessEvent::ContextSummarized { .. } => "context_summarized",
         HarnessEvent::TodosUpdated { .. } => "todos_updated",
         HarnessEvent::HandoffBrief { .. } => "handoff_brief",
         HarnessEvent::SessionMode { .. } => "session_mode",
@@ -900,6 +901,11 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
         HarnessEvent::ContextCompacted { before, after } => {
             format!("before={before} after={after}")
         }
+        HarnessEvent::ContextSummarized {
+            before,
+            after,
+            through_turn,
+        } => format!("before={before} after={after} through_turn={through_turn}"),
         HarnessEvent::TodosUpdated { item_count, .. } => format!("items={item_count}"),
         HarnessEvent::HandoffBrief { task, files, .. } => {
             format!("task_chars={} files={}", task.chars().count(), files.len())

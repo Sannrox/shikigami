@@ -38,8 +38,11 @@ pub struct EvalSuite {
     pub cases: Vec<EvalCase>,
 }
 
+/// One fixture case. Built only by deserializing a fixture, so new optional
+/// fields are additive.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct EvalCase {
     pub name: String,
     pub task: String,
@@ -54,6 +57,10 @@ pub struct EvalCase {
     pub expect_files: Vec<EvalFileExpectation>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Sets `run.compact_after_messages` for the case, so a fixture can run
+    /// long enough to compact.
+    #[serde(default)]
+    pub compact_after_messages: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +131,7 @@ async fn run_case(root: &Path, index: usize, case: &EvalCase) -> Result<EvalCase
     config.model.adapter = "scripted".into();
     config.events.adapter = "none".into();
     config.workspace.root = workspace_root.display().to_string();
+    config.run.compact_after_messages = case.compact_after_messages;
     if !case.script.is_null() {
         config.model.script_json = Some(serde_json::to_string(&case.script)?);
     }
@@ -235,5 +243,24 @@ mod tests {
         let result = run_fixture(&fixture).await.unwrap();
         assert!(result.passed, "{result:?}");
         assert_eq!(result.passed_cases, 1);
+    }
+
+    /// The shipped compaction fixture needs a fact that only the compacted
+    /// span holds. It passes with the scripted summary and fails without it.
+    #[tokio::test]
+    async fn compaction_fixture_needs_the_summary() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/eval-compaction.json");
+        let result = run_fixture(&path).await.unwrap();
+        assert!(result.passed, "{result:?}");
+
+        let mut suite: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let script = suite["cases"][0]["script"].as_array_mut().unwrap();
+        script.retain(|turn| turn.get("summary").is_none());
+        let dir = tempdir().unwrap();
+        let dropped = dir.path().join("dropped.json");
+        fs::write(&dropped, suite.to_string()).unwrap();
+        let result = run_fixture(&dropped).await.unwrap();
+        assert!(!result.passed, "drop-middle kept the fact: {result:?}");
     }
 }

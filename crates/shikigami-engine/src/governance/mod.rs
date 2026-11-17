@@ -392,6 +392,13 @@ pub trait GovernancePort: Send + Sync {
         false
     }
 
+    /// Whether [`Self::plan_turn`] only calls the local model port. Context
+    /// compaction asks the local model for a summary only then; a brokered
+    /// adapter would see an ungoverned model call, so it keeps drop-middle.
+    fn plans_with_local_model(&self) -> bool {
+        false
+    }
+
     /// Produce the next model turn. Local adapters use the provided model port
     /// callback; sekai-chisei uses PlanExecution on the plane.
     async fn plan_turn(
