@@ -6,7 +6,7 @@ For the complete options for a command, use `shikigami <command> --help`.
 ## Invocation
 
 ```text
-shikigami [--state DIR] [--config FILE] [--model MODEL] <COMMAND>
+shikigami [--state DIR] [--config FILE] [--model MODEL] [--preset PRESET] <COMMAND>
 ```
 
 ## Commands
@@ -39,6 +39,7 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 | `--state` / `SHIKIGAMI_STATE` | State root. Default: platform user-state directory keyed by cwd (`XDG_STATE_HOME/shikigami/<encoded-cwd>` when set; otherwise macOS Application Support, Windows `%LOCALAPPDATA%`, Unix `~/.local/state`). Project-local scratch: `--state ./.shikigami-state`. |
 | `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
 | `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
+| `--preset` / `SHIKIGAMI_PRESET` | Narrow tools and add a procedure: a built-in name or a preset `.toml` file; `code` means none. See [presets.md](presets.md) |
 | `run --keep-workspace` | Keep the workspace after a successful run |
 | `run --plan-jail` / `SHIKIGAMI_RUN_PLAN_JAIL` | Restrict mutating tools to `.shikigami/plan.md` until `--plan-accept` |
 | `run --plan-accept` / `--plan-reject` | Resume a parked plan: Accept restores execute authority on the same run; Reject completes failed and keeps the jail so a later `--resume` stays write-jailed |

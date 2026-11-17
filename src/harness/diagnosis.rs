@@ -12,6 +12,9 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
     let events_detail = harness.events.health_detail();
 
     lines.push(format!("profile:   {}", harness.config.profile.name));
+    if let Some(preset) = &harness.config.preset {
+        lines.push(format!("preset:    {}", preset.id));
+    }
     lines.push(format!(
         "config:    {}",
         harness.config_source.description()

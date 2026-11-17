@@ -1881,6 +1881,7 @@ mod tests {
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
             stop_repairs: 0,
+            preset: String::new(),
         };
         checkpoint.save(&state.runs_dir()).unwrap();
         if finish {

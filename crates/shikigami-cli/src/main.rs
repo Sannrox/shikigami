@@ -51,6 +51,11 @@ struct Cli {
     #[arg(long, global = true, env = "SHIKIGAMI_MODEL")]
     model: Option<String>,
 
+    /// Narrow tools and add a procedure: a built-in preset name or a preset
+    /// `.toml` file. `code` or unset means no preset.
+    #[arg(long, global = true, env = "SHIKIGAMI_PRESET")]
+    preset: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -301,7 +306,13 @@ async fn run() -> anyhow::Result<()> {
     match cli.command {
         Command::Version { .. } => unreachable!("version returns before host state is resolved"),
         Command::Doctor { json, models } => {
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             let report = harness.doctor_async().await;
             let (available_models, model_catalog_error) = if models {
                 match harness.available_models().await {
@@ -384,7 +395,13 @@ async fn run() -> anyhow::Result<()> {
                 (None, Some(path)) => Some(std::fs::read_to_string(path)?),
                 (None, None) => None,
             };
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             let mut request = RunRequest::new(task);
             request.keep_workspace = keep_workspace;
             request.timeout = timeout_secs.map(std::time::Duration::from_secs);
@@ -612,8 +629,13 @@ async fn run() -> anyhow::Result<()> {
             worker_id,
             lifecycle_listen,
         } => {
-            let harness =
-                Harness::resolve_with_model(cli.config.as_deref(), state.clone(), &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state.clone(),
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             let (tx, rx) = tokio::sync::watch::channel(false);
             let sig_tx = tx.clone();
             tokio::spawn(async move {
@@ -869,14 +891,26 @@ async fn run() -> anyhow::Result<()> {
             human_eprintln!(
                 "{PRODUCT} mcp server (stdio) — tools: doctor, run, run_start, run_status, run_wait"
             );
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             shikigami::mcp_server::run_stdio(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Acp => {
             human_eprintln!("{PRODUCT} acp server (stdio) — newline JSON-RPC session host");
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             // SIGINT/SIGTERM cancel the in-flight prompt and reap session jobs
             // like EOF does. Then exit at once: the stdin reader cannot be
             // cancelled, so runtime shutdown would wait for stdin to close.
@@ -892,14 +926,25 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Command::Tui => {
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             shikigami_tui::run(harness)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Export { run_id, output } => {
-            let harness =
-                Harness::resolve_with_model(cli.config.as_deref(), state.clone(), &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state.clone(),
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             let opts = shikigami::ExportOptions {
                 max_field_chars: 2_000,
                 config: Some(harness.config.clone()),
@@ -968,7 +1013,13 @@ async fn run() -> anyhow::Result<()> {
             resume,
             json,
         } => {
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             let manifest: ReplayManifest = read_bounded_json(&manifest, MAX_REPLAY_BUNDLE_BYTES)?;
             let evidence: ReplayEvidenceBundle =
                 read_bounded_json(&evidence, MAX_REPLAY_BUNDLE_BYTES)?;
@@ -1002,7 +1053,13 @@ async fn run() -> anyhow::Result<()> {
             payloads,
             json,
         } => {
-            let harness = Harness::resolve_with_model(cli.config.as_deref(), state, &cwd, model)?;
+            let harness = Harness::resolve_with_preset(
+                cli.config.as_deref(),
+                state,
+                &cwd,
+                model,
+                cli.preset.as_deref(),
+            )?;
             let request: ContentProcessRequestV1 =
                 read_bounded_json(&request, MAX_CONTENT_PROCESS_REQUEST_BYTES)?;
             let run_request = request.into_run_request(&payloads)?;

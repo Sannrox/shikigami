@@ -63,6 +63,8 @@ pub(super) struct RunSession {
     pub tools_enabled: Vec<String>,
     /// Completions refused by a `stop` hook (restored on resume).
     pub stop_repairs: u32,
+    /// Selected preset id, empty without one (ADR 0022).
+    pub preset: String,
     pub spans: RunSpanTrace,
     /// `wait=false` child tasks for this attempt. Terminal completion joins
     /// them. Session-host park detaches the handles; resume cannot recover
@@ -127,6 +129,7 @@ impl RunSession {
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
             stop_repairs: 0,
+            preset: String::new(),
             spans: RunSpanTrace::disabled(),
             background_joins: Vec::new(),
         }
@@ -774,6 +777,7 @@ impl RunSession {
             tools_mode: self.tools_mode.clone(),
             tools_enabled: self.tools_enabled.clone(),
             stop_repairs: self.stop_repairs,
+            preset: self.preset.clone(),
         }
         .save(&self.state_runs)?;
         if let (Some(content), Some(binding)) = (&mut self.content, next_content_binding) {

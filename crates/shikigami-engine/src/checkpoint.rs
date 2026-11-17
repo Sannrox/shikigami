@@ -264,6 +264,10 @@ pub struct Checkpoint {
     /// checkpoints.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub stop_repairs: u32,
+    /// Narrowing preset id (`<name>@sha256:<hex>`, ADR 0022). A resume must
+    /// select the same preset. Empty when the run has none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preset: String,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -508,6 +512,7 @@ mod tests {
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
             stop_repairs: 0,
+            preset: String::new(),
         };
         cp.save(&runs).unwrap();
         let loaded = Checkpoint::load(&runs, "abc").unwrap();
@@ -557,6 +562,7 @@ mod tests {
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
             stop_repairs: 0,
+            preset: String::new(),
         };
         std::fs::write(path, serde_json::to_vec(&cp).unwrap()).unwrap();
         assert!(matches!(
@@ -603,6 +609,7 @@ mod tests {
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
             stop_repairs: 0,
+            preset: String::new(),
         };
         let path = cp.save(&runs).unwrap();
         let raw = std::fs::read(&path).unwrap();
@@ -664,6 +671,7 @@ mod tests {
             tools_mode: String::new(),
             tools_enabled: Vec::new(),
             stop_repairs: 0,
+            preset: String::new(),
         }
     }
 

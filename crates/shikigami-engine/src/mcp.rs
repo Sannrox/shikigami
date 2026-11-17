@@ -51,7 +51,23 @@ pub async fn attach_mcp_servers(
     job: Option<&JobCredentialHandle>,
 ) -> Result<usize, ToolError> {
     let mut n = 0;
-    if let Some(gateway) = &config.tools.mcp_gateway {
+    // A preset attaches only the MCP tools it lists (ADR 0022).
+    let preset_tools = config
+        .preset
+        .as_ref()
+        .map(|preset| preset.mcp_tools.as_slice());
+    let lists_server = |server: &str| {
+        preset_tools.is_none_or(|names| {
+            names.iter().any(|name| {
+                name.strip_prefix("mcp.")
+                    .and_then(|rest| rest.strip_prefix(server))
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+        })
+    };
+    if let Some(gateway) = &config.tools.mcp_gateway
+        && lists_server(crate::config::MCP_GATEWAY_NAME)
+    {
         check_gateway_servers(&config.tools.mcp_servers).map_err(ToolError::Message)?;
         let job = job.ok_or_else(|| {
             ToolError::Message("mcp gateway requires the run's job credential".into())
@@ -59,16 +75,24 @@ pub async fn attach_mcp_servers(
         let client = McpHttpTransport::connect_gateway(gateway, job.clone(), config).await?;
         // A site-agent turn offers only the gateway tools its settings name
         // (#487); other profiles attach every tool the gateway lists.
-        let allowed = crate::config::is_site_agent_profile(&config.profile.name)
-            .then_some(config.tools.enabled.as_slice());
+        let allowed = preset_tools.or_else(|| {
+            crate::config::is_site_agent_profile(&config.profile.name)
+                .then_some(config.tools.enabled.as_slice())
+        });
         n += attach_tools(registry, MCP_GATEWAY_NAME, client, allowed)
             .await
             .map_err(|e| ToolError::Message(format!("mcp gateway: {e}")))?;
     }
     for server in &config.tools.mcp_servers {
+        if !lists_server(&server.name) {
+            continue;
+        }
         // Special offline mock: command "mock" registers a fixed tool.
         if server.command == "mock" {
             let name = format!("mcp.{}.echo", server.name);
+            if preset_tools.is_some_and(|names| !names.contains(&name)) {
+                continue;
+            }
             registry.register_external(Arc::new(MockEchoTool {
                 name,
                 server: server.name.clone(),
@@ -86,7 +110,7 @@ pub async fn attach_mcp_servers(
                 .map_err(ToolError::Message)?;
             match McpHttpTransport::connect(server, config).await {
                 Ok(client) => {
-                    n += attach_tools(registry, &server.name, client, None)
+                    n += attach_tools(registry, &server.name, client, preset_tools)
                         .await
                         .map_err(|e| {
                             ToolError::Message(format!("mcp server `{}`: {e}", server.name))
@@ -111,7 +135,7 @@ pub async fn attach_mcp_servers(
                     registry,
                     &server.name,
                     McpClient::new(transport, server.timeout()),
-                    None,
+                    preset_tools,
                 )
                 .await
                 .map_err(|e| ToolError::Message(format!("mcp server `{}`: {e}", server.name)))?;
