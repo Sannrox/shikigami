@@ -1,9 +1,9 @@
-//! Optional OpenTelemetry span export. Off by default; identity-only.
+//! Optional OpenTelemetry span export. Off by default; metadata only.
 //!
 //! This is not a governance receipt and not a tracing backend. When enabled,
 //! one run emits a root span plus one span per turn and tool call. Attributes
-//! are restricted to the harvest/identity allowlist; prompts, tool arguments,
-//! and tool outputs are never exported.
+//! are restricted to a fixed allowlist of ids, names, and counts; task text,
+//! prompts, tool arguments, tool outputs, and summaries are never exported.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,15 +16,28 @@ use uuid::Uuid;
 use crate::config::{Config, NetworkSettings, TracingSettings};
 use crate::governance::RunHandle;
 use crate::identity::{PRODUCT, VERSION};
+use crate::model::TokenUsage;
 
-/// Harvest-aligned span attributes. Anything else is dropped at the emission
-/// boundary, including keys a future caller might attempt to add.
+/// Span attributes: correlation ids, plus names and counts that follow the
+/// OpenTelemetry generative-AI conventions where one exists. Anything else is
+/// dropped at the emission boundary, including keys a future caller might
+/// attempt to add.
 pub const ALLOWED_SPAN_ATTRIBUTES: &[&str] = &[
     "run_id",
     "attempt_id",
     "logical_operation_id",
     "plan_operation_id",
     "call_id",
+    // Tool spans.
+    "gen_ai.tool.name",
+    // Turn spans.
+    "gen_ai.request.model",
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    // Run span.
+    "shikigami.prompt_id",
+    "shikigami.preset_id",
+    "shikigami.termination",
 ];
 
 #[derive(Debug, Error)]
@@ -87,16 +100,29 @@ impl RunSpanTrace {
         Self { inner: None }
     }
 
+    /// Opens the run span. `preset_id` is empty when the run has no preset.
     pub fn begin(
         config: &Config,
         handle: &RunHandle,
         plan_operation_id: &str,
+        prompt_id: &str,
+        preset_id: &str,
     ) -> Result<Self, TracingExportError> {
         let settings = &config.tracing;
         if !settings.enabled {
             return Ok(Self::disabled());
         }
         let destination = destination_from_settings(settings)?;
+        let mut run_attributes = identity_attributes(
+            &handle.run_id,
+            &handle.operation_id,
+            plan_operation_id,
+            None,
+        );
+        run_attributes.extend(allow_attribute("shikigami.prompt_id", prompt_id));
+        if !preset_id.is_empty() {
+            run_attributes.extend(allow_attribute("shikigami.preset_id", preset_id));
+        }
         Ok(Self {
             inner: Some(ActiveTrace {
                 destination,
@@ -107,12 +133,7 @@ impl RunSpanTrace {
                     parent_span_id: String::new(),
                     name: "run".into(),
                     start_unix_nano: unix_nano(),
-                    attributes: identity_attributes(
-                        &handle.run_id,
-                        &handle.operation_id,
-                        plan_operation_id,
-                        None,
-                    ),
+                    attributes: run_attributes,
                 },
                 current_turn: None,
                 current_tools: Vec::new(),
@@ -147,13 +168,30 @@ impl RunSpanTrace {
         });
     }
 
-    pub fn end_turn(&mut self) {
-        if let Some(inner) = self.inner.as_mut() {
-            inner.close_turn(true);
+    /// Closes the turn span with the model it used and, when the model
+    /// reported it, the turn's token usage.
+    pub fn end_turn(&mut self, model: &str, usage: Option<TokenUsage>) {
+        let Some(inner) = self.inner.as_mut() else {
+            return;
+        };
+        if let Some(turn) = inner.current_turn.as_mut() {
+            turn.attributes
+                .extend(allow_attribute("gen_ai.request.model", model));
+            if let Some(usage) = usage {
+                turn.attributes.extend(allow_attribute(
+                    "gen_ai.usage.input_tokens",
+                    &usage.input_tokens.to_string(),
+                ));
+                turn.attributes.extend(allow_attribute(
+                    "gen_ai.usage.output_tokens",
+                    &usage.output_tokens.to_string(),
+                ));
+            }
         }
+        inner.close_turn(true);
     }
 
-    pub fn start_tool(&mut self, call_id: &str) {
+    pub fn start_tool(&mut self, call_id: &str, tool_name: &str) {
         let Some(inner) = self.inner.as_mut() else {
             return;
         };
@@ -162,17 +200,19 @@ impl RunSpanTrace {
             .as_ref()
             .map(|span| span.span_id.clone())
             .unwrap_or_else(|| inner.run_span.span_id.clone());
+        let mut attributes = identity_attributes(
+            &inner.identities.run_id,
+            &inner.identities.logical_operation_id,
+            &inner.identities.plan_operation_id,
+            Some(call_id),
+        );
+        attributes.extend(allow_attribute("gen_ai.tool.name", tool_name));
         inner.current_tools.push(OpenSpan {
             span_id: random_hex(16),
             parent_span_id: parent,
             name: "tool".into(),
             start_unix_nano: unix_nano(),
-            attributes: identity_attributes(
-                &inner.identities.run_id,
-                &inner.identities.logical_operation_id,
-                &inner.identities.plan_operation_id,
-                Some(call_id),
-            ),
+            attributes,
         });
     }
 
@@ -190,7 +230,11 @@ impl RunSpanTrace {
         }
     }
 
-    pub async fn finish(&mut self, success: bool) -> Result<(), TracingExportError> {
+    pub async fn finish(
+        &mut self,
+        success: bool,
+        termination: &str,
+    ) -> Result<(), TracingExportError> {
         let Some(inner) = self.inner.as_mut() else {
             return Ok(());
         };
@@ -198,6 +242,10 @@ impl RunSpanTrace {
             return Ok(());
         }
         inner.close_turn(success);
+        inner
+            .run_span
+            .attributes
+            .extend(allow_attribute("shikigami.termination", termination));
         let run = std::mem::replace(
             &mut inner.run_span,
             OpenSpan {

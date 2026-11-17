@@ -4,9 +4,10 @@ Optional OpenTelemetry export of one run as a trace. **Off by default.**
 Spans are a correlation surface, not governance receipts, not a tracing
 backend, and not a second source of truth.
 
-The emission boundary is identity-only: policy decides whether anything
-leaves the process; a fixed allowlist decides which attributes may leave;
-prompts, tool arguments, and tool outputs never become attributes.
+The emission boundary carries metadata only (ids, names, counts): policy
+decides whether anything leaves the process; a fixed allowlist decides which
+attributes may leave; prompts, tool arguments, and tool outputs never become
+attributes.
 
 ## Settings (`[tracing]`)
 
@@ -44,8 +45,10 @@ One attempt is one trace.
 
 ## Attribute allowlist
 
-Span attributes use the same correlation names as harvest / plane identity
-([identity.md](identity.md), [ADR 0009](decisions/0009-tool-call-correlation.md)):
+Correlation attributes use the same names as harvest / plane identity
+([identity.md](identity.md), [ADR 0009](decisions/0009-tool-call-correlation.md)).
+Metadata attributes follow the OpenTelemetry generative-AI semantic
+conventions where one exists, and use a `shikigami.` prefix where none does:
 
 | Attribute | Meaning |
 | --- | --- |
@@ -54,6 +57,12 @@ Span attributes use the same correlation names as harvest / plane identity
 | `logical_operation_id` | Inbound operation correlation (`RunRequest.logical_operation_id`, else the attempt) |
 | `plan_operation_id` | Plane decision / host `PlanExecution` id when a governance checkpoint recorded one; empty on ungoverned runs |
 | `call_id` | Durable tool-call id `tool-{turn}-{index}[-{model_id}]` (tool spans only) |
+| `gen_ai.tool.name` | Tool name, including `mcp.<server>.<tool>` (tool spans) |
+| `gen_ai.request.model` | Model the turn used (turn spans) |
+| `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Token counts, when the model reported usage (turn spans) |
+| `shikigami.prompt_id` | Versioned prompt id (run span) |
+| `shikigami.preset_id` | Narrowing preset id, when the run has one (run span) |
+| `shikigami.termination` | How the run ended: `completed`, `failed`, `parked`, … (run span) |
 
 Resource attributes are `service.name=shikigami` and `service.version`.
 No other keys are exported. A defense-in-depth filter drops unknown keys at

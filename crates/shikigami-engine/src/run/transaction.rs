@@ -100,8 +100,14 @@ impl<'a> RunTransaction<'a> {
             .as_ref()
             .map(|checkpoint| checkpoint.operation_id.as_str())
             .unwrap_or("");
-        session.spans = RunSpanTrace::begin(&self.engine.config, &handle, plan_operation_id)
-            .map_err(|error| RunError::Message(error.to_string()))?;
+        session.spans = RunSpanTrace::begin(
+            &self.engine.config,
+            &handle,
+            plan_operation_id,
+            &prompt_id,
+            &session.preset,
+        )
+        .map_err(|error| RunError::Message(error.to_string()))?;
         if request.resume_run_id.is_some() {
             self.engine.model.restore_replay_cursor(session.turns)?;
         }
@@ -430,7 +436,8 @@ impl<'a> RunTransaction<'a> {
                     false,
                     session.keeps_parked_workspace(pending_park.is_some()),
                 );
-                self.export_spans(&mut session, false).await;
+                self.export_spans(&mut session, false, e.termination())
+                    .await;
                 return Err(e);
             }
         };
@@ -489,7 +496,8 @@ impl<'a> RunTransaction<'a> {
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
                 self.cleanup_workspace(&ws, &session, &request, false, false);
-                self.export_spans(&mut session, false).await;
+                self.export_spans(&mut session, false, error.termination())
+                    .await;
                 return Err(error);
             }
             let governance_summary = projected_summary(session.is_content(), &final_summary);
@@ -517,7 +525,8 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
-                self.export_spans(&mut session, false).await;
+                self.export_spans(&mut session, false, RunTermination::Failed)
+                    .await;
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, false)
                     .await;
@@ -541,7 +550,8 @@ impl<'a> RunTransaction<'a> {
                 super::artifact_lifecycle::RunArtifactLifecycle::new(self.engine)
                     .finalize(&session.run_id, &ws.path, tools.as_ref())
                     .await;
-                self.export_spans(&mut session, false).await;
+                self.export_spans(&mut session, false, error.termination())
+                    .await;
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, false)
                     .await;
@@ -581,7 +591,7 @@ impl<'a> RunTransaction<'a> {
             session.mark_replay_finalized(artifact_dir.as_deref());
             session.mark_content_finalized(artifact_dir.as_deref());
             if let Err(error) = session.save(tools.as_ref()) {
-                self.export_spans(&mut session, success).await;
+                self.export_spans(&mut session, success, termination).await;
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, false)
                     .await;
@@ -602,7 +612,7 @@ impl<'a> RunTransaction<'a> {
         )
         .await;
 
-        self.export_spans(&mut session, success).await;
+        self.export_spans(&mut session, success, termination).await;
 
         Ok(RunResult {
             run_id: session.run_id.clone(),
@@ -918,8 +928,13 @@ impl<'a> RunTransaction<'a> {
         }
     }
 
-    async fn export_spans(&self, session: &mut super::session::RunSession, success: bool) {
-        if let Err(error) = session.spans.finish(success).await {
+    async fn export_spans(
+        &self,
+        session: &mut super::session::RunSession,
+        success: bool,
+        termination: RunTermination,
+    ) {
+        if let Err(error) = session.spans.finish(success, termination.as_str()).await {
             self.engine.emit(
                 &session.run_id,
                 HarnessEvent::Message {
