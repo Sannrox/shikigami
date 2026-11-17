@@ -78,6 +78,12 @@ async fn example() -> Result<(), shikigami::HarnessError> {
 }
 ```
 
+Settings structs are `#[non_exhaustive]`, so a new setting is not a breaking
+change. Start from `Config::default()` (or a parsed settings file) and assign
+fields as above. Struct literals do not compile outside the engine crate.
+`McpServerSettings::stdio` / `::http`, `McpGatewaySettings::new`, and
+`HookSettings::new` build the entries that have required fields.
+
 ## Resolving settings like the CLI
 
 ```rust

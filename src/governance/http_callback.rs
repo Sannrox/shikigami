@@ -392,7 +392,7 @@ impl GovernancePort for HttpCallbackGovernance {
 #[cfg(all(test, feature = "model-http"))]
 mod tests {
     use super::*;
-    use crate::config::{Config, GovernanceSettings, ToolsSettings};
+    use crate::config::{Config, GovernanceSettings};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -418,24 +418,15 @@ mod tests {
     }
 
     fn config_with_endpoint(endpoint: &str) -> Config {
-        Config {
-            governance: GovernanceSettings {
-                adapter: "http-callback".into(),
-                endpoint: Some(endpoint.into()),
-                principal: "test".into(),
-                fail_closed: true,
-                namespace: "default".into(),
-                token_env: None,
-                client_secret_env: None,
-                allow_insecure_remote: false,
-                delayed_evidence: crate::config::DelayedEvidenceSettings::default(),
-            },
-            tools: ToolsSettings {
-                enabled: vec!["read_file".into(), "write_file".into(), "bash".into()],
-                ..ToolsSettings::default()
-            },
-            ..Config::default()
-        }
+        let mut config = Config::default();
+        config.governance = GovernanceSettings::default();
+        config.governance.adapter = "http-callback".into();
+        config.governance.endpoint = Some(endpoint.into());
+        config.governance.principal = "test".into();
+        config.governance.fail_closed = true;
+        config.governance.namespace = "default".into();
+        config.tools.enabled = vec!["read_file".into(), "write_file".into(), "bash".into()];
+        config
     }
 
     #[tokio::test]
