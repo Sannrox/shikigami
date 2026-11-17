@@ -25,7 +25,12 @@ pub use none::NoneGovernance;
 /// them only when `run.nested` / `RunRequest.nested` is on.
 fn in_process_enabled_tools(config: &Config) -> Vec<String> {
     let mut enabled = config.tools.effective_enabled();
-    for name in ["child_run", "child_status"] {
+    let mut implicit = vec!["child_run", "child_status"];
+    // Background bash helpers share `bash` authority (`builtin_is_authorized`).
+    if enabled.iter().any(|tool| tool == "bash") {
+        implicit.extend_from_slice(crate::tools::BASH_HELPER_TOOLS);
+    }
+    for name in implicit {
         if !enabled.iter().any(|tool| tool == name) {
             enabled.push(name.into());
         }

@@ -362,6 +362,12 @@ impl<'a> RunTransaction<'a> {
                 let _ = self
                     .finish_nested_children(&mut session, &request, started, timeout, true, true)
                     .await;
+            } else if let Some(jobs) = tools.take_background_jobs() {
+                // Session hosts also keep background jobs until the resume
+                // adopts them, the run ends, or the host exits.
+                self.engine
+                    .registry
+                    .park_background_jobs(&session.run_id, jobs);
             }
         } else {
             let over_bounds = check_bounds(

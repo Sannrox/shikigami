@@ -12,6 +12,8 @@ mod registry;
 mod todo;
 mod web_fetch;
 
+pub(crate) use bash::BackgroundJobs;
+pub(crate) use catalog::BASH_HELPER_TOOLS;
 pub(crate) use catalog::{ReplayToolAuthority, load_skill_definition, replay_tool_authority};
 pub(crate) use environment::ToolEnvironment;
 
@@ -424,6 +426,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(logs, ToolOutput::Text("visible|unset|unset".into()));
+        reg.kill_background_jobs().await;
+    }
+
+    /// A job ends with its shell: the poll that sees the shell exit also kills
+    /// the children it left in its process group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_job_descendants_die_when_the_shell_exits() {
+        let dir = tempdir().unwrap();
+        let reg = ToolRegistry::with_builtins_sandbox_protected_environment(
+            dir.path(),
+            vec!["bash".into()],
+            30,
+            NetworkSettings::default(),
+            true,
+            &[],
+            crate::config::SandboxSettings {
+                backend: crate::config::SandboxBackend::Rlimit,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        reg.execute("bash_background", r#"{"command":"sleep 30 & echo $!"}"#)
+            .await
+            .unwrap();
+        let job = r#"{"job_id":"job-1"}"#;
+        let mut pid = None;
+        for _ in 0..250 {
+            let status = reg.execute("bash_job_status", job).await.unwrap();
+            let logs = reg.execute("bash_job_logs", job).await.unwrap();
+            if let (ToolOutput::Text(status), ToolOutput::Text(logs)) = (status, logs)
+                && status.contains("exited")
+            {
+                pid = logs.trim().parse::<libc::pid_t>().ok();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let pid = pid.expect("shell exited and logged its child");
+        let mut gone = false;
+        for _ in 0..250 {
+            // The orphaned sleep is reparented to init, which reaps it.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "descendant {pid} outlived its job");
+    }
+
+    #[tokio::test]
+    async fn exited_background_jobs_do_not_count_against_the_limit() {
+        let dir = tempdir().unwrap();
+        let reg = registry(&dir, &["bash"]);
+        for n in 1..=5 {
+            reg.execute("bash_background", r#"{"command":"true"}"#)
+                .await
+                .unwrap_or_else(|error| panic!("job {n}: {error}"));
+            let job = format!(r#"{{"job_id":"job-{n}"}}"#);
+            for _ in 0..250 {
+                let status = reg.execute("bash_job_status", &job).await.unwrap();
+                if matches!(status, ToolOutput::Text(ref text) if text.contains("exited")) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
         reg.kill_background_jobs().await;
     }
 

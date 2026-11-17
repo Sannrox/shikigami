@@ -644,13 +644,9 @@ impl AcpHost {
                         request_permission(session_id, park, client, drive.cancel()).await?;
                     match outcome {
                         PermissionOutcome::Cancelled => {
-                            persist_prompt_wait_for_drive(
-                                &harness.state.runs_dir(),
-                                &result.run_id,
-                                drive,
-                            )
-                            .await
-                            .map_err(|e| rpc_error(-32603, e))?;
+                            persist_prompt_wait_for_drive(&harness, &result.run_id, drive)
+                                .await
+                                .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
                         PermissionOutcome::Allow => {
@@ -667,13 +663,9 @@ impl AcpHost {
                         request_permission(session_id, park, client, drive.cancel()).await?;
                     match outcome {
                         PermissionOutcome::Cancelled => {
-                            persist_prompt_wait_for_drive(
-                                &harness.state.runs_dir(),
-                                &result.run_id,
-                                drive,
-                            )
-                            .await
-                            .map_err(|e| rpc_error(-32603, e))?;
+                            persist_prompt_wait_for_drive(&harness, &result.run_id, drive)
+                                .await
+                                .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
                         PermissionOutcome::Allow => {
@@ -690,13 +682,9 @@ impl AcpHost {
                         request_permission(session_id, park, client, drive.cancel()).await?;
                     match outcome {
                         PermissionOutcome::Cancelled => {
-                            persist_prompt_wait_for_drive(
-                                &harness.state.runs_dir(),
-                                &result.run_id,
-                                drive,
-                            )
-                            .await
-                            .map_err(|e| rpc_error(-32603, e))?;
+                            persist_prompt_wait_for_drive(&harness, &result.run_id, drive)
+                                .await
+                                .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
                         PermissionOutcome::Allow | PermissionOutcome::Deny => {
@@ -1056,12 +1044,16 @@ fn persist_prompt_wait(runs_dir: &Path, run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A permission wait was cancelled: the turn ends like a mid-turn cancel, so
+/// its parked background jobs end too, and the run waits for the next prompt.
 async fn persist_prompt_wait_for_drive(
-    runs_dir: &Path,
+    harness: &Harness,
     run_id: &str,
     drive: &PromptDrive,
 ) -> Result<(), String> {
-    persist_prompt_wait_with_resolver(runs_dir, run_id, drive.content_resolver()).await
+    harness.registry.reap_parked_background_jobs_of(run_id);
+    persist_prompt_wait_with_resolver(&harness.state.runs_dir(), run_id, drive.content_resolver())
+        .await
 }
 
 async fn persist_prompt_wait_with_resolver(
@@ -1398,7 +1390,7 @@ async fn resume_prompt_drive(
         let (outcome, answer) =
             request_permission(session_id, &info, client, Some(&cancel_rx)).await?;
         if outcome == PermissionOutcome::Cancelled {
-            persist_prompt_wait_for_drive(&harness.state.runs_dir(), &run_id, &drive)
+            persist_prompt_wait_for_drive(harness, &run_id, &drive)
                 .await
                 .map_err(|e| rpc_error(-32603, e))?;
             return Ok(ResumeOutcome::Done(json!({ "stopReason": "cancelled" })));
@@ -2443,6 +2435,16 @@ fn same_cwd(left: &Path, right: &Path) -> bool {
 
 /// Serve ACP on process stdio until EOF. Newline-delimited JSON-RPC.
 pub async fn run_stdio(harness: Harness) -> Result<(), String> {
+    run_stdio_until(harness, std::future::pending()).await
+}
+
+/// [`run_stdio`] that also stops when `shutdown` resolves (for example on
+/// SIGTERM). Either way the in-flight prompt is cancelled and awaited, so
+/// its run reaps its background jobs, and parked session jobs are reaped.
+pub async fn run_stdio_until(
+    harness: Harness,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), String> {
     let host = Arc::new(AcpHost::new(harness));
     let writer = Arc::new(Mutex::new(stdout()));
     let pending: Arc<Mutex<PendingPermissions>> = Arc::new(Mutex::new(HashMap::new()));
@@ -2480,7 +2482,18 @@ pub async fn run_stdio(harness: Harness) -> Result<(), String> {
         next_id,
     };
 
-    serve_inbound(host, client, inbound_rx, writer).await
+    // Sessions end with the host: no parked background job outlives it, also
+    // when this future is dropped on a signal or unwinds from a panic.
+    let _reap = ReapParkedJobsOnDrop(Arc::clone(&host.harness.registry));
+    serve_inbound(host, client, inbound_rx, writer, shutdown).await
+}
+
+struct ReapParkedJobsOnDrop(Arc<crate::registry::RunRegistry>);
+
+impl Drop for ReapParkedJobsOnDrop {
+    fn drop(&mut self) {
+        self.0.reap_parked_background_jobs();
+    }
 }
 
 async fn serve_inbound(
@@ -2488,10 +2501,20 @@ async fn serve_inbound(
     client: StdioClient,
     mut inbound_rx: mpsc::Receiver<Value>,
     writer: Arc<Mutex<tokio::io::Stdout>>,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), String> {
     let mut prompt: Option<tokio::task::JoinHandle<Option<Value>>> = None;
+    let mut shutdown = std::pin::pin!(shutdown);
     loop {
         tokio::select! {
+            () = &mut shutdown => {
+                host.cancel_all().await;
+                client.cancel_all_pending().await;
+                if let Some(task) = prompt.take() {
+                    let _ = task.await;
+                }
+                break;
+            }
             maybe_msg = inbound_rx.recv() => {
                 let Some(msg) = maybe_msg else {
                     host.cancel_all().await;
@@ -4631,6 +4654,149 @@ mod tests {
             raw.and_then(|value| value.get("path")),
             Some(&json!("ok.txt"))
         );
+    }
+
+    /// A process that is gone or a zombie awaiting its reaper.
+    fn process_alive(pid: &str) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    /// Pid that `echo $$; exec sleep 30` wrote to the first job's log.
+    async fn first_job_pid(cwd: &Path) -> String {
+        let log = cwd.join(".shikigami/jobs/job-1.log");
+        for _ in 0..250 {
+            let pid = std::fs::read_to_string(&log).unwrap_or_default();
+            if !pid.trim().is_empty() {
+                return pid.trim().to_string();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("job never wrote its pid");
+    }
+
+    #[tokio::test]
+    async fn background_job_outlives_session_parks_and_dies_with_the_host() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$; exec sleep 30\"}"}]},
+              {"content":"started"},
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"x\"}"}]},
+              {"tool_calls":[{"name":"bash_job_status","args_json":"{\"job_id\":\"job-1\"}"}]},
+              {"content":"checked"}
+            ]"#,
+            |config| config.tools.mode = crate::config::PermissionMode::WorkspaceExec,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        for (id, text) in [(3, "start a job"), (4, "is it running")] {
+            let prompt = host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "session/prompt",
+                        "params": {
+                            "sessionId": session_id,
+                            "prompt": [{"type":"text","text":text}]
+                        }
+                    }),
+                    &client,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt:?}");
+        }
+        let updates = format!("{:?}", client.updates.lock().await);
+        assert!(
+            updates.contains("job_id=job-1 status=running"),
+            "job must survive the prompt wait and the approval park: {updates}"
+        );
+        let pid = first_job_pid(&cwd).await;
+        assert!(process_alive(&pid));
+
+        host.harness.registry.reap_parked_background_jobs();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_alive(&pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job {pid} outlived the host"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_permission_wait_reaps_parked_background_jobs() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$; exec sleep 30\"}"}]},
+              {"content":"started"},
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"x\"}"}]}
+            ]"#,
+            |config| config.tools.mode = crate::config::PermissionMode::WorkspaceExec,
+        );
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let allow = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &allow, &cwd).await;
+        let mut stops = Vec::new();
+        for (id, permission) in [
+            (3, PermissionOutcome::Allow),
+            (4, PermissionOutcome::Cancelled),
+        ] {
+            let client = RecordingClient {
+                updates: Mutex::new(Vec::new()),
+                permission,
+            };
+            let prompt = host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "session/prompt",
+                        "params": {
+                            "sessionId": session_id,
+                            "prompt": [{"type":"text","text":"go"}]
+                        }
+                    }),
+                    &client,
+                )
+                .await
+                .unwrap();
+            stops.push(rpc_ok(&prompt)["stopReason"].clone());
+            if id == 3 {
+                let pid = first_job_pid(&cwd).await;
+                assert!(process_alive(&pid), "job must survive the prompt wait");
+            }
+        }
+        assert_eq!(stops, [json!("end_turn"), json!("cancelled")]);
+        let pid = first_job_pid(&cwd).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_alive(&pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancel left job {pid} running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]

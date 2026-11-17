@@ -128,7 +128,13 @@ pub struct RunRegistry {
     /// Same-process idle waiters for nested child finish/park. Interned by
     /// `runs_root` so a resume Engine still sees children started earlier.
     idle_signals: Arc<Mutex<IdleSignalMap>>,
+    /// Background jobs of session runs parked in this process, by run id.
+    /// Interned by `runs_root` like `idle_signals`. Process-local: a host
+    /// restart loses them, and dropping an entry kills its jobs.
+    parked_jobs: Arc<Mutex<ParkedJobMap>>,
 }
+
+type ParkedJobMap = HashMap<String, crate::tools::BackgroundJobs>;
 
 impl RunRegistry {
     pub fn new(state_root: impl AsRef<Path>) -> Result<Self, RegistryError> {
@@ -142,13 +148,58 @@ impl RunRegistry {
     pub fn inspect(state_root: impl AsRef<Path>) -> Self {
         let runs_root = state_root.as_ref().join("runs");
         let idle_signals = shared_idle_signals(&runs_root);
+        let parked_jobs = shared_parked_jobs(&runs_root);
         Self {
             runs_root,
             cancel_root: state_root.as_ref().join("run-controls"),
             run_locks: Arc::new(Mutex::new(HashMap::new())),
             start_signals: Arc::new(Mutex::new(HashMap::new())),
             idle_signals,
+            parked_jobs,
         }
+    }
+
+    /// Keep a parked session run's background jobs alive until it resumes.
+    pub(crate) fn park_background_jobs(&self, run_id: &str, jobs: crate::tools::BackgroundJobs) {
+        if jobs.jobs.is_empty() {
+            return;
+        }
+        let mut parked = self
+            .parked_jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        parked.insert(run_id.to_owned(), jobs);
+    }
+
+    /// Hand parked jobs back to the resuming attempt of `run_id`.
+    pub(crate) fn take_parked_background_jobs(
+        &self,
+        run_id: &str,
+    ) -> Option<crate::tools::BackgroundJobs> {
+        let mut parked = self
+            .parked_jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        parked.remove(run_id)
+    }
+
+    /// Kill the background jobs parked for `run_id`. Session hosts call this
+    /// when a cancel ends the turn of a parked run.
+    pub fn reap_parked_background_jobs_of(&self, run_id: &str) {
+        drop(self.take_parked_background_jobs(run_id));
+    }
+
+    /// Kill every background job parked under this state root. Session hosts
+    /// call this when they exit.
+    pub fn reap_parked_background_jobs(&self) {
+        let drained: Vec<_> = {
+            let mut parked = self
+                .parked_jobs
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            parked.drain().collect()
+        };
+        drop(drained);
     }
 
     pub fn runs_root(&self) -> &Path {
@@ -740,6 +791,16 @@ impl RunRegistry {
 
 fn shared_idle_signals(runs_root: &Path) -> Arc<Mutex<IdleSignalMap>> {
     static MAPS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<IdleSignalMap>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut maps = MAPS.lock().unwrap_or_else(|poison| poison.into_inner());
+    Arc::clone(
+        maps.entry(runs_root.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(HashMap::new()))),
+    )
+}
+
+fn shared_parked_jobs(runs_root: &Path) -> Arc<Mutex<ParkedJobMap>> {
+    static MAPS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<ParkedJobMap>>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
     let mut maps = MAPS.lock().unwrap_or_else(|poison| poison.into_inner());
     Arc::clone(
