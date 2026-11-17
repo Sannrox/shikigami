@@ -30,12 +30,21 @@ endpoint = "/var/log/shikigami/spans.json"
 ```
 
 An `http://` or `https://` endpoint POSTs OTLP/HTTP JSON to `{endpoint}/v1/traces`
-unless the path already contains `/v1/traces`. File endpoints write one OTLP
-JSON document at run end.
+unless the path already contains `/v1/traces`. A file endpoint is appended to:
+one OTLP JSON document per line, the same shape a collector's file exporter
+writes. A file therefore collects every run and attempt that points at it.
+
+Spans are exported as they end, not at run end. A process that dies mid-run
+loses only the spans still open; the turns and tool calls it finished are
+already at the endpoint. HTTP posts run in the background and the run awaits
+them only at its end, bounded by a 5 s request timeout. A failing or
+unreachable endpoint logs a warning and never fails the run.
 
 ## Span model
 
-One attempt is one trace.
+One run is one trace. The trace id derives from the run id, so a resume,
+takeover, or park and wake in another process writes into the same trace.
+Each attempt adds its own `run` span to it.
 
 | Span | Parent | When |
 | --- | --- | --- |

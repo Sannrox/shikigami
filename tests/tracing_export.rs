@@ -35,22 +35,22 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
     assert!(result.success, "{}", result.summary);
 
     let exported = fs::read_to_string(&spans_path).unwrap();
-    assert!(exported.contains("\"name\": \"run\""), "{exported}");
-    assert!(exported.contains("\"name\": \"turn\""), "{exported}");
-    assert!(exported.contains("\"name\": \"tool\""), "{exported}");
+    assert!(exported.contains("\"name\":\"run\""), "{exported}");
+    assert!(exported.contains("\"name\":\"turn\""), "{exported}");
+    assert!(exported.contains("\"name\":\"tool\""), "{exported}");
     assert!(exported.contains(&result.run_id), "{exported}");
     assert!(exported.contains("parent-op-284"), "{exported}");
-    assert!(exported.contains("\"key\": \"run_id\""), "{exported}");
-    assert!(exported.contains("\"key\": \"attempt_id\""), "{exported}");
+    assert!(exported.contains("\"key\":\"run_id\""), "{exported}");
+    assert!(exported.contains("\"key\":\"attempt_id\""), "{exported}");
     assert!(
-        exported.contains("\"key\": \"logical_operation_id\""),
+        exported.contains("\"key\":\"logical_operation_id\""),
         "{exported}"
     );
     assert!(
-        exported.contains("\"key\": \"plan_operation_id\""),
+        exported.contains("\"key\":\"plan_operation_id\""),
         "{exported}"
     );
-    assert!(exported.contains("\"key\": \"call_id\""), "{exported}");
+    assert!(exported.contains("\"key\":\"call_id\""), "{exported}");
     assert!(exported.contains("tool-"), "{exported}");
 
     let spans = spans_by_name(&exported);
@@ -87,6 +87,74 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
             "payload leaked into spans: {secret}\n{exported}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_resumed_run_writes_into_the_same_trace() {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.jsonl");
+    let attempt = |script: &str| {
+        let mut config = offline_config(dir.path());
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+        config.model.script_json = Some(script.into());
+        Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap()
+    };
+    let write = r#"{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\"}"}]}"#;
+    let report = r#"{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}"#;
+
+    // The first script runs out after the tool call, leaving a checkpoint.
+    attempt(&format!("[{write}]"))
+        .run(RunRequest::new("trace"))
+        .await
+        .unwrap_err();
+    let run_id = fs::read_dir(StateRoot::new(dir.path().join("state")).runs_dir())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    // The scripted model picks its reply by turn, so the resumed script
+    // repeats the turn already taken.
+    let mut resume = RunRequest::new("");
+    resume.resume_run_id = Some(run_id);
+    let result = attempt(&format!("[{write},{report}]"))
+        .run(resume)
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.summary);
+
+    let exported = fs::read_to_string(&spans_path).unwrap();
+    let spans = exported_spans(&exported);
+    let trace_ids: std::collections::BTreeSet<_> = spans
+        .iter()
+        .map(|span| span["traceId"].as_str().unwrap())
+        .collect();
+    assert_eq!(trace_ids.len(), 1, "{exported}");
+    let runs = spans.iter().filter(|span| span["name"] == "run").count();
+    assert_eq!(runs, 2, "one run span per attempt: {exported}");
+}
+
+#[tokio::test]
+async fn an_unreachable_collector_does_not_fail_the_run() {
+    let dir = tempdir().unwrap();
+    // A port that was just free: nothing listens there.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut config = offline_config(dir.path());
+    config.tracing.enabled = true;
+    config.tracing.exporter = "otlp".into();
+    config.tracing.endpoint = Some(format!("http://127.0.0.1:{port}"));
+
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let result = harness.run(RunRequest::new("demo")).await.unwrap();
+    assert!(result.success, "{}", result.summary);
 }
 
 #[tokio::test]
@@ -130,14 +198,24 @@ fn offline_config(root: &Path) -> Config {
     config
 }
 
+/// Every span in an OTLP JSON-lines export, in export order.
+fn exported_spans(exported: &str) -> Vec<serde_json::Value> {
+    exported
+        .lines()
+        .flat_map(|line| {
+            let payload: serde_json::Value = serde_json::from_str(line).unwrap();
+            payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .unwrap()
+                .clone()
+        })
+        .collect()
+}
+
 /// Attributes of each exported span, grouped by span name in export order.
 fn spans_by_name(exported: &str) -> HashMap<String, Vec<BTreeMap<String, String>>> {
-    let payload: serde_json::Value = serde_json::from_str(exported).unwrap();
     let mut spans: HashMap<String, Vec<_>> = HashMap::new();
-    for span in payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
-        .as_array()
-        .unwrap()
-    {
+    for span in exported_spans(exported) {
         let attributes = span["attributes"]
             .as_array()
             .unwrap()

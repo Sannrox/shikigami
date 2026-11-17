@@ -1,11 +1,16 @@
 //! Optional OpenTelemetry span export. Off by default; metadata only.
 //!
 //! This is not a governance receipt and not a tracing backend. When enabled,
-//! one run emits a root span plus one span per turn and tool call. Attributes
+//! one run emits a root span plus one span per turn and tool call. Each span
+//! is exported as soon as it ends, so a process that dies mid-run loses only
+//! its open spans. The trace id derives from the run id, so every process
+//! that works on the run (resume, takeover, park and wake) writes into the
+//! same trace. Attributes
 //! are restricted to a fixed allowlist of ids, names, and counts; task text,
 //! prompts, tool arguments, tool outputs, and summaries are never exported.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -60,7 +65,12 @@ struct ActiveTrace {
     run_span: OpenSpan,
     current_turn: Option<OpenSpan>,
     current_tools: Vec<OpenSpan>,
+    /// Ended spans not yet handed to the exporter.
     finished_spans: Vec<FinishedSpan>,
+    /// HTTP exports in flight; `finish` awaits them.
+    in_flight: Vec<tokio::task::JoinHandle<Result<(), TracingExportError>>>,
+    /// First export failure, reported by `finish`. Export never fails a run.
+    first_error: Option<String>,
     identities: Identities,
     finished: bool,
 }
@@ -127,7 +137,7 @@ impl RunSpanTrace {
             inner: Some(ActiveTrace {
                 destination,
                 network: config.network.clone(),
-                trace_id: random_hex(32),
+                trace_id: trace_id_for(&handle.run_id),
                 run_span: OpenSpan {
                     span_id: random_hex(16),
                     parent_span_id: String::new(),
@@ -138,6 +148,8 @@ impl RunSpanTrace {
                 current_turn: None,
                 current_tools: Vec::new(),
                 finished_spans: Vec::new(),
+                in_flight: Vec::new(),
+                first_error: None,
                 identities: Identities {
                     run_id: handle.run_id.clone(),
                     logical_operation_id: handle.operation_id.clone(),
@@ -227,6 +239,7 @@ impl RunSpanTrace {
         {
             let open = inner.current_tools.remove(index);
             inner.finished_spans.push(open.finish(ok));
+            inner.flush();
         }
     }
 
@@ -257,10 +270,20 @@ impl RunSpanTrace {
             },
         );
         inner.finished_spans.push(run.finish(success));
-        let payload = encode_otlp(&inner.trace_id, &inner.finished_spans);
-        export_payload(&inner.destination, &inner.network, &payload).await?;
+        inner.flush();
         inner.finished = true;
-        Ok(())
+        for export in std::mem::take(&mut inner.in_flight) {
+            let outcome = export
+                .await
+                .unwrap_or_else(|error| Err(TracingExportError::Message(error.to_string())));
+            if let Err(error) = outcome {
+                inner.first_error.get_or_insert(error.to_string());
+            }
+        }
+        match inner.first_error.take() {
+            Some(error) => Err(TracingExportError::Message(error)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -271,6 +294,35 @@ impl ActiveTrace {
         }
         if let Some(open) = self.current_turn.take() {
             self.finished_spans.push(open.finish(ok));
+        }
+        self.flush();
+    }
+
+    /// Hands ended spans to the exporter. A file gets one OTLP JSON line
+    /// appended now; an HTTP collector gets a background POST that `finish`
+    /// awaits, so the run never waits on the collector mid-run.
+    fn flush(&mut self) {
+        if self.finished_spans.is_empty() {
+            return;
+        }
+        let payload = encode_otlp(&self.trace_id, &std::mem::take(&mut self.finished_spans));
+        match &self.destination {
+            Destination::File(path) => {
+                if let Err(error) = append_file(path, &payload) {
+                    self.first_error.get_or_insert(error.to_string());
+                }
+            }
+            Destination::Http(url) => match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    let (url, network) = (url.clone(), self.network.clone());
+                    self.in_flight.push(
+                        runtime.spawn(async move { post_otlp(&url, &network, &payload).await }),
+                    );
+                }
+                Err(error) => {
+                    self.first_error.get_or_insert(error.to_string());
+                }
+            },
         }
     }
 }
@@ -346,24 +398,21 @@ fn otlp_http_url(endpoint: &str) -> String {
     }
 }
 
-async fn export_payload(
-    destination: &Destination,
-    network: &NetworkSettings,
-    payload: &Value,
-) -> Result<(), TracingExportError> {
-    match destination {
-        Destination::File(path) => write_file(path, payload),
-        Destination::Http(url) => post_otlp(url, network, payload).await,
-    }
-}
-
-fn write_file(path: &Path, payload: &Value) -> Result<(), TracingExportError> {
+/// Appends one OTLP JSON document as a line. Each line is one complete
+/// write, so a crash can cut only the last line.
+fn append_file(path: &Path, payload: &Value) -> Result<(), TracingExportError> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(payload).expect("otlp json"))?;
+    let mut line = serde_json::to_vec(payload).expect("otlp json");
+    line.push(b'\n');
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(&line)?;
     Ok(())
 }
 
@@ -465,6 +514,11 @@ fn unix_nano() -> u128 {
         .as_nanos()
 }
 
+/// 32 hex chars derived from the run id: every attempt at one run shares it.
+fn trace_id_for(run_id: &str) -> String {
+    crate::evidence_queue::sha256_hex(run_id.as_bytes())[..32].to_owned()
+}
+
 fn random_hex(chars: usize) -> String {
     Uuid::new_v4().simple().to_string()[..chars].to_string()
 }
@@ -483,6 +537,46 @@ pub fn filter_span_attributes(
 mod tests {
     use super::*;
     use crate::config::TracingSettings;
+
+    #[test]
+    fn ended_spans_reach_the_file_before_the_run_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spans.jsonl");
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(path.to_string_lossy().into());
+        let handle = RunHandle {
+            run_id: "run-1".into(),
+            operation_id: "run-1".into(),
+            namespace: String::new(),
+        };
+        let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "").unwrap();
+        trace.start_turn(1);
+        trace.end_turn("model", None);
+        trace.start_tool("tool-1-0", "read_file");
+        trace.end_tool("tool-1-0", true);
+        // No `finish`: the process dies here.
+        drop(trace);
+
+        let exported = std::fs::read_to_string(&path).unwrap();
+        let names: Vec<String> = exported
+            .lines()
+            .flat_map(|line| {
+                let payload: Value = serde_json::from_str(line).unwrap();
+                payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|span| {
+                        assert_eq!(span["traceId"], trace_id_for("run-1"));
+                        span["name"].as_str().unwrap().to_owned()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(names, ["turn", "tool"]);
+    }
 
     #[test]
     fn allowlist_drops_prompt_and_tool_payload_keys() {
