@@ -928,6 +928,9 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Command::Tui { continue_last } => {
+            // The TUI edits `cwd` in place: refuse a state root inside it
+            // before resolving the harness writes anything there.
+            shikigami::workspace::refuse_state_inside(&cwd, state.path())?;
             let harness = Harness::resolve_with_preset(
                 cli.config.as_deref(),
                 state,

@@ -437,8 +437,10 @@ fn missing_model_key_names_the_variable_to_set() {
         ),
     )
     .unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_shikigami"))
-        .current_dir(dir.path())
+        .current_dir(&project)
         .env_remove(&var)
         .arg("--config")
         .arg(&config)

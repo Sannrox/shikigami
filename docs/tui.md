@@ -14,7 +14,8 @@ shikigami tui --continue   # latest session in this folder
 The session is inplace on the current directory. The process-host default puts
 `--state` in the platform user-state directory keyed by cwd, which sits outside
 the workspace. `--state` / `SHIKIGAMI_STATE` still override; a root inside the
-workspace fails closed.
+workspace fails closed at launch: the TUI exits non-zero with the refusal before
+it writes anything, so the project stays unchanged.
 
 Credentials come from the environment, same as CLI. There is no TUI login.
 A missing key variable stops launch with the variable to set. With no

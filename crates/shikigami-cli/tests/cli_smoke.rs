@@ -1106,6 +1106,32 @@ fn human_output_keeps_model_and_error_controls_inert() {
     assert_inert(&output.stderr);
 }
 
+/// #623: the TUI refuses a state directory inside the project at launch,
+/// before it writes anything, and exits non-zero.
+#[test]
+fn tui_refuses_state_inside_the_project_before_writing() {
+    let dir = tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    fs::create_dir(&project).expect("project");
+    let out = cargo_bin_cmd!("shikigami")
+        .current_dir(&project)
+        .env("HOME", dir.path())
+        .args(["--state", "./state", "tui"])
+        .output()
+        .expect("tui");
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("state directory is inside the project") && stderr.contains("--state"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_dir(&project).unwrap().count(),
+        0,
+        "project changed"
+    );
+}
+
 /// #593: a state directory inside the project is refused in user terms.
 #[test]
 fn run_refuses_state_inside_the_project_in_user_terms() {
