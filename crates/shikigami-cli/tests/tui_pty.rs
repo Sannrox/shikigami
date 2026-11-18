@@ -478,7 +478,7 @@ fn tui_statusline_command_shows_and_a_hanging_one_does_not_freeze() {
     let config = with_command(&dir, r#"read -r p; echo "custom-status-ok""#, 2000);
     let mut tui = start_tui_with(&dir, &config, &[]);
     tui.wait_for("the custom status", |t| {
-        contains(&t.output(), b"custom-status-ok")
+        screen(t).contains("custom-status-ok")
     });
     send(&tui, b"\x03");
     assert!(tui.wait_exit().success());
@@ -487,7 +487,7 @@ fn tui_statusline_command_shows_and_a_hanging_one_does_not_freeze() {
     let config = with_command(&dir, "sleep 30", 300);
     let mut tui = start_tui_with(&dir, &config, &[]);
     tui.wait_for("the failure line", |t| {
-        contains(&t.output(), b"timed out after 300ms")
+        screen(t).contains("timed out after 300ms")
     });
     send(&tui, b"\x03");
     assert!(tui.wait_exit().success());
@@ -503,6 +503,29 @@ fn tui_statusline_command_shows_and_a_hanging_one_does_not_freeze() {
         "{:?}",
         quit.elapsed()
     );
+}
+
+/// #624: the demo asks, writes, and reports, but its write lands in the
+/// scratch directory under the state root and the project stays empty.
+#[test]
+fn demo_write_stays_out_of_the_project() {
+    let dir = temp_dir();
+    let mut tui = start_tui(&dir, None);
+    tui.wait_for("the demo notice", |t| {
+        contains(&t.output(), b"No model configured")
+    });
+    let before = tui.output().len();
+    send(&tui, b"hi\r");
+    tui.wait_for("the permission ask", |t| screen(t).contains("y allow"));
+    send(&tui, b"y");
+    wait_turn_done(&mut tui, before);
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+
+    let project = dir.path().join("project");
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
+    let marker = dir.path().join("state/demo-workspace/SHIKIGAMI_OK.txt");
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok\n");
 }
 
 /// #602: with no model configured the built-in demo answers, and launch says

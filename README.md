@@ -86,8 +86,9 @@ mkdir -p /tmp/shikigami-try && cd /tmp/shikigami-try
 shikigami tui
 ```
 
-Type a prompt and press Enter. The demo asks to write `SHIKIGAMI_OK.txt`;
-press `y` to allow it. `/help` lists keys and commands; Ctrl-C quits.
+Type a prompt and press Enter. The demo asks to write `SHIKIGAMI_OK.txt` into a
+scratch directory it names, not your project; press `y` to allow it. `/help`
+lists keys and commands; Ctrl-C quits.
 
 To use a real model, create a settings file in that folder and point it at
 any OpenAI-compatible endpoint. The key stays in the environment, never in the
