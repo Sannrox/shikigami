@@ -16,6 +16,9 @@ the workspace. `--state` / `SHIKIGAMI_STATE` still override; a root inside the
 workspace fails closed.
 
 Credentials come from the environment, same as CLI. There is no TUI login.
+A missing key variable stops launch with the variable to set. With no
+`[model]` configured, the built-in demo script answers: launch says so in one
+system line and names how to configure a real model.
 Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 `--config` as `doctor` / `run`; see
 [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml).

@@ -44,13 +44,28 @@ pub async fn run(harness: Harness) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .canonicalize()
         .map_err(|e| e.to_string())?;
+    let demo = uses_demo_model(&harness.config);
     let host = Arc::new(AcpHost::new(harness));
     let session = TuiSession::start(host, &cwd).await?;
+    if demo {
+        session
+            .lock_shared()
+            .transcript
+            .push(TranscriptLine::System(DEMO_MODEL_NOTICE.into()));
+    }
     let mut termination = Termination::install()?;
     run_terminal(session, &mut termination).await?;
     // The terminal is restored by now; end the process the way the signal would have.
     termination.reraise();
     Ok(())
+}
+
+/// Shown at launch when no model is configured and the built-in demo script answers.
+const DEMO_MODEL_NOTICE: &str = "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt, then stops. To use a real model, set [model] in a settings file and start with --config <file>.";
+
+/// True when the scripted adapter runs without a script, so the engine's demo answers.
+fn uses_demo_model(config: &shikigami::config::Config) -> bool {
+    config.model.adapter == "scripted" && config.model.script_json.is_none()
 }
 
 /// Grace period for a running turn to record its cancellation before a
