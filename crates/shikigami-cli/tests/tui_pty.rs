@@ -156,8 +156,15 @@ fn start_tui(dir: &tempfile::TempDir, script: Option<&str>) -> PtyChild {
 fn start_tui_with(dir: &tempfile::TempDir, config: &str, env: &[(&str, &str)]) -> PtyChild {
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
+    launch_tui(dir, env, &[])
+}
+
+/// Launches `shikigami tui <tui_args>` on the settings file and directories
+/// `start_tui_with` wrote under `dir`.
+fn launch_tui(dir: &tempfile::TempDir, env: &[(&str, &str)], tui_args: &[&str]) -> PtyChild {
+    let project = dir.path().join("project");
     let config_path = dir.path().join("config.toml");
-    std::fs::write(&config_path, config).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_shikigami"));
     cmd.current_dir(&project)
         .env("TERM", "xterm-256color")
@@ -168,7 +175,8 @@ fn start_tui_with(dir: &tempfile::TempDir, config: &str, env: &[(&str, &str)]) -
         .arg(&config_path)
         .arg("--state")
         .arg(dir.path().join("state"))
-        .arg("tui");
+        .arg("tui")
+        .args(tui_args);
     let mut tui = PtyChild::spawn(cmd);
     tui.wait_for("the alternate screen and raw mode", |t| {
         contains(&t.output(), b"\x1b[?1049h") && !t.cooked()
@@ -291,6 +299,66 @@ fn hostile_model_text_cannot_drive_the_terminal() {
     send(&tui, b"\x03");
     assert!(tui.wait_exit().success());
     assert_restored(&tui, before, "^c after hostile text");
+}
+
+/// Polls until the exited child's output after `before` holds `needle`;
+/// the reader thread may still be draining the pty.
+fn drained_contains(tui: &PtyChild, before: usize, needle: &[u8]) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if contains(&tui.output()[before..], needle) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// #598: quitting a session with a run prints the way back to the shell, a
+/// plain launch starts new, and `--continue` reopens the session.
+#[test]
+fn quit_prints_the_way_back_and_continue_reopens() {
+    const HINT: &[u8] = b"Continue this session later: shikigami tui --continue";
+    let dir = temp_dir();
+    let script = r#"[{"content":"first-reply"},{"content":"second-reply"}]"#;
+    let mut tui = start_tui(&dir, Some(script));
+    send(&tui, b"remember me\r");
+    tui.wait_for("the reply", |t| contains(&t.output(), b"first-reply"));
+    wait_turn_done(&mut tui, 0);
+    let before = tui.output().len();
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+    assert!(
+        drained_contains(&tui, before, HINT),
+        "{:?}",
+        lossy(&tui.output()[before..])
+    );
+    let after = tui.output()[before..].to_vec();
+    let left = after.windows(8).position(|w| w == b"\x1b[?1049l").unwrap();
+    let hint = after.windows(HINT.len()).position(|w| w == HINT).unwrap();
+    assert!(
+        hint > left,
+        "the hint lands in the shell, not the TUI screen"
+    );
+
+    let mut plain = launch_tui(&dir, &[], &[]);
+    send(&plain, b"\x03");
+    assert!(plain.wait_exit().success());
+    assert!(
+        !contains(&plain.output(), b"remember me"),
+        "{:?}",
+        lossy(&plain.output())
+    );
+    assert!(!contains(&plain.output(), HINT), "no run, no hint");
+
+    let mut continued = launch_tui(&dir, &[], &["--continue"]);
+    continued.wait_for("the continued line", |t| {
+        contains(
+            &t.output(),
+            b"Continued your session from just now (1 turn).",
+        )
+    });
+    assert!(contains(&continued.output(), b"remember me"));
 }
 
 /// #601: the run id `/run` prints, passed unchanged to `shikigami export`,

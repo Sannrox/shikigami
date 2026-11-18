@@ -7,7 +7,8 @@ freeze-core CLI (`version` / `doctor` / `run` / `serve`). Bare `shikigami`
 stays usage/help.
 
 ```bash
-shikigami tui
+shikigami tui              # new session
+shikigami tui --continue   # latest session in this folder
 ```
 
 The session is inplace on the current directory. The process-host default puts
@@ -30,23 +31,23 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 
 | Action | Mapping |
 | --- | --- |
-| Start | `initialize`, then `session/load` of the last session in this cwd, or `session/new` when load fails or none exists. The replay shows the outcomes seen live: a tool keeps its path and outcome (`cancelled`, `failed`), and a prompt that failed or was cancelled before any answer shows `This prompt got no answer.` |
+| Start | `initialize`, then `session/new`. With `--continue`, `session/load` of the session in this cwd that last did work (its run checkpoint was written most recently), followed by one system line: `Continued your session from <age> (<n> turns).` When no session with a run exists or the load fails, `--continue` starts `session/new` and says so in a system line. The replay shows the outcomes seen live: a tool keeps its path and outcome (`cancelled`, `failed`), and a prompt that failed or was cancelled before any answer shows `This prompt got no answer.` |
 | Prompt | Enter sends `session/prompt`. Framed composer (`>` between two `─` rules); short drafts stay one row; Shift+Enter / Alt+Enter insert a newline and the composer grows in place (capped like ask/plan). Bracketed paste inserts as typed text, including newlines. `>` on the first composer line only. Left/Right/Home/End move the cursor; Up/Down move inside a multiline draft and walk sent prompts from the first or last row. Draft stays visible while a turn runs. While busy, a static dim `running` row sits above the composer (same slot as the slash list, above the top `─`); idle has no extra row. Enter while a turn is running queues one follow-up (the current draft) and shows dim `queued  …` in the footer; a second Enter replaces it; Esc drops it unless a slash list, resume list, or plan is open (those dismiss first). After the in-flight turn finishes, the host sends the queued `session/prompt` the same as a normal Enter. Ctrl-C cancel drops the queue without sending it. |
-| Slash | Type `/` while idle to open a dim command list above the composer (Tab complete, Up/Down select, Esc dismiss, Enter run). `/help` writes a short system block of keys and slash names, then returns to the idle composer. `/compact` shrinks the live run history. `/copy` (Ctrl+Y while idle) copies the last assistant transcript line to the terminal clipboard via OSC 52; no assistant line is a system line; success is a dim footer `copied`. `/attach path` stages a host file as an ACP prompt part (image, audio, or PDF) without copying it into the workspace; the next Enter or `/skill:name` sends it with the draft or skill text. A session that starts with an attachment (`/new` then attach) accepts attachments on any later prompt; a session that started as text stays text. Files over 8MiB or an unsupported type fail before the payload is loaded. `/new` starts a new session in this cwd. `/resume` opens the same dim list of persisted sessions for this cwd (short session id, newest first). Enter loads via `session/load`; Esc dismisses; an empty list is a system line with no picker; load failure stays on the current session and writes a system line. `/run` writes the session's run id with the `shikigami runs` and `shikigami export` commands that accept it, or says there is no run yet. `/exit` and `/quit` leave the host. `/skill:name` loads `.shikigami/skills/<name>` or `.agents/skills/<name>` and sends it as the prompt, including any staged attachments. Unknown slash is a normal prompt. |
+| Slash | Type `/` while idle to open a dim command list above the composer (Tab complete, Up/Down select, Esc dismiss, Enter run). `/help` writes a short system block of keys and slash names, then returns to the idle composer. `/compact` shrinks the live run history. `/copy` (Ctrl+Y while idle) copies the last assistant transcript line to the terminal clipboard via OSC 52; no assistant line is a system line; success is a dim footer `copied`. `/attach path` stages a host file as an ACP prompt part (image, audio, or PDF) without copying it into the workspace; the next Enter or `/skill:name` sends it with the draft or skill text. A session that starts with an attachment (`/new` then attach) accepts attachments on any later prompt; a session that started as text stays text. Files over 8MiB or an unsupported type fail before the payload is loaded. `/new` starts a new session in this cwd. `/resume` opens the same dim list of this cwd's sessions that have a run, most recently active first; each row shows age, turn count, and first prompt. Enter loads via `session/load`; Esc dismisses; an empty list is a system line with no picker; load failure stays on the current session and writes a system line. `/run` writes the session's run id with the `shikigami runs` and `shikigami export` commands that accept it, or says there is no run yet. `/exit` and `/quit` leave the host. `/skill:name` loads `.shikigami/skills/<name>` or `.agents/skills/<name>` and sends it as the prompt, including any staged attachments. Unknown slash is a normal prompt. |
 | Stream | Dense transcript of `session/update` (dim `you` prefix, assistant text, `·` tool name/path, blank line between turns) |
 | Tool output | Ctrl+O expands the last tool to a wrapped `·`-prefixed block; a second Ctrl+O collapses. No-op when there are no tools. |
 | Scroll | Ctrl+K / Ctrl+J move the transcript one visual row; PageUp / PageDown / wheel page it (a new prompt returns to the tail). Overflowing ask/plan docks take PageUp/PageDown and wheel on that slot first; at the top or bottom they resume transcript paging. Mouse capture is on while the alt-screen is up, so drag-select may not work; PageUp/PageDown stay the keyboard page path. |
 | Permission | Replaces the composer on `session/request_permission` (title plus argument fields, `> y allow` / `n deny`); Esc cancel. Plan write-jail review uses this composer. Overflowing argument lists scroll in the dock; they are not truncated. The transcript stays visible. |
 | Plan | Replaces the composer when a `plan` session update arrives; Ctrl-P toggles, Esc hides |
 | Cancel | Ctrl-C while a prompt is running sends `session/cancel` |
-| Quit | Ctrl-C when idle, Ctrl-D when idle, or `/exit` / `/quit` |
+| Quit | Ctrl-C when idle, Ctrl-D when idle, or `/exit` / `/quit`. When the session has a run, the shell then shows `Continue this session later: shikigami tui --continue` |
 | Signal | SIGTERM or SIGHUP cancels a running prompt like Ctrl-C, restores the terminal like a quit, then exits with the signal's status |
 
-Continue-last-in-cwd is fail closed: an unknown or unreadable previous session
+`--continue` is fail closed: an unknown or unreadable previous session
 starts `session/new`. When the previous TUI died mid-step, the loaded session
 marks the unfinished tool `not run` (it was waiting for permission) or
 `result unknown` (it was running) and adds one system line saying so; the next
-prompt asks the pending question again. Resume and continue-last selection list text and
+prompt asks the pending question again. `/resume` and `--continue` list text and
 attachment sessions across a restart, and omit an attachment session whose
 payloads are gone because its run ended.
 
@@ -65,7 +66,8 @@ TUI returns the record to idle. Terminals without support ignore the sequence.
 
 The host requires a terminal. It does not add a theming engine, plugin store,
 voice, dashboard, or web view. Status is one dim footer under the composer
-(state word, short session id and keys; long errors go to the transcript).
+(state word, model, `turn <n>` once a prompt was sent, and keys; long errors
+go to the transcript). The session's run id is one `/run` away.
 The state word is plain: `ready`, `running`, `ask`, `done` after a finished
 turn, `cancelled`, `turn limit`, `length limit`, `refused`, or `error`; protocol
 stop reasons never show. Nested
@@ -75,13 +77,15 @@ when state changes. Stderr event JSON is discarded while the alt-screen is up.
 ## Proof
 
 Deterministic in-process tests in `crates/shikigami-tui` drive the ACP mapping without a
-TTY: mutating-tool park → permission dock → resume; continue-last-in-cwd
-load and fail-closed new session; `/resume` picker load, Esc, and fail-closed
+TTY: mutating-tool park → permission dock → resume; a plain start is new and
+`--continue` replays the latest session, or starts new and says so; `/resume` picker load, Esc, and fail-closed
 unknown id; plan dock from a `session/update`.
 
 `crates/shikigami-cli/tests/tui_pty.rs` runs the built binary in a
 pseudo-terminal and checks, from outside the process, that SIGTERM and SIGHUP
 leave the alternate screen, turn off mouse capture, bracketed paste, and raw
-mode, and show the cursor.
+mode, and show the cursor. It also checks that quitting a session with a run
+prints the `--continue` command after the terminal is restored, and that
+`--continue` reopens that session.
 
 Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md). Customization (keys, colors, status line) is declarative and user-level only: [ADR 0023](decisions/0023-tui-customization.md).

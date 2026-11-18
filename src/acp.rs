@@ -71,6 +71,17 @@ impl PersistedSession {
     }
 }
 
+/// A persisted session as `--continue` and `/resume` show it.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub session_id: String,
+    /// Last checkpoint write: when the session last did work.
+    pub last_active: std::time::SystemTime,
+    /// User prompts left in the run's history (compaction drops older ones).
+    pub prompts: usize,
+    pub first_prompt: Option<String>,
+}
+
 #[derive(Clone)]
 struct LiveSession {
     cwd: PathBuf,
@@ -974,9 +985,10 @@ impl AcpHost {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Persisted ACP session ids for `cwd`, newest mtime first, omitting
-    /// content runs whose payloads are no longer available.
-    pub fn session_ids_for_cwd(&self, cwd: &Path) -> Vec<String> {
+    /// Persisted sessions for `cwd` that have a run, most recently active
+    /// first. Omits content runs whose payloads are no longer available.
+    /// The TUI uses it for `--continue` and the `/resume` picker.
+    pub fn sessions_for_cwd(&self, cwd: &Path) -> Vec<SessionSummary> {
         let dir = self.sessions_dir();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -992,11 +1004,9 @@ impl AcpHost {
                     .collect()
             })
             .unwrap_or_default();
-        let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                continue;
-            };
+        let runs_dir = self.harness.state.runs_dir();
+        let mut found = Vec::new();
+        for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
@@ -1010,27 +1020,45 @@ impl AcpHost {
             if !same_cwd(Path::new(&persisted.cwd), cwd) {
                 continue;
             }
-            if !live_content_ids.contains(&persisted.session_id)
+            let Some(run_id) = persisted.run_id.as_deref() else {
+                continue;
+            };
+            let Ok(checkpoint) = Checkpoint::load(&runs_dir, run_id) else {
+                continue;
+            };
+            if checkpoint.content.is_some()
+                && !live_content_ids.contains(&persisted.session_id)
                 && !self.content_dir(&persisted.session_id).is_dir()
-                && let Some(run_id) = persisted.run_id.as_deref()
-                && let Ok(checkpoint) = Checkpoint::load(&self.harness.state.runs_dir(), run_id)
-                && checkpoint.content.is_some()
             {
                 continue;
             }
-            let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) else {
+            // The checkpoint is rewritten every turn; the session record is not.
+            let Ok(last_active) = std::fs::metadata(crate::checkpoint::path_for(&runs_dir, run_id))
+                .and_then(|meta| meta.modified())
+            else {
                 continue;
             };
-            found.push((mtime, persisted.session_id));
+            let mut prompts = checkpoint.messages.iter().filter(|message| {
+                message.role == "user"
+                    && !message.content.is_empty()
+                    && !message
+                        .content
+                        .starts_with(crate::run::COMPACTION_MARKER_PREFIX)
+            });
+            let first_prompt = prompts.next().map(|message| message.content.clone());
+            found.push(SessionSummary {
+                session_id: persisted.session_id,
+                last_active,
+                prompts: usize::from(first_prompt.is_some()) + prompts.count(),
+                first_prompt,
+            });
         }
-        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        found.into_iter().map(|(_, id)| id).collect()
-    }
-
-    /// Most recently persisted session for `cwd`, if any. Used by the TUI
-    /// continue-last-in-cwd path (`session/load`, fail closed → `session/new`).
-    pub fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
-        self.session_ids_for_cwd(cwd).into_iter().next()
+        found.sort_by(|a, b| {
+            b.last_active
+                .cmp(&a.last_active)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        found
     }
 
     async fn session_run_id(&self, session_id: &str) -> Option<String> {
@@ -3622,7 +3650,7 @@ mod tests {
                 .contains("intersect")
         );
         assert!(host.sessions.lock().await.is_empty());
-        assert!(host.session_ids_for_cwd(dir.path()).is_empty());
+        assert!(host.sessions_for_cwd(dir.path()).is_empty());
     }
 
     #[tokio::test]
@@ -4612,7 +4640,12 @@ mod tests {
             dir.path(),
             r#"[{"content":"1"},{"content":"2"},{"content":"3"},{"content":"after-restart"}]"#,
         );
-        assert!(restarted.session_ids_for_cwd(&cwd).contains(&session_id));
+        assert!(
+            restarted
+                .sessions_for_cwd(&cwd)
+                .iter()
+                .any(|s| s.session_id == session_id)
+        );
         let loaded = load(&restarted, &client, &session_id, &cwd).await;
         assert_eq!(rpc_ok(&loaded)["sessionId"], session_id.as_str());
         let reply = prompt(&restarted, &client, &session_id, text.clone()).await;
@@ -4647,7 +4680,12 @@ mod tests {
         assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn");
         std::fs::remove_dir_all(host.content_dir(&session_id)).unwrap();
         let restarted = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
-        assert!(!restarted.session_ids_for_cwd(&cwd).contains(&session_id));
+        assert!(
+            !restarted
+                .sessions_for_cwd(&cwd)
+                .iter()
+                .any(|s| s.session_id == session_id)
+        );
         let loaded = load(&restarted, &client, &session_id, &cwd).await;
         assert_eq!(loaded["error"]["code"], -32603, "{loaded}");
     }
