@@ -11,7 +11,8 @@ shikigami tui              # new session
 shikigami tui --continue   # latest session in this folder
 ```
 
-The session is inplace on the current directory. The process-host default puts
+The session is inplace on the current directory, except for the built-in demo
+(below). The process-host default puts
 `--state` in the platform user-state directory keyed by cwd, which sits outside
 the workspace. `--state` / `SHIKIGAMI_STATE` still override; a root inside the
 workspace fails closed at launch: the TUI exits non-zero with the refusal before
@@ -20,7 +21,9 @@ it writes anything, so the project stays unchanged.
 Credentials come from the environment, same as CLI. There is no TUI login.
 A missing key variable stops launch with the variable to set. With no
 `[model]` configured, the built-in demo script answers: launch says so in one
-system line and names how to configure a real model. With an HTTP model,
+system line and names how to configure a real model. The demo's write goes to
+`demo-workspace` under the state root, never into the project, and the launch
+line names that directory. With an HTTP model,
 launch also checks in the background that the model address answers (a plain
 request without the key, so no model request is spent); when it does not, one
 system line says so and names the next step. Typing works meanwhile.

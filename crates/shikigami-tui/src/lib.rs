@@ -60,19 +60,19 @@ async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), 
         .map_err(|e| e.to_string())?
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let demo = uses_demo_model(&harness.config);
     let model = model_label(&harness.config.model);
     let model_port = harness.model_handle();
     let host = Arc::new(AcpHost::new(harness));
+    let demo = host.demo_workspace();
     let mut session = TuiSession::start(host, &cwd, continue_last).await?;
     session.model = model;
     session.look = look;
     session.statusline = statusline;
-    if demo {
+    if let Some(demo) = demo {
         session
             .lock_shared()
             .transcript
-            .push(TranscriptLine::System(DEMO_MODEL_NOTICE.into()));
+            .extend(demo_model_notice(&demo).map(TranscriptLine::System));
     }
     let shared = Arc::clone(&session.client.shared);
     tokio::spawn(note_unreachable_model(model_port, Arc::clone(&shared)));
@@ -157,7 +157,14 @@ async fn note_unreachable_model(
     }
 }
 
-const DEMO_MODEL_NOTICE: &str = "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt, then stops. To use a real model, set [model] in a settings file and start with --config <file>.";
+/// Launch lines when the built-in demo answers. The scratch directory it
+/// writes to gets a line of its own so a long path stays readable.
+fn demo_model_notice(workspace: &Path) -> [String; 2] {
+    [
+        "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt in this scratch directory, not in your project, then stops. To use a real model, set [model] in a settings file and start with --config <file>.".into(),
+        workspace.display().to_string(),
+    ]
+}
 
 /// The footer's model name. A scripted model has no real name to show.
 fn model_label(model: &shikigami::config::ModelSettings) -> String {
@@ -166,11 +173,6 @@ fn model_label(model: &shikigami::config::ModelSettings) -> String {
         ("scripted", true) => "scripted".into(),
         _ => model.model.clone(),
     }
-}
-
-/// True when the scripted adapter runs without a script, so the engine's demo answers.
-fn uses_demo_model(config: &shikigami::config::Config) -> bool {
-    config.model.adapter == "scripted" && config.model.script_json.is_none()
 }
 
 /// Grace period for a running turn to record its cancellation before a

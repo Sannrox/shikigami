@@ -903,10 +903,25 @@ impl AcpHost {
         &self.harness.config.context
     }
 
+    /// Where the built-in demo works, when no model is configured: a scratch
+    /// directory under the state root, so the demo's permissioned write
+    /// never lands in the user's project. `None` with a configured model.
+    pub fn demo_workspace(&self) -> Option<PathBuf> {
+        let model = &self.harness.config.model;
+        (model.adapter == "scripted" && model.script_json.is_none())
+            .then(|| self.harness.state.path().join("demo-workspace"))
+    }
+
     fn harness_for_cwd(&self, cwd: &Path, mode: Option<&str>) -> Result<Harness, String> {
         let mut config = self.harness.config.clone();
         config.workspace.adapter = "inplace".into();
-        config.workspace.root = cwd.display().to_string();
+        config.workspace.root = match self.demo_workspace() {
+            Some(demo) => {
+                fs::create_dir_all(&demo).map_err(|e| e.to_string())?;
+                demo.display().to_string()
+            }
+            None => cwd.display().to_string(),
+        };
         if let Some(mode) = mode {
             config.apply_session_mode(mode).map_err(|e| e.to_string())?;
         }
