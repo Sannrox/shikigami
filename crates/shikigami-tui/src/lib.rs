@@ -22,7 +22,6 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::{Constraint, CrosstermBackend, Layout, Position, Rect, Style};
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
@@ -32,6 +31,9 @@ use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
 use shikigami::acp::{AcpClient, AcpHost, SessionSummary};
+
+mod look;
+use look::{Action, KeyMap, Look, Palette};
 use shikigami::harness::Harness;
 use shikigami::identity::{PRODUCT, VERSION};
 
@@ -46,6 +48,8 @@ pub async fn run_continuing(harness: Harness) -> Result<(), String> {
 }
 
 async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), String> {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let look = Look::from_settings(&harness.config.tui, no_color)?;
     if !stdin().is_terminal() || !stdout().is_terminal() {
         return Err("shikigami tui requires a terminal".into());
     }
@@ -59,6 +63,7 @@ async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), 
     let host = Arc::new(AcpHost::new(harness));
     let mut session = TuiSession::start(host, &cwd, continue_last).await?;
     session.model = model;
+    session.look = look;
     if demo {
         session
             .lock_shared()
@@ -656,6 +661,8 @@ struct TuiSession {
     osc_write: Mutex<OscWrite>,
     /// Model name for the footer; empty hides it.
     model: String,
+    /// Key bindings and colors from `[tui]`.
+    look: Look,
 }
 
 impl TuiSession {
@@ -676,6 +683,7 @@ impl TuiSession {
             prompt: Mutex::new(None),
             osc_write: Mutex::new(osc_write_noop),
             model: String::new(),
+            look: Look::default(),
         };
         session
             .call(
@@ -1121,7 +1129,7 @@ impl TuiSession {
                 let mut shared = self.lock_shared();
                 shared
                     .transcript
-                    .push(TranscriptLine::System(HELP_TEXT.into()));
+                    .push(TranscriptLine::System(help_text(&self.look.keys)));
                 shared.dirty = true;
                 KeyResult::Continue
             }
@@ -1436,7 +1444,13 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
-const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /run  /copy  /attach  /exit  /quit  /skill:name  /help";
+/// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
+fn help_text(keys: &KeyMap) -> String {
+    format!(
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /copy  /attach  /exit  /quit  /skill:name  /help",
+        keys.label(Action::Interrupt)
+    )
+}
 
 /// Static busy marker in the slash-list slot above the composer.
 const RUNNING_MARKER: &str = "running";
@@ -1680,7 +1694,8 @@ fn turn_count(shared: &Shared) -> usize {
         .count()
 }
 
-fn status_line(model: &str, shared: &Shared, width: u16) -> String {
+fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u16) -> String {
+    let interrupt = keys.label(Action::Interrupt);
     let mut parts = vec![shared.status.clone()];
     if !model.is_empty() {
         parts.push(model.to_string());
@@ -1692,19 +1707,19 @@ fn status_line(model: &str, shared: &Shared, width: u16) -> String {
     if shared.permission.is_some() {
         parts.push("esc cancel".into());
     } else if shared.busy {
-        parts.push("^c cancel".into());
+        parts.push(format!("{interrupt} cancel"));
     } else if shared.resume.is_some() {
         parts.push("esc".into());
-        parts.push("^c quit".into());
+        parts.push(format!("{interrupt} quit"));
     } else if slash_visible(shared) {
         parts.push("tab pick".into());
         parts.push("esc".into());
-        parts.push("^c quit".into());
+        parts.push(format!("{interrupt} quit"));
     } else {
-        parts.push("^c quit".into());
+        parts.push(format!("{interrupt} quit"));
     }
     if shared.plan.is_some() {
-        parts.push("^p plan".into());
+        parts.push(format!("{} plan", keys.label(Action::TogglePlan)));
     }
     if let Some(queued) = shared.queued.as_ref() {
         parts.push(format!(
@@ -1717,7 +1732,7 @@ fn status_line(model: &str, shared: &Shared, width: u16) -> String {
         .iter()
         .any(|line| matches!(line, TranscriptLine::Tool(_)))
     {
-        parts.push("^o tool".into());
+        parts.push(format!("{} tool", keys.label(Action::ToggleTool)));
     }
     parts.push("pgup/pgdn/wheel".into());
     truncate_display(&format!("  {}", parts.join("  ")), width as usize)
@@ -1781,8 +1796,8 @@ fn spaced_rows(transcript: &[TranscriptLine]) -> Vec<String> {
     rows
 }
 
-fn rule_line(width: u16) -> Line<'static> {
-    Line::from(Span::styled("─".repeat(width as usize), dim_style()))
+fn rule_line(width: u16, style: Style) -> Line<'static> {
+    Line::from(Span::styled("─".repeat(width as usize), style))
 }
 
 fn compact_value(value: &Value) -> String {
@@ -2537,56 +2552,53 @@ fn handle_mouse(session: &TuiSession, mouse: MouseEvent) {
 
 fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
-        if session.lock_shared().busy {
-            session.cancel();
+    let action = session.look.keys.action(&key);
+    match action {
+        Some(Action::Interrupt) => {
+            if session.lock_shared().busy {
+                session.cancel();
+                return KeyResult::Continue;
+            }
+            return KeyResult::Quit;
+        }
+        Some(Action::Quit) => {
+            return if session.lock_shared().busy {
+                KeyResult::Continue
+            } else {
+                KeyResult::Quit
+            };
+        }
+        Some(Action::TogglePlan) => {
+            let mut shared = session.lock_shared();
+            if shared.plan.is_some() {
+                shared.show_plan = !shared.show_plan;
+                shared.dirty = true;
+            }
             return KeyResult::Continue;
         }
-        return KeyResult::Quit;
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
-        return if session.lock_shared().busy {
-            KeyResult::Continue
-        } else {
-            KeyResult::Quit
-        };
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
-        let mut shared = session.lock_shared();
-        if shared.plan.is_some() {
-            shared.show_plan = !shared.show_plan;
-            shared.dirty = true;
+        Some(Action::ToggleTool) => {
+            session.lock_shared().toggle_last_tool();
+            return KeyResult::Continue;
         }
-        return KeyResult::Continue;
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O')) {
-        session.lock_shared().toggle_last_tool();
-        return KeyResult::Continue;
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-        let idle = {
-            let shared = session.lock_shared();
-            !shared.busy && shared.permission.is_none()
-        };
-        if idle {
-            session.copy_last_assistant();
+        Some(Action::Copy) => {
+            let idle = {
+                let shared = session.lock_shared();
+                !shared.busy && shared.permission.is_none()
+            };
+            if idle {
+                session.copy_last_assistant();
+            }
+            return KeyResult::Continue;
         }
-        return KeyResult::Continue;
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K')) {
-        session.lock_shared().line_up();
-        return KeyResult::Continue;
-    }
-    // Ctrl+J is LF. Some terminals report it as Char('j')+CONTROL, Enter+CONTROL, or Char('\n').
-    if (ctrl
-        && matches!(
-            key.code,
-            KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Enter
-        ))
-        || matches!(key.code, KeyCode::Char('\n'))
-    {
-        session.lock_shared().line_down();
-        return KeyResult::Continue;
+        Some(Action::ScrollLineUp) => {
+            session.lock_shared().line_up();
+            return KeyResult::Continue;
+        }
+        Some(Action::ScrollLineDown) => {
+            session.lock_shared().line_down();
+            return KeyResult::Continue;
+        }
+        Some(Action::LineStart | Action::LineEnd | Action::ClearInput) | None => {}
     }
 
     let asking = session.lock_shared().permission.is_some();
@@ -2602,17 +2614,20 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         return KeyResult::Continue;
     }
 
-    if ctrl && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A')) {
-        session.lock_shared().set_cursor_start();
-        return KeyResult::Continue;
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E')) {
-        session.lock_shared().set_cursor_end();
-        return KeyResult::Continue;
-    }
-    if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
-        session.lock_shared().clear_input();
-        return KeyResult::Continue;
+    match action {
+        Some(Action::LineStart) => {
+            session.lock_shared().set_cursor_start();
+            return KeyResult::Continue;
+        }
+        Some(Action::LineEnd) => {
+            session.lock_shared().set_cursor_end();
+            return KeyResult::Continue;
+        }
+        Some(Action::ClearInput) => {
+            session.lock_shared().clear_input();
+            return KeyResult::Continue;
+        }
+        _ => {}
     }
 
     let (slash_open, resume_open) = {
@@ -2759,14 +2774,10 @@ fn handle_paste(session: &TuiSession, text: &str) {
     session.lock_shared().insert_str(text);
 }
 
-fn dim_style() -> Style {
-    Style::new().add_modifier(Modifier::DIM)
-}
-
-fn styled_lines(line: &TranscriptLine) -> Vec<Line<'static>> {
+fn styled_lines(line: &TranscriptLine, palette: &Palette) -> Vec<Line<'static>> {
     let style = match line {
-        TranscriptLine::Assistant(_) => Style::new(),
-        _ => dim_style(),
+        TranscriptLine::Assistant(_) => palette.text,
+        _ => palette.muted,
     };
     line_text(line)
         .lines()
@@ -2775,6 +2786,7 @@ fn styled_lines(line: &TranscriptLine) -> Vec<Line<'static>> {
 }
 
 fn draw(frame: &mut Frame, session: &TuiSession) {
+    let palette = &session.look.palette;
     let (slash_cmds, slash_selected) = {
         let cmds = session.overlay_cmds();
         let selected = session.lock_shared().slash_selected;
@@ -2841,7 +2853,7 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
         if last.is_some_and(|prev| prev != kind) {
             lines.push(Line::default());
         }
-        lines.extend(styled_lines(line));
+        lines.extend(styled_lines(line, palette));
         last = Some(kind);
     }
     shared.transcript_h = view.height;
@@ -2884,12 +2896,9 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
                     slash_area.width as usize,
                 );
                 if slash_start + i == selected {
-                    Line::from(Span::styled(
-                        text,
-                        Style::new().add_modifier(Modifier::REVERSED),
-                    ))
+                    Line::from(Span::styled(text, palette.selected))
                 } else {
-                    Line::from(Span::styled(text, dim_style()))
+                    Line::from(Span::styled(text, palette.muted))
                 }
             })
             .collect();
@@ -2899,12 +2908,15 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
         idx += 1;
         let text = truncate_display(&running_marker_row(), overlay.width as usize);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(text, dim_style()))),
+            Paragraph::new(Line::from(Span::styled(text, palette.muted))),
             overlay,
         );
     }
 
-    frame.render_widget(Paragraph::new(rule_line(chunks[idx].width)), chunks[idx]);
+    frame.render_widget(
+        Paragraph::new(rule_line(chunks[idx].width, palette.muted)),
+        chunks[idx],
+    );
     idx += 1;
 
     let composer = chunks[idx];
@@ -2921,12 +2933,9 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
             .lines()
             .map(|row| {
                 if row.starts_with("> y allow") {
-                    Line::from(Span::styled(
-                        row.to_string(),
-                        Style::new().add_modifier(Modifier::REVERSED),
-                    ))
+                    Line::from(Span::styled(row.to_string(), palette.selected))
                 } else {
-                    Line::from(row.to_string())
+                    Line::from(Span::styled(row.to_string(), palette.text))
                 }
             })
             .collect();
@@ -2944,7 +2953,7 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
             .take(composer_h as usize)
             .map(|row| Line::from(row.clone()))
             .collect();
-        frame.render_widget(Paragraph::new(shown), composer);
+        frame.render_widget(Paragraph::new(shown).style(palette.text), composer);
         frame.set_cursor_position(Position {
             x: composer
                 .x
@@ -2953,15 +2962,19 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
         });
     }
 
-    frame.render_widget(Paragraph::new(rule_line(chunks[idx].width)), chunks[idx]);
+    frame.render_widget(
+        Paragraph::new(rule_line(chunks[idx].width, palette.muted)),
+        chunks[idx],
+    );
     idx += 1;
     frame.render_widget(
         Paragraph::new(terminal_text(&status_line(
             &session.model,
+            &session.look.keys,
             &shared,
             chunks[idx].width,
         )))
-        .style(dim_style()),
+        .style(palette.muted),
         chunks[idx],
     );
     shared.dirty = false;
@@ -3243,7 +3256,7 @@ mod tests {
         assert!(shared.transcript.iter().any(
             |line| matches!(line, TranscriptLine::System(text) if text.contains("state directory"))
         ));
-        let footer = status_line("claude-sonnet-5-5", &shared, 40);
+        let footer = status_line("claude-sonnet-5-5", &KeyMap::default(), &shared, 40);
         assert!(footer.contains("error"));
         assert!(!footer.contains("state directory"));
         assert!(footer.chars().count() <= 40);
@@ -3270,6 +3283,26 @@ mod tests {
         let id = session.session_id();
         let short = &id["sess-".len().."sess-".len() + 8];
         assert!(!rows.join("\n").contains(short));
+    }
+
+    /// #603: a rebound key performs the action, the old key no longer does,
+    /// and the footer and help name the new key.
+    #[tokio::test]
+    async fn rebound_interrupt_key_quits_and_is_shown() {
+        let dir = tempdir().unwrap();
+        let mut session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        let mut settings = shikigami::config::TuiSettings::default();
+        settings.keys.insert("interrupt".into(), "ctrl+g".into());
+        session.look = Look::from_settings(&settings, true).unwrap();
+        let rows = drawn_rows(&session, 80, 24);
+        assert_eq!(rows.last().unwrap(), "  ready  ^g quit  pgup/pgdn/wheel");
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        assert!(matches!(
+            handle_key(&session, ctrl('c')),
+            KeyResult::Continue
+        ));
+        assert!(matches!(handle_key(&session, ctrl('g')), KeyResult::Quit));
+        assert!(help_text(&session.look.keys).contains("^g cancel/quit"));
     }
 
     #[test]
@@ -3300,7 +3333,7 @@ mod tests {
                 &mut shared,
                 Some(&json!({"result": {"stopReason": reason}})),
             );
-            let footer = status_line("claude-sonnet-5-5", &shared, 80);
+            let footer = status_line("claude-sonnet-5-5", &KeyMap::default(), &shared, 80);
             assert!(
                 footer.starts_with(&format!("  {word}  ")),
                 "{reason}: {footer}"
@@ -3429,7 +3462,12 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_some()
         );
-        let footer = status_line(&session.model, &session.lock_shared(), 80);
+        let footer = status_line(
+            &session.model,
+            &session.look.keys,
+            &session.lock_shared(),
+            80,
+        );
         assert!(footer.contains("queued  follow up"), "{footer}");
         let err = session.spawn_prompt("too soon".into()).await.unwrap_err();
         assert!(err.contains("already in flight"), "{err}");
@@ -3449,7 +3487,12 @@ mod tests {
         assert_eq!(queued_display(&session).as_deref(), Some("second"));
         assert_eq!(session.lock_shared().input, "");
         assert_eq!(user_prompts(&session), vec!["write".to_string()]);
-        let footer = status_line(&session.model, &session.lock_shared(), 80);
+        let footer = status_line(
+            &session.model,
+            &session.look.keys,
+            &session.lock_shared(),
+            80,
+        );
         assert!(footer.contains("queued  second"), "{footer}");
         assert!(!footer.contains("queued  first"), "{footer}");
         let _ = session.wait_prompt().await;
@@ -3466,7 +3509,12 @@ mod tests {
             KeyResult::Continue
         ));
         assert!(queued_display(&session).is_none());
-        let footer = status_line(&session.model, &session.lock_shared(), 80);
+        let footer = status_line(
+            &session.model,
+            &session.look.keys,
+            &session.lock_shared(),
+            80,
+        );
         assert!(!footer.contains("queued"), "{footer}");
         assert_eq!(user_prompts(&session), vec!["write".to_string()]);
         let _ = session.wait_prompt().await;
@@ -3605,7 +3653,7 @@ mod tests {
             if cell.symbol().trim().is_empty() {
                 continue;
             }
-            if !cell.modifier.contains(Modifier::DIM) {
+            if !cell.modifier.contains(ratatui::style::Modifier::DIM) {
                 return false;
             }
             saw = true;
@@ -3635,7 +3683,12 @@ mod tests {
         assert!(!session.lock_shared().busy);
         let (row, _) = slot_above_composer_rule(&session);
         assert_ne!(row.trim(), RUNNING_MARKER, "{row:?}");
-        let footer = status_line(&session.model, &session.lock_shared(), 80);
+        let footer = status_line(
+            &session.model,
+            &session.look.keys,
+            &session.lock_shared(),
+            80,
+        );
         assert!(!footer.contains(RUNNING_MARKER), "{footer}");
     }
 
@@ -4832,7 +4885,7 @@ mod tests {
         let text = session.transcript_text();
         assert!(text.contains("Enter"), "{text}");
         assert!(text.contains("Shift+Enter"), "{text}");
-        assert!(text.contains("Ctrl-C"), "{text}");
+        assert!(text.contains("^c cancel/quit"), "{text}");
         assert!(text.contains("/compact"), "{text}");
         assert!(text.contains("/new"), "{text}");
         assert!(text.contains("/resume"), "{text}");
@@ -4976,7 +5029,12 @@ mod tests {
             Some("last assistant reply")
         );
         assert_eq!(session.lock_shared().status, "copied");
-        let footer = status_line(&session.model, &session.lock_shared(), 80);
+        let footer = status_line(
+            &session.model,
+            &session.look.keys,
+            &session.lock_shared(),
+            80,
+        );
         assert!(footer.contains("copied"), "{footer}");
         let text = session.transcript_text();
         assert!(text.contains("last assistant reply"), "{text}");
