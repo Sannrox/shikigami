@@ -93,7 +93,11 @@ async fn invoke_hook(hook: &HookSettings, event: HookEvent, payload: &Value) -> 
 }
 
 /// Run an operator-trusted command with `stdin` (plus a newline) and wait at
-/// most `limit`; the child is killed when the limit passes. Returns stdout
+/// most `limit`. The command leads its own process group; when the limit
+/// passes, or the call is dropped first, the whole group is killed, so
+/// processes it started do not outlive it. The wait ends when the command's
+/// output closes, so only a background process with its own stdio survives a
+/// command that finishes on time. Returns stdout
 /// when `capture_stdout` is set, else an empty buffer. Lifecycle hooks and
 /// the TUI status line command use it.
 pub async fn run_operator_command(
@@ -104,7 +108,10 @@ pub async fn run_operator_command(
     limit: Duration,
     capture_stdout: bool,
 ) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(command)
+    let mut cmd = Command::new(command);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd
         .args(args)
         .stdin(Stdio::piped())
         .stdout(if capture_stdout {
@@ -117,6 +124,7 @@ pub async fn run_operator_command(
         .envs(env.iter().copied())
         .spawn()
         .map_err(|e| format!("spawn: {e}"))?;
+    let mut group = GroupKill(child.id());
 
     if let Some(mut pipe) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
@@ -127,6 +135,7 @@ pub async fn run_operator_command(
 
     match timeout(limit, child.wait_with_output()).await {
         Ok(Ok(out)) => {
+            group.0 = None;
             if out.status.success() {
                 Ok(out.stdout)
             } else {
@@ -141,6 +150,15 @@ pub async fn run_operator_command(
         }
         Ok(Err(e)) => Err(format!("wait: {e}")),
         Err(_) => Err(format!("timed out after {limit:?}")),
+    }
+}
+
+/// Kills the operator command's process group on drop unless disarmed.
+struct GroupKill(Option<u32>);
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        crate::sandbox::kill_process_group(self.0.take());
     }
 }
 
@@ -348,6 +366,73 @@ mod tests {
             std::fs::set_permissions(&path, perms).unwrap();
         }
         (dir, path)
+    }
+
+    /// #638: a background process with its own stdio outlives a command that
+    /// finishes on time.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn on_time_exit_keeps_a_detached_background_process() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let (_dir, script) = write_script(&format!(
+            "#!/bin/sh\nsleep 30 >/dev/null 2>&1 </dev/null &\necho $! > {}\n",
+            pid_file.path().display()
+        ));
+        run_operator_command(
+            script.to_str().unwrap(),
+            &[],
+            &[],
+            "{}",
+            Duration::from_secs(5),
+            false,
+        )
+        .await
+        .unwrap();
+        let pid: libc::pid_t = std::fs::read_to_string(pid_file.path())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(alive, "detached background process {pid} was killed");
+    }
+
+    /// #638: a command that times out takes the processes it started with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_the_commands_children() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let (_dir, script) = write_script(&format!(
+            "#!/bin/sh\nsleep 30 &\necho $! > {}\nsleep 30\n",
+            pid_file.path().display()
+        ));
+        let err = run_operator_command(
+            script.to_str().unwrap(),
+            &[],
+            &[],
+            "{}",
+            Duration::from_millis(300),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.starts_with("timed out"), "{err}");
+
+        let pid: libc::pid_t = std::fs::read_to_string(pid_file.path())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let started = std::time::Instant::now();
+        // The orphan is reaped by init shortly after the kill.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "grandchild {pid} still running"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
