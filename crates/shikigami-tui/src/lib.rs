@@ -9,7 +9,7 @@ use std::io::{self, IsTerminal, Write, stdin, stdout};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use crossterm::event::{
@@ -31,12 +31,21 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use unicode_width::UnicodeWidthChar;
 
-use shikigami::acp::{AcpClient, AcpHost};
+use shikigami::acp::{AcpClient, AcpHost, SessionSummary};
 use shikigami::harness::Harness;
 use shikigami::identity::{PRODUCT, VERSION};
 
-/// Run the interactive host on a real terminal until quit.
+/// Run the interactive host on a real terminal until quit, in a new session.
 pub async fn run(harness: Harness) -> Result<(), String> {
+    run_terminal_host(harness, false).await
+}
+
+/// `run`, but reopening the latest session in this folder (`--continue`).
+pub async fn run_continuing(harness: Harness) -> Result<(), String> {
+    run_terminal_host(harness, true).await
+}
+
+async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), String> {
     if !stdin().is_terminal() || !stdout().is_terminal() {
         return Err("shikigami tui requires a terminal".into());
     }
@@ -45,16 +54,27 @@ pub async fn run(harness: Harness) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let demo = uses_demo_model(&harness.config);
+    let model = model_label(&harness.config.model);
     let host = Arc::new(AcpHost::new(harness));
-    let session = TuiSession::start(host, &cwd).await?;
+    let mut session = TuiSession::start(host, &cwd, continue_last).await?;
+    session.model = model;
     if demo {
         session
             .lock_shared()
             .transcript
             .push(TranscriptLine::System(DEMO_MODEL_NOTICE.into()));
     }
+    let shared = Arc::clone(&session.client.shared);
     let mut termination = Termination::install()?;
     run_terminal(session, &mut termination).await?;
+    if shared
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .run_id
+        .is_some()
+    {
+        println!("{CONTINUE_HINT}");
+    }
     // The terminal is restored by now; end the process the way the signal would have.
     termination.reraise();
     Ok(())
@@ -69,8 +89,28 @@ const NO_ANSWER: &str = "This prompt got no answer.";
 /// Leads a failed prompt whose host marked the failure as the model's.
 const MODEL_FAILED: &str = "The model did not answer. Check the model address and key in your settings, or run shikigami doctor. Your next prompt tries again.";
 
+/// Printed to the shell after quitting a session that has a run.
+const CONTINUE_HINT: &str = "Continue this session later: shikigami tui --continue";
+
+/// `--continue` found no session with a run in this folder.
+const NOTHING_TO_CONTINUE: &str =
+    "No earlier session in this folder to continue. This is a new session.";
+
+/// `--continue` found a session but could not load it.
+const CONTINUE_FAILED: &str =
+    "The last session in this folder could not be opened. This is a new session.";
+
 /// Shown at launch when no model is configured and the built-in demo script answers.
 const DEMO_MODEL_NOTICE: &str = "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt, then stops. To use a real model, set [model] in a settings file and start with --config <file>.";
+
+/// The footer's model name. A scripted model has no real name to show.
+fn model_label(model: &shikigami::config::ModelSettings) -> String {
+    match (model.adapter.as_str(), model.script_json.is_some()) {
+        ("scripted", false) => "demo".into(),
+        ("scripted", true) => "scripted".into(),
+        _ => model.model.clone(),
+    }
+}
 
 /// True when the scripted adapter runs without a script, so the engine's demo answers.
 fn uses_demo_model(config: &shikigami::config::Config) -> bool {
@@ -204,8 +244,8 @@ struct Shared {
     /// Esc hid the `/` list; cleared once the draft no longer starts with `/`.
     slash_dismissed: bool,
     slash_selected: usize,
-    /// Full session ids for the `/resume` picker, newest first.
-    resume_ids: Option<Vec<String>>,
+    /// Sessions in the open `/resume` picker, most recently active first.
+    resume: Option<Vec<SessionSummary>>,
     /// Last OSC 52 clipboard payload written by `/copy` or Ctrl+Y.
     last_osc52: Option<String>,
     /// Staged ACP prompt parts from `/attach` (bytes stay in the prompt, not the workspace).
@@ -238,7 +278,7 @@ impl Shared {
             dirty: true,
             slash_dismissed: false,
             slash_selected: 0,
-            resume_ids: None,
+            resume: None,
             last_osc52: None,
             pending_parts: Vec::new(),
             run_id: None,
@@ -567,10 +607,12 @@ struct TuiSession {
     next_id: AtomicU64,
     prompt: Mutex<Option<JoinHandle<Option<Value>>>>,
     osc_write: Mutex<OscWrite>,
+    /// Model name for the footer; empty hides it.
+    model: String,
 }
 
 impl TuiSession {
-    async fn start(host: Arc<AcpHost>, cwd: &Path) -> Result<Self, String> {
+    async fn start(host: Arc<AcpHost>, cwd: &Path, continue_last: bool) -> Result<Self, String> {
         let cwd = if cwd.is_absolute() {
             cwd.to_path_buf()
         } else {
@@ -586,6 +628,7 @@ impl TuiSession {
             next_id: AtomicU64::new(1),
             prompt: Mutex::new(None),
             osc_write: Mutex::new(osc_write_noop),
+            model: String::new(),
         };
         session
             .call(
@@ -597,17 +640,8 @@ impl TuiSession {
                 }),
             )
             .await?;
-        let session_id = if let Some(id) = session.host.last_session_id_for_cwd(&cwd) {
-            match session
-                .call("session/load", json!({ "sessionId": id }))
-                .await
-            {
-                Ok(result) => {
-                    apply_load_result(&mut session.lock_shared(), &result);
-                    id
-                }
-                Err(_) => session.create_session(&cwd).await?,
-            }
+        let session_id = if continue_last {
+            session.continue_latest(&cwd).await?
         } else {
             session.create_session(&cwd).await?
         };
@@ -621,6 +655,42 @@ impl TuiSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// `--continue`: load the most recently active session for `cwd`. When
+    /// there is none, or it fails to load, start a new one and say so.
+    async fn continue_latest(&self, cwd: &Path) -> Result<String, String> {
+        let Some(latest) = self.host.sessions_for_cwd(cwd).into_iter().next() else {
+            let id = self.create_session(cwd).await?;
+            self.push_system(NOTHING_TO_CONTINUE);
+            return Ok(id);
+        };
+        match self
+            .call("session/load", json!({ "sessionId": latest.session_id }))
+            .await
+        {
+            Ok(result) => {
+                let mut shared = self.lock_shared();
+                apply_load_result(&mut shared, &result);
+                shared.transcript.push(TranscriptLine::System(format!(
+                    "Continued your session from {} ({}).",
+                    ago(elapsed_since(latest.last_active)),
+                    turns_label(latest.prompts)
+                )));
+                Ok(latest.session_id)
+            }
+            Err(_) => {
+                let id = self.create_session(cwd).await?;
+                self.push_system(CONTINUE_FAILED);
+                Ok(id)
+            }
+        }
+    }
+
+    fn push_system(&self, text: &str) {
+        let mut shared = self.lock_shared();
+        shared.transcript.push(TranscriptLine::System(text.into()));
+        shared.dirty = true;
     }
 
     async fn create_session(&self, cwd: &Path) -> Result<String, String> {
@@ -930,29 +1000,22 @@ impl TuiSession {
     }
 
     fn overlay_cmds(&self) -> Vec<SlashCommand> {
-        let ids = self.lock_shared().resume_ids.clone();
-        if let Some(ids) = ids {
-            return ids
-                .iter()
-                .map(|id| SlashCommand {
-                    name: short_session_id(id).to_string(),
-                    hint: String::new(),
-                })
-                .collect();
+        if let Some(sessions) = self.lock_shared().resume.as_ref() {
+            return sessions.iter().map(resume_row).collect();
         }
         self.slash_matches()
     }
 
     fn open_resume_picker(&self) -> KeyResult {
-        let ids = self.host.session_ids_for_cwd(&self.cwd);
+        let sessions = self.host.sessions_for_cwd(&self.cwd);
         let mut shared = self.lock_shared();
-        if ids.is_empty() {
+        if sessions.is_empty() {
             shared
                 .transcript
                 .push(TranscriptLine::System("no sessions".into()));
-            shared.resume_ids = None;
+            shared.resume = None;
         } else {
-            shared.resume_ids = Some(ids);
+            shared.resume = Some(sessions);
             shared.slash_selected = 0;
         }
         shared.dirty = true;
@@ -1118,7 +1181,7 @@ impl TuiSession {
             shared.show_plan = false;
             shared.scroll_back = 0;
             shared.dock_scroll = 0;
-            shared.resume_ids = None;
+            shared.resume = None;
             shared.slash_selected = 0;
             shared.dirty = true;
             backup
@@ -1458,7 +1521,7 @@ fn osc_write_fail(_: &[u8]) -> io::Result<()> {
 }
 
 fn slash_visible(shared: &Shared) -> bool {
-    shared.resume_ids.is_none()
+    shared.resume.is_none()
         && !shared.busy
         && shared.permission.is_none()
         && !shared.show_plan
@@ -1509,21 +1572,63 @@ fn slash_window(selected: usize, count: usize, vis: usize) -> (usize, usize) {
     (start, vis)
 }
 
-fn short_session_id(id: &str) -> &str {
-    let rest = id.strip_prefix("sess-").unwrap_or(id);
-    rest.get(..8).unwrap_or(rest)
+/// One `/resume` row: age, then turn count and first prompt.
+fn resume_row(session: &SessionSummary) -> SlashCommand {
+    let first = session.first_prompt.as_deref().unwrap_or("");
+    SlashCommand {
+        name: ago(elapsed_since(session.last_active)),
+        hint: format!(
+            "{:<9}  {}",
+            turns_label(session.prompts),
+            truncate_one_line(first, 60)
+        ),
+    }
 }
 
-fn status_line(session_id: &str, shared: &Shared, width: u16) -> String {
-    let mut parts = vec![
-        shared.status.clone(),
-        short_session_id(session_id).to_string(),
-    ];
+fn elapsed_since(when: SystemTime) -> Duration {
+    SystemTime::now().duration_since(when).unwrap_or_default()
+}
+
+/// Coarse age in words: "just now", "5 minutes ago", "yesterday".
+fn ago(elapsed: Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    let (n, unit) = match minutes {
+        0 => return "just now".into(),
+        1..60 => (minutes, "minute"),
+        60..1440 => (minutes / 60, "hour"),
+        1440..2880 => return "yesterday".into(),
+        _ => (minutes / 1440, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
+}
+
+fn turns_label(n: usize) -> String {
+    format!("{n} turn{}", if n == 1 { "" } else { "s" })
+}
+
+/// Prompts the user sent in this session, replayed ones included.
+fn turn_count(shared: &Shared) -> usize {
+    shared
+        .transcript
+        .iter()
+        .filter(|line| matches!(line, TranscriptLine::User(_)))
+        .count()
+}
+
+fn status_line(model: &str, shared: &Shared, width: u16) -> String {
+    let mut parts = vec![shared.status.clone()];
+    if !model.is_empty() {
+        parts.push(model.to_string());
+    }
+    let turns = turn_count(shared);
+    if turns > 0 {
+        parts.push(format!("turn {turns}"));
+    }
     if shared.permission.is_some() {
         parts.push("esc cancel".into());
     } else if shared.busy {
         parts.push("^c cancel".into());
-    } else if shared.resume_ids.is_some() {
+    } else if shared.resume.is_some() {
         parts.push("esc".into());
         parts.push("^c quit".into());
     } else if slash_visible(shared) {
@@ -2445,7 +2550,7 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
 
     let (slash_open, resume_open) = {
         let shared = session.lock_shared();
-        (slash_visible(&shared), shared.resume_ids.is_some())
+        (slash_visible(&shared), shared.resume.is_some())
     };
     let list_open = slash_open || resume_open;
     match key.code {
@@ -2513,12 +2618,12 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                     shared.queue_follow_up();
                     return KeyResult::Continue;
                 }
-                if let Some(ids) = shared.resume_ids.take() {
-                    let idx = shared.slash_selected.min(ids.len().saturating_sub(1));
+                if let Some(sessions) = shared.resume.take() {
+                    let idx = shared.slash_selected.min(sessions.len().saturating_sub(1));
                     shared.slash_selected = 0;
                     shared.dirty = true;
-                    if let Some(id) = ids.get(idx).cloned() {
-                        return KeyResult::LoadSession(id);
+                    if let Some(picked) = sessions.into_iter().nth(idx) {
+                        return KeyResult::LoadSession(picked.session_id);
                     }
                     return KeyResult::Continue;
                 }
@@ -2556,7 +2661,7 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         }
         KeyCode::Esc => {
             let mut shared = session.lock_shared();
-            if shared.resume_ids.take().is_some() {
+            if shared.resume.take().is_some() {
                 shared.slash_selected = 0;
                 shared.dirty = true;
             } else if slash_visible(&shared) {
@@ -2779,7 +2884,7 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     idx += 1;
     frame.render_widget(
         Paragraph::new(terminal_text(&status_line(
-            &session.session_id(),
+            &session.model,
             &shared,
             chunks[idx].width,
         )))
@@ -2898,8 +3003,10 @@ mod tests {
         panic!("timed out waiting for TUI state");
     }
 
+    /// #598: a plain start is a new session; `--continue` replays the
+    /// latest one and says how old it is.
     #[tokio::test]
-    async fn continue_last_in_cwd_loads_previous_session() {
+    async fn plain_start_is_new_and_continue_replays_the_latest() {
         let dir = tempdir().unwrap();
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -2907,28 +3014,34 @@ mod tests {
             dir.path(),
             r#"[{"content":"hello"},{"content":"again"}]"#,
         ));
-        let first = TuiSession::start(Arc::clone(&host), &cwd).await.unwrap();
+        let first = TuiSession::start(Arc::clone(&host), &cwd, false)
+            .await
+            .unwrap();
         first.spawn_prompt("hi".into()).await.unwrap();
-        let stop = first.wait_prompt().await;
-        assert_eq!(
-            stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
-            Some(&json!("end_turn"))
-        );
+        let _ = first.wait_prompt().await;
         let id = first.session_id();
-        assert!(first.transcript_text().contains("hello"));
         drop(first);
 
-        let second = TuiSession::start(host, &cwd).await.unwrap();
-        assert_eq!(second.session_id(), id);
+        let plain = TuiSession::start(Arc::clone(&host), &cwd, false)
+            .await
+            .unwrap();
+        assert_ne!(plain.session_id(), id);
+        assert!(plain.transcript_text().is_empty());
+        drop(plain);
+
+        let continued = TuiSession::start(host, &cwd, true).await.unwrap();
+        assert_eq!(continued.session_id(), id);
+        let text = continued.transcript_text();
+        assert!(text.contains("hello"), "load must replay history: {text}");
         assert!(
-            second.transcript_text().contains("hello"),
-            "load must replay history: {}",
-            second.transcript_text()
+            text.ends_with("Continued your session from just now (1 turn)."),
+            "{text}"
         );
     }
 
+    /// `--continue` with only an unloadable session record starts new and says so.
     #[tokio::test]
-    async fn continue_last_in_cwd_fail_closed_starts_new() {
+    async fn continue_without_a_usable_session_says_it_started_new() {
         let dir = tempdir().unwrap();
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -2947,10 +3060,9 @@ mod tests {
         )
         .unwrap();
 
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, true).await.unwrap();
         assert_ne!(session.session_id(), fake);
-        assert!(session.session_id().starts_with("sess-"));
-        assert!(session.transcript_text().is_empty());
+        assert_eq!(session.transcript_text(), NOTHING_TO_CONTINUE);
     }
 
     #[tokio::test]
@@ -2965,7 +3077,7 @@ mod tests {
               {"content":"wrote it"}
             ]"#,
         ));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session.spawn_prompt("write".into()).await.unwrap();
         wait_until(|| session.overlay_text().is_some()).await;
         let overlay = session.overlay_text().expect("permission overlay");
@@ -3001,7 +3113,7 @@ mod tests {
           {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
           {"content":"wrote it"}
         ]"#;
-        let first = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd)
+        let first = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd, false)
             .await
             .unwrap();
         first.spawn_prompt("write".into()).await.unwrap();
@@ -3012,7 +3124,7 @@ mod tests {
         }
         drop(first);
 
-        let second = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd)
+        let second = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd, true)
             .await
             .unwrap();
         let transcript = second.transcript_text();
@@ -3060,10 +3172,45 @@ mod tests {
         assert!(shared.transcript.iter().any(
             |line| matches!(line, TranscriptLine::System(text) if text.contains("state directory"))
         ));
-        let footer = status_line("sess-c0fa033e-aaaa", &shared, 40);
+        let footer = status_line("claude-sonnet-5-5", &shared, 40);
         assert!(footer.contains("error"));
         assert!(!footer.contains("state directory"));
         assert!(footer.chars().count() <= 40);
+    }
+
+    /// #598: the footer names the model and, once a prompt was sent, the turn.
+    #[tokio::test]
+    async fn footer_shows_model_and_turn_not_session_id() {
+        let dir = tempdir().unwrap();
+        let mut session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.model = "claude-sonnet-5-5".into();
+        let rows = drawn_rows(&session, 80, 24);
+        assert_eq!(
+            rows.last().unwrap(),
+            "  ready  claude-sonnet-5-5  ^c quit  pgup/pgdn/wheel"
+        );
+        session.spawn_prompt("hi".into()).await.unwrap();
+        let _ = session.wait_prompt().await;
+        let rows = drawn_rows(&session, 80, 24);
+        assert_eq!(
+            rows.last().unwrap(),
+            "  done  claude-sonnet-5-5  turn 1  ^c quit  pgup/pgdn/wheel"
+        );
+        let id = session.session_id();
+        let short = &id["sess-".len().."sess-".len() + 8];
+        assert!(!rows.join("\n").contains(short));
+    }
+
+    #[test]
+    fn ago_reads_as_words() {
+        let mins = |m: u64| ago(Duration::from_secs(m * 60));
+        assert_eq!(mins(0), "just now");
+        assert_eq!(mins(1), "1 minute ago");
+        assert_eq!(mins(59), "59 minutes ago");
+        assert_eq!(mins(60), "1 hour ago");
+        assert_eq!(mins(23 * 60), "23 hours ago");
+        assert_eq!(mins(24 * 60), "yesterday");
+        assert_eq!(mins(3 * 24 * 60), "3 days ago");
     }
 
     /// #617: the footer says the session state in words, never the wire stop reason.
@@ -3082,7 +3229,7 @@ mod tests {
                 &mut shared,
                 Some(&json!({"result": {"stopReason": reason}})),
             );
-            let footer = status_line("sess-c0fa033e-aaaa", &shared, 80);
+            let footer = status_line("claude-sonnet-5-5", &shared, 80);
             assert!(
                 footer.starts_with(&format!("  {word}  ")),
                 "{reason}: {footer}"
@@ -3117,7 +3264,7 @@ mod tests {
               {"content":"wrote it"}
             ]"#,
         ));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session.spawn_prompt("write".into()).await.unwrap();
         session.cancel();
         let stop = session.wait_prompt().await;
@@ -3132,7 +3279,23 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), script));
-        TuiSession::start(host, &cwd).await.unwrap()
+        TuiSession::start(host, &cwd, false).await.unwrap()
+    }
+
+    /// `start_session` with `--continue`: the latest session in `project`.
+    async fn continue_session(dir: &tempfile::TempDir, script: &str) -> TuiSession {
+        let host = Arc::new(scripted_host(dir.path(), script));
+        TuiSession::start(host, &dir.path().join("project"), true)
+            .await
+            .unwrap()
+    }
+
+    /// A continued session's transcript without its closing continued line.
+    fn replayed_text(session: &TuiSession) -> String {
+        let text = session.transcript_text();
+        let (replayed, last) = text.rsplit_once('\n').expect("replay and continued line");
+        assert!(last.starts_with("Continued your session from"), "{text}");
+        replayed.to_string()
     }
 
     fn enter_key() -> KeyEvent {
@@ -3184,7 +3347,7 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_some()
         );
-        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        let footer = status_line(&session.model, &session.lock_shared(), 80);
         assert!(footer.contains("queued  follow up"), "{footer}");
         let err = session.spawn_prompt("too soon".into()).await.unwrap_err();
         assert!(err.contains("already in flight"), "{err}");
@@ -3204,7 +3367,7 @@ mod tests {
         assert_eq!(queued_display(&session).as_deref(), Some("second"));
         assert_eq!(session.lock_shared().input, "");
         assert_eq!(user_prompts(&session), vec!["write".to_string()]);
-        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        let footer = status_line(&session.model, &session.lock_shared(), 80);
         assert!(footer.contains("queued  second"), "{footer}");
         assert!(!footer.contains("queued  first"), "{footer}");
         let _ = session.wait_prompt().await;
@@ -3221,7 +3384,7 @@ mod tests {
             KeyResult::Continue
         ));
         assert!(queued_display(&session).is_none());
-        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        let footer = status_line(&session.model, &session.lock_shared(), 80);
         assert!(!footer.contains("queued"), "{footer}");
         assert_eq!(user_prompts(&session), vec!["write".to_string()]);
         let _ = session.wait_prompt().await;
@@ -3390,7 +3553,7 @@ mod tests {
         assert!(!session.lock_shared().busy);
         let (row, _) = slot_above_composer_rule(&session);
         assert_ne!(row.trim(), RUNNING_MARKER, "{row:?}");
-        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        let footer = status_line(&session.model, &session.lock_shared(), 80);
         assert!(!footer.contains(RUNNING_MARKER), "{footer}");
     }
 
@@ -3476,7 +3639,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session
             .client
             .notify(
@@ -3511,7 +3674,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session.lock_shared().transcript_h = 10;
         let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
         assert!(matches!(handle_key(&session, key), KeyResult::Continue));
@@ -3608,7 +3771,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session
             .client
             .notify(
@@ -3636,7 +3799,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session
             .client
             .notify(
@@ -3811,11 +3974,10 @@ mod tests {
         apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
         let rows = drawn_rows(&session, 80, 24);
         assert_screen_rules(&rows, 80);
-        let short_id = &session.session_id()["sess-".len()..][..8];
-        let screen = rows.join("\n").replace(short_id, "<id>");
+        let screen = rows.join("\n");
         let rule = "─".repeat(80);
         let expected = format!(
-            "{}you  write the ok file\n\n· write_file  ok.txt  cancelled\n{rule}\n>\n{rule}\n  cancelled  <id>  ^c quit  ^o tool  pgup/pgdn/wheel",
+            "{}you  write the ok file\n\n· write_file  ok.txt  cancelled\n{rule}\n>\n{rule}\n  cancelled  turn 1  ^c quit  ^o tool  pgup/pgdn/wheel",
             "\n".repeat(17)
         );
         assert_eq!(screen, expected);
@@ -3850,8 +4012,8 @@ mod tests {
         let live = session.transcript_text();
         drop(session);
 
-        let relaunched = start_session(&dir, script).await;
-        let replayed = relaunched.transcript_text();
+        let relaunched = continue_session(&dir, script).await;
+        let replayed = replayed_text(&relaunched);
         // The history keeps no error text, so the failed prompt's outcome
         // replays as one line instead of the live error.
         let failure = format!("{MODEL_FAILED}\nscripted turns exhausted");
@@ -3902,9 +4064,9 @@ mod tests {
         session.wait_prompt().await;
         drop(session);
 
-        let relaunched = start_session(&dir, script).await;
+        let relaunched = continue_session(&dir, script).await;
         assert_eq!(
-            relaunched.transcript_text(),
+            replayed_text(&relaunched),
             format!("you  first-ask\n{NO_ANSWER}\nyou  second-ask\nanswered")
         );
     }
@@ -3943,8 +4105,8 @@ mod tests {
         let live = session.transcript_text();
         drop(session);
 
-        let relaunched = start_session(&dir, script).await;
-        assert_eq!(relaunched.transcript_text(), live);
+        let relaunched = continue_session(&dir, script).await;
+        assert_eq!(replayed_text(&relaunched), live);
     }
 
     /// #601: `/run` names the run `shikigami runs` and `export` accept, and says
@@ -3982,14 +4144,10 @@ mod tests {
         ));
         let rows = drawn_rows(&session, 80, 24);
         assert_screen_rules(&rows, 80);
-        let short_id = &session.session_id()["sess-".len()..][..8];
-        let screen = rows
-            .join("\n")
-            .replace(&run_id, "<run>")
-            .replace(short_id, "<id>");
+        let screen = rows.join("\n").replace(&run_id, "<run>");
         let rule = "─".repeat(80);
         let expected = format!(
-            "{}Run <run>\nshikigami runs <run>\nshikigami export <run>\n{rule}\n>\n{rule}\n  done  <id>  ^c quit  pgup/pgdn/wheel",
+            "{}Run <run>\nshikigami runs <run>\nshikigami export <run>\n{rule}\n>\n{rule}\n  done  ^c quit  pgup/pgdn/wheel",
             "\n".repeat(17)
         );
         assert_eq!(screen, expected);
@@ -4050,7 +4208,7 @@ mod tests {
     async fn untrusted_output_controls_are_inert_on_redraw() {
         let dir = tempdir().unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, dir.path()).await.unwrap();
+        let session = TuiSession::start(host, dir.path(), false).await.unwrap();
         let payload = "visible\x1b]52;c;Y2xpcA==\x07\x1b[2J\x1bPdata\x1b\\\x00\r\u{009b}end";
         {
             let mut shared = session.lock_shared();
@@ -4097,7 +4255,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         notify_multiline_tool(&session).await;
         let text = session.transcript_text();
         assert_eq!(tool_line_count(&text), 1, "{text}");
@@ -4112,7 +4270,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         notify_multiline_tool(&session).await;
         type_text(&session, "draft");
         assert!(matches!(
@@ -4157,7 +4315,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "hello");
         session.lock_shared().dirty = false;
         assert!(matches!(
@@ -4214,7 +4372,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         install_permission(&session, r#"{"path":"ok.txt"}"#.into());
         let _ = drawn_text(&session);
         assert_eq!(session.lock_shared().dock_max_scroll(), 0);
@@ -4298,7 +4456,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         for ch in ['a', 'b', 'c'] {
             handle_key(
                 &session,
@@ -4320,7 +4478,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session.spawn_prompt("first".into()).await.unwrap();
         let _ = session.wait_prompt().await;
         handle_key(&session, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
@@ -4335,7 +4493,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "hi");
         let shift = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
         assert!(matches!(handle_key(&session, shift), KeyResult::Continue));
@@ -4372,7 +4530,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "ab");
         handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
         type_text(&session, "cd");
@@ -4502,7 +4660,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
 
         type_text(&session, "/c");
         assert_eq!(
@@ -4546,7 +4704,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         assert!(session.slash_catalog().iter().any(|cmd| cmd.name == "help"));
         type_text(&session, "/help");
         assert!(matches!(
@@ -4586,7 +4744,7 @@ mod tests {
         let png = b"\x89PNG UNIQUE-TUI-401-IMAGE";
         std::fs::write(cwd.join("shot.png"), png).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         assert!(
             session
                 .slash_catalog()
@@ -4647,7 +4805,7 @@ mod tests {
         let huge = cwd.join("huge.png");
         std::fs::write(&huge, vec![0u8; 8 * 1024 * 1024 + 1]).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"unused"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "/attach huge.png");
         assert!(matches!(
             handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4703,7 +4861,7 @@ mod tests {
             Some("last assistant reply")
         );
         assert_eq!(session.lock_shared().status, "copied");
-        let footer = status_line(&session.session_id(), &session.lock_shared(), 80);
+        let footer = status_line(&session.model, &session.lock_shared(), 80);
         assert!(footer.contains("copied"), "{footer}");
         let text = session.transcript_text();
         assert!(text.contains("last assistant reply"), "{text}");
@@ -4829,7 +4987,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "/compact");
         assert!(slash_visible(&session.lock_shared()));
         handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -4847,7 +5005,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session.spawn_prompt("first".into()).await.unwrap();
         let _ = session.wait_prompt().await;
         type_text(&session, "/");
@@ -4867,7 +5025,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "prefer tests first\n").unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "/skill:");
         assert_eq!(
             session
@@ -4894,7 +5052,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "prefer tests first\n").unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "/skill:demo extra");
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
             KeyResult::Prompt { display, send, .. } => {
@@ -4916,7 +5074,7 @@ mod tests {
         let png = b"\x89PNG UNIQUE-TUI-401-SKILL";
         std::fs::write(cwd.join("shot.png"), png).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "/attach shot.png");
         assert!(matches!(
             handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -4952,7 +5110,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "run make validate\n").unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         type_text(&session, "/skill:verify-change");
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
             KeyResult::Prompt { display, send, .. } => {
@@ -4969,7 +5127,7 @@ mod tests {
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"hello"}]"#));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
         session.spawn_prompt("hi".into()).await.unwrap();
         let _ = session.wait_prompt().await;
         assert!(session.transcript_text().contains("hello"));
@@ -4979,41 +5137,13 @@ mod tests {
         assert!(session.transcript_text().is_empty());
     }
 
-    fn write_session_file(
-        root: &Path,
-        session_id: &str,
-        cwd: &Path,
-        run_id: Option<&str>,
-        mtime: SystemTime,
-    ) {
-        let dir = root.join("state/acp-sessions");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{session_id}.json"));
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "session_id": session_id,
-                "cwd": cwd.display().to_string(),
-                "run_id": run_id
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+    /// Sets when a session last did work, as `/resume` and `--continue` order it.
+    fn set_last_active(session: &TuiSession, mtime: SystemTime) {
+        let run_id = session.lock_shared().run_id.clone().expect("session run");
+        let runs = session.cwd.parent().unwrap().join("state/runs");
         std::fs::OpenOptions::new()
             .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(mtime)
-            .unwrap();
-    }
-
-    fn touch_session(root: &Path, session_id: &str, mtime: SystemTime) {
-        let path = root
-            .join("state/acp-sessions")
-            .join(format!("{session_id}.json"));
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
+            .open(shikigami::checkpoint::path_for(&runs, &run_id))
             .unwrap()
             .set_modified(mtime)
             .unwrap();
@@ -5033,66 +5163,77 @@ mod tests {
         ));
     }
 
+    /// Two sessions with runs in `project` (older answered "hello", newer
+    /// is current) and one in another folder that `/resume` must not list.
     async fn two_cwd_sessions(dir: &tempfile::TempDir) -> (TuiSession, String, String) {
         let cwd = dir.path().join("project");
+        let other = dir.path().join("other");
         std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
         let host = Arc::new(scripted_host(
             dir.path(),
             r#"[{"content":"hello"},{"content":"again"}]"#,
         ));
-        let session = TuiSession::start(host, &cwd).await.unwrap();
-        session.spawn_prompt("hi".into()).await.unwrap();
+        let now = SystemTime::now();
+        let elsewhere = TuiSession::start(Arc::clone(&host), &other, false)
+            .await
+            .unwrap();
+        elsewhere.spawn_prompt("elsewhere".into()).await.unwrap();
+        let _ = elsewhere.wait_prompt().await;
+        set_last_active(&elsewhere, now + Duration::from_secs(60));
+        let session = TuiSession::start(host, &cwd, false).await.unwrap();
+        session
+            .spawn_prompt("fix the flaky login test".into())
+            .await
+            .unwrap();
         let _ = session.wait_prompt().await;
+        set_last_active(&session, now - Duration::from_secs(3 * 3600));
         let older = session.session_id();
         session.new_session().await.unwrap();
+        session
+            .spawn_prompt("add a health check".into())
+            .await
+            .unwrap();
+        let _ = session.wait_prompt().await;
+        set_last_active(&session, now);
         let newer = session.session_id();
-        let now = SystemTime::now();
-        touch_session(dir.path(), &older, now - Duration::from_secs(60));
-        touch_session(dir.path(), &newer, now);
-        let other = dir.path().join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        write_session_file(
-            dir.path(),
-            &format!("sess-{}", uuid::Uuid::new_v4()),
-            &other,
-            None,
-            now + Duration::from_secs(60),
-        );
         (session, older, newer)
     }
 
     #[tokio::test]
-    async fn resume_lists_persisted_sessions_for_cwd() {
+    async fn resume_lists_age_turns_and_first_prompt() {
         let dir = tempdir().unwrap();
         let (session, older, newer) = two_cwd_sessions(&dir).await;
         open_resume(&session);
-        let ids = session
+        let ids: Vec<String> = session
             .lock_shared()
-            .resume_ids
-            .clone()
-            .expect("resume picker");
+            .resume
+            .as_ref()
+            .expect("resume picker")
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect();
         assert_eq!(ids, vec![newer.clone(), older.clone()]);
-        let names: Vec<String> = session
+        let rows: Vec<String> = session
             .overlay_cmds()
-            .into_iter()
-            .map(|cmd| cmd.name)
+            .iter()
+            .map(|cmd| slash_row_text(cmd, 11))
             .collect();
         assert_eq!(
-            names,
+            rows,
             vec![
-                short_session_id(&newer).to_string(),
-                short_session_id(&older).to_string()
+                "  just now     1 turn     add a health check",
+                "  3 hours ago  1 turn     fix the flaky login test",
             ]
         );
         let drawn = drawn_text(&session);
-        assert!(drawn.contains(short_session_id(&newer)), "{drawn}");
-        assert!(drawn.contains(short_session_id(&older)), "{drawn}");
-        assert!(!drawn.contains("acp-sessions"), "{drawn}");
+        assert!(drawn.contains("fix the flaky login test"), "{drawn}");
+        assert!(!drawn.contains("elsewhere"), "{drawn}");
+        assert!(!drawn.contains("sess-"), "{drawn}");
         assert!(
             !drawn.contains(&session.cwd.display().to_string()),
             "{drawn}"
         );
-        assert!(names.iter().all(|name| name.len() <= 8));
     }
 
     #[tokio::test]
@@ -5100,7 +5241,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, older, newer) = two_cwd_sessions(&dir).await;
         assert_eq!(session.session_id(), newer);
-        assert!(session.transcript_text().is_empty());
         open_resume(&session);
         handle_key(&session, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         match handle_key(&session, enter_key()) {
@@ -5111,12 +5251,10 @@ mod tests {
             other => panic!("expected load, got {other:?}"),
         }
         assert_eq!(session.session_id(), older);
-        assert!(session.lock_shared().resume_ids.is_none());
-        assert!(
-            session.transcript_text().contains("hello"),
-            "{}",
-            session.transcript_text()
-        );
+        assert!(session.lock_shared().resume.is_none());
+        let text = session.transcript_text();
+        assert!(text.contains("fix the flaky login test"), "{text}");
+        assert!(!text.contains("add a health check"), "{text}");
     }
 
     #[tokio::test]
@@ -5124,14 +5262,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, _, newer) = two_cwd_sessions(&dir).await;
         open_resume(&session);
-        assert!(session.lock_shared().resume_ids.is_some());
+        assert!(session.lock_shared().resume.is_some());
         assert!(matches!(
             handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             KeyResult::Continue
         ));
-        assert!(session.lock_shared().resume_ids.is_none());
+        assert!(session.lock_shared().resume.is_none());
         assert_eq!(session.session_id(), newer);
-        assert!(session.transcript_text().is_empty());
+        assert!(session.transcript_text().contains("add a health check"));
         assert!(session.overlay_cmds().is_empty());
     }
 
@@ -5148,7 +5286,7 @@ mod tests {
         let text = session.transcript_text();
         assert!(text.contains("keep-me"), "{text}");
         assert!(text.contains("unknown session"), "{text}");
-        assert!(session.lock_shared().resume_ids.is_none());
+        assert!(session.lock_shared().resume.is_none());
     }
 
     #[tokio::test]
@@ -5157,7 +5295,7 @@ mod tests {
         let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
         std::fs::remove_dir_all(dir.path().join("state/acp-sessions")).unwrap();
         open_resume(&session);
-        assert!(session.lock_shared().resume_ids.is_none());
+        assert!(session.lock_shared().resume.is_none());
         assert!(session.overlay_cmds().is_empty());
         let text = session.transcript_text();
         assert!(text.contains("no sessions"), "{text}");

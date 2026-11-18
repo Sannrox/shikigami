@@ -210,7 +210,11 @@ enum Command {
     ///
     /// Evolving process host, same rank as `mcp` / `acp`. Not freeze-core.
     /// Bare `shikigami` stays usage/help.
-    Tui,
+    Tui {
+        /// Reopen the latest session in this folder instead of starting a new one.
+        #[arg(long = "continue")]
+        continue_last: bool,
+    },
     /// Export a run transcript as JSONL from local checkpoint state.
     Export {
         /// Run id under the state root (`runs/<id>/checkpoint.json`).
@@ -923,7 +927,7 @@ async fn run() -> anyhow::Result<()> {
                 std::process::exit(code);
             }
         }
-        Command::Tui => {
+        Command::Tui { continue_last } => {
             let harness = Harness::resolve_with_preset(
                 cli.config.as_deref(),
                 state,
@@ -931,9 +935,12 @@ async fn run() -> anyhow::Result<()> {
                 model,
                 cli.preset.as_deref(),
             )?;
-            shikigami_tui::run(harness)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let result = if continue_last {
+                shikigami_tui::run_continuing(harness).await
+            } else {
+                shikigami_tui::run(harness).await
+            };
+            result.map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Export { run_id, output } => {
             let harness = Harness::resolve_with_preset(

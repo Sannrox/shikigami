@@ -402,11 +402,12 @@ Facts the `tui-e2e` skill reads.
 - Scripted backend: `--config examples/local-run.toml` (scripted model, no
   network). Each test uses a new project directory and a new `--state`
   outside it: the TUI works in place, refuses a state root inside the
-  workspace, and continues the last session of the directory it starts in.
+  workspace, and `--continue` reopens the last session of the directory it
+  starts in.
 - Pseudo-terminal: `crates/shikigami-cli/tests/tui_pty.rs` spawns the built
   binary on an `openpty` pair with `libc` and polls the captured bytes and
   terminal modes with a bound. Extend it rather than adding a second driver.
-- Durable session: persisted sessions per directory (continue-last and
+- Durable session: persisted sessions per directory (`--continue` and
   `/resume`). Stage 6 applies to changes to how sessions are stored, loaded,
   or resumed.
 - Live target: a local OpenAI-compatible gateway through
