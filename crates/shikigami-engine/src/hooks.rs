@@ -111,8 +111,7 @@ pub async fn run_operator_command(
     let mut cmd = Command::new(command);
     #[cfg(unix)]
     cmd.process_group(0);
-    let mut child = cmd
-        .args(args)
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(if capture_stdout {
             Stdio::piped()
@@ -121,8 +120,9 @@ pub async fn run_operator_command(
         })
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .envs(env.iter().copied())
-        .spawn()
+        .envs(env.iter().copied());
+    let mut child = spawn_retrying_busy(&mut cmd)
+        .await
         .map_err(|e| format!("spawn: {e}"))?;
     let mut group = GroupKill(child.id());
 
@@ -150,6 +150,22 @@ pub async fn run_operator_command(
         }
         Ok(Err(e)) => Err(format!("wait: {e}")),
         Err(_) => Err(format!("timed out after {limit:?}")),
+    }
+}
+
+/// Spawn, retrying briefly while the executable is "text file busy": on Linux
+/// a script that was just written can still be open for writing in a process
+/// forked meanwhile (by another thread) until that process execs.
+async fn spawn_retrying_busy(cmd: &mut Command) -> std::io::Result<tokio::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 5 => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(10 * attempt)).await;
+            }
+            other => return other,
+        }
     }
 }
 
