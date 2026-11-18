@@ -202,7 +202,14 @@ mod tests {
         assert!(
             matches!(shared.transcript.as_slice(), [TranscriptLine::System(t)] if t.contains("(exit status: 3: boom)")),
             "{:?}",
-            shared.transcript.len()
+            shared
+                .transcript
+                .iter()
+                .map(|l| match l {
+                    TranscriptLine::System(t) => t.as_str(),
+                    _ => "",
+                })
+                .collect::<Vec<_>>()
         );
     }
 
@@ -222,6 +229,11 @@ mod tests {
         }
         line.tick(&snapshot(2), &shared);
         settle(&mut line).await;
-        assert_eq!(std::fs::read_to_string(count).unwrap().lines().count(), 2);
+        assert_eq!(
+            std::fs::read_to_string(count).unwrap().lines().count(),
+            2,
+            "{:?}",
+            shared.lock().unwrap().transcript.len()
+        );
     }
 }

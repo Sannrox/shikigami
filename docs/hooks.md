@@ -10,6 +10,14 @@ The TUI status line command (`[tui.statusline]`, see
 [settings](settings.md#tui)) runs the same way: trusted, JSON on stdin,
 killed at its time limit.
 
+A command runs in its own process group. At its time limit, or when the run
+that started it ends first, the whole group is killed, so processes it started
+do not keep running. The command counts as running until its output is
+closed: a process it starts in the background keeps running after the command
+exits only if it redirects stdin, stdout, and stderr (for example
+`job >/dev/null 2>&1 </dev/null &`). One that still holds the command's output
+counts against the time limit and is killed with the group.
+
 ## Settings
 
 ```toml
