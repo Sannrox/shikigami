@@ -190,7 +190,7 @@ async fn execute_fallback(
     let turn = local_model
         .next_turn(system, messages, tools)
         .await
-        .map_err(|error| GovernanceError::Message(error.to_string()))?;
+        .map_err(GovernanceError::Model)?;
     let mut view = view;
     view.now_ms = now_ms();
     fallback::still_valid(&checkpoint, &view)?;

@@ -14,7 +14,7 @@ client crate; export is JSON and/or Prometheus *text format*.
 | `shikigami_runs_failed_total` | counter | Failed / cancelled / timed out |
 | `shikigami_runs_parked_total` | counter | Parked (`escalate`) terminations |
 | `shikigami_turns_total` | counter | Model turns completed |
-| `shikigami_plane_errors_total` | counter | Governance/plane errors observed |
+| `shikigami_plane_errors_total` | counter | Governance/plane errors observed; model adapter failures are not counted |
 | `shikigami_tokens_input_total` | counter | Input tokens when reported |
 | `shikigami_tokens_output_total` | counter | Output tokens when reported |
 
