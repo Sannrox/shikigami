@@ -25,6 +25,7 @@ use crate::content::{
     sha256_digest,
 };
 use crate::events::{AsyncChannelRx, AsyncChannelSink, EventSink, HarnessEvent};
+use crate::governance::GovernanceError;
 use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
@@ -704,7 +705,7 @@ impl AcpHost {
             let result = match result {
                 Ok(result) => result,
                 Err(HarnessError::Run(RunError::Cancelled)) => {
-                    self.retain_cancelled_run(
+                    self.retain_run_for_next_prompt(
                         session_id,
                         &harness,
                         drive.resume_run_id().or(forwarded_run_id),
@@ -712,14 +713,26 @@ impl AcpHost {
                     .await;
                     return Ok("cancelled");
                 }
-                Err(e) => return Err(rpc_error(-32603, e.to_string())),
+                Err(e) => {
+                    let error = prompt_error(&e);
+                    if error.pointer("/data/shikigami/kind").is_some() {
+                        // A model failure ends the turn, not the conversation.
+                        self.retain_run_for_next_prompt(
+                            session_id,
+                            &harness,
+                            drive.resume_run_id().or(forwarded_run_id),
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
             };
             self.set_run_id(session_id, Some(result.run_id.clone()))
                 .await
                 .map_err(|e| rpc_error(-32603, e))?;
 
             if result.termination == RunTermination::Cancelled {
-                self.retain_cancelled_run(session_id, &harness, Some(result.run_id.clone()))
+                self.retain_run_for_next_prompt(session_id, &harness, Some(result.run_id.clone()))
                     .await;
                 return Ok("cancelled");
             }
@@ -1037,7 +1050,9 @@ impl AcpHost {
         self.persist(session_id, live)
     }
 
-    async fn retain_cancelled_run(
+    /// Parks a run whose turn ended early (cancelled, or the model failed) so
+    /// the session's next prompt continues it with its history.
+    async fn retain_run_for_next_prompt(
         &self,
         session_id: &str,
         harness: &Harness,
@@ -2740,6 +2755,21 @@ fn prompt_capabilities(model: &dyn ModelPort) -> Value {
     })
 }
 
+/// A failed `session/prompt` run. Model failures carry
+/// `data.shikigami.kind = "model"` so a client can say what failed in its own words.
+fn prompt_error(error: &HarnessError) -> Value {
+    let mut value = rpc_error(-32603, error.to_string());
+    if matches!(
+        error,
+        HarnessError::Model(_)
+            | HarnessError::Run(RunError::Model(_))
+            | HarnessError::Run(RunError::Governance(GovernanceError::Model(_)))
+    ) {
+        value["data"] = json!({ "shikigami": { "kind": "model" } });
+    }
+    value
+}
+
 fn rpc_error(code: i64, message: impl Into<String>) -> Value {
     json!({ "code": code, "message": message.into() })
 }
@@ -3886,6 +3916,81 @@ mod tests {
         assert!(
             checkpoint.content.is_some(),
             "attachment prompt must use a content run"
+        );
+    }
+
+    /// #615: a model failure on `session/prompt` says it is a model failure.
+    #[tokio::test]
+    async fn prompt_model_failure_is_marked_as_model() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), "[]");
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hello"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt["error"]["code"], -32603, "{prompt}");
+        assert_eq!(
+            prompt["error"]["data"]["shikigami"]["kind"], "model",
+            "{prompt}"
+        );
+    }
+
+    /// #615: after a model failure the next prompt continues the same run,
+    /// with the failed prompt still in its history.
+    #[tokio::test]
+    async fn prompt_after_model_failure_continues_the_run() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            // Fails until both prompts are in the run's history.
+            r#"[{"requires_context":["first-ask","again"],"content":"recovered"}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = |id: u64, text: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/prompt",
+                "params": { "sessionId": session_id, "prompt": [{"type":"text","text":text}] }
+            })
+        };
+        let failed = host.handle(prompt(3, "first-ask"), &client).await.unwrap();
+        assert_eq!(
+            failed["error"]["data"]["shikigami"]["kind"], "model",
+            "{failed}"
+        );
+        let retried = host.handle(prompt(4, "again"), &client).await.unwrap();
+        assert_eq!(rpc_ok(&retried)["stopReason"], "end_turn", "{retried}");
+        let updates = client.updates.lock().await;
+        assert!(
+            updates
+                .iter()
+                .any(|u| u["update"]["content"]["text"] == "recovered"),
+            "{updates:?}"
         );
     }
 

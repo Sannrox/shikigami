@@ -60,6 +60,9 @@ pub async fn run(harness: Harness) -> Result<(), String> {
     Ok(())
 }
 
+/// Leads a failed prompt whose host marked the failure as the model's.
+const MODEL_FAILED: &str = "The model did not answer. Check the model address and key in your settings, or run shikigami doctor. Your next prompt tries again.";
+
 /// Shown at launch when no model is configured and the built-in demo script answers.
 const DEMO_MODEL_NOTICE: &str = "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt, then stops. To use a real model, set [model] in a settings file and start with --config <file>.";
 
@@ -2033,9 +2036,15 @@ fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
     {
-        shared
-            .transcript
-            .push(TranscriptLine::System(err.to_string()));
+        let model_failed = resp
+            .and_then(|v| v.pointer("/error/data/shikigami/kind"))
+            .is_some_and(|kind| kind == "model");
+        let line = if model_failed {
+            format!("{MODEL_FAILED}\n{err}")
+        } else {
+            err.to_string()
+        };
+        shared.transcript.push(TranscriptLine::System(line));
         shared.status = "error".into();
         return;
     }
