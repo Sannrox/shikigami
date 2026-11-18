@@ -403,7 +403,9 @@ Facts the `tui-e2e` skill reads.
   network). Each test uses a new project directory and a new `--state`
   outside it: the TUI works in place, refuses a state root inside the
   workspace, and continues the last session of the directory it starts in.
-- Pseudo-terminal: no test drives the built binary in a pseudo-terminal yet.
+- Pseudo-terminal: `crates/shikigami-cli/tests/tui_pty.rs` spawns the built
+  binary on an `openpty` pair with `libc` and polls the captured bytes and
+  terminal modes with a bound. Extend it rather than adding a second driver.
 - Durable session: persisted sessions per directory (continue-last and
   `/resume`). Stage 6 applies to changes to how sessions are stored, loaded,
   or resumed.

@@ -34,6 +34,7 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 | Plan | Replaces the composer when a `plan` session update arrives; Ctrl-P toggles, Esc hides |
 | Cancel | Ctrl-C while a prompt is running sends `session/cancel` |
 | Quit | Ctrl-C when idle, Ctrl-D when idle, or `/exit` / `/quit` |
+| Signal | SIGTERM or SIGHUP cancels a running prompt like Ctrl-C, restores the terminal like a quit, then exits with the signal's status |
 
 Continue-last-in-cwd is fail closed: an unknown or unreadable previous session
 starts `session/new`. Resume and continue-last selection list text and
@@ -65,5 +66,10 @@ Deterministic in-process tests in `crates/shikigami-tui` drive the ACP mapping w
 TTY: mutating-tool park → permission dock → resume; continue-last-in-cwd
 load and fail-closed new session; `/resume` picker load, Esc, and fail-closed
 unknown id; plan dock from a `session/update`.
+
+`crates/shikigami-cli/tests/tui_pty.rs` runs the built binary in a
+pseudo-terminal and checks, from outside the process, that SIGTERM and SIGHUP
+leave the alternate screen, turn off mouse capture, bracketed paste, and raw
+mode, and show the cursor.
 
 Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md).
