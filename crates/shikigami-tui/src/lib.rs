@@ -3540,21 +3540,165 @@ mod tests {
     }
 
     fn drawn_text(session: &TuiSession) -> String {
-        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut out = drawn_rows(session, 80, 24).join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// One headless render at `width`x`height`, one string per row, trailing
+    /// spaces trimmed.
+    fn drawn_rows(session: &TuiSession, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, session)).unwrap();
         let buf = terminal.backend().buffer();
-        let area = buf.area();
-        let mut out = String::new();
-        for y in 0..area.height {
-            for x in 0..area.width {
-                if let Some(cell) = buf.cell((x, y)) {
-                    out.push_str(cell.symbol());
+        (0..height)
+            .map(|y| {
+                // A wide character owns the next cell too; read it once, as a
+                // terminal shows it.
+                let mut row = String::new();
+                let mut x = 0;
+                while x < width {
+                    let symbol = buf.cell((x, y)).map_or(" ", |cell| cell.symbol());
+                    row.push_str(symbol);
+                    x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+                }
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Screen rules every render test checks: nothing wider than the screen,
+    /// no control characters, no debug or JSON dumps of program values.
+    fn assert_screen_rules(rows: &[String], width: u16) {
+        let screen = rows.join("\n");
+        for row in rows {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(row.as_str()) <= width as usize,
+                "row wider than {width}: {row:?}\n{screen}"
+            );
+            assert!(
+                !row.chars().any(|ch| ch.is_control() && ch != '\t'),
+                "control character on screen: {row:?}"
+            );
+        }
+        for dump in ["Some(", "None", "{\"", "\\u{", "Err("] {
+            assert!(!screen.contains(dump), "{dump} on screen:\n{screen}");
+        }
+    }
+
+    /// At the narrow and short sizes the permission dock still shows both
+    /// answers, paging if it overflows, and the answer key still works.
+    #[tokio::test]
+    async fn permission_dock_stays_answerable_when_small() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        install_permission(&session, r#"{"path":"notes/todo.txt"}"#.into());
+        for (width, height) in [(80, 24), (40, 12), (20, 8)] {
+            session.lock_shared().dock_scroll = 0;
+            let mut seen = String::new();
+            // Page the dock until it stops moving; both answers must show on the way.
+            for _ in 0..8 {
+                let rows = drawn_rows(&session, width, height);
+                assert_screen_rules(&rows, width);
+                seen.push_str(&rows.join("\n"));
+                let before = session.lock_shared().dock_scroll;
+                handle_event(&session, Event::Key(page_key(KeyCode::PageDown)));
+                if session.lock_shared().dock_scroll == before {
+                    break;
                 }
             }
-            out.push('\n');
+            for hint in ["y allow", "n deny"] {
+                assert!(
+                    seen.contains(hint),
+                    "{hint} unreachable at {width}x{height}:\n{seen}"
+                );
+            }
         }
-        out
+        assert!(matches!(
+            handle_key(
+                &session,
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)
+            ),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().permission.is_none(), "n must answer");
+    }
+
+    /// A turn cancelled at the permission prompt, as the whole screen shows it.
+    #[tokio::test]
+    async fn cancelled_turn_screen() {
+        let dir = tempdir().unwrap();
+        let session = start_session(
+            &dir,
+            r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]}]"#,
+        )
+        .await;
+        session
+            .spawn_prompt("write the ok file".into())
+            .await
+            .unwrap();
+        wait_until(|| session.overlay_text().is_some()).await;
+        session.cancel();
+        let stop = session.wait_prompt().await;
+        apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+        let rows = drawn_rows(&session, 80, 24);
+        assert_screen_rules(&rows, 80);
+        let short_id = &session.session_id()["sess-".len()..][..8];
+        let screen = rows.join("\n").replace(short_id, "<id>");
+        let rule = "─".repeat(80);
+        let expected = format!(
+            "{}you  write the ok file\n\n\n· write_file  ok.txt\n{rule}\n>\n{rule}\n  cancelled  <id>  ^c quit  ^o tool  pgup/pgdn/wheel",
+            "\n".repeat(16)
+        );
+        assert_eq!(screen, expected);
+    }
+
+    /// CJK, emoji and one unbroken long line wrap inside the screen.
+    #[tokio::test]
+    async fn wide_and_long_lines_stay_inside_the_screen() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        {
+            let mut shared = session.lock_shared();
+            shared.transcript = vec![
+                TranscriptLine::User("雪の日 🌨️ を説明して".into()),
+                TranscriptLine::Assistant("x".repeat(300)),
+                TranscriptLine::Assistant("雪".repeat(70) + " 🎉🎉🎉 done"),
+            ];
+            shared.dirty = true;
+        }
+        // 39 columns is odd, so a wide character lands on the last column.
+        for (width, height) in [(80, 24), (39, 30), (40, 12), (39, 12)] {
+            let rows = drawn_rows(&session, width, height);
+            assert_screen_rules(&rows, width);
+            let screen = rows.join("\n");
+            assert!(
+                screen.contains("done"),
+                "the newest line is in view: {screen}"
+            );
+            if height < 24 {
+                continue;
+            }
+            // Tall enough for the whole transcript: wrapping keeps every character.
+            let xs: usize = rows
+                .iter()
+                .filter(|row| !row.is_empty() && row.chars().all(|c| c == 'x'))
+                .map(|row| row.len())
+                .sum();
+            assert_eq!(xs, 300, "{width}x{height}: {screen}");
+            assert_eq!(
+                screen.matches('雪').count(),
+                71,
+                "{width}x{height}: {screen}"
+            );
+            assert_eq!(
+                screen.matches('🎉').count(),
+                3,
+                "{width}x{height}: {screen}"
+            );
+            assert!(screen.contains("🌨"), "{width}x{height}: {screen}");
+        }
     }
 
     #[tokio::test]

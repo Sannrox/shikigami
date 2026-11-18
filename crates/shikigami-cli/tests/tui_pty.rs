@@ -140,18 +140,26 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// A TUI on an idle scripted session, with its own project and state directories.
-fn start_tui(dir: &tempfile::TempDir) -> PtyChild {
+/// A TUI on a scripted session, with its own project and state directories.
+/// `script` is the scripted model's JSON steps; `None` keeps the example's default.
+fn start_tui(dir: &tempfile::TempDir, script: Option<&str>) -> PtyChild {
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let config = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
+    let mut config = std::fs::read_to_string(example).unwrap();
+    if let Some(script) = script {
+        // The example ends in the [model] table.
+        config.push_str(&format!("script_json = '{script}'\n"));
+    }
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, config).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_shikigami"));
     cmd.current_dir(&project)
         .env("TERM", "xterm-256color")
         .env("LANG", "C.UTF-8")
         .env("NO_COLOR", "1")
         .arg("--config")
-        .arg(&config)
+        .arg(&config_path)
         .arg("--state")
         .arg(dir.path().join("state"))
         .arg("tui");
@@ -162,45 +170,109 @@ fn start_tui(dir: &tempfile::TempDir) -> PtyChild {
     tui
 }
 
+fn temp_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("tui-pty-{}-", std::process::id()))
+        .tempdir()
+        .unwrap()
+}
+
+/// Asserts that the bytes written after `before` restore the terminal and that
+/// the pty is back in cooked mode.
+fn assert_restored(tui: &PtyChild, before: usize, name: &str) {
+    let restore = [
+        (&b"\x1b[?1049l"[..], "leave alternate screen"),
+        (b"\x1b[?1000l", "mouse capture off"),
+        (b"\x1b[?2004l", "bracketed paste off"),
+        (b"\x1b[?25h", "cursor visible"),
+    ];
+    // The child has exited; give the reader thread a moment to drain the pty.
+    let start = Instant::now();
+    let after = loop {
+        let after = tui.output()[before..].to_vec();
+        if restore.iter().all(|(seq, _)| contains(&after, seq))
+            || start.elapsed() > Duration::from_secs(2)
+        {
+            break after;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    for (seq, what) in restore {
+        assert!(
+            contains(&after, seq),
+            "{name}: no {what}: {:?}",
+            lossy(&after)
+        );
+    }
+    assert!(tui.cooked(), "{name}: raw mode still on");
+}
+
+fn send(tui: &PtyChild, bytes: &[u8]) {
+    let n = unsafe { libc::write(tui.master.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+    assert_eq!(n, bytes.len() as isize, "write to pty");
+}
+
 /// #591: a termination signal restores the terminal the way ^c does and the
 /// process still reports that the signal ended it.
 #[test]
 fn termination_signal_restores_the_terminal() {
     for (signal, name) in [(libc::SIGTERM, "SIGTERM"), (libc::SIGHUP, "SIGHUP")] {
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("tui-pty-{}-", std::process::id()))
-            .tempdir()
-            .unwrap();
-        let mut tui = start_tui(&dir);
+        let dir = temp_dir();
+        let mut tui = start_tui(&dir, None);
         let before = tui.output().len();
         assert_eq!(unsafe { libc::kill(tui.child.id() as i32, signal) }, 0);
         let status = tui.wait_exit();
         assert_eq!(status.signal(), Some(signal), "{name}: {status}");
-
-        let restore = [
-            (&b"\x1b[?1049l"[..], "leave alternate screen"),
-            (b"\x1b[?1000l", "mouse capture off"),
-            (b"\x1b[?2004l", "bracketed paste off"),
-            (b"\x1b[?25h", "cursor visible"),
-        ];
-        // The child has exited; give the reader thread a moment to drain the pty.
-        let start = Instant::now();
-        let after = loop {
-            let after = tui.output()[before..].to_vec();
-            if restore.iter().all(|(seq, _)| contains(&after, seq))
-                || start.elapsed() > Duration::from_secs(2)
-            {
-                break after;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        for (seq, what) in restore {
-            assert!(
-                contains(&after, seq),
-                "{name}: no {what}: {:?}",
-                lossy(&after)
-            );
-        }
-        assert!(tui.cooked(), "{name}: raw mode still on");
+        assert_restored(&tui, before, name);
     }
+}
+
+/// #594: every way a person quits leaves a usable terminal and a clean exit.
+#[test]
+fn quit_keys_restore_the_terminal() {
+    for (keys, name) in [(&b"\x03"[..], "^c"), (b"\x04", "^d"), (b"/exit\r", "/exit")] {
+        let dir = temp_dir();
+        let mut tui = start_tui(&dir, None);
+        let before = tui.output().len();
+        send(&tui, keys);
+        let status = tui.wait_exit();
+        assert!(status.success(), "{name}: {status}");
+        assert_restored(&tui, before, name);
+    }
+}
+
+/// #594: model text that carries terminal escapes reaches the real terminal
+/// inert. It cannot retitle the window, clear the screen, recolor, or ring the bell.
+#[test]
+fn hostile_model_text_cannot_drive_the_terminal() {
+    let dir = temp_dir();
+    let script = r#"[{"content":"title\u001b]0;pwned\u0007 clear\u001b[2J red\u001b[31mRED bell\u0007 done-marker"}]"#;
+    let mut tui = start_tui(&dir, Some(script));
+    let before = tui.output().len();
+    send(&tui, b"say it\r");
+    tui.wait_for("the reply", |t| {
+        contains(&t.output()[before..], b"done-marker")
+    });
+    let after = tui.output()[before..].to_vec();
+    for (seq, what) in [
+        (&b"\x1b]0;pwned"[..], "window title"),
+        (b"\x1b[2J", "clear screen"),
+        (b"\x1b[31m", "red foreground"),
+        (b"\x07", "bell"),
+    ] {
+        assert!(
+            !contains(&after, seq),
+            "{what} reached the terminal: {:?}",
+            lossy(&after)
+        );
+    }
+    assert!(
+        contains(&after, b"RED"),
+        "visible text dropped: {:?}",
+        lossy(&after)
+    );
+    let before = tui.output().len();
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+    assert_restored(&tui, before, "^c after hostile text");
 }
