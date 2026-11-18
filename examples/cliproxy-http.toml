@@ -8,10 +8,16 @@
 #   cargo run --bin shikigami -- --config examples/cliproxy-http.toml tui
 #
 # `model` must be an id the gateway lists on GET /v1/models. Direct HTTP
-# `auto` still maps to gpt-4.1-mini; set an explicit id.
+# `auto` still maps to gpt-4.1-mini; set an explicit id, or override it
+# per command with `--model <id>`.
 #
-# For TUI over a project tree, set workspace.adapter = "inplace".
-# The CLI default state root is already outside cwd.
+# `run` and `tui` work on the current directory in place: edits land in your
+# files. The state root must stay outside that directory; the CLI default
+# already is. For a fresh, empty workspace per run instead, set
+# workspace.adapter = "directory".
+#
+# Bash stays off. To let the model run commands (tests, builds), set
+# tools.mode = "workspace_exec".
 version = 1
 
 [profile]
@@ -22,7 +28,7 @@ adapter = "local"
 fail_closed = false
 
 [workspace]
-adapter = "directory"
+adapter = "inplace"
 root = "."
 
 [network]

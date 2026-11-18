@@ -20,6 +20,35 @@ fn runs_without_diagnose_does_not_create_state_directories() {
     );
 }
 
+/// `runs <id>` prints the result like the other fields, not as debug output.
+#[test]
+fn runs_inspect_prints_success_as_plain_value() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let config = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
+    let out = cargo_bin_cmd!("shikigami")
+        .current_dir(dir.path())
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .args(["run", "demo", "--json"])
+        .output()
+        .expect("run");
+    assert!(out.status.success(), "{out:?}");
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).expect("run --json");
+    let run_id = result["run_id"].as_str().expect("run_id");
+
+    cargo_bin_cmd!("shikigami")
+        .args(["--state", state.to_str().unwrap(), "runs", run_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(" success=true "))
+        .stdout(predicate::str::contains("Some(").not());
+}
+
 #[test]
 fn runs_inspect_without_diagnose_does_not_create_state_directories() {
     let dir = tempdir().expect("tempdir");
