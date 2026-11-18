@@ -40,10 +40,11 @@ enum ServeIntake {
     long_about = None
 )]
 struct Cli {
-    /// Host state root. Default: platform user-state directory keyed by cwd.
+    /// Where sessions and runs are kept. Default: a per-folder directory under the platform user-state directory.
     #[arg(long, global = true, env = "SHIKIGAMI_STATE")]
     state: Option<PathBuf>,
 
+    /// Settings file (TOML). Without one, the built-in scripted demo model is used.
     #[arg(long, global = true, env = "SHIKIGAMI_CONFIG")]
     config: Option<PathBuf>,
 
@@ -206,10 +207,9 @@ enum Command {
     ///
     /// Evolving process host, same rank as `mcp`. Not freeze-core.
     Acp,
-    /// Interactive terminal host. ACP client of the in-process session. See docs/tui.md.
-    ///
-    /// Evolving process host, same rank as `mcp` / `acp`. Not freeze-core.
-    /// Bare `shikigami` stays usage/help.
+    // Evolving process host, same rank as `mcp` / `acp`. Not freeze-core.
+    // Bare `shikigami` stays usage/help.
+    /// Chat with an agent that works on the files in this folder. See docs/tui.md.
     Tui {
         /// Reopen the latest session in this folder instead of starting a new one.
         #[arg(long = "continue")]
