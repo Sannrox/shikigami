@@ -6,6 +6,7 @@
 //! completion, and artifact finalization. Engine remains the stable public
 //! construction interface.
 
+use crate::typed_report::TypedProfile;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,10 +153,7 @@ impl<'a> RunTransaction<'a> {
         let recovered_usage = recovered_content_terminal
             .as_ref()
             .map(|(terminal, _)| terminal.usage);
-        let finder_role = (self.engine.config.profile.name == SECURITY_FINDER_PROFILE)
-            .then_some(self.engine.config.security_finder.role.as_deref())
-            .flatten();
-        let triage = self.engine.config.profile.name == SECURITY_TRIAGE_PROFILE;
+        let typed = TypedProfile::of(&self.engine.config).map_err(RunError::Message)?;
         let stop = StopGate {
             request: &request,
             started,
@@ -165,190 +163,120 @@ impl<'a> RunTransaction<'a> {
         // A report recovered from the checkpoint may predate its `stop` check
         // (crash between the two), so the check runs again here.
         let mut gate_error = None;
-        let recovered_text_report =
-            match recovered_text_report(&session.messages, finder_role, triage) {
-                Some(report) if report.success => {
-                    match self
-                        .stop_gate(&stop, &mut session, &tools, &report.summary)
-                        .await
-                    {
-                        Ok(StopDecision::Finish) => Some((report, RunTermination::Completed)),
-                        Ok(StopDecision::Repair) => None,
-                        Ok(StopDecision::Fail(summary)) => Some((
-                            crate::tools::Report {
-                                summary,
-                                success: false,
-                                data: None,
-                            },
-                            RunTermination::Failed,
-                        )),
-                        Err(error) => {
-                            gate_error = Some(error);
-                            None
-                        }
+        let recovered_text_report = match recovered_text_report(&session.messages, typed) {
+            Some(report) if report.success => {
+                match self
+                    .stop_gate(&stop, &mut session, &tools, &report.summary)
+                    .await
+                {
+                    Ok(StopDecision::Finish) => Some((report, RunTermination::Completed)),
+                    Ok(StopDecision::Repair) => None,
+                    Ok(StopDecision::Fail(summary)) => Some((
+                        crate::tools::Report {
+                            summary,
+                            success: false,
+                            data: None,
+                        },
+                        RunTermination::Failed,
+                    )),
+                    Err(error) => {
+                        gate_error = Some(error);
+                        None
                     }
                 }
-                Some(report) => Some((report, RunTermination::Completed)),
-                None => None,
-            };
+            }
+            Some(report) => Some((report, RunTermination::Completed)),
+            None => None,
+        };
 
         // Ok(Some(park)) when parked (escalate or approval); Ok(None) when
         // finished normally.
-        let result: Result<Option<ParkInfo>, RunError> = if let Some((terminal, summary)) =
-            recovered_content_terminal
-        {
-            final_summary = if triage {
-                crate::security_triage::canonicalize_recovered_summary(&summary, terminal.success)
+        let result: Result<Option<ParkInfo>, RunError> =
+            if let Some((terminal, summary)) = recovered_content_terminal {
+                let report = match typed {
+                    Some(profile) => profile
+                        .recover(&summary, terminal.success)
+                        .map_err(RunError::Message)?,
+                    None => crate::tools::Report {
+                        summary,
+                        success: terminal.success,
+                        data: None,
+                    },
+                };
+                final_summary = report.summary;
+                final_data = report.data;
+                success = terminal.success;
+                termination = terminal.termination;
+                Ok(None)
+            } else if let Some(error) = gate_error {
+                Err(error)
+            } else if let Some((report, recovered_termination)) = recovered_text_report {
+                final_summary = report.summary;
+                final_data = report.data;
+                success = report.success;
+                termination = recovered_termination;
+                Ok(None)
+            } else if request.resume_plan == Some(super::PlanDecision::Reject) {
+                final_summary = "plan rejected".into();
+                success = false;
+                termination = RunTermination::Failed;
+                Ok(None)
             } else {
-                crate::security_finder::canonicalize_recovered_summary(
-                    &summary,
-                    terminal.success,
-                    finder_role,
-                )
-            }
-            .map_err(RunError::Message)?;
-            success = terminal.success;
-            termination = terminal.termination;
-            Ok(None)
-        } else if let Some(error) = gate_error {
-            Err(error)
-        } else if let Some((report, recovered_termination)) = recovered_text_report {
-            final_summary = report.summary;
-            final_data = report.data;
-            success = report.success;
-            termination = recovered_termination;
-            Ok(None)
-        } else if request.resume_plan == Some(super::PlanDecision::Reject) {
-            final_summary = "plan rejected".into();
-            success = false;
-            termination = RunTermination::Failed;
-            Ok(None)
-        } else {
-            async {
-                loop {
-                    let turn = match model_turns.next(&mut session).await {
-                        Err(RunError::MaxTurns(limit)) if request.session_wait => {
-                            let parked = ParkedState {
-                                reason: "max_turns".into(),
-                                question: String::new(),
-                                tool_call_id: String::new(),
-                                kind: ParkKind::PromptWait,
-                                allow_call_id: String::new(),
-                                plan_digest: String::new(),
-                            };
-                            pending_park = Some(parked.clone());
-                            session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
-                            termination = RunTermination::Parked;
-                            final_summary = format!("reached max_turns ({limit})");
-                            success = false;
-                            return Ok(Some(ParkInfo {
-                                reason: parked.reason,
-                                question: parked.question,
-                                tool_call_id: parked.tool_call_id,
-                                kind: ParkKind::PromptWait,
-                                approval_id: None,
-                                display_call_id: None,
-                                args_json: None,
-                                plan_digest: String::new(),
-                            }));
-                        }
-                        result => result?,
-                    };
-
-                    if turn.tool_calls.is_empty() {
-                        if replay.is_some() {
-                            return Err(RunError::Message(
-                                "replay requires the terminal `report` tool".into(),
-                            ));
-                        }
-                        if self.engine.config.profile.name == SECURITY_FINDER_PROFILE {
-                            return Err(RunError::Message(
-                                "profile `security-finder`: missing terminal `report`".into(),
-                            ));
-                        }
-                        if self.engine.config.profile.name == SECURITY_TRIAGE_PROFILE {
-                            return Err(RunError::Message(
-                                "profile `security-triage`: missing terminal `report`".into(),
-                            ));
-                        }
-                        final_summary = if turn.content.is_empty() {
-                            "model finished without tools".into()
-                        } else {
-                            turn.content
-                        };
-                        if !request.session_wait {
-                            match self
-                                .stop_gate(&stop, &mut session, &tools, &final_summary)
-                                .await?
-                            {
-                                StopDecision::Finish => {}
-                                StopDecision::Repair => continue,
-                                StopDecision::Fail(summary) => {
-                                    final_summary = summary;
-                                    success = false;
-                                    termination = RunTermination::Failed;
-                                    return Ok(None);
-                                }
+                async {
+                    loop {
+                        let turn = match model_turns.next(&mut session).await {
+                            Err(RunError::MaxTurns(limit)) if request.session_wait => {
+                                let parked = ParkedState {
+                                    reason: "max_turns".into(),
+                                    question: String::new(),
+                                    tool_call_id: String::new(),
+                                    kind: ParkKind::PromptWait,
+                                    allow_call_id: String::new(),
+                                    plan_digest: String::new(),
+                                };
+                                pending_park = Some(parked.clone());
+                                session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
+                                termination = RunTermination::Parked;
+                                final_summary = format!("reached max_turns ({limit})");
+                                success = false;
+                                return Ok(Some(ParkInfo {
+                                    reason: parked.reason,
+                                    question: parked.question,
+                                    tool_call_id: parked.tool_call_id,
+                                    kind: ParkKind::PromptWait,
+                                    approval_id: None,
+                                    display_call_id: None,
+                                    args_json: None,
+                                    plan_digest: String::new(),
+                                }));
                             }
-                        }
-                        success = true;
-                        if request.session_wait {
-                            let parked = ParkedState {
-                                reason: "end_turn".into(),
-                                question: String::new(),
-                                tool_call_id: String::new(),
-                                kind: ParkKind::PromptWait,
-                                allow_call_id: String::new(),
-                                plan_digest: String::new(),
-                            };
-                            pending_park = Some(parked.clone());
-                            session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
-                            termination = RunTermination::Parked;
-                            return Ok(Some(ParkInfo {
-                                reason: parked.reason,
-                                question: parked.question,
-                                tool_call_id: parked.tool_call_id,
-                                kind: ParkKind::PromptWait,
-                                approval_id: None,
-                                display_call_id: None,
-                                args_json: None,
-                                plan_digest: String::new(),
-                            }));
-                        }
-                        termination = RunTermination::Completed;
-                        if session.is_content() {
-                            session.mark_content_terminal(
-                                success,
-                                termination,
-                                &final_summary,
-                                model_turns.usage(),
-                            )?;
-                            session.save(tools.as_ref())?;
-                        }
-                        break;
-                    }
+                            result => result?,
+                        };
 
-                    let outcome = DurableToolBatch::new(
-                        self.engine,
-                        &request,
-                        started,
-                        timeout,
-                        &handle,
-                        Arc::clone(&tools),
-                        replay.is_some(),
-                    )
-                    .execute(&turn, &mut session, &mut pending_park, model_turns.usage())
-                    .await?;
-                    match outcome {
-                        ToolBatchOutcome::Continue => continue,
-                        ToolBatchOutcome::Completed {
-                            summary,
-                            success: report_success,
-                            data,
-                        } => {
-                            if report_success {
+                        if turn.tool_calls.is_empty() {
+                            if replay.is_some() {
+                                return Err(RunError::Message(
+                                    "replay requires the terminal `report` tool".into(),
+                                ));
+                            }
+                            if self.engine.config.profile.name == SECURITY_FINDER_PROFILE {
+                                return Err(RunError::Message(
+                                    "profile `security-finder`: missing terminal `report`".into(),
+                                ));
+                            }
+                            if self.engine.config.profile.name == SECURITY_TRIAGE_PROFILE {
+                                return Err(RunError::Message(
+                                    "profile `security-triage`: missing terminal `report`".into(),
+                                ));
+                            }
+                            final_summary = if turn.content.is_empty() {
+                                "model finished without tools".into()
+                            } else {
+                                turn.content
+                            };
+                            if !request.session_wait {
                                 match self
-                                    .stop_gate(&stop, &mut session, &tools, &summary)
+                                    .stop_gate(&stop, &mut session, &tools, &final_summary)
                                     .await?
                                 {
                                     StopDecision::Finish => {}
@@ -361,24 +289,94 @@ impl<'a> RunTransaction<'a> {
                                     }
                                 }
                             }
-                            final_summary = summary;
-                            final_data = data;
-                            success = report_success;
+                            success = true;
+                            if request.session_wait {
+                                let parked = ParkedState {
+                                    reason: "end_turn".into(),
+                                    question: String::new(),
+                                    tool_call_id: String::new(),
+                                    kind: ParkKind::PromptWait,
+                                    allow_call_id: String::new(),
+                                    plan_digest: String::new(),
+                                };
+                                pending_park = Some(parked.clone());
+                                session.save_recoverable(Some(parked.clone()), tools.as_ref())?;
+                                termination = RunTermination::Parked;
+                                return Ok(Some(ParkInfo {
+                                    reason: parked.reason,
+                                    question: parked.question,
+                                    tool_call_id: parked.tool_call_id,
+                                    kind: ParkKind::PromptWait,
+                                    approval_id: None,
+                                    display_call_id: None,
+                                    args_json: None,
+                                    plan_digest: String::new(),
+                                }));
+                            }
                             termination = RunTermination::Completed;
-                            return Ok(None);
+                            if session.is_content() {
+                                session.mark_content_terminal(
+                                    success,
+                                    termination,
+                                    &final_summary,
+                                    model_turns.usage(),
+                                )?;
+                                session.save(tools.as_ref())?;
+                            }
+                            break;
                         }
-                        ToolBatchOutcome::Parked { info, summary } => {
-                            final_summary = summary;
-                            success = false;
-                            termination = RunTermination::Parked;
-                            return Ok(Some(info));
+
+                        let outcome = DurableToolBatch::new(
+                            self.engine,
+                            &request,
+                            started,
+                            timeout,
+                            &handle,
+                            Arc::clone(&tools),
+                            replay.is_some(),
+                        )
+                        .execute(&turn, &mut session, &mut pending_park, model_turns.usage())
+                        .await?;
+                        match outcome {
+                            ToolBatchOutcome::Continue => continue,
+                            ToolBatchOutcome::Completed {
+                                summary,
+                                success: report_success,
+                                data,
+                            } => {
+                                if report_success {
+                                    match self
+                                        .stop_gate(&stop, &mut session, &tools, &summary)
+                                        .await?
+                                    {
+                                        StopDecision::Finish => {}
+                                        StopDecision::Repair => continue,
+                                        StopDecision::Fail(summary) => {
+                                            final_summary = summary;
+                                            success = false;
+                                            termination = RunTermination::Failed;
+                                            return Ok(None);
+                                        }
+                                    }
+                                }
+                                final_summary = summary;
+                                final_data = data;
+                                success = report_success;
+                                termination = RunTermination::Completed;
+                                return Ok(None);
+                            }
+                            ToolBatchOutcome::Parked { info, summary } => {
+                                final_summary = summary;
+                                success = false;
+                                termination = RunTermination::Parked;
+                                return Ok(Some(info));
+                            }
                         }
                     }
+                    Ok(None)
                 }
-                Ok(None)
-            }
-            .await
-        };
+                .await
+            };
 
         let park_info = match &result {
             Ok(park) => park.clone(),
@@ -462,7 +460,16 @@ impl<'a> RunTransaction<'a> {
             self.engine.config.model.output_usd_micros_per_mtok,
         );
         if session.is_content() && termination != RunTermination::Parked {
-            session.mark_content_terminal(success, termination, &final_summary, usage)?;
+            // Bound to the stored record the report tool appended.
+            let stored = crate::typed_report::stored_text(
+                &self.engine.config,
+                &crate::tools::Report {
+                    summary: final_summary.clone(),
+                    success,
+                    data: final_data.clone(),
+                },
+            );
+            session.mark_content_terminal(success, termination, &stored, usage)?;
             session.save(tools.as_ref())?;
         }
 
@@ -976,12 +983,11 @@ async fn wait_for_child_idle(mut rx: watch::Receiver<bool>, already_idle: bool) 
 }
 
 /// The terminal `report` the checkpoint already holds, when the last turn is
-/// one successfully executed `report` call. Typed profiles get their
-/// canonical summary back.
+/// one successfully executed `report` call. A typed profile rebuilds its
+/// canonical report from the stored record.
 fn recovered_text_report(
     messages: &[ChatMessage],
-    finder_role: Option<&str>,
-    triage: bool,
+    typed: Option<TypedProfile<'_>>,
 ) -> Option<crate::tools::Report> {
     let assistant_idx = messages
         .iter()
@@ -998,35 +1004,20 @@ fn recovered_text_report(
     if tool.role != "tool" || tool.tool_call_id != call.id || assistant_idx + 2 != messages.len() {
         return None;
     }
-    let mut report: crate::tools::Report = serde_json::from_str(&call.args_json).ok()?;
-    let canonical = |summary: &str| {
-        if triage {
-            crate::security_triage::canonicalize_report(summary).ok()
-        } else {
-            crate::security_finder::canonicalize_report(summary, finder_role?).ok()
-        }
-    };
-    let typed = triage || finder_role.is_some();
+    let report: crate::tools::Report = serde_json::from_str(&call.args_json).ok()?;
     // A matching tool-call id is not enough: denied, hook-blocked, and failed
     // executions also append a tool message. Successful `report` results use
     // this prefix; anything else must resume through the normal turn loop.
-    if tool.content == format!("report: {}", report.summary) {
-        if typed && report.success {
-            report.summary = canonical(&report.summary)?;
-        }
-        return Some(report);
+    let stored = tool.content.strip_prefix("report: ")?;
+    match typed {
+        // Typed profiles store the whole canonical report as JSON. A record
+        // in an older form does not parse and the turn is planned again.
+        Some(profile) if report.success => profile
+            .recover(stored, true)
+            .ok()
+            .filter(|recovered| recovered.summary == report.summary),
+        _ => (stored == report.summary).then_some(report),
     }
-    // Typed profiles stamp the canonical summary into the tool result, not the
-    // call args.
-    if !typed || !report.success {
-        return None;
-    }
-    let summary = canonical(&report.summary)?;
-    if tool.content != format!("report: {summary}") {
-        return None;
-    }
-    report.summary = summary;
-    Some(report)
 }
 
 fn projected_summary(content_run: bool, summary: &str) -> String {
@@ -1395,7 +1386,7 @@ mod tests {
             },
         ];
         // A crash after the report keeps its structured answer.
-        let report = recovered_text_report(&messages, None, false).unwrap();
+        let report = recovered_text_report(&messages, None).unwrap();
         assert!(report.success);
         assert_eq!(report.summary, "done");
         assert_eq!(report.data.unwrap()["proposal"], "p-1");
@@ -1413,7 +1404,7 @@ mod tests {
                 args_json: r#"{"summary":"done","success":true}"#.into(),
             }],
         }];
-        assert_eq!(recovered_text_report(&messages, None, false), None);
+        assert_eq!(recovered_text_report(&messages, None), None);
     }
 
     #[test]
@@ -1436,12 +1427,12 @@ mod tests {
                 tool_calls: vec![],
             },
         ];
-        assert_eq!(recovered_text_report(&messages, None, false), None);
+        assert_eq!(recovered_text_report(&messages, None), None);
     }
 
     #[test]
-    fn recovered_text_report_recognizes_a_canonicalized_security_finder_report() {
-        let original = serde_json::json!({
+    fn recovered_text_report_rebuilds_a_typed_report_from_its_stored_record() {
+        let verdict = serde_json::json!({
             "package": crate::security_finder::PACKAGE_ID,
             "role": crate::security_finder::ROLE_DEPENDENCY_ADVISORY,
             "coverage": {"complete": true, "summary": "Reviewed lockfile."},
@@ -1454,51 +1445,58 @@ mod tests {
                 "finding_class": "vulnerable-dependency",
             }],
             "hypotheses": []
-        })
-        .to_string();
-        let canonical = crate::security_finder::canonicalize_report(
-            &original,
-            crate::security_finder::ROLE_DEPENDENCY_ADVISORY,
-        )
-        .unwrap();
-        assert_ne!(original, canonical);
-        let messages = vec![
-            ChatMessage {
-                role: "assistant".into(),
-                content: String::new(),
-                tool_call_id: String::new(),
-                tool_calls: vec![crate::model::ToolCall {
-                    id: "call_0".into(),
-                    name: "report".into(),
-                    args_json: serde_json::json!({
-                        "summary": original,
-                        "success": true
-                    })
-                    .to_string(),
-                }],
-            },
-            ChatMessage {
-                role: "tool".into(),
-                content: format!("report: {canonical}"),
-                tool_call_id: "call_0".into(),
-                tool_calls: vec![],
-            },
-        ];
+        });
+        let args = serde_json::json!({
+            "summary": "one finding",
+            "success": true,
+            "data": verdict,
+        });
+        let advisory = TypedProfile::Finder {
+            role: crate::security_finder::ROLE_DEPENDENCY_ADVISORY,
+        };
+        let mut canonical: crate::tools::Report = serde_json::from_value(args.clone()).unwrap();
+        advisory.canonicalize(&mut canonical).unwrap();
+        assert_ne!(canonical.data.as_ref(), verdict.as_object());
+        let messages = |stored: String| {
+            vec![
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_call_id: String::new(),
+                    tool_calls: vec![crate::model::ToolCall {
+                        id: "call_0".into(),
+                        name: "report".into(),
+                        args_json: args.to_string(),
+                    }],
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    content: format!("report: {stored}"),
+                    tool_call_id: "call_0".into(),
+                    tool_calls: vec![],
+                },
+            ]
+        };
+        let stored = serde_json::to_string(&canonical).unwrap();
         assert_eq!(
-            recovered_text_report(
-                &messages,
-                Some(crate::security_finder::ROLE_DEPENDENCY_ADVISORY),
-                false
-            )
-            .map(|report| (report.success, report.summary)),
-            Some((true, canonical.clone()))
+            recovered_text_report(&messages(stored.clone()), Some(advisory)),
+            Some(canonical.clone())
         );
+        let boundary = TypedProfile::Finder {
+            role: crate::security_finder::ROLE_AUTHORIZATION_BOUNDARY,
+        };
         assert_eq!(
-            recovered_text_report(
-                &messages,
-                Some(crate::security_finder::ROLE_AUTHORIZATION_BOUNDARY),
-                false
-            ),
+            recovered_text_report(&messages(stored), Some(boundary)),
+            None
+        );
+        // A record in the previous form (the verdict alone) is planned again.
+        let previous = canonical
+            .data
+            .map(serde_json::Value::Object)
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            recovered_text_report(&messages(previous), Some(advisory)),
             None
         );
     }

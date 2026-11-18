@@ -11,7 +11,6 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::checkpoint::Checkpoint;
-use crate::config::{SECURITY_FINDER_PROFILE, SECURITY_TRIAGE_PROFILE};
 use crate::content::{
     ContentRunRequestV1, initial_messages_match, load_sidecar, project_bounded_text,
     resolve_accepted, resolve_terminal_summary, validate_messages,
@@ -216,19 +215,17 @@ impl<'a> RunSupervision<'a> {
             .await
             .map_err(|error| RunError::Message(error.to_string()))?
             .ok_or_else(|| RunError::Message("content terminal summary is missing".into()))?;
-        let finder_role = (self.engine.config.profile.name == SECURITY_FINDER_PROFILE)
-            .then_some(self.engine.config.security_finder.role.as_deref())
-            .flatten();
-        let summary = if self.engine.config.profile.name == SECURITY_TRIAGE_PROFILE {
-            crate::security_triage::canonicalize_recovered_summary(&summary, terminal.success)
-        } else {
-            crate::security_finder::canonicalize_recovered_summary(
-                &summary,
-                terminal.success,
-                finder_role,
-            )
-        }
-        .map_err(RunError::Message)?;
+        let (summary, data) = match crate::typed_report::TypedProfile::of(&self.engine.config)
+            .map_err(RunError::Message)?
+        {
+            Some(profile) => {
+                let report = profile
+                    .recover(&summary, terminal.success)
+                    .map_err(RunError::Message)?;
+                (report.summary, report.data)
+            }
+            None => (summary, None),
+        };
         let cost = CostEstimate::from_usage_and_rates(
             terminal.usage,
             self.engine.config.model.input_usd_micros_per_mtok,
@@ -238,7 +235,7 @@ impl<'a> RunSupervision<'a> {
             run_id: run_id.into(),
             success: terminal.success,
             summary,
-            data: None,
+            data,
             turns: sidecar.completed_turns,
             workspace: checkpoint.workspace,
             artifact_dir: terminal

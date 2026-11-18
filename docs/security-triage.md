@@ -25,8 +25,10 @@ The `site-agent` bounds apply, plus a typed verdict and the triage skill.
 
 ## Output
 
-The only output is the final `report`. Its `summary` is one JSON object
-matching `pkg:security.exposure-verdict/v1`. Measured facts (component,
+The only output is the final `report`. Its `data` is one JSON object
+matching `pkg:security.exposure-verdict/v1`, and its `summary` is plain
+text. The verdict reaches the run result, `run.json`, and governed harvest
+as `data`. A successful report without valid `data` is refused. Measured facts (component,
 verdict, reachable markings, evidence) stay out of `hypotheses`.
 
 A finding on a component that can reach marked data must carry those

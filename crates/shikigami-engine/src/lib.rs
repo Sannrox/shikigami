@@ -32,5 +32,6 @@ pub mod state;
 pub mod tools;
 pub mod tracing_export;
 pub mod transcript;
+mod typed_report;
 pub mod worker_lifecycle;
 pub mod workspace;

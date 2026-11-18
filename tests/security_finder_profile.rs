@@ -81,8 +81,9 @@ async fn run(
     (result, events)
 }
 
-fn report_turn(summary: &serde_json::Value) -> serde_json::Value {
-    let args = serde_json::json!({"summary": summary.to_string(), "success": true});
+/// A `report` turn carrying the typed result in `data`.
+fn report_turn(data: &serde_json::Value) -> serde_json::Value {
+    let args = serde_json::json!({"summary": "typed result", "success": true, "data": data});
     serde_json::json!({"tool_calls": [{"name": "report", "args_json": args.to_string()}]})
 }
 
@@ -91,7 +92,8 @@ fn tool_turn(name: &str, args: serde_json::Value) -> serde_json::Value {
 }
 
 fn parsed_report(result: &shikigami::RunResult) -> FinderReport {
-    serde_json::from_str(&result.summary).unwrap()
+    assert_eq!(result.summary, "typed result");
+    serde_json::from_value(serde_json::Value::Object(result.data.clone().unwrap())).unwrap()
 }
 
 #[tokio::test]
