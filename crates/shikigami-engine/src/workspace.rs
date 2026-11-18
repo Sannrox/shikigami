@@ -702,10 +702,37 @@ fn path_is_within(parent: &Path, child: &Path) -> bool {
     let Ok(parent) = parent.canonicalize() else {
         return false;
     };
-    let Ok(child) = child.canonicalize() else {
-        return child.starts_with(&parent);
-    };
-    child.starts_with(&parent)
+    canonical_through_existing(child).is_some_and(|child| child.starts_with(&parent))
+}
+
+/// `path` made absolute and canonical through its nearest existing ancestor,
+/// so a directory that does not exist yet still compares by where it would be.
+fn canonical_through_existing(path: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(path).ok()?;
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return Some(
+                rest.iter()
+                    .rev()
+                    .fold(canonical, |acc, part| acc.join(part)),
+            );
+        }
+        rest.push(existing.file_name()?.to_owned());
+        existing = existing.parent()?;
+    }
+}
+
+/// Refuses a state root inside `project`, for a host that edits the project
+/// in place, before anything is written to either.
+pub fn refuse_state_inside(project: &Path, state: &Path) -> Result<(), WorkspaceError> {
+    if path_is_within(project, state) {
+        return Err(WorkspaceError::StateInsideWorkspace {
+            workspace: project.canonicalize()?,
+        });
+    }
+    Ok(())
 }
 
 impl WorkspacePort for InPlaceDirectoryWorkspace {
