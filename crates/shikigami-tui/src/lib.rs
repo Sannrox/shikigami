@@ -2913,18 +2913,16 @@ mod tests {
         apply_prompt_result(
             &mut shared,
             Some(&json!({
-                "error": { "message": "inplace workspace must not contain the harness state directory" }
+                "error": { "message": "the state directory is inside the project /p; set --state or SHIKIGAMI_STATE to a directory outside it" }
             })),
         );
         assert_eq!(shared.status, "error");
-        assert!(
-            shared.transcript.iter().any(
-                |line| matches!(line, TranscriptLine::System(text) if text.contains("inplace"))
-            )
-        );
+        assert!(shared.transcript.iter().any(
+            |line| matches!(line, TranscriptLine::System(text) if text.contains("state directory"))
+        ));
         let footer = status_line("sess-c0fa033e-aaaa", &shared, 40);
         assert!(footer.contains("error"));
-        assert!(!footer.contains("inplace"));
+        assert!(!footer.contains("state directory"));
         assert!(footer.chars().count() <= 40);
     }
 
