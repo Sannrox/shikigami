@@ -431,7 +431,10 @@ impl AcpHost {
             "cwd": live.cwd.display().to_string(),
         });
         if let Some(interrupted) = interrupted {
-            result["_meta"] = json!({ "shikigami": { "interrupted": interrupted } });
+            result["_meta"]["shikigami"]["interrupted"] = interrupted;
+        }
+        if let Some(run_id) = live.run_id {
+            result["_meta"]["shikigami"]["runId"] = json!(run_id);
         }
         Ok(result)
     }
@@ -652,7 +655,12 @@ impl AcpHost {
             let stop = self
                 .drive_prompt(&session_id, harness, &mut drive, client, sink, &mut events)
                 .await?;
-            Ok(json!({ "stopReason": stop }))
+            let mut result = json!({ "stopReason": stop });
+            // The run that `shikigami runs` and `shikigami export` accept for this session.
+            if let Some(run_id) = self.session_run_id(&session_id).await {
+                result["_meta"]["shikigami"]["runId"] = json!(run_id);
+            }
+            Ok(result)
         }
         .await;
         if outcome.is_err() {
@@ -1010,6 +1018,10 @@ impl AcpHost {
     /// continue-last-in-cwd path (`session/load`, fail closed → `session/new`).
     pub fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
         self.session_ids_for_cwd(cwd).into_iter().next()
+    }
+
+    async fn session_run_id(&self, session_id: &str) -> Option<String> {
+        self.sessions.lock().await.get(session_id)?.run_id.clone()
     }
 
     async fn set_run_id(&self, session_id: &str, run_id: Option<String>) -> Result<(), String> {
@@ -3875,6 +3887,57 @@ mod tests {
             checkpoint.content.is_some(),
             "attachment prompt must use a content run"
         );
+    }
+
+    /// #601: prompt and load results name the run `shikigami runs` and
+    /// `export` accept, and a restarted host reports the same run.
+    #[tokio::test]
+    async fn prompt_and_load_report_the_session_run() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hello"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let run_id = rpc_ok(&prompt)["_meta"]["shikigami"]["runId"]
+            .as_str()
+            .expect("prompt result names the run")
+            .to_string();
+        assert!(Checkpoint::load(&dir.path().join("state/runs"), &run_id).is_ok());
+
+        let restarted = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let _ = init_and_new(&restarted, &client, &cwd).await;
+        let loaded = restarted
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&loaded)["_meta"]["shikigami"]["runId"], run_id);
     }
 
     #[tokio::test]

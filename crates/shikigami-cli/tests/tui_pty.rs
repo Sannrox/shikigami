@@ -276,3 +276,44 @@ fn hostile_model_text_cannot_drive_the_terminal() {
     assert!(tui.wait_exit().success());
     assert_restored(&tui, before, "^c after hostile text");
 }
+
+/// #601: the run id `/run` prints, passed unchanged to `shikigami export`,
+/// yields this session's transcript.
+#[test]
+fn run_id_on_screen_exports_the_session() {
+    let dir = temp_dir();
+    let mut tui = start_tui(&dir, Some(r#"[{"content":"exported-reply"}]"#));
+    send(&tui, b"hello\r");
+    tui.wait_for("the reply", |t| contains(&t.output(), b"exported-reply"));
+    let before = tui.output().len();
+    send(&tui, b"/run\r");
+    tui.wait_for("the run line", |t| {
+        contains(&t.output()[before..], b"shikigami export ")
+    });
+    let screen = lossy(&tui.output()[before..]);
+    let run_id: String = screen
+        .split("shikigami export ")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    assert!(!run_id.is_empty(), "{screen:?}");
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+
+    let export = Command::new(env!("CARGO_BIN_EXE_shikigami"))
+        .current_dir(dir.path().join("project"))
+        .arg("--config")
+        .arg(dir.path().join("config.toml"))
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("export")
+        .arg(&run_id)
+        .output()
+        .unwrap();
+    let stdout = lossy(&export.stdout);
+    assert!(export.status.success(), "{}", lossy(&export.stderr));
+    assert!(stdout.contains("hello"), "{stdout}");
+    assert!(stdout.contains("exported-reply"), "{stdout}");
+}
