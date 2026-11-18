@@ -137,6 +137,13 @@ pub enum ModelError {
     Json(#[from] serde_json::Error),
     #[error("http: {0}")]
     Http(String),
+    /// The provider answered with a non-success status (`text` is e.g.
+    /// `402 Payment Required`).
+    #[error("http: model provider returned {text}")]
+    ProviderStatus { code: u16, text: String },
+    /// The request never reached the provider: refused connection or timeout.
+    #[error("http: {0}")]
+    Unreachable(String),
 }
 
 #[async_trait]
