@@ -72,4 +72,4 @@ pseudo-terminal and checks, from outside the process, that SIGTERM and SIGHUP
 leave the alternate screen, turn off mouse capture, bracketed paste, and raw
 mode, and show the cursor.
 
-Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md).
+Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md). Customization (keys, colors, status line) is declarative and user-level only: [ADR 0023](decisions/0023-tui-customization.md).
