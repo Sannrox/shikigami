@@ -522,10 +522,14 @@ async fn run() -> anyhow::Result<()> {
                         println!("{}", serde_json::to_string_pretty(&record)?);
                     } else {
                         human_println!(
-                            "run {} status={} success={:?} turns={} termination={} artifacts={}",
+                            "run {} status={} success={} turns={} termination={} artifacts={}",
                             record.run_id,
                             record.status,
-                            record.success,
+                            record.success.map_or("-", |success| if success {
+                                "true"
+                            } else {
+                                "false"
+                            }),
                             record.turns,
                             record.termination.as_deref().unwrap_or("-"),
                             record.artifact_dir.as_deref().unwrap_or("-"),
