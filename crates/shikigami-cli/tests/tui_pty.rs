@@ -207,6 +207,14 @@ fn assert_restored(tui: &PtyChild, before: usize, name: &str) {
     assert!(tui.cooked(), "{name}: raw mode still on");
 }
 
+/// Waits until the turn started after `before` has finished, so ^c quits
+/// instead of cancelling a turn that is still settling.
+fn wait_turn_done(tui: &mut PtyChild, before: usize) {
+    tui.wait_for("the finished turn", |t| {
+        contains(&t.output()[before..], b"end_turn")
+    });
+}
+
 fn send(tui: &PtyChild, bytes: &[u8]) {
     let n = unsafe { libc::write(tui.master.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
     assert_eq!(n, bytes.len() as isize, "write to pty");
@@ -253,6 +261,7 @@ fn hostile_model_text_cannot_drive_the_terminal() {
     tui.wait_for("the reply", |t| {
         contains(&t.output()[before..], b"done-marker")
     });
+    wait_turn_done(&mut tui, before);
     let after = tui.output()[before..].to_vec();
     for (seq, what) in [
         (&b"\x1b]0;pwned"[..], "window title"),
@@ -285,6 +294,7 @@ fn run_id_on_screen_exports_the_session() {
     let mut tui = start_tui(&dir, Some(r#"[{"content":"exported-reply"}]"#));
     send(&tui, b"hello\r");
     tui.wait_for("the reply", |t| contains(&t.output(), b"exported-reply"));
+    wait_turn_done(&mut tui, 0);
     let before = tui.output().len();
     send(&tui, b"/run\r");
     tui.wait_for("the run line", |t| {
@@ -316,4 +326,56 @@ fn run_id_on_screen_exports_the_session() {
     assert!(export.status.success(), "{}", lossy(&export.stderr));
     assert!(stdout.contains("hello"), "{stdout}");
     assert!(stdout.contains("exported-reply"), "{stdout}");
+}
+
+/// #602: with no model configured the built-in demo answers, and launch says
+/// so before the first prompt; a configured model shows no such line.
+#[test]
+fn launch_names_the_demo_model() {
+    let dir = temp_dir();
+    let mut tui = start_tui(&dir, None);
+    tui.wait_for("the demo notice", |t| {
+        contains(&t.output(), b"No model configured")
+    });
+
+    let dir = temp_dir();
+    let mut tui = start_tui(&dir, Some(r#"[{"content":"configured-reply"}]"#));
+    send(&tui, b"hi\r");
+    tui.wait_for("the reply", |t| contains(&t.output(), b"configured-reply"));
+    assert!(
+        !contains(&tui.output(), b"No model configured"),
+        "{:?}",
+        lossy(&tui.output())
+    );
+}
+
+/// #602: an unset key variable stops launch with the variable and the fix.
+#[test]
+fn missing_model_key_names_the_variable_to_set() {
+    let dir = temp_dir();
+    let var = format!("SHIKIGAMI_TEST_UNSET_KEY_{}", std::process::id());
+    let config = dir.path().join("http.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "version = 1\n[model]\nadapter = \"http\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key_env = \"{var}\"\n"
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_shikigami"))
+        .current_dir(dir.path())
+        .env_remove(&var)
+        .arg("--config")
+        .arg(&config)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("tui")
+        .output()
+        .unwrap();
+    let stderr = lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains(&format!("set {var} in the environment")),
+        "{stderr}"
+    );
 }
