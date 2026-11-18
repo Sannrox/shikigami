@@ -1061,6 +1061,22 @@ impl AcpHost {
         found
     }
 
+    /// Ids from [`Self::sessions_for_cwd`]; prefer that, it carries the summary.
+    pub fn session_ids_for_cwd(&self, cwd: &Path) -> Vec<String> {
+        self.sessions_for_cwd(cwd)
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect()
+    }
+
+    /// First id from [`Self::sessions_for_cwd`].
+    pub fn last_session_id_for_cwd(&self, cwd: &Path) -> Option<String> {
+        self.sessions_for_cwd(cwd)
+            .into_iter()
+            .next()
+            .map(|session| session.session_id)
+    }
+
     async fn session_run_id(&self, session_id: &str) -> Option<String> {
         self.sessions.lock().await.get(session_id)?.run_id.clone()
     }

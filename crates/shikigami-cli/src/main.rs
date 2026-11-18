@@ -935,9 +935,12 @@ async fn run() -> anyhow::Result<()> {
                 model,
                 cli.preset.as_deref(),
             )?;
-            shikigami_tui::run(harness, continue_last)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let result = if continue_last {
+                shikigami_tui::run_continuing(harness).await
+            } else {
+                shikigami_tui::run(harness).await
+            };
+            result.map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Export { run_id, output } => {
             let harness = Harness::resolve_with_preset(

@@ -35,9 +35,17 @@ use shikigami::acp::{AcpClient, AcpHost, SessionSummary};
 use shikigami::harness::Harness;
 use shikigami::identity::{PRODUCT, VERSION};
 
-/// Run the interactive host on a real terminal until quit. Starts a new
-/// session unless `continue_last` asks for the latest one in this folder.
-pub async fn run(harness: Harness, continue_last: bool) -> Result<(), String> {
+/// Run the interactive host on a real terminal until quit, in a new session.
+pub async fn run(harness: Harness) -> Result<(), String> {
+    run_terminal_host(harness, false).await
+}
+
+/// `run`, but reopening the latest session in this folder (`--continue`).
+pub async fn run_continuing(harness: Harness) -> Result<(), String> {
+    run_terminal_host(harness, true).await
+}
+
+async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), String> {
     if !stdin().is_terminal() || !stdout().is_terminal() {
         return Err("shikigami tui requires a terminal".into());
     }
