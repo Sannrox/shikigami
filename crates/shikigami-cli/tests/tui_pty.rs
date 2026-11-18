@@ -214,10 +214,11 @@ fn assert_restored(tui: &PtyChild, before: usize, name: &str) {
 }
 
 /// Waits until the turn started after `before` has finished, so ^c quits
-/// instead of cancelling a turn that is still settling.
+/// instead of cancelling a turn that is still settling. Keys on the fixed
+/// terminal status signal: the footer redraw only writes the cells that changed.
 fn wait_turn_done(tui: &mut PtyChild, before: usize) {
     tui.wait_for("the finished turn", |t| {
-        contains(&t.output()[before..], b"end_turn")
+        contains(&t.output()[before..], b"\x1b]7501;state=done")
     });
 }
 
