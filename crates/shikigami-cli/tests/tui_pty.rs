@@ -413,6 +413,49 @@ fn run_id_on_screen_exports_the_session() {
     assert!(stdout.contains("exported-reply"), "{stdout}");
 }
 
+/// #603: `[tui.keys]` rebinds an action on the real terminal, and a bad
+/// entry refuses launch with the entry named.
+#[test]
+fn tui_keys_rebind_and_a_bad_entry_refuses_launch() {
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
+    let base = std::fs::read_to_string(example).unwrap();
+
+    let dir = temp_dir();
+    let mut tui = start_tui_with(
+        &dir,
+        &format!("{base}\n[tui.keys]\ninterrupt = \"ctrl+g\"\n"),
+        &[],
+    );
+    tui.wait_for("the rebound footer", |t| contains(&t.output(), b"^g quit"));
+    send(&tui, b"\x07");
+    assert!(tui.wait_exit().success());
+
+    let dir = temp_dir();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!("{base}\n[tui.keys]\ntoggle_plna = \"ctrl+g\"\n"),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_shikigami"))
+        .current_dir(&project)
+        .arg("--config")
+        .arg(&config)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("tui")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = lossy(&out.stderr);
+    assert!(
+        stderr.contains("tui.keys.toggle_plna: unknown action"),
+        "{stderr}"
+    );
+}
+
 /// #602: with no model configured the built-in demo answers, and launch says
 /// so before the first prompt; a configured model shows no such line.
 #[test]

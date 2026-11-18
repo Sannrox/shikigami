@@ -500,6 +500,52 @@ hooks. See [hooks.md](hooks.md).
 | `timeout_ms` | `5000` | Kill after this duration (capped at 120s; `stop` at 1h) |
 | `fail_closed` | `false` | Fail the tool/run on hook failure or timeout |
 
+### `[tui]`
+
+Key bindings and colors for `shikigami tui`
+([ADR 0023](decisions/0023-tui-customization.md)). Like every setting, they
+come only from the settings file you chose. A `shikigami.toml` in the project
+is never loaded implicitly, so a cloned repository cannot rebind keys. An
+unknown action or role, a key that is not `ctrl+<letter>` or `alt+<letter>`,
+an invalid color, or two actions on one key stops launch with the entry named.
+
+```toml
+[tui.keys]
+toggle_plan = "alt+p"
+interrupt = "ctrl+g"
+
+[tui.colors]
+muted = "#8a8a8a"
+selected = "cyan"
+```
+
+`[tui.keys]` maps an action to a key. Unlisted actions keep their default.
+`ctrl+m`, `ctrl+i`, and `ctrl+h` are refused because terminals send them as
+Enter, Tab, and Backspace.
+
+| Action | Default | Does |
+| --- | --- | --- |
+| `interrupt` | `ctrl+c` | Cancel the running prompt, or quit when idle |
+| `quit` | `ctrl+d` | Quit when idle |
+| `toggle_plan` | `ctrl+p` | Show or hide the plan |
+| `toggle_tool` | `ctrl+o` | Expand or collapse the last tool line |
+| `copy` | `ctrl+y` | Copy the last answer (OSC 52) |
+| `scroll_line_up` | `ctrl+k` | Scroll the transcript one row up |
+| `scroll_line_down` | `ctrl+j` | Scroll the transcript one row down |
+| `line_start` | `ctrl+a` | Move the cursor to the start of the draft |
+| `line_end` | `ctrl+e` | Move the cursor to the end of the draft |
+| `clear_input` | `ctrl+u` | Clear the draft |
+
+`[tui.colors]` sets a foreground color per role: a name (`red`, `lightblue`,
+`gray`, ...), an ANSI index, or `#rrggbb`. With `NO_COLOR` set, the names are
+still checked but colors are not applied.
+
+| Role | Default | Covers |
+| --- | --- | --- |
+| `text` | terminal default | Answers and the composer |
+| `muted` | dim | Prompts, tool and system lines, rules, lists, footer |
+| `selected` | reversed | The highlighted row in a list or ask |
+
 ## Environment variables
 
 | Variable | Purpose |

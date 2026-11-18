@@ -57,10 +57,34 @@ pub struct Config {
     /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
     #[serde(default)]
     pub hooks: Vec<HookSettings>,
+    /// Interactive terminal host customization (ADR 0023). Raw names here;
+    /// `shikigami tui` checks them at launch.
+    #[serde(default, skip_serializing_if = "TuiSettings::is_empty")]
+    pub tui: TuiSettings,
     /// Narrowing preset the host selected (ADR 0022). Never read from or
     /// written to the settings file.
     #[serde(skip)]
     pub preset: Option<AppliedPreset>,
+}
+
+/// `[tui]`: key bindings and colors for `shikigami tui`. Read only from the
+/// settings file the user chose, never implicitly from the project.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TuiSettings {
+    /// Action name to key, e.g. `toggle_plan = "ctrl+g"`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
+    /// Color role to a color name or `#rrggbb`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub colors: BTreeMap<String, String>,
+}
+
+impl TuiSettings {
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.colors.is_empty()
+    }
 }
 
 /// One lifecycle hook entry (`command` is operator-trusted).
@@ -1016,6 +1040,7 @@ impl Default for Config {
             network: NetworkSettings::default(),
             sandbox: SandboxSettings::default(),
             hooks: Vec::new(),
+            tui: TuiSettings::default(),
             preset: None,
         }
     }

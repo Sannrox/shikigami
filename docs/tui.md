@@ -101,4 +101,4 @@ prints the `--continue` command after the terminal is restored, that
 `--continue` reopens that session, and that a second TUI does not take over a
 session the first holds until the first is killed.
 
-Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md). Customization (keys, colors, status line) is declarative and user-level only: [ADR 0023](decisions/0023-tui-customization.md).
+Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md). Customization (keys, colors, status line) is declarative and user-level only: [ADR 0023](decisions/0023-tui-customization.md). Keys and colors are set in [`[tui]`](settings.md#tui); the footer and `/help` show the bound keys.
