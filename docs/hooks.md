@@ -6,6 +6,10 @@ Disabled when the `hooks` list is empty (default).
 Hooks are **not** a sandbox and **not** a plugin marketplace. Only configure
 commands you trust on the host.
 
+The TUI status line command (`[tui.statusline]`, see
+[settings](settings.md#tui)) runs the same way: trusted, JSON on stdin,
+killed at its time limit.
+
 ## Settings
 
 ```toml

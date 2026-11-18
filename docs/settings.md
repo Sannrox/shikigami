@@ -502,10 +502,11 @@ hooks. See [hooks.md](hooks.md).
 
 ### `[tui]`
 
-Key bindings and colors for `shikigami tui`
+Key bindings, colors, and a status line command for `shikigami tui`
 ([ADR 0023](decisions/0023-tui-customization.md)). Like every setting, they
 come only from the settings file you chose. A `shikigami.toml` in the project
-is never loaded implicitly, so a cloned repository cannot rebind keys. An
+is never loaded implicitly, so a cloned repository cannot rebind keys or run a
+status line command. An
 unknown action or role, a key that is not `ctrl+<letter>` or `alt+<letter>`,
 an invalid color, or two actions on one key stops launch with the entry named.
 
@@ -545,6 +546,41 @@ still checked but colors are not applied.
 | `text` | terminal default | Answers and the composer |
 | `muted` | dim | Prompts, tool and system lines, rules, lists, footer |
 | `selected` | reversed | The highlighted row in a list or ask |
+
+`[tui.statusline]` runs an operator-trusted command, like a
+[lifecycle hook](hooks.md), and shows the first line it prints in the footer
+in place of the model and turn, cut to 48 columns. It runs out of process,
+off the draw path, whenever the session state below changes. A command that
+prints nothing, exits non-zero, or runs past `timeout_ms` leaves the default
+footer. The first non-zero exit or timeout also adds one line to the
+transcript; later ones stay quiet.
+
+```toml
+[tui.statusline]
+command = "/usr/local/bin/my-status"
+timeout_ms = 200
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `command` | required | Executable path or name on `PATH` |
+| `timeout_ms` | `200` | Kill after this duration (capped at 5s) |
+
+The command gets one JSON line on stdin. `schema_version` changes only when a
+field changes meaning or goes away; new fields may appear in the same version.
+
+```json
+{"schema_version":1,"session_id":"…","cwd":"/work/repo","model":"claude-sonnet-5-5","status":"ready","turn":2,"run_id":"…"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `session_id` | ACP session shown in this window |
+| `cwd` | Working directory the session belongs to |
+| `model` | Model name, or `demo` / `scripted` |
+| `status` | Footer status word: `ready`, `running`, `ask`, `error`, ... |
+| `turn` | Prompts sent in this session |
+| `run_id` | The session's run, or `null` until the first prompt finishes |
 
 ## Environment variables
 

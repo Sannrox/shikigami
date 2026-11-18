@@ -456,6 +456,55 @@ fn tui_keys_rebind_and_a_bad_entry_refuses_launch() {
     );
 }
 
+/// #604: a `[tui.statusline]` command's first line shows in the footer; one
+/// that hangs past its limit says so, and while it hangs the screen still
+/// answers keys.
+#[test]
+fn tui_statusline_command_shows_and_a_hanging_one_does_not_freeze() {
+    use std::os::unix::fs::PermissionsExt;
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
+    let base = std::fs::read_to_string(example).unwrap();
+    let with_command = |dir: &tempfile::TempDir, body: &str, timeout_ms: u64| {
+        let script = dir.path().join("status.sh");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        format!(
+            "{base}\n[tui.statusline]\ncommand = {:?}\ntimeout_ms = {timeout_ms}\n",
+            script.display().to_string()
+        )
+    };
+
+    let dir = temp_dir();
+    let config = with_command(&dir, r#"read -r p; echo "custom-status-ok""#, 2000);
+    let mut tui = start_tui_with(&dir, &config, &[]);
+    tui.wait_for("the custom status", |t| {
+        contains(&t.output(), b"custom-status-ok")
+    });
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+
+    let dir = temp_dir();
+    let config = with_command(&dir, "sleep 30", 300);
+    let mut tui = start_tui_with(&dir, &config, &[]);
+    tui.wait_for("the failure line", |t| {
+        contains(&t.output(), b"timed out after 300ms")
+    });
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+
+    let dir = temp_dir();
+    let config = with_command(&dir, "sleep 30", 4000);
+    let mut tui = start_tui_with(&dir, &config, &[]);
+    let quit = Instant::now();
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+    assert!(
+        quit.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        quit.elapsed()
+    );
+}
+
 /// #602: with no model configured the built-in demo answers, and launch says
 /// so before the first prompt; a configured model shows no such line.
 #[test]
