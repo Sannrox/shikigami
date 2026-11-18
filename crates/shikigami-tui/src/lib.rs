@@ -186,6 +186,8 @@ struct Shared {
     last_osc52: Option<String>,
     /// Staged ACP prompt parts from `/attach` (bytes stay in the prompt, not the workspace).
     pending_parts: Vec<Value>,
+    /// The session's run as the host last reported it; `/run` shows it.
+    run_id: Option<String>,
 }
 
 impl Shared {
@@ -215,6 +217,7 @@ impl Shared {
             resume_ids: None,
             last_osc52: None,
             pending_parts: Vec::new(),
+            run_id: None,
         }
     }
 
@@ -576,7 +579,7 @@ impl TuiSession {
                 .await
             {
                 Ok(result) => {
-                    apply_interruption(&mut session.lock_shared(), &result);
+                    apply_load_result(&mut session.lock_shared(), &result);
                     id
                 }
                 Err(_) => session.create_session(&cwd).await?,
@@ -793,6 +796,10 @@ impl TuiSession {
                 hint: "start a new session".into(),
             },
             SlashCommand {
+                name: "run".into(),
+                hint: "show the run id for runs and export".into(),
+            },
+            SlashCommand {
                 name: "resume".into(),
                 hint: "load a persisted session".into(),
             },
@@ -974,6 +981,16 @@ impl TuiSession {
                 shared.dirty = true;
                 KeyResult::Continue
             }
+            "run" => {
+                let mut shared = self.lock_shared();
+                let line = match &shared.run_id {
+                    Some(id) => format!("Run {id}\nshikigami runs {id}\nshikigami export {id}"),
+                    None => "No run yet. Send a prompt to start one.".into(),
+                };
+                shared.transcript.push(TranscriptLine::System(line));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             "copy" => {
                 self.copy_last_assistant();
                 KeyResult::Continue
@@ -1055,6 +1072,7 @@ impl TuiSession {
         shared.permission = None;
         shared.queued = None;
         shared.pending_parts.clear();
+        shared.run_id = None;
         shared.status = "ready".into();
         shared.scroll_back = 0;
         shared.dock_scroll = 0;
@@ -1088,7 +1106,7 @@ impl TuiSession {
             Ok(result) => {
                 *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
                 let mut shared = self.lock_shared();
-                apply_interruption(&mut shared, &result);
+                apply_load_result(&mut shared, &result);
                 shared.status = "ready".into();
                 shared.dirty = true;
             }
@@ -1268,7 +1286,7 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
-const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /copy  /attach  /exit  /quit  /skill:name  /help";
+const HELP_TEXT: &str = "Enter send  Shift+Enter newline  Ctrl-C cancel/quit\n/compact  /new  /resume  /run  /copy  /attach  /exit  /quit  /skill:name  /help";
 
 /// Static busy marker in the slash-list slot above the composer.
 const RUNNING_MARKER: &str = "running";
@@ -1905,6 +1923,20 @@ fn chunk_text(update: &Value) -> Option<String> {
 
 /// Mark the tool calls a dead host left unfinished and say so once, from the
 /// `session/load` result's `_meta.shikigami.interrupted`.
+/// Applies a `session/load` result: the session's run and any interrupted step.
+fn apply_load_result(shared: &mut Shared, result: &Value) {
+    shared.run_id = run_id_of(result);
+    apply_interruption(shared, result);
+}
+
+/// The run id the host reports in a `session/prompt` or `session/load` result.
+fn run_id_of(result: &Value) -> Option<String> {
+    result
+        .pointer("/_meta/shikigami/runId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 fn apply_interruption(shared: &mut Shared, result: &Value) {
     let Some(calls) = result
         .pointer("/_meta/shikigami/interrupted/toolCalls")
@@ -1972,6 +2004,9 @@ fn prompt_cancelled(resp: Option<&Value>) -> bool {
 }
 
 fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
+    if let Some(result) = resp.and_then(|v| v.get("result")) {
+        shared.run_id = run_id_of(result);
+    }
     if let Some(reason) = resp
         .and_then(|v| v.pointer("/result/stopReason"))
         .and_then(|v| v.as_str())
@@ -3654,6 +3689,58 @@ mod tests {
         assert_eq!(screen, expected);
     }
 
+    /// #601: `/run` names the run `shikigami runs` and `export` accept, and says
+    /// so plainly before the first prompt.
+    #[tokio::test]
+    async fn slash_run_names_the_session_run() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        type_text(&session, "/run");
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        assert!(
+            session
+                .transcript_text()
+                .contains("No run yet. Send a prompt to start one."),
+            "{}",
+            session.transcript_text()
+        );
+
+        session.spawn_prompt("hello".into()).await.unwrap();
+        let stop = session.wait_prompt().await;
+        apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+        let run_id = session.lock_shared().run_id.clone().expect("run id");
+        assert!(
+            dir.path().join("state/runs").join(&run_id).exists(),
+            "{run_id} is a run on disk"
+        );
+        session.lock_shared().transcript.clear();
+        type_text(&session, "/run");
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        let rows = drawn_rows(&session, 80, 24);
+        assert_screen_rules(&rows, 80);
+        let short_id = &session.session_id()["sess-".len()..][..8];
+        let screen = rows
+            .join("\n")
+            .replace(&run_id, "<run>")
+            .replace(short_id, "<id>");
+        let rule = "─".repeat(80);
+        let expected = format!(
+            "{}Run <run>\nshikigami runs <run>\nshikigami export <run>\n{rule}\n>\n{rule}\n  end_turn  <id>  ^c quit  pgup/pgdn/wheel",
+            "\n".repeat(17)
+        );
+        assert_eq!(screen, expected);
+        // Narrow: the id may wrap onto its own row but is never split.
+        let rows = drawn_rows(&session, 40, 12);
+        assert_screen_rules(&rows, 40);
+        assert!(rows.iter().any(|row| row.contains(&run_id)), "{rows:#?}");
+    }
+
     /// CJK, emoji and one unbroken long line wrap inside the screen.
     #[tokio::test]
     async fn wide_and_long_lines_stay_inside_the_screen() {
@@ -4218,6 +4305,7 @@ mod tests {
         assert!(text.contains("/compact"), "{text}");
         assert!(text.contains("/new"), "{text}");
         assert!(text.contains("/resume"), "{text}");
+        assert!(text.contains("/run"), "{text}");
         assert!(text.contains("/copy"), "{text}");
         assert!(text.contains("/attach"), "{text}");
         assert!(text.contains("/exit"), "{text}");

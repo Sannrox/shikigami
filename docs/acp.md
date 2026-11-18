@@ -104,6 +104,12 @@ question, and `in_doubt` when the recovery diagnosis reports an uncertain tool.
 Load does not change the run: the next `session/prompt` asks the pending
 question again. Clients that ignore `_meta` see today's replay.
 
+The `session/prompt` and `session/load` results carry
+`_meta.shikigami.runId` once the session has a run: the id that
+`shikigami runs <id>` and `shikigami export <id>` accept. A follow-up prompt
+usually keeps the same run, but a rejected plan or a new run after a
+cancellation changes it, so read it from the latest result.
+
 Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
 name a catalog mode; the mapping lives in `[session.modes]` settings. Invalid
 mappings return `-32602` before session creation or first-prompt freezing.
