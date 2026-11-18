@@ -65,7 +65,10 @@ TUI returns the record to idle. Terminals without support ignore the sequence.
 
 The host requires a terminal. It does not add a theming engine, plugin store,
 voice, dashboard, or web view. Status is one dim footer under the composer
-(short session id and keys; long errors go to the transcript). Nested
+(state word, short session id and keys; long errors go to the transcript).
+The state word is plain: `ready`, `running`, `ask`, `done` after a finished
+turn, `cancelled`, `turn limit`, `length limit`, `refused`, or `error`; protocol
+stop reasons never show. Nested
 `child_run` appears as a tool event in the transcript. The loop redraws only
 when state changes. Stderr event JSON is discarded while the alt-screen is up.
 

@@ -2021,6 +2021,18 @@ fn prompt_cancelled(resp: Option<&Value>) -> bool {
         == Some("cancelled")
 }
 
+/// The footer word for an ACP stop reason; wire values never reach the screen.
+fn stop_word(reason: &str) -> &'static str {
+    match reason {
+        "end_turn" => "done",
+        "cancelled" => "cancelled",
+        "max_turn_requests" => "turn limit",
+        "max_tokens" => "length limit",
+        "refusal" => "refused",
+        _ => "ready",
+    }
+}
+
 fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
     if let Some(result) = resp.and_then(|v| v.get("result")) {
         shared.run_id = run_id_of(result);
@@ -2029,7 +2041,7 @@ fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
         .and_then(|v| v.pointer("/result/stopReason"))
         .and_then(|v| v.as_str())
     {
-        shared.status = reason.to_string();
+        shared.status = stop_word(reason).into();
         return;
     }
     if let Some(err) = resp
@@ -2071,7 +2083,7 @@ fn program_status(shared: &Shared) -> &'static [u8] {
     } else {
         match shared.status.as_str() {
             "error" => b"\x1b]7501;state=error:app=shikigami\x1b\\",
-            "end_turn" => b"\x1b]7501;state=done:app=shikigami\x1b\\",
+            "done" => b"\x1b]7501;state=done:app=shikigami\x1b\\",
             _ => b"\x1b]7501;state=idle:app=shikigami\x1b\\",
         }
     }
@@ -2985,6 +2997,33 @@ mod tests {
         assert!(footer.chars().count() <= 40);
     }
 
+    /// #617: the footer says the session state in words, never the wire stop reason.
+    #[test]
+    fn footer_shows_state_words_not_stop_reasons() {
+        for (reason, word) in [
+            ("end_turn", "done"),
+            ("cancelled", "cancelled"),
+            ("max_turn_requests", "turn limit"),
+            ("max_tokens", "length limit"),
+            ("refusal", "refused"),
+            ("some_future_reason", "ready"),
+        ] {
+            let mut shared = Shared::new();
+            apply_prompt_result(
+                &mut shared,
+                Some(&json!({"result": {"stopReason": reason}})),
+            );
+            let footer = status_line("sess-c0fa033e-aaaa", &shared, 80);
+            assert!(
+                footer.starts_with(&format!("  {word}  ")),
+                "{reason}: {footer}"
+            );
+            if reason != word {
+                assert!(!footer.contains(reason), "{reason}: {footer}");
+            }
+        }
+    }
+
     #[test]
     fn composer_height_uses_wrapped_rows() {
         let args = "x".repeat(400);
@@ -3755,7 +3794,7 @@ mod tests {
             .replace(short_id, "<id>");
         let rule = "─".repeat(80);
         let expected = format!(
-            "{}Run <run>\nshikigami runs <run>\nshikigami export <run>\n{rule}\n>\n{rule}\n  end_turn  <id>  ^c quit  pgup/pgdn/wheel",
+            "{}Run <run>\nshikigami runs <run>\nshikigami export <run>\n{rule}\n>\n{rule}\n  done  <id>  ^c quit  pgup/pgdn/wheel",
             "\n".repeat(17)
         );
         assert_eq!(screen, expected);
