@@ -96,6 +96,14 @@ attach. Unsupported types fail closed. Omit attachments and today's text host
 is unchanged. Attachment sessions inherit content v1: no escalate parking.
 `session/compact` still cuts ChatMessage history.
 
+When a restored session's last host went away mid-step, the `session/load`
+result carries `_meta.shikigami.interrupted.toolCalls`: one
+`{ "toolCallId", "outcome" }` per replayed tool call that has no result.
+`outcome` is `not_run` when the run was waiting on a permission, plan, or
+question, and `in_doubt` when the recovery diagnosis reports an uncertain tool.
+Load does not change the run: the next `session/prompt` asks the pending
+question again. Clients that ignore `_meta` see today's replay.
+
 Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
 name a catalog mode; the mapping lives in `[session.modes]` settings. Invalid
 mappings return `-32602` before session creation or first-prompt freezing.

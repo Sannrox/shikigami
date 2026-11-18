@@ -390,7 +390,9 @@ impl AcpHost {
         if !is_safe_run_id(session_id) {
             return Err(rpc_error(-32002, "unknown session"));
         }
-        let live = if let Some(live) = self.sessions.lock().await.get(session_id) {
+        let live_session = self.sessions.lock().await.get(session_id).cloned();
+        let restored = live_session.is_none();
+        let live = if let Some(live) = live_session {
             LiveSession {
                 cwd: live.cwd.clone(),
                 run_id: live.run_id.clone(),
@@ -421,12 +423,17 @@ impl AcpHost {
                 .insert(session_id.to_string(), live.clone());
             live
         };
-        self.replay_session_history(session_id, &live, client)
+        let interrupted = self
+            .replay_session_history(session_id, &live, restored, client)
             .await?;
-        Ok(json!({
+        let mut result = json!({
             "sessionId": session_id,
             "cwd": live.cwd.display().to_string(),
-        }))
+        });
+        if let Some(interrupted) = interrupted {
+            result["_meta"] = json!({ "shikigami": { "interrupted": interrupted } });
+        }
+        Ok(result)
     }
 
     async fn session_compact(&self, params: &Value) -> Result<Value, Value> {
@@ -467,14 +474,17 @@ impl AcpHost {
         Ok(json!({ "before": before, "after": after }))
     }
 
+    /// Replay the session's conversation as `session/update`s. For a session
+    /// `restored` from disk, also returns its `interruption`, if any.
     async fn replay_session_history(
         &self,
         session_id: &str,
         live: &LiveSession,
+        restored: bool,
         client: &dyn AcpClient,
-    ) -> Result<(), Value> {
+    ) -> Result<Option<Value>, Value> {
         let Some(run_id) = live.run_id.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let harness = self
             .harness_for_cwd(&live.cwd, live.mode.as_deref())
@@ -496,7 +506,18 @@ impl AcpHost {
         } else {
             conversation_updates(session_id, &checkpoint.messages)
         };
-        send_updates(client, updates).await
+        let interrupted = restored
+            .then(|| {
+                interruption(
+                    &harness,
+                    run_id,
+                    &checkpoint,
+                    unresolved_tool_calls(&updates),
+                )
+            })
+            .flatten();
+        send_updates(client, updates).await?;
+        Ok(interrupted)
     }
 
     async fn session_prompt(&self, params: &Value, client: &dyn AcpClient) -> Result<Value, Value> {
@@ -1981,6 +2002,52 @@ fn content_conversation_updates(
         }
     }
     updates
+}
+
+/// Replayed `tool_call` ids that no `tool_call_update` resolves, in order.
+fn unresolved_tool_calls(updates: &[Value]) -> Vec<String> {
+    let mut open: Vec<String> = Vec::new();
+    for update in updates {
+        let inner = &update["update"];
+        let Some(id) = inner["toolCallId"].as_str() else {
+            continue;
+        };
+        match inner["sessionUpdate"].as_str() {
+            Some("tool_call") => open.push(id.to_string()),
+            Some("tool_call_update") => open.retain(|open_id| open_id != id),
+            _ => {}
+        }
+    }
+    open
+}
+
+/// `session/load` `_meta.shikigami.interrupted` for a restored session whose
+/// last host went away mid-step, or `None`. Read-only: the run keeps its park,
+/// so the next prompt asks the pending question again. Outcomes come from the
+/// recovery diagnosis (`in_doubt` for an uncertain tool) and the durable park
+/// (`not_run` while a permission, plan, or question was pending).
+fn interruption(
+    harness: &Harness,
+    run_id: &str,
+    checkpoint: &Checkpoint,
+    unresolved: Vec<String>,
+) -> Option<Value> {
+    let in_doubt = harness
+        .diagnose_run(run_id)
+        .is_ok_and(|diagnosis| diagnosis.class == crate::harness::RecoveryClass::UncertainTool);
+    let outcome = if in_doubt {
+        "in_doubt"
+    } else if checkpoint.is_ask_park() || checkpoint.is_plan_park() || checkpoint.is_escalate_park()
+    {
+        "not_run"
+    } else {
+        return None;
+    };
+    let tool_calls: Vec<Value> = unresolved
+        .into_iter()
+        .map(|id| json!({ "toolCallId": id, "outcome": outcome }))
+        .collect();
+    Some(json!({ "toolCalls": tool_calls }))
 }
 
 fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value> {
