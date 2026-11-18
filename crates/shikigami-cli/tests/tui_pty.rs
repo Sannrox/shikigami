@@ -469,11 +469,77 @@ fn unreachable_model_names_the_next_step() {
     let before = tui.output().len();
     send(&tui, b"hi\r");
     tui.wait_for("the model failure", |t| {
-        contains(&t.output()[before..], b"The model did not answer.")
+        contains(&t.output()[before..], b"Could not reach the model.")
     });
     // One ^c quits: the TUI is idle again, not stuck in the failed turn.
     send(&tui, b"\x03");
     assert!(tui.wait_exit().success());
+}
+
+/// A model provider on an ephemeral local port that answers every request
+/// with `status` (e.g. `402 Payment Required`). Returns the port.
+fn stub_provider(status: &'static str) -> u16 {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            // Read the whole request so closing does not reset it mid-send.
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n @ 1..) = stream.read(&mut buf) {
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break;
+                    }
+                }
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    port
+}
+
+/// #622: a provider that rejects the key and one that refuses for billing
+/// each lead with their own cause and next step.
+#[test]
+fn provider_refusals_name_their_cause() {
+    for (status, lead) in [
+        (
+            "401 Unauthorized",
+            &b"The model provider rejected the key."[..],
+        ),
+        (
+            "402 Payment Required",
+            &b"The model provider refused for billing, quota, or rate limits."[..],
+        ),
+    ] {
+        let dir = temp_dir();
+        let var = format!("SHIKIGAMI_TEST_KEY_{}", std::process::id());
+        let port = stub_provider(status);
+        let config = format!(
+            "version = 1\n[model]\nadapter = \"http\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"m\"\napi_key_env = \"{var}\"\n"
+        );
+        let mut tui = start_tui_with(&dir, &config, &[(&var, "test-key")]);
+        let before = tui.output().len();
+        send(&tui, b"hi\r");
+        tui.wait_for(status, |t| contains(&t.output()[before..], lead));
+        send(&tui, b"\x03");
+        assert!(tui.wait_exit().success());
+    }
 }
 
 /// #595: a second window does not take over the session the first holds; it

@@ -86,8 +86,27 @@ const COMPACTED: &str = "Earlier messages were compacted.";
 /// Replayed under a prompt that got no answer (failed or cancelled first).
 const NO_ANSWER: &str = "This prompt got no answer.";
 
-/// Leads a failed prompt whose host marked the failure as the model's.
-const MODEL_FAILED: &str = "The model did not answer. Check the model address and key in your settings, or run shikigami doctor. Your next prompt tries again.";
+/// Leads a failed prompt whose host marked the failure as the model's, by the
+/// host's `data.shikigami.cause`. The upstream detail follows on its own line.
+fn model_failure_lead(cause: Option<&str>) -> &'static str {
+    match cause {
+        Some("scriptEnded") => {
+            "The scripted model has no more answers. To use a real model, set [model] in a settings file and start with --config <file>."
+        }
+        Some("unreachable") => {
+            "Could not reach the model. Check the model address in your settings and that the server is running. Your next prompt tries again."
+        }
+        Some("credentials") => {
+            "The model provider rejected the key. Check the key variable named in your settings. Your next prompt tries again."
+        }
+        Some("account") => {
+            "The model provider refused for billing, quota, or rate limits. Check your provider account, or wait and try again."
+        }
+        _ => {
+            "The model did not answer. Run shikigami doctor to check your settings. Your next prompt tries again."
+        }
+    }
+}
 
 /// Printed to the shell after quitting a session that has a run.
 const CONTINUE_HINT: &str = "Continue this session later: shikigami tui --continue";
@@ -2247,11 +2266,13 @@ fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
     {
-        let model_failed = resp
-            .and_then(|v| v.pointer("/error/data/shikigami/kind"))
-            .is_some_and(|kind| kind == "model");
+        let data = resp.and_then(|v| v.pointer("/error/data/shikigami"));
+        let model_failed = data
+            .and_then(|d| d.get("kind"))
+            .is_some_and(|k| k == "model");
         let line = if model_failed {
-            format!("{MODEL_FAILED}\n{err}")
+            let cause = data.and_then(|d| d.get("cause")).and_then(Value::as_str);
+            format!("{}\n{err}", model_failure_lead(cause))
         } else {
             err.to_string()
         };
@@ -4056,7 +4077,10 @@ mod tests {
         let replayed = replayed_text(&relaunched);
         // The history keeps no error text, so the failed prompt's outcome
         // replays as one line instead of the live error.
-        let failure = format!("{MODEL_FAILED}\nscripted turns exhausted");
+        let failure = format!(
+            "{}\nscripted turns exhausted",
+            model_failure_lead(Some("scriptEnded"))
+        );
         assert!(live.contains(&failure), "{live}");
         assert_eq!(replayed, live.replace(&failure, NO_ANSWER));
     }

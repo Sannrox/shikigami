@@ -118,7 +118,11 @@ another process holds fails with `-32000` and
 file is empty and older hosts ignore it.
 
 A `session/prompt` that fails because the model failed returns `-32603` with
-`data.shikigami.kind = "model"`; other failures carry no `data`. As after a
+`data.shikigami.kind = "model"`; other failures carry no `data`. When the
+cause is known, `data.shikigami.cause` names it: `scriptEnded` (a scripted
+model has no more turns), `unreachable` (no connection or a timeout),
+`credentials` (the provider answered 401 or 403), or `account` (402 or 429:
+billing, quota, or rate). As after a
 cancel, the run then waits for the next prompt, which continues it with its
 history.
 

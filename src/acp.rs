@@ -29,7 +29,7 @@ use crate::governance::GovernanceError;
 use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
-use crate::model::{ChatMessage, ModelPort};
+use crate::model::{ChatMessage, ModelError, ModelPort};
 use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
     compact_messages,
@@ -2899,15 +2899,35 @@ fn session_hold_error(error: std::io::Error) -> Value {
 /// `data.shikigami.kind = "model"` so a client can say what failed in its own words.
 fn prompt_error(error: &HarnessError) -> Value {
     let mut value = rpc_error(-32603, error.to_string());
-    if matches!(
-        error,
-        HarnessError::Model(_)
-            | HarnessError::Run(RunError::Model(_))
-            | HarnessError::Run(RunError::Governance(GovernanceError::Model(_)))
-    ) {
-        value["data"] = json!({ "shikigami": { "kind": "model" } });
+    let model_error = match error {
+        HarnessError::Model(e)
+        | HarnessError::Run(RunError::Model(e))
+        | HarnessError::Run(RunError::Governance(GovernanceError::Model(e))) => e,
+        _ => return value,
+    };
+    value["data"] = json!({ "shikigami": { "kind": "model" } });
+    if let Some(cause) = model_failure_cause(model_error) {
+        value["data"]["shikigami"]["cause"] = json!(cause);
     }
     value
+}
+
+/// The `data.shikigami.cause` of a model failure, when it is known:
+/// `scriptEnded` (a scripted model has no more turns), `unreachable` (no
+/// connection or timeout), `credentials` (401/403), `account` (402/429:
+/// billing, quota, or rate).
+fn model_failure_cause(error: &ModelError) -> Option<&'static str> {
+    match error {
+        ModelError::ScriptExhausted => Some("scriptEnded"),
+        ModelError::Unreachable(_) => Some("unreachable"),
+        ModelError::ProviderStatus {
+            code: 401 | 403, ..
+        } => Some("credentials"),
+        ModelError::ProviderStatus {
+            code: 402 | 429, ..
+        } => Some("account"),
+        _ => None,
+    }
 }
 
 fn rpc_error(code: i64, message: impl Into<String>) -> Value {

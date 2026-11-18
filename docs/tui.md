@@ -20,9 +20,12 @@ Credentials come from the environment, same as CLI. There is no TUI login.
 A missing key variable stops launch with the variable to set. With no
 `[model]` configured, the built-in demo script answers: launch says so in one
 system line and names how to configure a real model.
-A prompt that fails because the model did not answer leads with that and the
-next step (check the model address and key, or `shikigami doctor`), then the
-upstream detail; the next prompt tries again.
+A prompt that fails because the model did not answer leads with the likely
+cause and next step, then the upstream detail: the scripted model has no more
+answers (configure a real model), the model cannot be reached (check the
+address), the provider rejected the key (check the key variable), or the
+provider refused for billing, quota, or rate (check the account). Any other
+model failure points to `shikigami doctor`. The next prompt tries again.
 Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 `--config` as `doctor` / `run`; see
 [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml).

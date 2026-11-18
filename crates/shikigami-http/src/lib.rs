@@ -110,7 +110,11 @@ impl AttemptError {
     fn from_send(error: reqwest::Error) -> Self {
         let transient = error.is_timeout() || error.is_connect();
         Self {
-            error: http_err(error),
+            error: if transient {
+                ModelError::Unreachable(error.to_string())
+            } else {
+                http_err(error)
+            },
             transient,
             retry_after: None,
         }
@@ -126,7 +130,10 @@ impl AttemptError {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(|secs| Duration::from_secs(secs).min(MAX_BACKOFF));
         Self {
-            error: ModelError::Http(format!("model provider returned {status}")),
+            error: ModelError::ProviderStatus {
+                code: status.as_u16(),
+                text: status.to_string(),
+            },
             transient: status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error(),
             retry_after,
         }
