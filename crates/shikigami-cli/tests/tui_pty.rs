@@ -475,3 +475,30 @@ fn unreachable_model_names_the_next_step() {
     send(&tui, b"\x03");
     assert!(tui.wait_exit().success());
 }
+
+/// #595: a second window does not take over the session the first holds; it
+/// starts a new one and says why. Once the holder is killed (a crash), the
+/// session continues at once.
+#[test]
+fn a_second_window_does_not_take_over_a_held_session() {
+    let dir = temp_dir();
+    let mut first = start_tui(&dir, Some(r#"[{"content":"first-reply"}]"#));
+    send(&first, b"hello\r");
+    first.wait_for("the reply", |t| contains(&t.output(), b"first-reply"));
+    wait_turn_done(&mut first, 0);
+
+    let mut second = launch_tui(&dir, &[], &["--continue"]);
+    second.wait_for("the in-use line", |t| {
+        contains(&t.output(), b"open in another window")
+    });
+    assert!(!contains(&second.output(), b"first-reply"));
+    send(&second, b"\x03");
+    assert!(second.wait_exit().success());
+
+    drop(first);
+    let mut third = launch_tui(&dir, &[], &["--continue"]);
+    third.wait_for("the continued session", |t| {
+        contains(&t.output(), b"Continued your session")
+    });
+    assert!(contains(&third.output(), b"first-reply"));
+}

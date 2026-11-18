@@ -80,6 +80,8 @@ pub struct SessionSummary {
     /// User prompts left in the run's history (compaction drops older ones).
     pub prompts: usize,
     pub first_prompt: Option<String>,
+    /// Another process holds the session (see [`AcpHost::hold_session`]).
+    pub in_use: bool,
 }
 
 #[derive(Clone)]
@@ -292,6 +294,9 @@ pub struct AcpHost {
     harness: Harness,
     initialized: AtomicBool,
     sessions: Mutex<HashMap<String, LiveSession>>,
+    /// Open lock files of the sessions this host created or loaded. The OS
+    /// lock lasts as long as the file stays open, so it ends with the process.
+    held: std::sync::Mutex<HashMap<String, fs::File>>,
 }
 
 impl AcpHost {
@@ -300,6 +305,7 @@ impl AcpHost {
             harness,
             initialized: AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
+            held: std::sync::Mutex::new(HashMap::new()),
         };
         host.sweep_orphan_payloads();
         host
@@ -375,6 +381,8 @@ impl AcpHost {
                 .map_err(|e| rpc_error(-32602, e.to_string()))?;
         }
         let session_id = format!("sess-{}", uuid::Uuid::new_v4());
+        self.hold_session(&session_id)
+            .map_err(|e| rpc_error(-32603, e.to_string()))?;
         let live = LiveSession {
             cwd: cwd.clone(),
             run_id: None,
@@ -402,6 +410,10 @@ impl AcpHost {
         if !is_safe_run_id(session_id) {
             return Err(rpc_error(-32002, "unknown session"));
         }
+        if self.load_persisted(session_id).is_none() {
+            return Err(rpc_error(-32002, "unknown session"));
+        }
+        self.hold_session(session_id).map_err(session_hold_error)?;
         let live_session = self.sessions.lock().await.get(session_id).cloned();
         let restored = live_session.is_none();
         let live = if let Some(live) = live_session {
@@ -905,6 +917,50 @@ impl AcpHost {
         self.harness.state.path().join("acp-sessions")
     }
 
+    fn session_lock_path(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir().join(format!("{session_id}.lock"))
+    }
+
+    /// Take the exclusive OS lock on a session, so a second process (another
+    /// TUI, an editor) cannot drive it at the same time. Held until this host
+    /// drops; a crashed holder releases it at once. `WouldBlock` means another
+    /// process holds it.
+    fn hold_session(&self, session_id: &str) -> std::io::Result<()> {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if held.contains_key(session_id) {
+            return Ok(());
+        }
+        fs::create_dir_all(self.sessions_dir())?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.session_lock_path(session_id))?;
+        file.try_lock().map_err(|e| match e {
+            fs::TryLockError::WouldBlock => std::io::ErrorKind::WouldBlock.into(),
+            fs::TryLockError::Error(e) => e,
+        })?;
+        held.insert(session_id.to_string(), file);
+        Ok(())
+    }
+
+    /// True when another process holds the session's lock. Probes with a
+    /// lock that is released again at once.
+    fn held_elsewhere(&self, session_id: &str) -> bool {
+        if self
+            .held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(session_id)
+        {
+            return false;
+        }
+        let Ok(file) = fs::File::open(self.session_lock_path(session_id)) else {
+            return false;
+        };
+        matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock))
+    }
+
     /// Private payload directory of one content session (ADR 0021).
     fn content_dir(&self, session_id: &str) -> PathBuf {
         self.sessions_dir().join(format!("{session_id}.content"))
@@ -1047,6 +1103,7 @@ impl AcpHost {
             });
             let first_prompt = prompts.next().map(|message| message.content.clone());
             found.push(SessionSummary {
+                in_use: self.held_elsewhere(&persisted.session_id),
                 session_id: persisted.session_id,
                 last_active,
                 prompts: usize::from(first_prompt.is_some()) + prompts.count(),
@@ -2825,6 +2882,20 @@ fn prompt_capabilities(model: &dyn ModelPort) -> Value {
 }
 
 /// A failed `session/prompt` run. Model failures carry
+/// `session/load` error message for a session another process holds.
+pub const SESSION_IN_USE: &str = "session is open in another process";
+
+/// A session another process holds: `data.shikigami.kind = "sessionInUse"`,
+/// so a client can start a new session and say why.
+fn session_hold_error(error: std::io::Error) -> Value {
+    if error.kind() != std::io::ErrorKind::WouldBlock {
+        return rpc_error(-32603, error.to_string());
+    }
+    let mut value = rpc_error(-32000, SESSION_IN_USE);
+    value["data"] = json!({ "shikigami": { "kind": "sessionInUse" } });
+    value
+}
+
 /// `data.shikigami.kind = "model"` so a client can say what failed in its own words.
 fn prompt_error(error: &HarnessError) -> Value {
     let mut value = rpc_error(-32603, error.to_string());
@@ -4121,20 +4192,9 @@ mod tests {
             .to_string();
         assert!(Checkpoint::load(&dir.path().join("state/runs"), &run_id).is_ok());
 
+        drop(host);
         let restarted = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
-        let _ = init_and_new(&restarted, &client, &cwd).await;
-        let loaded = restarted
-            .handle(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 10,
-                    "method": "session/load",
-                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
-                }),
-                &client,
-            )
-            .await
-            .unwrap();
+        let loaded = load_after_restart(&restarted, &client, &session_id, &cwd).await;
         assert_eq!(rpc_ok(&loaded)["_meta"]["shikigami"]["runId"], run_id);
     }
 
@@ -4581,6 +4641,27 @@ mod tests {
         .unwrap()
     }
 
+    /// [`load`] on a host started after the session's previous host was
+    /// dropped. Retries `sessionInUse` for a moment: a process another test
+    /// forks in parallel keeps the old lock's descriptor until it execs.
+    async fn load_after_restart(
+        host: &AcpHost,
+        client: &dyn AcpClient,
+        session_id: &str,
+        cwd: &Path,
+    ) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let loaded = load(host, client, session_id, cwd).await;
+            if loaded["error"]["data"]["shikigami"]["kind"] != "sessionInUse"
+                || std::time::Instant::now() > deadline
+            {
+                return loaded;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// `initialize` a fresh (restarted) host, then `session/load`.
     async fn load(host: &AcpHost, client: &dyn AcpClient, session_id: &str, cwd: &Path) -> Value {
         host.handle(
@@ -4652,6 +4733,7 @@ mod tests {
 
         // A restarted host loads the session and resolves every part again.
         // The scripted model indexes its script by the run's turn number.
+        drop(host);
         let restarted = scripted_host(
             dir.path(),
             r#"[{"content":"1"},{"content":"2"},{"content":"3"},{"content":"after-restart"}]"#,
@@ -4662,7 +4744,7 @@ mod tests {
                 .iter()
                 .any(|s| s.session_id == session_id)
         );
-        let loaded = load(&restarted, &client, &session_id, &cwd).await;
+        let loaded = load_after_restart(&restarted, &client, &session_id, &cwd).await;
         assert_eq!(rpc_ok(&loaded)["sessionId"], session_id.as_str());
         let reply = prompt(&restarted, &client, &session_id, text.clone()).await;
         assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
@@ -4670,6 +4752,52 @@ mod tests {
         // Ending the session's run drops its payloads.
         restarted.set_run_id(&session_id, None).await.unwrap();
         assert!(!payloads.exists());
+    }
+
+    /// #595: a session another host holds is listed as in use and refused
+    /// with `sessionInUse`; once that host is gone it loads.
+    #[tokio::test]
+    async fn a_held_session_is_refused_until_its_host_is_gone() {
+        let dir = tempdir().unwrap();
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let holder = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let session_id = init_and_new(&holder, &client, &cwd).await;
+        let reply = prompt(
+            &holder,
+            &client,
+            &session_id,
+            json!([{"type":"text","text":"hi"}]),
+        )
+        .await;
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
+
+        let second = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let listed = second.sessions_for_cwd(&cwd);
+        assert!(
+            listed
+                .iter()
+                .all(|s| s.session_id == session_id && s.in_use),
+            "{}",
+            listed.len()
+        );
+        let refused = load(&second, &client, &session_id, &cwd).await;
+        assert_eq!(
+            refused["error"]["data"]["shikigami"]["kind"], "sessionInUse",
+            "{refused}"
+        );
+        assert!(
+            !holder.sessions_for_cwd(&cwd)[0].in_use,
+            "the holder's own session is free to it"
+        );
+
+        drop(holder);
+        let loaded = load_after_restart(&second, &client, &session_id, &cwd).await;
+        assert_eq!(rpc_ok(&loaded)["sessionId"], session_id.as_str());
     }
 
     #[tokio::test]
@@ -4695,6 +4823,7 @@ mod tests {
         .await;
         assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn");
         std::fs::remove_dir_all(host.content_dir(&session_id)).unwrap();
+        drop(host);
         let restarted = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
         assert!(
             !restarted
@@ -4702,7 +4831,7 @@ mod tests {
                 .iter()
                 .any(|s| s.session_id == session_id)
         );
-        let loaded = load(&restarted, &client, &session_id, &cwd).await;
+        let loaded = load_after_restart(&restarted, &client, &session_id, &cwd).await;
         assert_eq!(loaded["error"]["code"], -32603, "{loaded}");
     }
 

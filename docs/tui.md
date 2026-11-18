@@ -44,7 +44,12 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 | Signal | SIGTERM or SIGHUP cancels a running prompt like Ctrl-C, restores the terminal like a quit, then exits with the signal's status |
 
 `--continue` is fail closed: an unknown or unreadable previous session
-starts `session/new`. When the previous TUI died mid-step, the loaded session
+starts `session/new`. When another window (another TUI or an ACP client) has
+the latest session open, `--continue` starts a new session and writes
+`The last session in this folder is open in another window. This is a new session.`
+`/resume` marks such a session `in use` before its first prompt, and Enter on
+it stays on the current session with a system line. Once the other window
+exits or crashes, the session continues as usual. When the previous TUI died mid-step, the loaded session
 marks the unfinished tool `not run` (it was waiting for permission) or
 `result unknown` (it was running) and adds one system line saying so; the next
 prompt asks the pending question again. `/resume` and `--continue` list text and
@@ -85,7 +90,8 @@ unknown id; plan dock from a `session/update`.
 pseudo-terminal and checks, from outside the process, that SIGTERM and SIGHUP
 leave the alternate screen, turn off mouse capture, bracketed paste, and raw
 mode, and show the cursor. It also checks that quitting a session with a run
-prints the `--continue` command after the terminal is restored, and that
-`--continue` reopens that session.
+prints the `--continue` command after the terminal is restored, that
+`--continue` reopens that session, and that a second TUI does not take over a
+session the first holds until the first is killed.
 
 Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md). Customization (keys, colors, status line) is declarative and user-level only: [ADR 0023](decisions/0023-tui-customization.md).
