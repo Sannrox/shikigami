@@ -49,7 +49,7 @@ pub use crate::tools::{
     JOB_CREDENTIAL_ENV_NAMES, JOB_NAMESPACE_ENV, JOB_TENANT_ENV, JOB_TOKEN_ENV, JobCredential,
     JobCredentialHandle,
 };
-pub use model_turn::compact_messages;
+pub use model_turn::{COMPACTION_MARKER_PREFIX, compact_messages};
 pub use resume::validate_resumed_workspace;
 
 /// Default system prompt body (see [`crate::prompts`] for versioned id / digest).
