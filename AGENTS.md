@@ -314,7 +314,7 @@ Follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in all project spaces.
 The workflow Skills (`advance-issue-frontier`, `assess-change-impact`,
 `capture-project-decision`, `deliver-ready-issue`, `prepare-release`,
 `refactor-docs`, `shape-work-item`, `technical-documentation`, `verify-change`)
-and the opt-in `ci-audit` and `sekai-ontology` Skills are canonical in
+and the opt-in `ci-audit`, `sekai-ontology`, and `tui-e2e` Skills are canonical in
 [Sannrox/agent-kit](https://github.com/Sannrox/agent-kit). There is no pin:
 this repository always uses the latest `main`. `.agents/skills/<name>/` holds
 only a generated stub that points to the shared skill; read the installed skill
@@ -385,3 +385,28 @@ Rows beyond `## Testing Guidelines`:
 - `sekai-client` and kekkai pins and their upgrade notes;
 - OCI image publication needs a stable version;
 - tagging: [RELEASING.md](RELEASING.md). Agents never push `v*` tags.
+
+### TUI proof
+
+Facts the `tui-e2e` skill reads.
+
+- Test command: `cargo test --locked -p shikigami-tui`.
+- Headless backend: ratatui `TestBackend` in the test module of
+  `crates/shikigami-tui/src/lib.rs`. Render with `draw(frame, &session)`,
+  read rows with `buffer_row`, and send keys with
+  `handle_key(&session, KeyEvent::new(..))`; `session_with_assistant` builds a
+  session over a temp directory. There is no snapshot tool; tests assert on
+  buffer text. Sizes: 80x24 standard, 40x12 narrow.
+- Key map and session rules: the `## Behavior` table in
+  [docs/tui.md](docs/tui.md). Keep it in step with key handling changes.
+- Scripted backend: `--config examples/local-run.toml` (scripted model, no
+  network). Each test uses a new project directory and a new `--state`
+  outside it: the TUI works in place, refuses a state root inside the
+  workspace, and continues the last session of the directory it starts in.
+- Pseudo-terminal: no test drives the built binary in a pseudo-terminal yet.
+- Durable session: persisted sessions per directory (continue-last and
+  `/resume`). Stage 6 applies to changes to how sessions are stored, loaded,
+  or resumed.
+- Live target: a local OpenAI-compatible gateway through
+  `examples/cliproxy-http.toml`, key from `CLIPROXY_API_KEY`, checked with
+  `validate-behavior`.
