@@ -244,7 +244,7 @@ impl GovernancePort for HttpCallbackGovernance {
         local_model
             .next_turn(system, messages, tools)
             .await
-            .map_err(|e| GovernanceError::Message(e.to_string()))
+            .map_err(GovernanceError::Model)
     }
 
     async fn authorize_tool(

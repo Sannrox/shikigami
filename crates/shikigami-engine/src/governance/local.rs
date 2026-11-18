@@ -182,7 +182,7 @@ impl GovernancePort for LocalGovernance {
         local_model
             .next_turn(system, messages, tools)
             .await
-            .map_err(|e| GovernanceError::Message(e.to_string()))
+            .map_err(GovernanceError::Model)
     }
 
     async fn plan_content_turn(

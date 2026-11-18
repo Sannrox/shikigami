@@ -246,9 +246,14 @@ impl LocalDurability {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum GovernanceError {
     #[error("governance: {0}")]
     Message(String),
+    /// The model adapter a governance port called failed (transport, provider
+    /// status, or response). Displayed as the model's own error.
+    #[error(transparent)]
+    Model(#[from] crate::model::ModelError),
     #[error("governance unavailable: {0}")]
     Unavailable(String),
     #[error("tool denied: {0}")]
@@ -625,7 +630,7 @@ pub(crate) async fn plan_local_content_turn(
     model
         .next_content_turn(system, messages, tools, capabilities, &resolved)
         .await
-        .map_err(|error| GovernanceError::Message(error.to_string()))
+        .map_err(GovernanceError::Model)
 }
 
 pub fn from_config(config: &Config) -> Result<Box<dyn GovernancePort>, GovernanceError> {

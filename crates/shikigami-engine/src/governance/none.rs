@@ -177,7 +177,7 @@ impl GovernancePort for NoneGovernance {
         local_model
             .next_turn(system, messages, tools)
             .await
-            .map_err(|e| GovernanceError::Message(e.to_string()))
+            .map_err(GovernanceError::Model)
     }
 
     async fn plan_content_turn(
@@ -228,5 +228,35 @@ impl GovernancePort for NoneGovernance {
         _outcome: RunOutcome,
     ) -> Result<(), GovernanceError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ModelError, ScriptedModel};
+
+    /// A model failure surfaces as the model's own error, not as governance.
+    #[tokio::test]
+    async fn model_failure_is_reported_as_a_model_error() {
+        let mut config = Config::default();
+        config.model.script_json = Some("[]".into());
+        let model = ScriptedModel::from_config(&config).unwrap();
+        let handle = RunHandle {
+            run_id: "run-1".into(),
+            operation_id: "run-1".into(),
+            namespace: "local".into(),
+        };
+
+        let error = NoneGovernance::from_config(&config)
+            .plan_turn(&handle, "", &[], &[], &model)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            GovernanceError::Model(ModelError::ScriptExhausted)
+        ));
+        assert_eq!(error.to_string(), "scripted turns exhausted");
     }
 }
