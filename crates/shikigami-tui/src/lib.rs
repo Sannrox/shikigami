@@ -46,7 +46,72 @@ pub async fn run(harness: Harness) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let host = Arc::new(AcpHost::new(harness));
     let session = TuiSession::start(host, &cwd).await?;
-    run_terminal(session).await
+    let mut termination = Termination::install()?;
+    run_terminal(session, &mut termination).await?;
+    // The terminal is restored by now; end the process the way the signal would have.
+    termination.reraise();
+    Ok(())
+}
+
+/// Grace period for a running turn to record its cancellation before a
+/// termination signal ends the process.
+const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+
+/// SIGTERM and SIGHUP (a closed terminal) handling for the TUI process.
+/// Installed before raw mode, so a signal never ends the process with the
+/// terminal still in TUI mode; the event loop restores it and then `reraise`
+/// keeps the signal exit status.
+#[cfg(unix)]
+struct Termination {
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+    received: Option<libc::c_int>,
+}
+
+#[cfg(unix)]
+impl Termination {
+    fn install() -> Result<Self, String> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            term: signal(SignalKind::terminate()).map_err(|e| e.to_string())?,
+            hup: signal(SignalKind::hangup()).map_err(|e| e.to_string())?,
+            received: None,
+        })
+    }
+
+    /// Resolves when a termination signal arrives. Cancel-safe.
+    async fn recv(&mut self) {
+        let signal = tokio::select! {
+            _ = self.term.recv() => libc::SIGTERM,
+            _ = self.hup.recv() => libc::SIGHUP,
+        };
+        self.received = Some(signal);
+    }
+
+    fn reraise(self) {
+        if let Some(signal) = self.received {
+            unsafe {
+                libc::signal(signal, libc::SIG_DFL);
+                libc::raise(signal);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct Termination;
+
+#[cfg(not(unix))]
+impl Termination {
+    fn install() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) {
+        std::future::pending().await
+    }
+
+    fn reraise(self) {}
 }
 
 struct ToolLine {
@@ -1960,7 +2025,7 @@ impl Drop for StderrSilence {
     }
 }
 
-async fn run_terminal(session: TuiSession) -> Result<(), String> {
+async fn run_terminal(session: TuiSession, termination: &mut Termination) -> Result<(), String> {
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _guard = TerminalGuard;
     let mut out = stdout();
@@ -2018,10 +2083,20 @@ async fn run_terminal(session: TuiSession) -> Result<(), String> {
             continue;
         }
 
-        let ev = match tokio::time::timeout(Duration::from_millis(80), rx.recv()).await {
-            Ok(Some(ev)) => ev,
-            Ok(None) => break,
-            Err(_) => continue,
+        let ev = tokio::select! {
+            ev = tokio::time::timeout(Duration::from_millis(80), rx.recv()) => match ev {
+                Ok(Some(ev)) => ev,
+                Ok(None) => break,
+                Err(_) => continue,
+            },
+            () = termination.recv() => {
+                // Same cancel as ^c on a running turn, then quit.
+                if session.lock_shared().busy {
+                    session.cancel();
+                    let _ = tokio::time::timeout(TERMINATION_GRACE, session.wait_prompt()).await;
+                }
+                break;
+            }
         };
         match handle_event(&session, ev) {
             KeyResult::Quit => break,
