@@ -40,7 +40,9 @@ failed `tool_end` in the run journal (`events.jsonl`).
 
 ## Output
 
-The only output is the final `report`. Its `summary` is one JSON object.
+The only output is the final `report`. Its `data` is one JSON object and
+its `summary` is plain text. The record reaches the run result, `run.json`,
+and governed harvest as `data`.
 The harness stamps `problem_signature` from measured facts (component,
 version range, finding class, advisory id) so the same problem agrees
 across models. Two advisories on the same component stay distinct.
@@ -67,10 +69,10 @@ and `serve --intake plane`. Agent-turn intake stays the site-agent profile.
 
 A run that exhausts its budget ends with `max_turns` or `timed_out`. It has
 no typed report, so it is not a clean review. Ending without a terminal
-`report` is the same blocked result. A successful `report` whose JSON is
-not a typed finding record, or whose coverage is incomplete, is refused as
-a failed `report` call. Resuming a successful content checkpoint whose
-stored summary is not a typed finding record for the configured role is
+`report` is the same blocked result. A successful `report` whose `data` is
+missing, not a typed finding record, or has incomplete coverage is refused
+as a failed `report` call. Resuming a successful content checkpoint whose
+stored report is not a typed finding record for the configured role is
 the same blocked result. Rerun with a larger budget or a smaller bundle.
 
 ## Tests

@@ -1,6 +1,7 @@
 //! Durable execution and reporting for one model-produced tool batch.
 
 use crate::tracing_export::Outbound;
+use crate::typed_report::{TypedProfile, stored_text};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use tokio::task::JoinSet;
 use crate::checkpoint::{
     ApprovalPark, ParkedState, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
-use crate::config::{Config, SECURITY_FINDER_PROFILE, SECURITY_TRIAGE_PROFILE};
+use crate::config::Config;
 use crate::events::HarnessEvent;
 use crate::governance::{
     GovernanceError, RunHandle, bind_parked_call, now_unix_ms, park_arguments_digest,
@@ -43,17 +44,8 @@ fn apply_security_finder_report(config: &Config, output: ToolOutput) -> Result<T
     let ToolOutput::Report(mut report) = output else {
         return Ok(output);
     };
-    if !report.success {
-        return Ok(ToolOutput::Report(report));
-    }
-    if config.profile.name == SECURITY_FINDER_PROFILE {
-        let role =
-            config.security_finder.role.as_deref().ok_or_else(|| {
-                "profile `security-finder`: missing security_finder.role".to_string()
-            })?;
-        report.summary = crate::security_finder::canonicalize_report(&report.summary, role)?;
-    } else if config.profile.name == SECURITY_TRIAGE_PROFILE {
-        report.summary = crate::security_triage::canonicalize_report(&report.summary)?;
+    if let Some(profile) = TypedProfile::of(config)? {
+        profile.canonicalize(&mut report)?;
     }
     Ok(ToolOutput::Report(report))
 }
@@ -943,12 +935,14 @@ impl<'a> DurableToolBatch<'a> {
                     });
                 }
                 Ok(ToolOutput::Report(report)) if !session.plan_jail || session.is_content() => {
-                    let detail = format!("report: {}", report.summary);
+                    // A resume reads the typed result back from this record.
+                    let stored = stored_text(&self.engine.config, report);
+                    let detail = format!("report: {stored}");
                     if session.is_content() {
                         session
-                            .append_content_tool_text(tool_call_id.clone(), report.summary.clone())
+                            .append_content_tool_text(tool_call_id.clone(), stored.clone())
                             .await?;
-                        content_terminal_report = Some((report.success, report.summary.clone()));
+                        content_terminal_report = Some((report.success, stored));
                     }
                     session.messages.push(ChatMessage {
                         role: "tool".into(),
@@ -1310,10 +1304,11 @@ impl<'a> DurableToolBatch<'a> {
                     (true, projected_detail(session.is_content(), text))
                 }
                 Ok(ToolOutput::Report(report)) => {
-                    let detail = format!("report: {}", report.summary);
+                    let stored = stored_text(&self.engine.config, report);
+                    let detail = format!("report: {stored}");
                     if session.is_content() {
                         session
-                            .append_content_tool_text(tool_call_id.clone(), report.summary.clone())
+                            .append_content_tool_text(tool_call_id.clone(), stored)
                             .await?;
                     }
                     session.messages.push(ChatMessage {

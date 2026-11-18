@@ -75,8 +75,9 @@ async fn run(
     (result, events)
 }
 
-fn report_turn(summary: &serde_json::Value) -> serde_json::Value {
-    let args = serde_json::json!({"summary": summary.to_string(), "success": true});
+/// A `report` turn carrying the typed result in `data`.
+fn report_turn(data: &serde_json::Value) -> serde_json::Value {
+    let args = serde_json::json!({"summary": "typed result", "success": true, "data": data});
     serde_json::json!({"tool_calls": [{"name": "report", "args_json": args.to_string()}]})
 }
 
@@ -210,8 +211,12 @@ async fn marked_data_gets_a_higher_severity_verdict_than_an_isolated_component()
         "the triage profile must be in trusted context: {marked_events:?}"
     );
 
-    let isolated: TriageReport = serde_json::from_str(&isolated.summary).unwrap();
-    let marked: TriageReport = serde_json::from_str(&marked.summary).unwrap();
+    assert_eq!(isolated.summary, "typed result");
+    let typed = |result: &shikigami::RunResult| -> TriageReport {
+        serde_json::from_value(serde_json::Value::Object(result.data.clone().unwrap())).unwrap()
+    };
+    let isolated = typed(&isolated);
+    let marked = typed(&marked);
     assert_eq!(isolated.package, PACKAGE_ID);
     assert!(isolated.reachable_markings.is_empty());
     assert_eq!(marked.reachable_markings, vec!["customer-pii".to_string()]);
@@ -251,6 +256,23 @@ async fn unreviewed_recorded_disposition_is_refused() {
         result.is_err() || result.as_ref().is_ok_and(|run| !run.success),
         "an unreviewed recorded disposition must not look clean: {result:?}"
     );
+}
+
+#[tokio::test]
+async fn a_verdict_in_summary_without_data_is_refused() {
+    let args = json!({"summary": verdict(&[], "medium").to_string(), "success": true});
+    let turn = json!({"tool_calls": [{"name": "report", "args_json": args.to_string()}]});
+    let (_dir, engine, rx) = triage_engine(json!([turn]));
+    let (result, events) = run(&engine, &rx).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolEnd { name, ok: false, detail, .. }
+                if name == "report" && detail.contains("report data is required")
+        )),
+        "{events:?}"
+    );
+    assert!(result.is_err() || result.as_ref().is_ok_and(|run| !run.success));
 }
 
 #[tokio::test]

@@ -54,15 +54,6 @@ pub struct TriageReport {
     pub proposed_disposition: Option<ProposedDisposition>,
 }
 
-/// Stamp a recovered successful summary. Failed reports pass the stored text.
-pub fn canonicalize_recovered_summary(summary: &str, success: bool) -> Result<String, String> {
-    if success {
-        canonicalize_report(summary)
-    } else {
-        Ok(summary.to_string())
-    }
-}
-
 /// Parse a successful report and fail closed on an untyped or mixed record.
 pub fn canonicalize_report(summary: &str) -> Result<String, String> {
     let mut report: TriageReport = serde_json::from_str(summary).map_err(|error| {
@@ -177,13 +168,5 @@ mod tests {
         .to_string();
         let error = canonicalize_report(&summary).unwrap_err();
         assert!(error.contains("unreviewed disposition"), "{error}");
-    }
-
-    #[test]
-    fn recovered_failure_is_not_reparsed() {
-        assert_eq!(
-            canonicalize_recovered_summary("not typed", false).unwrap(),
-            "not typed"
-        );
     }
 }

@@ -133,19 +133,6 @@ pub fn problem_signature(
     sha256_prefixed(material.to_string().as_bytes())
 }
 
-/// Stamp a recovered successful summary against the configured role.
-/// Failed reports and other profiles pass the stored text through.
-pub fn canonicalize_recovered_summary(
-    summary: &str,
-    success: bool,
-    expected_role: Option<&str>,
-) -> Result<String, String> {
-    match expected_role {
-        Some(role) if success => canonicalize_report(summary, role),
-        _ => Ok(summary.to_string()),
-    }
-}
-
 /// Parse a successful report, stamp canonical signatures, and fail closed on
 /// incomplete coverage or a finding/hypothesis mix-up.
 pub fn canonicalize_report(summary: &str, expected_role: &str) -> Result<String, String> {
@@ -444,29 +431,5 @@ mod tests {
         let left = problem_signature("a\nversion_range=b", "c", "vulnerable-dependency", "");
         let right = problem_signature("a", "b\nversion_range=c", "vulnerable-dependency", "");
         assert_ne!(left, right);
-    }
-
-    #[test]
-    fn recovered_successful_summary_must_match_the_configured_role() {
-        let summary = report(
-            serde_json::json!([finding("left-pad", "=1.3.0", "vulnerable-dependency")]),
-            serde_json::json!([]),
-        );
-        let canonical =
-            canonicalize_recovered_summary(&summary, true, Some(ROLE_DEPENDENCY_ADVISORY)).unwrap();
-        assert_ne!(canonical, summary);
-        let error =
-            canonicalize_recovered_summary(&summary, true, Some(ROLE_AUTHORIZATION_BOUNDARY))
-                .unwrap_err();
-        assert!(error.contains("does not match configured role"), "{error}");
-        assert_eq!(
-            canonicalize_recovered_summary(&summary, true, None).unwrap(),
-            summary
-        );
-        assert_eq!(
-            canonicalize_recovered_summary("not typed", false, Some(ROLE_DEPENDENCY_ADVISORY))
-                .unwrap(),
-            "not typed"
-        );
     }
 }
