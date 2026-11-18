@@ -1955,7 +1955,7 @@ fn content_conversation_updates(
     let mut updates = Vec::new();
     let mut turn = 0u32;
     let mut call_ids = HashMap::new();
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message.role.as_str() {
             "user" => {
                 let text =
@@ -1965,7 +1965,8 @@ fn content_conversation_updates(
                         "sessionId": session_id,
                         "update": {
                             "sessionUpdate": "user_message_chunk",
-                            "content": { "type": "text", "text": text }
+                            "content": { "type": "text", "text": text },
+                            "messageId": format!("user-{index}")
                         }
                     }));
                 }
@@ -2081,14 +2082,29 @@ fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value
     let mut updates = Vec::new();
     let mut turn = 0u32;
     let mut call_ids = HashMap::new();
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message.role.as_str() {
+            "user"
+                if message
+                    .content
+                    .starts_with(crate::run::COMPACTION_MARKER_PREFIX) =>
+            {
+                updates.push(json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "user_message_chunk",
+                        "content": { "type": "text", "text": message.content },
+                        "_meta": { "shikigami": { "compacted": true } }
+                    }
+                }));
+            }
             "user" if !message.content.is_empty() => {
                 updates.push(json!({
                     "sessionId": session_id,
                     "update": {
                         "sessionUpdate": "user_message_chunk",
-                        "content": { "type": "text", "text": message.content }
+                        "content": { "type": "text", "text": message.content },
+                        "messageId": format!("user-{index}")
                     }
                 }));
             }
@@ -2107,9 +2123,9 @@ fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value
                 for (index, call) in message.tool_calls.iter().enumerate() {
                     let stable = stable_call_id(call, turn, index);
                     let conversation = conversation_call_id(call, turn, index);
-                    call_ids.insert(conversation, stable.clone());
+                    call_ids.insert(conversation, (stable.clone(), call.name.clone()));
                     if !call.id.is_empty() {
-                        call_ids.insert(call.id.clone(), stable.clone());
+                        call_ids.insert(call.id.clone(), (stable.clone(), call.name.clone()));
                     }
                     updates.push(json!({
                         "sessionId": session_id,
@@ -2125,12 +2141,21 @@ fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value
                 }
             }
             "tool" => {
-                let call_id = call_ids
+                let (call_id, name) = call_ids
                     .get(&message.tool_call_id)
                     .cloned()
-                    .unwrap_or_else(|| message.tool_call_id.clone());
+                    .unwrap_or_else(|| (message.tool_call_id.clone(), String::new()));
                 let failed =
                     message.content == "permission denied" || message.content == "cancelled";
+                // A report result is stored as `report: <summary>` for resume;
+                // the live update showed the summary alone.
+                let text = match name.as_str() {
+                    "report" => message
+                        .content
+                        .strip_prefix("report: ")
+                        .unwrap_or(&message.content),
+                    _ => message.content.as_str(),
+                };
                 updates.push(json!({
                     "sessionId": session_id,
                     "update": {
@@ -2139,7 +2164,7 @@ fn conversation_updates(session_id: &str, messages: &[ChatMessage]) -> Vec<Value
                         "status": if failed { "failed" } else { "completed" },
                         "content": [{
                             "type": "content",
-                            "content": { "type": "text", "text": message.content }
+                            "content": { "type": "text", "text": text }
                         }]
                     }
                 }));
@@ -3917,6 +3942,30 @@ mod tests {
             checkpoint.content.is_some(),
             "attachment prompt must use a content run"
         );
+    }
+
+    /// #616: replayed prompts carry their own message id, and compaction markers
+    /// are flagged so a client shows them as a note.
+    #[test]
+    fn replay_marks_compaction_and_separates_prompts() {
+        let user = |content: &str| ChatMessage {
+            role: "user".into(),
+            content: content.into(),
+            tool_call_id: String::new(),
+            tool_calls: vec![],
+        };
+        let marker = format!(
+            "{} 2 earlier messages omitted]",
+            crate::run::COMPACTION_MARKER_PREFIX
+        );
+        let updates = conversation_updates("s", &[user("first"), user(&marker), user("second")]);
+        let ids: Vec<&Value> = updates.iter().map(|u| &u["update"]["messageId"]).collect();
+        assert_eq!(ids, [&json!("user-0"), &Value::Null, &json!("user-2")]);
+        assert_eq!(
+            updates[1]["update"]["_meta"]["shikigami"]["compacted"],
+            true
+        );
+        assert!(updates[0]["update"].get("_meta").is_none());
     }
 
     /// #615: a model failure on `session/prompt` says it is a model failure.

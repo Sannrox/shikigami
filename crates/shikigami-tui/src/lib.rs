@@ -60,6 +60,12 @@ pub async fn run(harness: Harness) -> Result<(), String> {
     Ok(())
 }
 
+/// Replayed where compaction cut earlier messages from the run's history.
+const COMPACTED: &str = "Earlier messages were compacted.";
+
+/// Replayed under a prompt that got no answer (failed or cancelled first).
+const NO_ANSWER: &str = "This prompt got no answer.";
+
 /// Leads a failed prompt whose host marked the failure as the model's.
 const MODEL_FAILED: &str = "The model did not answer. Check the model address and key in your settings, or run shikigami doctor. Your next prompt tries again.";
 
@@ -1191,7 +1197,7 @@ fn format_tool(tool: &ToolLine) -> String {
     };
     let outcome = matches!(
         tool.status.as_str(),
-        "failed" | TOOL_NOT_RUN | TOOL_IN_DOUBT
+        "failed" | TOOL_NOT_RUN | TOOL_IN_DOUBT | TOOL_CANCELLED
     ) && !tool.detail.is_empty();
     let suffix = if outcome {
         format!("  {}", tool.status)
@@ -1832,16 +1838,30 @@ fn apply_update(shared: &mut Shared, params: &Value) {
         .unwrap_or("");
     match kind {
         "user_message_chunk" => {
-            if let Some(text) = chunk_text(update) {
-                merge_text(
-                    &mut shared.transcript,
-                    TranscriptLine::User(String::new()),
-                    text,
-                );
+            if update
+                .pointer("/_meta/shikigami/compacted")
+                .is_some_and(|v| v == true)
+            {
+                shared
+                    .transcript
+                    .push(TranscriptLine::System(COMPACTED.into()));
+            } else if let Some(text) = chunk_text(update) {
+                // A replayed prompt is one chunk with its own id: one line each,
+                // so a prompt that got no answer stays apart from the next.
+                if update.get("messageId").is_some() {
+                    shared.transcript.push(TranscriptLine::User(text));
+                } else {
+                    merge_text(
+                        &mut shared.transcript,
+                        TranscriptLine::User(String::new()),
+                        text,
+                    );
+                }
             }
         }
         "agent_message_chunk" => {
-            if let Some(text) = chunk_text(update) {
+            // A turn opens with an empty chunk; it carries no text to show.
+            if let Some(text) = chunk_text(update).filter(|text| !text.is_empty()) {
                 merge_text(
                     &mut shared.transcript,
                     TranscriptLine::Assistant(String::new()),
@@ -1870,13 +1890,27 @@ fn apply_update(shared: &mut Shared, params: &Value) {
                 .map(compact_value)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_default();
-            shared.transcript.push(TranscriptLine::Tool(ToolLine {
-                id,
-                title,
-                status,
-                detail,
-                expanded: false,
-            }));
+            // A call shown at its permission ask starts again once allowed: same line.
+            if let Some(TranscriptLine::Tool(tool)) = shared
+                .transcript
+                .iter_mut()
+                .rev()
+                .find(|line| matches!(line, TranscriptLine::Tool(t) if t.id == id))
+            {
+                tool.title = title;
+                tool.status = status;
+                if !detail.is_empty() {
+                    tool.detail = detail;
+                }
+            } else {
+                shared.transcript.push(TranscriptLine::Tool(ToolLine {
+                    id,
+                    title,
+                    status,
+                    detail,
+                    expanded: false,
+                }));
+            }
         }
         "tool_call_update" => {
             let id = update
@@ -1894,11 +1928,17 @@ fn apply_update(shared: &mut Shared, params: &Value) {
                 .rev()
                 .find(|line| matches!(line, TranscriptLine::Tool(t) if t.id == id))
             {
-                if let Some(status) = status {
-                    tool.status = status;
-                }
-                if let Some(detail) = detail {
-                    tool.detail = detail;
+                // The host replays a call cancelled at its ask as failed with
+                // the text `cancelled`; keep its path and say cancelled, as live.
+                if status.as_deref() == Some("failed") && detail.as_deref() == Some("cancelled") {
+                    tool.status = TOOL_CANCELLED.into();
+                } else {
+                    if let Some(status) = status {
+                        tool.status = status;
+                    }
+                    if let Some(detail) = detail {
+                        tool.detail = detail;
+                    }
                 }
             }
         }
@@ -1944,7 +1984,26 @@ fn chunk_text(update: &Value) -> Option<String> {
 /// Applies a `session/load` result: the session's run and any interrupted step.
 fn apply_load_result(shared: &mut Shared, result: &Value) {
     shared.run_id = run_id_of(result);
+    mark_unanswered_prompts(&mut shared.transcript);
     apply_interruption(shared, result);
+}
+
+/// After a replay, a prompt followed by another prompt or by nothing failed or
+/// was cancelled before any answer; the history keeps no error text, so say so.
+fn mark_unanswered_prompts(transcript: &mut Vec<TranscriptLine>) {
+    let mut index = 0;
+    while index < transcript.len() {
+        let unanswered = matches!(transcript[index], TranscriptLine::User(_))
+            && matches!(
+                transcript.get(index + 1),
+                None | Some(TranscriptLine::User(_))
+            );
+        if unanswered {
+            transcript.insert(index + 1, TranscriptLine::System(NO_ANSWER.into()));
+            index += 1;
+        }
+        index += 1;
+    }
 }
 
 /// The run id the host reports in a `session/prompt` or `session/load` result.
@@ -1993,6 +2052,7 @@ fn apply_interruption(shared: &mut Shared, result: &Value) {
 
 /// Tool line statuses set by `apply_interruption`, shown like `failed`.
 const TOOL_NOT_RUN: &str = "not run";
+const TOOL_CANCELLED: &str = "cancelled";
 const TOOL_IN_DOUBT: &str = "result unknown";
 
 fn tool_update_detail(update: &Value) -> Option<String> {
@@ -2041,6 +2101,15 @@ fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
         .and_then(|v| v.pointer("/result/stopReason"))
         .and_then(|v| v.as_str())
     {
+        if reason == "cancelled" {
+            for line in &mut shared.transcript {
+                if let TranscriptLine::Tool(tool) = line
+                    && tool.status == "pending"
+                {
+                    tool.status = TOOL_CANCELLED.into();
+                }
+            }
+        }
         shared.status = stop_word(reason).into();
         return;
     }
@@ -3746,10 +3815,136 @@ mod tests {
         let screen = rows.join("\n").replace(short_id, "<id>");
         let rule = "─".repeat(80);
         let expected = format!(
-            "{}you  write the ok file\n\n\n· write_file  ok.txt\n{rule}\n>\n{rule}\n  cancelled  <id>  ^c quit  ^o tool  pgup/pgdn/wheel",
-            "\n".repeat(16)
+            "{}you  write the ok file\n\n· write_file  ok.txt  cancelled\n{rule}\n>\n{rule}\n  cancelled  <id>  ^c quit  ^o tool  pgup/pgdn/wheel",
+            "\n".repeat(17)
         );
         assert_eq!(screen, expected);
+    }
+
+    /// #616: returning to a session shows the outcomes the user saw live.
+    #[tokio::test]
+    async fn relaunch_replays_what_the_user_saw() {
+        let dir = tempdir().unwrap();
+        let script = r#"[
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"no.txt\",\"content\":\"hi\\n\"}"}]},
+          {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"all written\",\"success\":true}"}]}
+        ]"#;
+        let session = start_session(&dir, script).await;
+        session
+            .spawn_prompt("write two files".into())
+            .await
+            .unwrap();
+        wait_until(|| session.overlay_text().is_some()).await;
+        session.answer_permission(true);
+        wait_until(|| {
+            session
+                .overlay_text()
+                .is_some_and(|text| text.contains("no.txt"))
+        })
+        .await;
+        session.answer_permission(false);
+        session.wait_prompt().await;
+        session.spawn_prompt("and then?".into()).await.unwrap();
+        session.wait_prompt().await;
+        let live = session.transcript_text();
+        drop(session);
+
+        let relaunched = start_session(&dir, script).await;
+        let replayed = relaunched.transcript_text();
+        // The history keeps no error text, so the failed prompt's outcome
+        // replays as one line instead of the live error.
+        let failure = format!("{MODEL_FAILED}\nscripted turns exhausted");
+        assert!(live.contains(&failure), "{live}");
+        assert_eq!(replayed, live.replace(&failure, NO_ANSWER));
+    }
+
+    /// #616: a compaction marker replays as a note, so the prompt before it is
+    /// not taken for one that got no answer.
+    #[test]
+    fn replayed_compaction_marker_is_a_note_not_a_prompt() {
+        let mut shared = Shared::new();
+        let user = |id: &str, text: &str| {
+            json!({"update": {"sessionUpdate": "user_message_chunk", "messageId": id,
+                "content": {"type": "text", "text": text}}})
+        };
+        apply_update(&mut shared, &user("user-0", "the task"));
+        apply_update(
+            &mut shared,
+            &json!({"update": {"sessionUpdate": "user_message_chunk",
+                "content": {"type": "text", "text": "[context compacted: 4 earlier messages omitted; continue the original task]"},
+                "_meta": {"shikigami": {"compacted": true}}}}),
+        );
+        apply_update(&mut shared, &user("user-6", "a follow-up"));
+        apply_update(
+            &mut shared,
+            &json!({"update": {"sessionUpdate": "agent_message_chunk", "messageId": "turn-3",
+                "content": {"type": "text", "text": "done it"}}}),
+        );
+        apply_load_result(&mut shared, &json!({}));
+        let text: Vec<String> = shared.transcript.iter().map(line_text).collect();
+        assert_eq!(
+            text,
+            ["you  the task", COMPACTED, "you  a follow-up", "done it"]
+        );
+    }
+
+    /// #616: a failed prompt followed by an answered one replays as two prompts.
+    #[tokio::test]
+    async fn relaunch_keeps_a_failed_prompt_apart_from_the_next() {
+        let dir = tempdir().unwrap();
+        // Fails until the second prompt is in the history.
+        let script = r#"[{"requires_context":["second-ask"],"content":"answered"}]"#;
+        let session = start_session(&dir, script).await;
+        session.spawn_prompt("first-ask".into()).await.unwrap();
+        session.wait_prompt().await;
+        session.spawn_prompt("second-ask".into()).await.unwrap();
+        session.wait_prompt().await;
+        drop(session);
+
+        let relaunched = start_session(&dir, script).await;
+        assert_eq!(
+            relaunched.transcript_text(),
+            format!("you  first-ask\n{NO_ANSWER}\nyou  second-ask\nanswered")
+        );
+    }
+
+    /// #616: a prompt cancelled before any output stays its own line live.
+    #[tokio::test]
+    async fn prompt_after_a_silent_cancel_stays_a_separate_line() {
+        let dir = tempdir().unwrap();
+        let session = start_session(
+            &dir,
+            r#"[{"chunks":["slow"],"chunk_delay_ms":300,"content":"slow"},{"content":"ok"}]"#,
+        )
+        .await;
+        session.spawn_prompt("first".into()).await.unwrap();
+        session.cancel();
+        session.wait_prompt().await;
+        session.spawn_prompt("second".into()).await.unwrap();
+        session.wait_prompt().await;
+        let prompts = user_prompts(&session);
+        assert_eq!(prompts, ["first", "second"]);
+    }
+
+    /// #616: a tool cancelled at its permission ask replays as it was shown.
+    #[tokio::test]
+    async fn relaunch_after_a_cancelled_ask_replays_what_the_user_saw() {
+        let dir = tempdir().unwrap();
+        let script = r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]}]"#;
+        let session = start_session(&dir, script).await;
+        session
+            .spawn_prompt("write the ok file".into())
+            .await
+            .unwrap();
+        wait_until(|| session.overlay_text().is_some()).await;
+        session.cancel();
+        session.wait_prompt().await;
+        let live = session.transcript_text();
+        drop(session);
+
+        let relaunched = start_session(&dir, script).await;
+        assert_eq!(relaunched.transcript_text(), live);
     }
 
     /// #601: `/run` names the run `shikigami runs` and `export` accept, and says

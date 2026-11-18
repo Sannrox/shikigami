@@ -61,6 +61,10 @@ fn replace_compacted_span(
 
 /// Every compaction marker starts with `[context compacted:`; replay and
 /// export detect compacted history by that prefix.
+/// Every compaction marker message starts with this; a replay shows it as a
+/// note, not as something the user typed.
+pub const COMPACTION_MARKER_PREFIX: &str = "[context compacted:";
+
 fn dropped_marker(dropped: usize) -> ChatMessage {
     user_message(format!(
         "[context compacted: {dropped} earlier messages omitted; continue the original task]"

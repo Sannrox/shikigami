@@ -96,6 +96,12 @@ attach. Unsupported types fail closed. Omit attachments and today's text host
 is unchanged. Attachment sessions inherit content v1: no escalate parking.
 `session/compact` still cuts ChatMessage history.
 
+`session/load` replays each stored prompt as one `user_message_chunk` with its
+own `messageId` (`user-<n>`). A compaction marker replays as a
+`user_message_chunk` with `_meta.shikigami.compacted = true`; clients show it
+as a note, not as something the user typed. A `report` result replays as its
+summary, as it was shown live.
+
 When a restored session's last host went away mid-step, the `session/load`
 result carries `_meta.shikigami.interrupted.toolCalls`: one
 `{ "toolCallId", "outcome" }` per replayed tool call that has no result.
