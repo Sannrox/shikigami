@@ -55,6 +55,7 @@ async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), 
         .map_err(|e| e.to_string())?;
     let demo = uses_demo_model(&harness.config);
     let model = model_label(&harness.config.model);
+    let model_port = harness.model_handle();
     let host = Arc::new(AcpHost::new(harness));
     let mut session = TuiSession::start(host, &cwd, continue_last).await?;
     session.model = model;
@@ -65,6 +66,7 @@ async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), 
             .push(TranscriptLine::System(DEMO_MODEL_NOTICE.into()));
     }
     let shared = Arc::clone(&session.client.shared);
+    tokio::spawn(note_unreachable_model(model_port, Arc::clone(&shared)));
     let mut termination = Termination::install()?;
     run_terminal(session, &mut termination).await?;
     if shared
@@ -128,6 +130,24 @@ const SESSION_IN_USE: &str =
     "That session is open in another window. Close it there, or pick another one.";
 
 /// Shown at launch when no model is configured and the built-in demo script answers.
+/// Launch found the configured model address unreachable. Typing still works.
+const MODEL_UNREACHABLE_AT_LAUNCH: &str = "The model address in your settings cannot be reached. Check the address, or start the model server. You can still type; prompts fail until it answers.";
+
+/// Writes [`MODEL_UNREACHABLE_AT_LAUNCH`] when the model's address does not
+/// answer. Runs beside the first screen so launch never waits on the network.
+async fn note_unreachable_model(
+    model: Arc<dyn shikigami::model::ModelPort>,
+    shared: Arc<Mutex<Shared>>,
+) {
+    if let Err(shikigami::model::ModelError::Unreachable(_)) = model.check_reachable().await {
+        let mut shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared
+            .transcript
+            .push(TranscriptLine::System(MODEL_UNREACHABLE_AT_LAUNCH.into()));
+        shared.dirty = true;
+    }
+}
+
 const DEMO_MODEL_NOTICE: &str = "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt, then stops. To use a real model, set [model] in a settings file and start with --config <file>.";
 
 /// The footer's model name. A scripted model has no real name to show.

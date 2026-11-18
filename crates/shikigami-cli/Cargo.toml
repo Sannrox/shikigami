@@ -36,3 +36,4 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+vt100 = "0.18.1"

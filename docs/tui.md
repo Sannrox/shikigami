@@ -20,7 +20,10 @@ it writes anything, so the project stays unchanged.
 Credentials come from the environment, same as CLI. There is no TUI login.
 A missing key variable stops launch with the variable to set. With no
 `[model]` configured, the built-in demo script answers: launch says so in one
-system line and names how to configure a real model.
+system line and names how to configure a real model. With an HTTP model,
+launch also checks in the background that the model address answers (a plain
+request without the key, so no model request is spent); when it does not, one
+system line says so and names the next step. Typing works meanwhile.
 A prompt that fails because the model did not answer leads with the likely
 cause and next step, then the upstream detail: the scripted model has no more
 answers (configure a real model), the model cannot be reached (check the
