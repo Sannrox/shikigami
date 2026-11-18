@@ -67,7 +67,7 @@ pub struct Config {
     pub preset: Option<AppliedPreset>,
 }
 
-/// `[tui]`: key bindings and colors for `shikigami tui`. Read only from the
+/// `[tui]`: key bindings, colors, and the status line for `shikigami tui`. Read only from the
 /// settings file the user chose, never implicitly from the project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,12 +79,31 @@ pub struct TuiSettings {
     /// Color role to a color name or `#rrggbb`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+    /// Operator command whose first output line shows in the footer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statusline: Option<TuiStatusLine>,
 }
 
 impl TuiSettings {
     fn is_empty(&self) -> bool {
-        self.keys.is_empty() && self.colors.is_empty()
+        self.keys.is_empty() && self.colors.is_empty() && self.statusline.is_none()
     }
+}
+
+/// `[tui.statusline]`: an operator-trusted command, like a hook. It gets the
+/// session state as JSON on stdin; its first stdout line is the status text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct TuiStatusLine {
+    pub command: String,
+    /// Kill after this duration (capped at 5s by the TUI).
+    #[serde(default = "default_statusline_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_statusline_timeout_ms() -> u64 {
+    200
 }
 
 /// One lifecycle hook entry (`command` is operator-trusted).
@@ -2359,6 +2378,16 @@ unknown_thing = true
             let is_parse = matches!(err, ConfigError::Parse { .. });
             prop_assert!(is_parse, "expected Parse for key {}, got {}", key, err);
         });
+    }
+
+    #[test]
+    fn tui_statusline_defaults_its_limit_and_refuses_unknown_fields() {
+        let tui: TuiSettings = toml::from_str("[statusline]\ncommand = \"st\"\n").unwrap();
+        let line = tui.statusline.unwrap();
+        assert_eq!((line.command.as_str(), line.timeout_ms), ("st", 200));
+        assert!(
+            toml::from_str::<TuiSettings>("[statusline]\ncommand = \"st\"\nargs = []\n").is_err()
+        );
     }
 
     #[test]

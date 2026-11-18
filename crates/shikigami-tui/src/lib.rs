@@ -33,9 +33,11 @@ use unicode_width::UnicodeWidthChar;
 use shikigami::acp::{AcpClient, AcpHost, SessionSummary};
 
 mod look;
+mod statusline;
 use look::{Action, KeyMap, Look, Palette};
 use shikigami::harness::Harness;
 use shikigami::identity::{PRODUCT, VERSION};
+use statusline::StatusLine;
 
 /// Run the interactive host on a real terminal until quit, in a new session.
 pub async fn run(harness: Harness) -> Result<(), String> {
@@ -50,6 +52,7 @@ pub async fn run_continuing(harness: Harness) -> Result<(), String> {
 async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), String> {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let look = Look::from_settings(&harness.config.tui, no_color)?;
+    let statusline = harness.config.tui.statusline.clone().map(StatusLine::new);
     if !stdin().is_terminal() || !stdout().is_terminal() {
         return Err("shikigami tui requires a terminal".into());
     }
@@ -64,6 +67,7 @@ async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), 
     let mut session = TuiSession::start(host, &cwd, continue_last).await?;
     session.model = model;
     session.look = look;
+    session.statusline = statusline;
     if demo {
         session
             .lock_shared()
@@ -304,6 +308,9 @@ struct Shared {
     pending_parts: Vec<Value>,
     /// The session's run as the host last reported it; `/run` shows it.
     run_id: Option<String>,
+    /// First output line of the `[tui.statusline]` command; `None` shows the
+    /// default model and turn.
+    statusline: Option<String>,
 }
 
 impl Shared {
@@ -334,6 +341,7 @@ impl Shared {
             last_osc52: None,
             pending_parts: Vec::new(),
             run_id: None,
+            statusline: None,
         }
     }
 
@@ -663,6 +671,8 @@ struct TuiSession {
     model: String,
     /// Key bindings and colors from `[tui]`.
     look: Look,
+    /// `[tui.statusline]` command, when configured.
+    statusline: Option<StatusLine>,
 }
 
 impl TuiSession {
@@ -684,6 +694,7 @@ impl TuiSession {
             osc_write: Mutex::new(osc_write_noop),
             model: String::new(),
             look: Look::default(),
+            statusline: None,
         };
         session
             .call(
@@ -1742,12 +1753,16 @@ fn turn_count(shared: &Shared) -> usize {
 fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u16) -> String {
     let interrupt = keys.label(Action::Interrupt);
     let mut parts = vec![shared.status.clone()];
-    if !model.is_empty() {
-        parts.push(model.to_string());
-    }
-    let turns = turn_count(shared);
-    if turns > 0 {
-        parts.push(format!("turn {turns}"));
+    if let Some(custom) = shared.statusline.as_deref() {
+        parts.push(truncate_one_line(custom, 48));
+    } else {
+        if !model.is_empty() {
+            parts.push(model.to_string());
+        }
+        let turns = turn_count(shared);
+        if turns > 0 {
+            parts.push(format!("turn {turns}"));
+        }
     }
     if shared.permission.is_some() {
         parts.push("esc cancel".into());
@@ -2443,7 +2458,10 @@ impl Drop for StderrSilence {
     }
 }
 
-async fn run_terminal(session: TuiSession, termination: &mut Termination) -> Result<(), String> {
+async fn run_terminal(
+    mut session: TuiSession,
+    termination: &mut Termination,
+) -> Result<(), String> {
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _guard = TerminalGuard;
     let mut out = stdout();
@@ -2472,8 +2490,32 @@ async fn run_terminal(session: TuiSession, termination: &mut Termination) -> Res
         }
     });
 
+    let mut statusline = session.statusline.take();
+    let cwd = session.cwd.to_string_lossy().into_owned();
     let mut last_program_status = None;
     loop {
+        if let Some(statusline) = statusline.as_mut() {
+            let (status, turn, run_id) = {
+                let shared = session.lock_shared();
+                (
+                    shared.status.clone(),
+                    turn_count(&shared),
+                    shared.run_id.clone(),
+                )
+            };
+            let session_id = session.session_id();
+            statusline.tick(
+                &statusline::Snapshot {
+                    session_id: &session_id,
+                    cwd: &cwd,
+                    model: &session.model,
+                    status: &status,
+                    turn,
+                    run_id: run_id.as_deref(),
+                },
+                &session.client.shared,
+            );
+        }
         let status = program_status(&session.lock_shared());
         if last_program_status != Some(status) {
             osc_write_stdout(status).map_err(|e| e.to_string())?;

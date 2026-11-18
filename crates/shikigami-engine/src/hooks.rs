@@ -80,31 +80,63 @@ async fn invoke_hook(hook: &HookSettings, event: HookEvent, payload: &Value) -> 
     });
     let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
     let limit = Duration::from_millis(hook.timeout_ms.clamp(1, 120_000));
+    run_operator_command(
+        &hook.command,
+        &hook.args,
+        &[("SHIKIGAMI_HOOK_EVENT", event.as_str())],
+        &body_str,
+        limit,
+        false,
+    )
+    .await
+    .map(drop)
+}
 
-    let mut child = Command::new(&hook.command)
-        .args(&hook.args)
+/// Run an operator-trusted command with `stdin` (plus a newline) and wait at
+/// most `limit`; the child is killed when the limit passes. Returns stdout
+/// when `capture_stdout` is set, else an empty buffer. Lifecycle hooks and
+/// the TUI status line command use it.
+pub async fn run_operator_command(
+    command: &str,
+    args: &[String],
+    env: &[(&str, &str)],
+    stdin: &str,
+    limit: Duration,
+    capture_stdout: bool,
+) -> Result<Vec<u8>, String> {
+    let mut child = Command::new(command)
+        .args(args)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(if capture_stdout {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .env("SHIKIGAMI_HOOK_EVENT", event.as_str())
+        .envs(env.iter().copied())
         .spawn()
         .map_err(|e| format!("spawn: {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut pipe) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(body_str.as_bytes()).await;
-        let _ = stdin.write_all(b"\n").await;
-        drop(stdin);
+        let _ = pipe.write_all(stdin.as_bytes()).await;
+        let _ = pipe.write_all(b"\n").await;
+        drop(pipe);
     }
 
     match timeout(limit, child.wait_with_output()).await {
         Ok(Ok(out)) => {
             if out.status.success() {
-                Ok(())
+                Ok(out.stdout)
             } else {
                 let err = String::from_utf8_lossy(&out.stderr);
-                Err(format!("exit {}: {err}", out.status))
+                let err = err.trim();
+                Err(if err.is_empty() {
+                    out.status.to_string()
+                } else {
+                    format!("{}: {err}", out.status)
+                })
             }
         }
         Ok(Err(e)) => Err(format!("wait: {e}")),
