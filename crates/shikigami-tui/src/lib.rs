@@ -100,6 +100,14 @@ const NOTHING_TO_CONTINUE: &str =
 const CONTINUE_FAILED: &str =
     "The last session in this folder could not be opened. This is a new session.";
 
+/// `--continue` found the last session held by another process.
+const CONTINUE_IN_USE: &str =
+    "The last session in this folder is open in another window. This is a new session.";
+
+/// `/resume` picked a session another process holds.
+const SESSION_IN_USE: &str =
+    "That session is open in another window. Close it there, or pick another one.";
+
 /// Shown at launch when no model is configured and the built-in demo script answers.
 const DEMO_MODEL_NOTICE: &str = "No model configured. This is the built-in demo: it asks to write SHIKIGAMI_OK.txt, then stops. To use a real model, set [model] in a settings file and start with --config <file>.";
 
@@ -665,6 +673,11 @@ impl TuiSession {
             self.push_system(NOTHING_TO_CONTINUE);
             return Ok(id);
         };
+        if latest.in_use {
+            let id = self.create_session(cwd).await?;
+            self.push_system(CONTINUE_IN_USE);
+            return Ok(id);
+        }
         match self
             .call("session/load", json!({ "sessionId": latest.session_id }))
             .await
@@ -679,9 +692,14 @@ impl TuiSession {
                 )));
                 Ok(latest.session_id)
             }
-            Err(_) => {
+            Err(err) => {
                 let id = self.create_session(cwd).await?;
-                self.push_system(CONTINUE_FAILED);
+                // Another window may take it between the list and the load.
+                self.push_system(if err == shikigami::acp::SESSION_IN_USE {
+                    CONTINUE_IN_USE
+                } else {
+                    CONTINUE_FAILED
+                });
                 Ok(id)
             }
         }
@@ -1205,7 +1223,12 @@ impl TuiSession {
                 shared.queued = backup.queued;
                 shared.scroll_back = backup.scroll_back;
                 shared.dock_scroll = backup.dock_scroll;
-                shared.transcript.push(TranscriptLine::System(err));
+                let line = if err == shikigami::acp::SESSION_IN_USE {
+                    SESSION_IN_USE.to_string()
+                } else {
+                    err
+                };
+                shared.transcript.push(TranscriptLine::System(line));
                 shared.status = "error".into();
                 shared.dirty = true;
             }
@@ -1572,13 +1595,15 @@ fn slash_window(selected: usize, count: usize, vis: usize) -> (usize, usize) {
     (start, vis)
 }
 
-/// One `/resume` row: age, then turn count and first prompt.
+/// One `/resume` row: age, then turn count and first prompt. A session
+/// another window holds says `in use` before its first prompt.
 fn resume_row(session: &SessionSummary) -> SlashCommand {
     let first = session.first_prompt.as_deref().unwrap_or("");
+    let in_use = if session.in_use { "in use  " } else { "" };
     SlashCommand {
         name: ago(elapsed_since(session.last_active)),
         hint: format!(
-            "{:<9}  {}",
+            "{:<9}  {in_use}{}",
             turns_label(session.prompts),
             truncate_one_line(first, 60)
         ),
@@ -2623,6 +2648,12 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                     shared.slash_selected = 0;
                     shared.dirty = true;
                     if let Some(picked) = sessions.into_iter().nth(idx) {
+                        if picked.in_use {
+                            shared
+                                .transcript
+                                .push(TranscriptLine::System(SESSION_IN_USE.into()));
+                            return KeyResult::Continue;
+                        }
                         return KeyResult::LoadSession(picked.session_id);
                     }
                     return KeyResult::Continue;
@@ -3124,9 +3155,7 @@ mod tests {
         }
         drop(first);
 
-        let second = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd, true)
-            .await
-            .unwrap();
+        let second = continue_session(&dir, script).await;
         let transcript = second.transcript_text();
         assert!(
             transcript.contains("· write_file") && transcript.contains("not run"),
@@ -3282,12 +3311,23 @@ mod tests {
         TuiSession::start(host, &cwd, false).await.unwrap()
     }
 
-    /// `start_session` with `--continue`: the latest session in `project`.
+    /// `start_session` with `--continue`: the latest session in `project`,
+    /// after the previous host was dropped (a relaunch). Retries while the session reads as in use: a
+    /// process another test forks in parallel keeps the old lock's descriptor
+    /// until it execs.
     async fn continue_session(dir: &tempfile::TempDir, script: &str) -> TuiSession {
-        let host = Arc::new(scripted_host(dir.path(), script));
-        TuiSession::start(host, &dir.path().join("project"), true)
-            .await
-            .unwrap()
+        let cwd = dir.path().join("project");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let host = Arc::new(scripted_host(dir.path(), script));
+            let session = TuiSession::start(host, &cwd, true).await.unwrap();
+            if session.transcript_text() != CONTINUE_IN_USE
+                || tokio::time::Instant::now() > deadline
+            {
+                return session;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// A continued session's transcript without its closing continued line.
@@ -5255,6 +5295,42 @@ mod tests {
         let text = session.transcript_text();
         assert!(text.contains("fix the flaky login test"), "{text}");
         assert!(!text.contains("add a health check"), "{text}");
+    }
+
+    /// #595: a session another window holds is not taken over. `--continue`
+    /// starts a new session and says why; `/resume` marks it and refuses it.
+    #[tokio::test]
+    async fn a_session_held_by_another_window_is_not_taken_over() {
+        let dir = tempdir().unwrap();
+        let holder = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        holder.spawn_prompt("held prompt".into()).await.unwrap();
+        holder.wait_prompt().await;
+        let held = holder.session_id();
+
+        let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+        let second = TuiSession::start(host, &dir.path().join("project"), true)
+            .await
+            .unwrap();
+        assert_ne!(second.session_id(), held);
+        assert_eq!(second.transcript_text(), CONTINUE_IN_USE);
+
+        open_resume(&second);
+        let rows: Vec<String> = second
+            .overlay_cmds()
+            .iter()
+            .map(|cmd| slash_row_text(cmd, 11))
+            .collect();
+        assert_eq!(rows, vec!["  just now     1 turn     in use  held prompt"]);
+        assert!(matches!(
+            handle_key(&second, enter_key()),
+            KeyResult::Continue
+        ));
+        assert_ne!(second.session_id(), held);
+        assert!(
+            second.transcript_text().ends_with(SESSION_IN_USE),
+            "{}",
+            second.transcript_text()
+        );
     }
 
     #[tokio::test]

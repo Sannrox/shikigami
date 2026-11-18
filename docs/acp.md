@@ -110,6 +110,13 @@ question, and `in_doubt` when the recovery diagnosis reports an uncertain tool.
 Load does not change the run: the next `session/prompt` asks the pending
 question again. Clients that ignore `_meta` see today's replay.
 
+One process drives a session at a time. `session/new` and `session/load` take
+an exclusive OS lock on `acp-sessions/<session>.lock` and hold it until the
+host exits; a crashed host releases it at once. A `session/load` of a session
+another process holds fails with `-32000` and
+`data.shikigami.kind = "sessionInUse"`; start a new session instead. The lock
+file is empty and older hosts ignore it.
+
 A `session/prompt` that fails because the model failed returns `-32603` with
 `data.shikigami.kind = "model"`; other failures carry no `data`. As after a
 cancel, the run then waits for the next prompt, which continues it with its
