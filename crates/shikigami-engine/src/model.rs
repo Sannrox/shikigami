@@ -165,6 +165,13 @@ pub trait ModelPort: Send + Sync {
         tools: &[ToolDef],
     ) -> Result<ModelTurn, ModelError>;
 
+    /// Whether the model's address answers at all, without spending a model
+    /// request or sending credentials. `Unreachable` when it does not;
+    /// adapters without an address are always reachable.
+    async fn check_reachable(&self) -> Result<(), ModelError> {
+        Ok(())
+    }
+
     /// Summarize part of a run's history for context compaction. `transcript`
     /// is the compacted span rendered as text; the result's `content` is the
     /// summary. The default asks for one tool-free turn; a turn that still

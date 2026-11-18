@@ -201,6 +201,12 @@ impl Harness {
         &*self.model
     }
 
+    /// The model adapter, for a check that outlives a borrow of the harness
+    /// (the TUI's launch reachability check).
+    pub fn model_handle(&self) -> Arc<dyn ModelPort> {
+        Arc::clone(&self.model)
+    }
+
     /// Return the effective model catalog for this harness.
     ///
     /// Sekai-Chisei is authoritative for governed availability. Ungoverned

@@ -132,6 +132,16 @@ impl Drop for PtyChild {
     }
 }
 
+/// The 80x24 screen a user sees after everything the TUI wrote so far. Use
+/// it for text: the TUI redraws only changed cells, so a line's bytes are not
+/// contiguous once the transcript scrolls.
+fn screen(tui: &PtyChild) -> String {
+    let size = |n| std::num::NonZeroU16::new(n).unwrap();
+    let mut parser = vt100::Parser::new(size(24), size(80), 0);
+    parser.process(&tui.output());
+    parser.screen().contents()
+}
+
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -471,7 +481,7 @@ fn unreachable_model_names_the_next_step() {
     let before = tui.output().len();
     send(&tui, b"hi\r");
     tui.wait_for("the model failure", |t| {
-        contains(&t.output()[before..], b"Could not reach the model.")
+        t.output().len() > before && screen(t).contains("Could not reach the model.")
     });
     // One ^c quits: the TUI is idle again, not stuck in the failed turn.
     send(&tui, b"\x03");
@@ -539,6 +549,34 @@ fn provider_refusals_name_their_cause() {
         let before = tui.output().len();
         send(&tui, b"hi\r");
         tui.wait_for(status, |t| contains(&t.output()[before..], lead));
+        send(&tui, b"\x03");
+        assert!(tui.wait_exit().success());
+    }
+}
+
+/// #627: launch says when the model address cannot be reached, before any
+/// prompt; a reachable address (any HTTP answer) says nothing.
+#[test]
+fn launch_says_when_the_model_cannot_be_reached() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let open_port = stub_provider("404 Not Found");
+    for (port, reachable) in [(closed_port, false), (open_port, true)] {
+        let dir = temp_dir();
+        let var = format!("SHIKIGAMI_TEST_KEY_{}", std::process::id());
+        let config = format!(
+            "version = 1\n[model]\nadapter = \"http\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nmodel = \"m\"\napi_key_env = \"{var}\"\n"
+        );
+        let mut tui = start_tui_with(&dir, &config, &[(&var, "test-key")]);
+        let notice = "The model address in your settings cannot be reached.";
+        if reachable {
+            // The check has had time to answer; the line never comes.
+            std::thread::sleep(Duration::from_secs(4));
+            assert!(!screen(&tui).contains(notice), "{}", screen(&tui));
+        } else {
+            tui.wait_for("the unreachable notice", |t| screen(t).contains(notice));
+        }
         send(&tui, b"\x03");
         assert!(tui.wait_exit().success());
     }

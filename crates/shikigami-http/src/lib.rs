@@ -84,6 +84,9 @@ fn http_err(error: reqwest::Error) -> ModelError {
     ModelError::Http(error.to_string())
 }
 
+/// Bound for the launch reachability check.
+const REACHABLE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Retries after the first attempt for a transient provider failure.
 const MAX_RETRIES: u32 = 2;
 const BASE_BACKOFF: Duration = Duration::from_millis(500);
@@ -235,6 +238,24 @@ fn backoff(retry: u32) -> Duration {
 impl ModelPort for HttpModel {
     fn id(&self) -> &'static str {
         "http"
+    }
+
+    /// An unauthenticated GET of the base URL: any HTTP answer, even an
+    /// error status, means the address is reachable.
+    async fn check_reachable(&self) -> Result<(), ModelError> {
+        match self
+            .client
+            .get(&self.base_url)
+            .timeout(REACHABLE_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.is_connect() || error.is_timeout() => {
+                Err(ModelError::Unreachable(error.to_string()))
+            }
+            Err(error) => Err(http_err(error)),
+        }
     }
 
     fn content_digest(&self) -> String {
