@@ -46,6 +46,12 @@ pub enum WorkspaceError {
     UnsafeSnapshotPath,
     #[error("workspace adapter `{0}` does not support snapshots")]
     SnapshotUnsupported(String),
+    /// A run that edits `workspace` in place would also see, and could edit,
+    /// the harness state. Refused before the run starts.
+    #[error(
+        "the state directory is inside the project {workspace}; set --state or SHIKIGAMI_STATE to a directory outside it"
+    )]
+    StateInsideWorkspace { workspace: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -724,11 +730,7 @@ impl WorkspacePort for InPlaceDirectoryWorkspace {
         }
         let path = std::fs::canonicalize(&self.root)?;
         if path_is_within(&path, state_runs) {
-            return Err(WorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "inplace workspace must not contain the harness state directory; \
-                 set SHIKIGAMI_STATE / --state outside the workspace root",
-            )));
+            return Err(WorkspaceError::StateInsideWorkspace { workspace: path });
         }
         Ok(MaterializedWorkspace {
             path,

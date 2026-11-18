@@ -1105,3 +1105,33 @@ fn human_output_keeps_model_and_error_controls_inert() {
     assert!(!output.status.success());
     assert_inert(&output.stderr);
 }
+
+/// #593: a state directory inside the project is refused in user terms.
+#[test]
+fn run_refuses_state_inside_the_project_in_user_terms() {
+    let dir = tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    fs::create_dir(&project).expect("project");
+    // In place, as the TUI works: the run edits the project directory itself.
+    let config = dir.path().join("inplace.toml");
+    fs::write(
+        &config,
+        "version = 1\n[workspace]\nadapter = \"inplace\"\nroot = \".\"\n[model]\nadapter = \"scripted\"\n",
+    )
+    .expect("config");
+    let out = cargo_bin_cmd!("shikigami")
+        .current_dir(&project)
+        .args(["--state", ".state", "--config", config.to_str().unwrap()])
+        .args(["run", "demo"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("state directory") && stderr.contains("--state"),
+        "{stderr}"
+    );
+    for internal in ["workspace I/O", "inplace"] {
+        assert!(!stderr.contains(internal), "{internal} in: {stderr}");
+    }
+}
