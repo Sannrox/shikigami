@@ -143,14 +143,19 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// A TUI on a scripted session, with its own project and state directories.
 /// `script` is the scripted model's JSON steps; `None` keeps the example's default.
 fn start_tui(dir: &tempfile::TempDir, script: Option<&str>) -> PtyChild {
-    let project = dir.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
     let mut config = std::fs::read_to_string(example).unwrap();
     if let Some(script) = script {
         // The example ends in the [model] table.
         config.push_str(&format!("script_json = '{script}'\n"));
     }
+    start_tui_with(dir, &config, &[])
+}
+
+/// A TUI on `config` (settings file text) with extra environment `env`.
+fn start_tui_with(dir: &tempfile::TempDir, config: &str, env: &[(&str, &str)]) -> PtyChild {
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, config).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_shikigami"));
@@ -158,6 +163,7 @@ fn start_tui(dir: &tempfile::TempDir, script: Option<&str>) -> PtyChild {
         .env("TERM", "xterm-256color")
         .env("LANG", "C.UTF-8")
         .env("NO_COLOR", "1")
+        .envs(env.iter().copied())
         .arg("--config")
         .arg(&config_path)
         .arg("--state")
@@ -378,4 +384,25 @@ fn missing_model_key_names_the_variable_to_set() {
         stderr.contains(&format!("set {var} in the environment")),
         "{stderr}"
     );
+}
+
+/// #615: an unreachable model says what failed and what to do before the
+/// upstream detail, and the TUI returns to idle.
+#[test]
+fn unreachable_model_names_the_next_step() {
+    let dir = temp_dir();
+    let var = format!("SHIKIGAMI_TEST_KEY_{}", std::process::id());
+    // Port 9 (discard) is closed on test hosts, so the connection is refused.
+    let config = format!(
+        "version = 1\n[model]\nadapter = \"http\"\nbase_url = \"http://127.0.0.1:9/v1\"\nmodel = \"m\"\napi_key_env = \"{var}\"\n"
+    );
+    let mut tui = start_tui_with(&dir, &config, &[(&var, "test-key")]);
+    let before = tui.output().len();
+    send(&tui, b"hi\r");
+    tui.wait_for("the model failure", |t| {
+        contains(&t.output()[before..], b"The model did not answer.")
+    });
+    // One ^c quits: the TUI is idle again, not stuck in the failed turn.
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
 }

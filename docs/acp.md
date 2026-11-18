@@ -104,6 +104,11 @@ question, and `in_doubt` when the recovery diagnosis reports an uncertain tool.
 Load does not change the run: the next `session/prompt` asks the pending
 question again. Clients that ignore `_meta` see today's replay.
 
+A `session/prompt` that fails because the model failed returns `-32603` with
+`data.shikigami.kind = "model"`; other failures carry no `data`. As after a
+cancel, the run then waits for the next prompt, which continues it with its
+history.
+
 The `session/prompt` and `session/load` results carry
 `_meta.shikigami.runId` once the session has a run: the id that
 `shikigami runs <id>` and `shikigami export <id>` accept. A follow-up prompt
