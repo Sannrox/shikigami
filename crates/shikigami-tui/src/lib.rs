@@ -575,7 +575,10 @@ impl TuiSession {
                 .call("session/load", json!({ "sessionId": id }))
                 .await
             {
-                Ok(_) => id,
+                Ok(result) => {
+                    apply_interruption(&mut session.lock_shared(), &result);
+                    id
+                }
                 Err(_) => session.create_session(&cwd).await?,
             }
         } else {
@@ -1082,9 +1085,10 @@ impl TuiSession {
             .call("session/load", json!({ "sessionId": session_id }))
             .await
         {
-            Ok(_) => {
+            Ok(result) => {
                 *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
                 let mut shared = self.lock_shared();
+                apply_interruption(&mut shared, &result);
                 shared.status = "ready".into();
                 shared.dirty = true;
             }
@@ -1149,22 +1153,22 @@ fn format_tool(tool: &ToolLine) -> String {
     } else {
         tool.detail.as_str()
     };
-    let failed = tool.status == "failed" && !tool.detail.is_empty();
+    let outcome = matches!(
+        tool.status.as_str(),
+        "failed" | TOOL_NOT_RUN | TOOL_IN_DOUBT
+    ) && !tool.detail.is_empty();
+    let suffix = if outcome {
+        format!("  {}", tool.status)
+    } else {
+        String::new()
+    };
     if !tool.expanded {
         let one = truncate_one_line(rest, 80);
-        return if failed {
-            format!("· {}  {one}  failed", tool.title)
-        } else {
-            format!("· {}  {one}", tool.title)
-        };
+        return format!("· {}  {one}{suffix}", tool.title);
     }
     let mut lines = rest.lines();
     let first = lines.next().unwrap_or("");
-    let mut out = if failed {
-        format!("· {}  {first}  failed", tool.title)
-    } else {
-        format!("· {}  {first}", tool.title)
-    };
+    let mut out = format!("· {}  {first}{suffix}", tool.title);
     for line in lines {
         out.push('\n');
         out.push_str("· ");
@@ -1898,6 +1902,48 @@ fn chunk_text(update: &Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
 }
+
+/// Mark the tool calls a dead host left unfinished and say so once, from the
+/// `session/load` result's `_meta.shikigami.interrupted`.
+fn apply_interruption(shared: &mut Shared, result: &Value) {
+    let Some(calls) = result
+        .pointer("/_meta/shikigami/interrupted/toolCalls")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let mut in_doubt = false;
+    for call in calls {
+        let id = call["toolCallId"].as_str().unwrap_or("");
+        let status = if call["outcome"] == "in_doubt" {
+            in_doubt = true;
+            TOOL_IN_DOUBT
+        } else {
+            TOOL_NOT_RUN
+        };
+        if let Some(TranscriptLine::Tool(tool)) = shared
+            .transcript
+            .iter_mut()
+            .rev()
+            .find(|line| matches!(line, TranscriptLine::Tool(t) if t.id == id))
+        {
+            tool.status = status.into();
+        }
+    }
+    shared.transcript.push(TranscriptLine::System(
+        if in_doubt {
+            "Last session stopped while a tool was running. Its result is unknown; check the workspace before you continue."
+        } else {
+            "Last session stopped while waiting for permission. Nothing ran; your next prompt asks again."
+        }
+        .into(),
+    ));
+    shared.dirty = true;
+}
+
+/// Tool line statuses set by `apply_interruption`, shown like `failed`.
+const TOOL_NOT_RUN: &str = "not run";
+const TOOL_IN_DOUBT: &str = "result unknown";
 
 fn tool_update_detail(update: &Value) -> Option<String> {
     update
@@ -2802,6 +2848,45 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
         assert!(session.transcript_text().contains("wrote it"));
+    }
+
+    /// #592: a host that dies at the permission prompt leaves the run parked;
+    /// the next TUI on the same state says so and marks the tool as not run.
+    #[tokio::test]
+    async fn restart_after_crash_mid_permission_marks_the_tool_not_run() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = r#"[
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+          {"content":"wrote it"}
+        ]"#;
+        let first = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd)
+            .await
+            .unwrap();
+        first.spawn_prompt("write".into()).await.unwrap();
+        wait_until(|| first.overlay_text().is_some()).await;
+        // Crash: the prompt never gets an answer and the host goes away.
+        if let Some(task) = first.prompt.lock().unwrap().take() {
+            task.abort();
+        }
+        drop(first);
+
+        let second = TuiSession::start(Arc::new(scripted_host(dir.path(), script)), &cwd)
+            .await
+            .unwrap();
+        let transcript = second.transcript_text();
+        assert!(
+            transcript.contains("· write_file") && transcript.contains("not run"),
+            "interrupted tool must show its outcome: {transcript}"
+        );
+        assert!(
+            transcript.contains("Last session stopped while waiting for permission."),
+            "restart must say the run was interrupted: {transcript}"
+        );
+        let screen = drawn_text(&second);
+        assert!(screen.contains("not run"), "{screen}");
+        assert!(!cwd.join("ok.txt").exists());
     }
 
     #[test]

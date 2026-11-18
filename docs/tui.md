@@ -37,7 +37,10 @@ Ungoverned HTTP through a local OpenAI-compatible gateway uses the same
 | Signal | SIGTERM or SIGHUP cancels a running prompt like Ctrl-C, restores the terminal like a quit, then exits with the signal's status |
 
 Continue-last-in-cwd is fail closed: an unknown or unreadable previous session
-starts `session/new`. Resume and continue-last selection list text and
+starts `session/new`. When the previous TUI died mid-step, the loaded session
+marks the unfinished tool `not run` (it was waiting for permission) or
+`result unknown` (it was running) and adds one system line saying so; the next
+prompt asks the pending question again. Resume and continue-last selection list text and
 attachment sessions across a restart, and omit an attachment session whose
 payloads are gone because its run ended.
 
