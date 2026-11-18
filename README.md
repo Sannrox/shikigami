@@ -73,6 +73,47 @@ workspace .../runs/b7d182a5-273a-4082-87d3-5eebd355eb85/workspace
 artifacts .../runs/b7d182a5-273a-4082-87d3-5eebd355eb85/artifacts
 ```
 
+### Chat in the terminal
+
+`shikigami tui` works with an agent on the current directory: it reads and
+edits your files and asks before each change. Start it in a scratch folder
+first. With no settings it runs the built-in demo, which says so on screen.
+From the clone:
+
+```bash
+export PATH="$PWD/target/release:$PATH"
+mkdir -p /tmp/shikigami-try && cd /tmp/shikigami-try
+shikigami tui
+```
+
+Type a prompt and press Enter. The demo asks to write `SHIKIGAMI_OK.txt`;
+press `y` to allow it. `/help` lists keys and commands; Ctrl-C quits.
+
+To use a real model, create a settings file in that folder and point it at
+any OpenAI-compatible endpoint. The key stays in the environment, never in the
+file:
+
+```toml
+# model.toml
+version = 1
+
+[model]
+adapter = "http"
+base_url = "https://<your-endpoint>/v1"
+model = "<model id>"
+api_key_env = "MODEL_API_KEY"
+```
+
+```bash
+export MODEL_API_KEY="…"
+shikigami --config model.toml doctor   # checks the file and the key
+shikigami --config model.toml tui
+```
+
+`shikigami tui --continue` reopens the last session in that folder. See
+[docs/tui.md](docs/tui.md) for keys and commands, and
+[examples/cliproxy-http.toml](examples/cliproxy-http.toml) for a local gateway.
+
 ### Requirements
 
 - [Rust](https://rustup.rs/) toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) (Rust 2024)
