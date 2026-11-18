@@ -2256,6 +2256,7 @@ dependencies = [
  "serde_json",
  "shikigami",
  "shikigami-types",
+ "strsim",
  "tempfile",
  "tokio",
  "unicode-width",

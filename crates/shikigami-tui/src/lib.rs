@@ -1079,9 +1079,13 @@ impl TuiSession {
         KeyResult::Continue
     }
 
-    fn slash_enter(&self, input: &str) -> Option<KeyResult> {
+    /// Runs a typed slash command. `None` means the line is a prompt: no leading
+    /// `/`, the `//text` escape, or a path-like first word (`/usr/bin/x fails`).
+    /// A command-like word that names nothing is refused with the closest name
+    /// and the draft stays in the composer so it can be fixed or escaped.
+    fn slash_enter(&self, input: &str) -> Option<SlashOutcome> {
         let trimmed = input.trim();
-        if !trimmed.starts_with('/') {
+        if !trimmed.starts_with('/') || trimmed.starts_with("//") {
             return None;
         }
         let (name, args) = slash_name_args(trimmed);
@@ -1111,8 +1115,18 @@ impl TuiSession {
                 name.strip_prefix("skill:")
                     .filter(|id| !id.is_empty())
                     .map(|_| name.to_string())
-            })?;
-        Some(self.slash_run(&command, args))
+            });
+        match command {
+            Some(command) => Some(SlashOutcome::Ran(self.slash_run(&command, args))),
+            None if name.contains('/') => None,
+            None => {
+                let line = unknown_command_line(name, &catalog);
+                let mut shared = self.lock_shared();
+                shared.transcript.push(TranscriptLine::System(line));
+                shared.dirty = true;
+                Some(SlashOutcome::Refused)
+            }
+        }
     }
 
     fn slash_run(&self, name: &str, args: &str) -> KeyResult {
@@ -1599,6 +1613,37 @@ fn running_marker_visible(shared: &Shared) -> bool {
 
 fn running_marker_row() -> String {
     format!("  {RUNNING_MARKER}")
+}
+
+/// What Enter did with a line that starts with `/`.
+enum SlashOutcome {
+    /// A known command ran; the composer is cleared.
+    Ran(KeyResult),
+    /// Unknown command; the draft stays for editing.
+    Refused,
+}
+
+/// Refusal for a slash word that names no command, with the closest name when
+/// one is near enough to be a typo.
+fn unknown_command_line(name: &str, catalog: &[SlashCommand]) -> String {
+    let closest = catalog
+        .iter()
+        .map(|cmd| {
+            let score = strsim::jaro_winkler(&name.to_lowercase(), &cmd.name);
+            (score, &cmd.name)
+        })
+        .filter(|(score, _)| *score > 0.7)
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    match closest {
+        Some((_, near)) => format!(
+            "Unknown command /{name}. Did you mean /{near}? Start with // to send it as text."
+        ),
+        None => {
+            format!(
+                "Unknown command /{name}. /help lists commands; start with // to send it as text."
+            )
+        }
+    }
 }
 
 fn slash_query(input: &str) -> &str {
@@ -2702,9 +2747,13 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 }
             }
             let text = session.lock_shared().input.clone();
-            if let Some(result) = session.slash_enter(&text) {
-                session.lock_shared().take_input();
-                return result;
+            match session.slash_enter(&text) {
+                Some(SlashOutcome::Ran(result)) => {
+                    session.lock_shared().take_input();
+                    return result;
+                }
+                Some(SlashOutcome::Refused) => return KeyResult::Continue,
+                None => {}
             }
             let (text, pending) = {
                 let mut shared = session.lock_shared();
@@ -2724,6 +2773,11 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                     shared.dirty = true;
                 }
             } else {
+                // `//text` is the escape for a prompt that starts with `/`.
+                let trimmed = match trimmed.strip_prefix('/') {
+                    Some(rest) if rest.starts_with('/') => rest,
+                    _ => trimmed,
+                };
                 let parts = prompt_parts(trimmed, pending);
                 return KeyResult::Prompt {
                     display: prompt_display(trimmed, &parts),
@@ -4769,6 +4823,19 @@ mod tests {
         }
     }
 
+    fn last_system(session: &TuiSession) -> String {
+        session
+            .lock_shared()
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|line| match line {
+                TranscriptLine::System(text) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     #[tokio::test]
     async fn slash_enter_maps_compact_exit_new_and_unknown() {
         let dir = tempdir().unwrap();
@@ -4803,13 +4870,44 @@ mod tests {
             KeyResult::NewSession
         ));
 
-        type_text(&session, "/hello");
-        match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            KeyResult::Prompt { display, send, .. } => {
-                assert_eq!(display, "/hello");
-                assert_eq!(send, "/hello");
+        type_text(&session, "/exti");
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(
+            last_system(&session).contains("Unknown command /exti. Did you mean /exit?"),
+            "{}",
+            last_system(&session)
+        );
+        assert_eq!(session.lock_shared().take_input(), "/exti");
+
+        type_text(&session, "/EXIT");
+        handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(last_system(&session).contains("Did you mean /exit?"));
+        session.lock_shared().take_input();
+
+        type_text(&session, "/zzzzzz");
+        handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            last_system(&session).contains("/help lists commands"),
+            "{}",
+            last_system(&session)
+        );
+        session.lock_shared().take_input();
+
+        for (typed, sent) in [
+            ("//exti now", "/exti now"),
+            ("/usr/bin/env fails", "/usr/bin/env fails"),
+        ] {
+            type_text(&session, typed);
+            match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                KeyResult::Prompt { display, send, .. } => {
+                    assert_eq!(display, sent);
+                    assert_eq!(send, sent);
+                }
+                other => panic!("{typed}: expected prompt, got {other:?}"),
             }
-            other => panic!("expected prompt, got {other:?}"),
         }
     }
 
