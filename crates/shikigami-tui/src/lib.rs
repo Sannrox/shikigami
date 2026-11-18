@@ -1309,7 +1309,8 @@ fn format_tool(tool: &ToolLine) -> String {
     } else {
         String::new()
     };
-    if !tool.expanded {
+    // A turn's final answer comes as a `report` call: show it whole, wrapped.
+    if !tool.expanded && tool.title != "report" {
         let one = truncate_one_line(rest, 80);
         return format!("· {}  {one}{suffix}", tool.title);
     }
@@ -4042,6 +4043,36 @@ mod tests {
             "\n".repeat(17)
         );
         assert_eq!(screen, expected);
+    }
+
+    /// #625: a turn's final answer in a long `report` summary reads in full,
+    /// wrapped, without expanding tool lines.
+    #[tokio::test]
+    async fn long_report_summary_shows_in_full() {
+        let dir = tempdir().unwrap();
+        let summary = "The project has two files: README.md describes the tool and main.py \
+                       holds the entry point. The glob and the write both ran, and the new \
+                       file is in place.";
+        let script = format!(
+            r#"[{{"tool_calls":[{{"name":"report","args_json":"{{\"summary\":\"{summary}\",\"success\":true}}"}}]}}]"#
+        );
+        let session = start_session(&dir, &script).await;
+        session.spawn_prompt("what is here?".into()).await.unwrap();
+        session.wait_prompt().await;
+        for (width, height) in [(80, 24), (40, 12)] {
+            let rows = drawn_rows(&session, width, height);
+            assert_screen_rules(&rows, width);
+            let words = rows
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                words.contains(summary),
+                "{width}x{height}:\n{}",
+                rows.join("\n")
+            );
+        }
     }
 
     /// #616: returning to a session shows the outcomes the user saw live.
