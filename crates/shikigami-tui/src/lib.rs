@@ -1221,16 +1221,13 @@ impl TuiSession {
         KeyResult::Continue
     }
 
-    /// Runs a typed slash command. `None` means the line is a prompt: no leading
-    /// `/`, the `//text` escape, or a path-like first word (`/usr/bin/x fails`).
-    /// A command-like word that names nothing is refused with the closest name
-    /// and the draft stays in the composer so it can be fixed or escaped.
-    fn slash_enter(&self, input: &str) -> Option<SlashOutcome> {
+    /// Classifies a composer line without running it or writing the transcript.
+    fn slash_line(&self, input: &str) -> SlashLine {
         let trimmed = input.trim();
         if !trimmed.starts_with('/') || trimmed.starts_with("//") {
-            return None;
+            return SlashLine::Prompt;
         }
-        let (name, args) = slash_name_args(trimmed);
+        let (name, _) = slash_name_args(trimmed);
         let catalog = self.slash_catalog();
         let selected = {
             let shared = self.lock_shared();
@@ -1259,10 +1256,23 @@ impl TuiSession {
                     .map(|_| name.to_string())
             });
         match command {
-            Some(command) => Some(SlashOutcome::Ran(self.slash_run(&command, args))),
-            None if name.contains('/') => None,
-            None => {
-                let line = unknown_command_line(name, &catalog);
+            Some(command) => SlashLine::Command(command),
+            None if name.contains('/') => SlashLine::Prompt,
+            None => SlashLine::Unknown,
+        }
+    }
+
+    /// Runs a typed slash command. `None` means the line is a prompt: no leading
+    /// `/`, the `//text` escape, or a path-like first word (`/usr/bin/x fails`).
+    /// A command-like word that names nothing is refused with the closest name
+    /// and the draft stays in the composer so it can be fixed or escaped.
+    fn slash_enter(&self, input: &str) -> Option<SlashOutcome> {
+        let (name, args) = slash_name_args(input.trim());
+        match self.slash_line(input) {
+            SlashLine::Prompt => None,
+            SlashLine::Command(command) => Some(SlashOutcome::Ran(self.slash_run(&command, args))),
+            SlashLine::Unknown => {
+                let line = unknown_command_line(name, &self.slash_catalog());
                 let mut shared = self.lock_shared();
                 shared.transcript.push(TranscriptLine::System(line));
                 shared.dirty = true;
@@ -1852,12 +1862,26 @@ fn running_marker_row() -> String {
     format!("  {RUNNING_MARKER}")
 }
 
+/// A composer line that starts with `/`, before Enter runs it.
+enum SlashLine {
+    /// Not a slash command: send or queue as a prompt.
+    Prompt,
+    /// Known catalog command or `/skill:` alias.
+    Command(String),
+    /// Command-like word that names nothing.
+    Unknown,
+}
+
 /// What Enter did with a line that starts with `/`.
 enum SlashOutcome {
     /// A known command ran; the composer is cleared.
     Ran(KeyResult),
     /// Unknown command; the draft stays for editing.
     Refused,
+}
+
+fn slash_waits_for_turn(command: &str) -> String {
+    format!("/{command} runs when this turn ends.")
 }
 
 /// Refusal for a slash word that names no command, with the closest name when
@@ -3016,12 +3040,25 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 session.lock_shared().insert_char('\n');
                 return KeyResult::Continue;
             }
+            if session.lock_shared().busy {
+                let text = session.lock_shared().input.clone();
+                match session.slash_line(&text) {
+                    SlashLine::Prompt => session.lock_shared().queue_follow_up(),
+                    SlashLine::Command(name) => {
+                        let mut shared = session.lock_shared();
+                        shared
+                            .transcript
+                            .push(TranscriptLine::System(slash_waits_for_turn(&name)));
+                        shared.dirty = true;
+                    }
+                    SlashLine::Unknown => {
+                        let _ = session.slash_enter(&text);
+                    }
+                }
+                return KeyResult::Continue;
+            }
             {
                 let mut shared = session.lock_shared();
-                if shared.busy {
-                    shared.queue_follow_up();
-                    return KeyResult::Continue;
-                }
                 if let Some(sessions) = shared.resume.take() {
                     let idx = shared.slash_selected.min(sessions.len().saturating_sub(1));
                     shared.slash_selected = 0;
@@ -3941,13 +3978,77 @@ mod tests {
         assert_eq!(session.lock_shared().input, "/compact");
         assert!(!slash_visible(&session.lock_shared()));
         assert!(session.slash_matches().is_empty());
+        let _ = session.wait_prompt().await;
+    }
+
+    #[tokio::test]
+    async fn slash_command_while_busy_stays_in_composer() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        session.spawn_prompt("write".into()).await.unwrap();
+        type_text(&session, "/usage");
         assert!(matches!(
             handle_key(&session, enter_key()),
             KeyResult::Continue
         ));
-        assert_eq!(queued_display(&session).as_deref(), Some("/compact"));
+        assert!(queued_display(&session).is_none());
+        assert_eq!(session.lock_shared().input, "/usage");
+        assert_eq!(last_system(&session), "/usage runs when this turn ends.");
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        let screen = drawn_text(&session);
+        assert!(
+            screen.contains("/usage runs when this turn ends."),
+            "{screen}"
+        );
+        assert!(screen.contains("> /usage"), "{screen}");
+        assert!(!screen.contains("queued"), "{screen}");
+        let narrow = drawn_rows(&session, 40, 12).join("\n");
+        assert!(
+            narrow.contains("/usage runs when this turn ends."),
+            "{narrow}"
+        );
+        assert!(narrow.contains("/usage"), "{narrow}");
+        let first = session.wait_prompt().await;
+        session.drain_queued_prompt(first.as_ref()).await.unwrap();
+        assert!(queued_display(&session).is_none());
+        assert!(
+            session
+                .prompt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        );
+        assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+        assert!(!session.transcript_text().contains("you  /usage"));
+        assert!(!session.lock_shared().busy);
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
         assert_eq!(session.lock_shared().input, "");
+        let table = last_system(&session);
+        assert!(table.contains("turn"), "{table}");
+        assert!(table.contains("in"), "{table}");
+    }
+
+    #[tokio::test]
+    async fn escaped_slash_while_busy_still_queues() {
+        let dir = tempdir().unwrap();
+        let session = start_session(
+            &dir,
+            r#"[{"content":"first reply"},{"content":"queued reply"}]"#,
+        )
+        .await;
+        spawn_then_queue(&session, "//usage as text").await;
+        assert_eq!(queued_display(&session).as_deref(), Some("//usage as text"));
+        assert_eq!(session.lock_shared().input, "");
+        let first = session.wait_prompt().await;
+        session.drain_queued_prompt(first.as_ref()).await.unwrap();
         let _ = session.wait_prompt().await;
+        assert_eq!(
+            user_prompts(&session),
+            vec!["write".to_string(), "//usage as text".to_string()]
+        );
     }
 
     fn prompt_task_finished(session: &TuiSession) -> bool {
