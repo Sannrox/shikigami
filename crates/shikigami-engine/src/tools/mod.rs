@@ -23,6 +23,7 @@ pub use catalog::{
     mutates_workspace, plan_jail_allows, plan_jail_destination_ok, read_plan_jail_file,
     write_plan_jail_file,
 };
+pub use fs::workspace_files;
 pub(crate) use handoff::apply_handoff;
 pub use handoff::{
     HandoffBrief, MAX_HANDOFF_FILES, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_PATH_CHARS,
@@ -944,6 +945,36 @@ mod tests {
             panic!("text");
         };
         assert!(g2.contains("node_modules") || g2.contains("x.js"), "{g2}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_files_stay_in_the_jail_and_honor_ignores() {
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("elsewhere.txt"), "x").unwrap();
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("src/keep.rs"), "").unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/x.js"), "").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "build.log\n").unwrap();
+        std::fs::write(dir.path().join("build.log"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("elsewhere.txt"),
+            dir.path().join("file-link"),
+        )
+        .unwrap();
+
+        // A folder the process cannot read is skipped, not fatal.
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+        let files = workspace_files(dir.path());
+        std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        assert_eq!(files.unwrap(), vec![".gitignore", "src/keep.rs"]);
     }
 
     #[tokio::test]

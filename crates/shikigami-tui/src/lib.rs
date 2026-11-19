@@ -33,6 +33,7 @@ use unicode_width::UnicodeWidthChar;
 use shikigami::acp::{AcpClient, AcpHost, SessionSummary};
 
 mod look;
+mod mention;
 mod statusline;
 mod usage;
 use look::{Action, KeyMap, Look, Palette};
@@ -304,6 +305,10 @@ struct Shared {
     /// Esc hid the `/` list; cleared once the draft no longer starts with `/`.
     slash_dismissed: bool,
     slash_selected: usize,
+    /// Start of the `@` mention Esc closed; it stays closed while that word is edited.
+    mention_dismissed: Option<usize>,
+    /// Workspace files for the `@` list, listed once per draft.
+    mention_files: FileList,
     /// Sessions in the open `/resume` picker, most recently active first.
     resume: Option<Vec<SessionSummary>>,
     /// Last OSC 52 clipboard payload written by `/copy` or Ctrl+Y.
@@ -343,6 +348,8 @@ impl Shared {
             dirty: true,
             slash_dismissed: false,
             slash_selected: 0,
+            mention_dismissed: None,
+            mention_files: FileList::NotRead,
             resume: None,
             last_osc52: None,
             pending_parts: Vec::new(),
@@ -449,6 +456,8 @@ impl Shared {
         self.history_idx = None;
         self.slash_dismissed = false;
         self.slash_selected = 0;
+        self.mention_dismissed = None;
+        self.mention_files = FileList::NotRead;
         self.dirty = true;
     }
 
@@ -461,6 +470,8 @@ impl Shared {
         self.dock_scroll = 0;
         self.slash_dismissed = false;
         self.slash_selected = 0;
+        self.mention_dismissed = None;
+        self.mention_files = FileList::NotRead;
         self.dirty = true;
         text
     }
@@ -489,6 +500,13 @@ impl Shared {
     fn sync_slash_dismissed(&mut self) {
         if !self.input.starts_with('/') {
             self.slash_dismissed = false;
+        }
+        // Esc closed one mention word; once that word is gone, `@` opens again.
+        if self.mention_dismissed.is_some()
+            && mention::mention_at(&self.input, self.cursor).map(|(start, _)| start)
+                != self.mention_dismissed
+        {
+            self.mention_dismissed = None;
         }
     }
 
@@ -648,6 +666,16 @@ impl Shared {
 #[derive(Clone)]
 struct TuiClient {
     shared: Arc<Mutex<Shared>>,
+}
+
+/// The `@` list's workspace files for the current draft.
+#[derive(Default)]
+enum FileList {
+    #[default]
+    NotRead,
+    /// A background walk is listing them.
+    Reading,
+    Ready(Arc<Vec<String>>),
 }
 
 struct SlashCommand {
@@ -1090,7 +1118,68 @@ impl TuiSession {
         if let Some(sessions) = self.lock_shared().resume.as_ref() {
             return sessions.iter().map(resume_row).collect();
         }
-        self.slash_matches()
+        let slash = self.slash_matches();
+        if !slash.is_empty() {
+            return slash;
+        }
+        self.mention_matches()
+            .into_iter()
+            .map(|path| SlashCommand {
+                name: path,
+                hint: String::new(),
+            })
+            .collect()
+    }
+
+    /// Ranked workspace files for the open `@` mention; empty when none is open.
+    fn mention_matches(&self) -> Vec<String> {
+        let mut shared = self.lock_shared();
+        let Some((_, query)) = mention_visible(&shared) else {
+            return Vec::new();
+        };
+        match &shared.mention_files {
+            FileList::Ready(files) => mention::rank(files, &query),
+            FileList::Reading => Vec::new(),
+            FileList::NotRead => {
+                // Walk off the draw thread; the list fills in when it is done.
+                shared.mention_files = FileList::Reading;
+                let root = self
+                    .host
+                    .demo_workspace()
+                    .unwrap_or_else(|| self.cwd.clone());
+                let state = Arc::clone(&self.client.shared);
+                std::thread::spawn(move || {
+                    let files = shikigami::tools::workspace_files(&root).unwrap_or_default();
+                    let mut shared = state.lock().unwrap_or_else(|e| e.into_inner());
+                    if matches!(shared.mention_files, FileList::Reading) {
+                        shared.mention_files = FileList::Ready(Arc::new(files));
+                        shared.dirty = true;
+                    }
+                });
+                Vec::new()
+            }
+        }
+    }
+
+    /// Replace the open mention with the selected file. False when no
+    /// mention is open or nothing matches.
+    fn pick_mention(&self) -> bool {
+        let matches = self.mention_matches();
+        let mut shared = self.lock_shared();
+        let Some((start, _)) = mention_visible(&shared) else {
+            return false;
+        };
+        let Some(path) = matches.get(shared.slash_selected.min(matches.len().saturating_sub(1)))
+        else {
+            return false;
+        };
+        let (input, cursor) = mention::insert(&shared.input, start, path);
+        shared.input = input;
+        shared.cursor = cursor;
+        shared.slash_selected = 0;
+        shared.history_idx = None;
+        shared.dirty = true;
+        true
     }
 
     fn open_resume_picker(&self) -> KeyResult {
@@ -1651,6 +1740,21 @@ fn slash_visible(shared: &Shared) -> bool {
         && shared.input.starts_with('/')
 }
 
+/// The open `@` mention (start, query): same idle rules as the slash list,
+/// and not one Esc closed.
+fn mention_visible(shared: &Shared) -> Option<(usize, String)> {
+    if shared.resume.is_some()
+        || shared.busy
+        || shared.permission.is_some()
+        || shared.show_plan
+        || shared.input.starts_with('/')
+    {
+        return None;
+    }
+    mention::mention_at(&shared.input, shared.cursor)
+        .filter(|(start, _)| shared.mention_dismissed != Some(*start))
+}
+
 /// One static dim row in the slash-list slot while a prompt is in flight.
 fn running_marker_visible(shared: &Shared) -> bool {
     shared.busy && !shared.dock_open()
@@ -1794,7 +1898,7 @@ fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u16) -> Strin
     } else if shared.resume.is_some() {
         parts.push("esc".into());
         parts.push(format!("{interrupt} quit"));
-    } else if slash_visible(shared) {
+    } else if slash_visible(shared) || mention_visible(shared).is_some() {
         parts.push("tab pick".into());
         parts.push("esc".into());
         parts.push(format!("{interrupt} quit"));
@@ -2742,11 +2846,15 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         _ => {}
     }
 
-    let (slash_open, resume_open) = {
+    let (slash_open, resume_open, mention_open) = {
         let shared = session.lock_shared();
-        (slash_visible(&shared), shared.resume.is_some())
+        (
+            slash_visible(&shared),
+            shared.resume.is_some(),
+            mention_visible(&shared).is_some(),
+        )
     };
-    let list_open = slash_open || resume_open;
+    let list_open = slash_open || resume_open || mention_open;
     match key.code {
         KeyCode::PageUp => session.lock_shared().page_up(),
         KeyCode::PageDown => session.lock_shared().page_down(),
@@ -2795,6 +2903,15 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 shared.dirty = true;
             }
         }
+        KeyCode::Tab if mention_open => {
+            session.pick_mention();
+        }
+        KeyCode::Enter
+            if mention_open
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                && session.pick_mention() => {}
         KeyCode::Char(ch) if !ctrl => session.lock_shared().insert_char(ch),
         KeyCode::Backspace => session.lock_shared().backspace(),
         KeyCode::Delete => session.lock_shared().delete_forward(),
@@ -2875,6 +2992,9 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                 shared.dirty = true;
             } else if slash_visible(&shared) {
                 shared.slash_dismissed = true;
+                shared.dirty = true;
+            } else if let Some((start, _)) = mention_visible(&shared) {
+                shared.mention_dismissed = Some(start);
                 shared.dirty = true;
             } else if shared.show_plan {
                 shared.show_plan = false;
@@ -4932,6 +5052,70 @@ mod tests {
         assert_eq!(slash_window(11, 12, 8), (4, 8));
         assert_eq!(slash_window(0, 3, 8), (0, 3));
         assert_eq!(slash_window(0, 0, 8), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn at_mention_lists_workspace_files_and_inserts_the_pick() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.rs"), "").unwrap();
+        std::fs::write(project.join(".gitignore"), "build.log\n").unwrap();
+        std::fs::write(project.join("build.log"), "").unwrap();
+        std::fs::write(dir.path().join("outside.rs"), "").unwrap();
+
+        type_text(&session, "fix @");
+        // The files are listed off the draw thread; the list fills in after.
+        wait_for_mention_files(&session).await;
+        let screen = drawn_text(&session);
+        assert!(screen.contains("  src/main.rs"), "{screen}");
+        assert!(screen.contains("tab pick"), "{screen}");
+        assert!(!screen.contains("build.log"), "{screen}");
+        assert!(!screen.contains("outside.rs"), "{screen}");
+
+        type_text(&session, "mai");
+        handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(session.lock_shared().input, "fix @src/main.rs ");
+        assert!(!drawn_text(&session).contains("  src/main.rs"));
+
+        type_text(&session, "@zzz");
+        assert!(session.mention_matches().is_empty());
+        session.lock_shared().clear_input();
+        type_text(&session, "see @src");
+        wait_for_mention_files(&session).await;
+        assert!(!session.mention_matches().is_empty());
+        handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(session.mention_matches().is_empty());
+        type_text(&session, "/");
+        assert!(
+            session.mention_matches().is_empty(),
+            "esc keeps the word closed"
+        );
+        assert_eq!(session.lock_shared().input, "see @src/");
+        for _ in 0.."@src/".len() {
+            handle_key(
+                &session,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            );
+        }
+        type_text(&session, "@");
+        assert!(
+            mention_visible(&session.lock_shared()).is_some(),
+            "a new word opens again"
+        );
+    }
+
+    async fn wait_for_mention_files(session: &TuiSession) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        session.mention_matches();
+        while !matches!(session.lock_shared().mention_files, FileList::Ready(_)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "file list never read"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn type_text(session: &TuiSession, text: &str) {

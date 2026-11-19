@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::ToolError;
 use super::executor::ToolExecutor;
-use super::path::{glob_match, is_unsafe_relative_path, path_is_ignored};
+use super::path::{glob_match, is_unsafe_relative_path, load_ignore_patterns, path_is_ignored};
 
 pub(crate) const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const MAX_SEARCH_MATCHES: usize = 200;
@@ -578,65 +578,96 @@ impl ToolExecutor {
         base: &Path,
         visit: &mut dyn FnMut(PathBuf) -> bool,
     ) -> Result<(), ToolError> {
-        if base.is_file() {
-            let rel = base
-                .strip_prefix(&self.workspace)
-                .map_err(|_| ToolError::PathEscape(base.to_path_buf()))?
-                .to_path_buf();
-            if is_unsafe_relative_path(&rel) && rel != Path::new("") {
-                return Err(ToolError::UnsafePath(rel));
-            }
-            if path_is_ignored(&rel, &self.ignore_patterns) {
-                return Ok(());
-            }
-            let _ = visit(rel);
+        walk_workspace(&self.workspace, &self.ignore_patterns, base, visit)
+    }
+}
+
+/// Workspace-relative files the `glob` tool sees: inside the jail, no
+/// symlinks, ignore rules from `.shikigamiignore`, `.gitignore`, and the
+/// built-in list, at most the walk cap. Sorted. The TUI's `@` file list uses it.
+pub fn workspace_files(workspace: &Path) -> Result<Vec<String>, ToolError> {
+    let workspace = std::fs::canonicalize(workspace)?;
+    let ignore = load_ignore_patterns(&workspace);
+    let mut files = Vec::new();
+    walk_workspace(&workspace, &ignore, &workspace, &mut |rel| {
+        files.push(rel.to_string_lossy().into_owned());
+        true
+    })?;
+    files.sort();
+    Ok(files)
+}
+
+/// [`ToolExecutor::walk_files`] over an explicit canonical `workspace` and
+/// ignore list.
+fn walk_workspace(
+    workspace: &Path,
+    ignore: &[String],
+    base: &Path,
+    visit: &mut dyn FnMut(PathBuf) -> bool,
+) -> Result<(), ToolError> {
+    if base.is_file() {
+        let rel = base
+            .strip_prefix(workspace)
+            .map_err(|_| ToolError::PathEscape(base.to_path_buf()))?
+            .to_path_buf();
+        if is_unsafe_relative_path(&rel) && rel != Path::new("") {
+            return Err(ToolError::UnsafePath(rel));
+        }
+        if path_is_ignored(&rel, ignore) {
             return Ok(());
         }
-        let mut stack = vec![base.to_path_buf()];
-        let mut seen = 0usize;
-        while let Some(dir) = stack.pop() {
-            let rd = std::fs::read_dir(&dir)?;
-            for entry in rd {
-                let entry = entry?;
-                let path = entry.path();
-                let meta = entry.metadata()?;
-                if meta.is_symlink() {
-                    continue; // do not follow symlinks out of jail
-                }
-                let rel = match path.strip_prefix(&self.workspace) {
-                    Ok(r) => r.to_path_buf(),
-                    Err(_) => continue,
-                };
-                if path_is_ignored(&rel, &self.ignore_patterns) {
-                    continue;
-                }
-                if meta.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !meta.is_file() {
-                    continue;
-                }
-                let canon = match std::fs::canonicalize(&path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                if !canon.starts_with(&self.workspace) {
-                    continue;
-                }
-                let rel = canon
-                    .strip_prefix(&self.workspace)
-                    .map_err(|_| ToolError::PathEscape(path))?
-                    .to_path_buf();
-                seen += 1;
-                if seen > MAX_WALK_FILES {
-                    return Ok(());
-                }
-                if !visit(rel) {
-                    return Ok(());
-                }
+        let _ = visit(rel);
+        return Ok(());
+    }
+    let mut stack = vec![base.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            // A subdirectory the process cannot read is skipped, not fatal.
+            Err(_) if dir != base => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in rd {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = entry.metadata()?;
+            if meta.is_symlink() {
+                continue; // do not follow symlinks out of jail
+            }
+            let rel = match path.strip_prefix(workspace) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => continue,
+            };
+            if path_is_ignored(&rel, ignore) {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            let canon = match std::fs::canonicalize(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !canon.starts_with(workspace) {
+                continue;
+            }
+            let rel = canon
+                .strip_prefix(workspace)
+                .map_err(|_| ToolError::PathEscape(path))?
+                .to_path_buf();
+            seen += 1;
+            if seen > MAX_WALK_FILES {
+                return Ok(());
+            }
+            if !visit(rel) {
+                return Ok(());
             }
         }
-        Ok(())
     }
+    Ok(())
 }
