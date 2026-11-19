@@ -747,3 +747,32 @@ fn a_second_window_does_not_take_over_a_held_session() {
     });
     assert!(contains(&third.output(), b"first-reply"));
 }
+
+/// #607: `@` lists workspace files (not ignored ones, not files outside the
+/// project) and Tab puts the picked path into the prompt.
+#[test]
+fn at_mention_picks_a_workspace_file() {
+    let dir = temp_dir();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "").unwrap();
+    std::fs::write(project.join(".gitignore"), "secret.rs\n").unwrap();
+    std::fs::write(project.join("secret.rs"), "").unwrap();
+    std::fs::write(dir.path().join("outside.rs"), "").unwrap();
+    let mut tui = start_tui(&dir, Some(r#"[{"content":"mention-reply"}]"#));
+    send(&tui, b"read @");
+    tui.wait_for("the file list", |t| screen(t).contains("  src/main.rs"));
+    let listed = screen(&tui);
+    assert!(!listed.contains("secret.rs"), "{listed}");
+    assert!(!listed.contains("outside.rs"), "{listed}");
+    send(&tui, b"mai\t\r");
+    tui.wait_for("the reply", |t| screen(t).contains("mention-reply"));
+    assert!(
+        screen(&tui).contains("read @src/main.rs"),
+        "{}",
+        screen(&tui)
+    );
+    wait_turn_done(&mut tui, 0);
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
