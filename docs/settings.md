@@ -160,6 +160,7 @@ Used for ungoverned planning (`none` / `local` governance). When governance is
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
 | `effort` | unset | Optional reasoning effort; adapters that do not speak it ignore it |
+| `alternates` | `[]` | More model ids a session may switch to with ACP `session/set_model` or TUI `/model`, on the same adapter, endpoint, and key. Ungoverned only: a governed session lists the plane catalog. Entries must be distinct and non-empty. |
 
 When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
 

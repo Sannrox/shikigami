@@ -677,6 +677,18 @@ impl RunRegistry {
     }
 
     pub fn append_event(&self, run_id: &str, event: &HarnessEvent) {
+        self.append_event_record(run_id, event, event_detail(event));
+    }
+
+    /// [`Self::append_event`] for a model turn, with the model that answered
+    /// it in the detail (`turn=3 model=<name>`), since a session can switch
+    /// models between prompts of one run.
+    pub(crate) fn append_model_turn(&self, run_id: &str, event: &HarnessEvent, model: &str) {
+        let detail = event_detail(event).map(|detail| format!("{detail} model={model}"));
+        self.append_event_record(run_id, event, detail);
+    }
+
+    fn append_event_record(&self, run_id: &str, event: &HarnessEvent, detail: Option<String>) {
         let Ok(dir) = self.run_dir(run_id) else {
             return;
         };
@@ -687,7 +699,7 @@ impl RunRegistry {
             schema_version: RUN_REGISTRY_SCHEMA_VERSION,
             timestamp_ms: now_ms(),
             event: event_name(event).into(),
-            detail: event_detail(event),
+            detail,
             call_id: event_call_id(event),
             edit_outcome: match event {
                 HarnessEvent::EditOutcome { record } => Some(record.clone()),

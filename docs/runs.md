@@ -18,6 +18,13 @@ artifacts/
   diff.patch   # only when the workspace is a git worktree with a bounded diff
 ~~~
 
+Each `model_turn` (and `content_turn`) line names the model that answered it
+in its detail, `turn=3 model=<id>`, because an ACP or TUI session can switch
+models between prompts of one run (`session/set_model`, `/model`). For a
+governed run the id is the routing preference sent to the plane. `run.json`
+`model` is the model when the run finished. Older journals show `turn=<n>`
+only.
+
 The registry is an operator convenience and crash-recovery aid. Governed
 operation truth, policy, leases, budgets, and retry limits remain owned by
 sekai-chisei. A durable per-run ownership lease prevents another process from

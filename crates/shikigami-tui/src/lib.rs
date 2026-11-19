@@ -317,6 +317,9 @@ struct Shared {
     pending_parts: Vec<Value>,
     /// The session's run as the host last reported it; `/run` shows it.
     run_id: Option<String>,
+    /// Models the session offers, from `session/new` or `session/load`;
+    /// `None` when the host offers no switch.
+    models: Option<SessionModels>,
     /// First output line of the `[tui.statusline]` command; `None` shows the
     /// default model and turn.
     statusline: Option<String>,
@@ -354,6 +357,7 @@ impl Shared {
             last_osc52: None,
             pending_parts: Vec::new(),
             run_id: None,
+            models: None,
             statusline: None,
             usage: Usage::default(),
         }
@@ -678,6 +682,47 @@ enum FileList {
     Ready(Arc<Vec<String>>),
 }
 
+/// A session's model catalog as the host offers it (ACP `models`).
+#[derive(Debug, Clone, PartialEq)]
+struct SessionModels {
+    current: String,
+    available: Vec<String>,
+}
+
+impl SessionModels {
+    fn of(result: &Value) -> Option<Self> {
+        let models = result.get("models")?;
+        Some(Self {
+            current: models.get("currentModelId")?.as_str()?.to_string(),
+            available: models
+                .get("availableModels")?
+                .as_array()?
+                .iter()
+                .filter_map(|m| m.get("modelId")?.as_str().map(str::to_string))
+                .collect(),
+        })
+    }
+
+    /// `/model` without a name: the offered models, the current one marked.
+    fn listing(&self) -> String {
+        let names: Vec<String> = self
+            .available
+            .iter()
+            .map(|id| {
+                if *id == self.current {
+                    format!("{id} (current)")
+                } else {
+                    id.clone()
+                }
+            })
+            .collect();
+        format!(
+            "Models: {}\n/model <name> switches from the next prompt.",
+            names.join(", ")
+        )
+    }
+}
+
 struct SlashCommand {
     name: String,
     hint: String,
@@ -704,6 +749,9 @@ struct TuiSession {
     osc_write: Mutex<OscWrite>,
     /// Model name for the footer; empty hides it.
     model: String,
+    /// The configured model id; a session on another one (`/model`) shows
+    /// that id in the footer instead of `model`.
+    default_model_id: String,
     /// Key bindings and colors from `[tui]`.
     look: Look,
     /// `[tui.statusline]` command, when configured.
@@ -717,6 +765,7 @@ impl TuiSession {
         } else {
             cwd.canonicalize().map_err(|e| e.to_string())?
         };
+        let default_model_id = host.configured_model();
         let session = Self {
             host,
             client: TuiClient {
@@ -728,6 +777,7 @@ impl TuiSession {
             prompt: Mutex::new(None),
             osc_write: Mutex::new(osc_write_noop),
             model: String::new(),
+            default_model_id,
             look: Look::default(),
             statusline: None,
         };
@@ -814,6 +864,7 @@ impl TuiSession {
                 }),
             )
             .await?;
+        self.lock_shared().models = SessionModels::of(&result);
         result
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -1007,6 +1058,10 @@ impl TuiSession {
             SlashCommand {
                 name: "usage".into(),
                 hint: "token use per turn".into(),
+            },
+            SlashCommand {
+                name: "model".into(),
+                hint: "list or switch models".into(),
             },
             SlashCommand {
                 name: "resume".into(),
@@ -1268,6 +1323,17 @@ impl TuiSession {
                 shared.dirty = true;
                 KeyResult::Continue
             }
+            "model" if !args.trim().is_empty() => KeyResult::SetModel(args.trim().to_string()),
+            "model" => {
+                let mut shared = self.lock_shared();
+                let line = match &shared.models {
+                    Some(models) => models.listing(),
+                    None => "This session offers no other model.".into(),
+                };
+                shared.transcript.push(TranscriptLine::System(line));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             "usage" => {
                 let mut shared = self.lock_shared();
                 let table = shared.usage.table(turn_count(&shared));
@@ -1363,6 +1429,38 @@ impl TuiSession {
         shared.dock_scroll = 0;
         shared.dirty = true;
         Ok(())
+    }
+
+    /// `/model <id>`: ask the host to switch the session's later prompts.
+    /// A refusal keeps the current model and says why.
+    async fn set_model(&self, model_id: &str) {
+        let result = self
+            .call(
+                "session/set_model",
+                json!({ "sessionId": self.session_id(), "modelId": model_id }),
+            )
+            .await;
+        let mut shared = self.lock_shared();
+        let line = match result {
+            Ok(_) => {
+                if let Some(models) = shared.models.as_mut() {
+                    models.current = model_id.to_string();
+                }
+                format!("Next prompts use {model_id}.")
+            }
+            Err(err) => format!("The model stays: {}", err.trim_end_matches('.')),
+        };
+        shared.transcript.push(TranscriptLine::System(line));
+        shared.dirty = true;
+    }
+
+    /// Footer and status line model name: the configured label, or the id
+    /// the session switched to.
+    fn model_label(&self, shared: &Shared) -> String {
+        match &shared.models {
+            Some(models) if models.current != self.default_model_id => models.current.clone(),
+            _ => self.model.clone(),
+        }
     }
 
     async fn load_session(&self, session_id: &str) {
@@ -1581,7 +1679,7 @@ fn prompt_line(shared: &Shared) -> String {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /copy  /attach  /exit  /quit  /skill:name  /help",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /model  /copy  /attach  /exit  /quit  /skill:name  /help",
         keys.label(Action::Interrupt)
     )
 }
@@ -2356,6 +2454,7 @@ fn chunk_text(update: &Value) -> Option<String> {
 /// Applies a `session/load` result: the session's run and any interrupted step.
 fn apply_load_result(shared: &mut Shared, result: &Value) {
     shared.run_id = run_id_of(result);
+    shared.models = SessionModels::of(result);
     mark_unanswered_prompts(&mut shared.transcript);
     apply_interruption(shared, result);
 }
@@ -2633,11 +2732,12 @@ async fn run_terminal(
                 )
             };
             let session_id = session.session_id();
+            let model = session.model_label(&session.lock_shared());
             statusline.tick(
                 &statusline::Snapshot {
                     session_id: &session_id,
                     cwd: &cwd,
-                    model: &session.model,
+                    model: &model,
                     status: &status,
                     turn,
                     run_id: run_id.as_deref(),
@@ -2718,6 +2818,7 @@ async fn run_terminal(
                 }
             }
             KeyResult::LoadSession(id) => session.load_session(&id).await,
+            KeyResult::SetModel(id) => session.set_model(&id).await,
             KeyResult::Continue => {}
         }
     }
@@ -2736,6 +2837,8 @@ enum KeyResult {
     Compact,
     NewSession,
     LoadSession(String),
+    /// `/model <id>`: switch later prompts to `id`.
+    SetModel(String),
 }
 
 fn handle_event(session: &TuiSession, ev: Event) -> KeyResult {
@@ -3210,7 +3313,7 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     idx += 1;
     frame.render_widget(
         Paragraph::new(terminal_text(&status_line(
-            &session.model,
+            &session.model_label(&shared),
             &session.look.keys,
             &shared,
             chunks[idx].width,
@@ -5116,6 +5219,63 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn model_command_lists_and_switches_the_sessions_model() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.model.adapter = "scripted".into();
+        config.model.script_json = Some(r#"[{"content":"ok"}]"#.into());
+        config.model.model = "model-a".into();
+        config.model.alternates = vec!["model-b".into()];
+        config.events.adapter = "none".into();
+        let harness = Harness::from_config(config, state).unwrap();
+        let mut session = TuiSession::start(Arc::new(AcpHost::new(harness)), &cwd, false)
+            .await
+            .unwrap();
+        session.model = "scripted".into();
+        let run = |session: &TuiSession, line: &str| {
+            session.lock_shared().input = line.into();
+            handle_key(session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        };
+
+        assert!(matches!(run(&session, "/model"), KeyResult::Continue));
+        let text = session.transcript_text();
+        assert!(
+            text.contains("Models: model-a (current), model-b"),
+            "{text}"
+        );
+
+        let KeyResult::SetModel(id) = run(&session, "/model model-z") else {
+            panic!("expected a switch");
+        };
+        session.set_model(&id).await;
+        assert!(
+            session
+                .transcript_text()
+                .contains("The model stays: model `model-z` is not offered"),
+            "{}",
+            session.transcript_text()
+        );
+        let screen = drawn_text(&session);
+        assert!(screen.contains("ready  scripted"), "{screen}");
+
+        let KeyResult::SetModel(id) = run(&session, "/model model-b") else {
+            panic!("expected a switch");
+        };
+        session.set_model(&id).await;
+        assert!(
+            session
+                .transcript_text()
+                .contains("Next prompts use model-b.")
+        );
+        let screen = drawn_text(&session);
+        assert!(screen.contains("ready  model-b"), "{screen}");
     }
 
     fn type_text(session: &TuiSession, text: &str) {

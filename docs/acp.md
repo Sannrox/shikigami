@@ -24,6 +24,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/new` | client → agent | Create a session id over a workspace `cwd`. Optional `mode` (`low` / `medium` / `high` / `ultra`) freezes the session ([ADR 0016](decisions/0016-session-mode.md)). Omit the field for today's spawn. With no `[model]` configured, the built-in demo's workspace is `demo-workspace` under the state root instead of `cwd`, so the demo never writes into the project. |
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed** |
 | `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error. A `mode` different from the frozen session mode is `-32602`. Attachment parts (`image`, `audio`, `resource`) pass through under ADR 0006 bounds when the adapter can read them; unsupported types fail closed. Omit attachments for today's text host. |
+| `session/set_model` | client → agent | Experimental: the session model selection in the protocol is not stable yet, and only the TUI depends on it. Later prompts of the session use `modelId`; a running prompt keeps its model. The id must be one the session offers: ungoverned, `[model].model` plus `[model].alternates`; governed, the plane catalog. A plane that does not answer refuses with `-32000` and `data.shikigami.kind = "modelCatalog"`, and the model stays (fail closed); an id not offered is `-32602`. The choice is kept with the session across a host restart. Result `{}`. |
 | `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. |
 | `session/update` | agent → client | Assistant text streams as `agent_message_chunk` updates while the model produces it, when the adapter streams (`http` does); each chunk carries the turn's `messageId`. Other adapters send one chunk per completed turn. `session/cancel` during a streamed turn stops the request; the turn is not recorded and the next prompt plans it again. Tool-call arguments do not stream. |
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
@@ -131,6 +132,10 @@ The `session/prompt` and `session/load` results carry
 `shikigami runs <id>` and `shikigami export <id>` accept. A follow-up prompt
 usually keeps the same run, but a rejected plan or a new run after a
 cancellation changes it, so read it from the latest result.
+
+The `session/new` and `session/load` results carry `models`
+(experimental): `{"currentModelId": "...", "availableModels": [{"modelId":
+"...", "name": "..."}]}`. It is absent when the catalog cannot be read.
 
 A `session/prompt` result also carries `_meta.shikigami.usage`
 (`{"inputTokens": n, "outputTokens": n}`) with the tokens that prompt used,

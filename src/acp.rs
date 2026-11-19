@@ -25,7 +25,7 @@ use crate::content::{
     sha256_digest,
 };
 use crate::events::{AsyncChannelRx, AsyncChannelSink, EventSink, HarnessEvent};
-use crate::governance::GovernanceError;
+use crate::governance::{AvailableModel, GovernanceError};
 use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
@@ -63,6 +63,9 @@ struct PersistedSession {
     mode: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     mode_frozen: bool,
+    /// Model chosen with `session/set_model`; absent keeps the configured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 impl PersistedSession {
@@ -91,6 +94,8 @@ struct LiveSession {
     cancel: Option<watch::Sender<bool>>,
     mode: Option<String>,
     mode_frozen: bool,
+    /// Model chosen with `session/set_model`, from the next prompt on.
+    model: Option<String>,
     /// In-memory payload custody for a content session. Not persisted.
     content: Option<SessionContent>,
     /// Tokens the session's runs reported while this host held it (each run
@@ -331,6 +336,7 @@ impl AcpHost {
             "session/load" => self.session_load(&params, client).await,
             "session/prompt" => self.session_prompt(&params, client).await,
             "session/compact" => self.session_compact(&params).await,
+            "session/set_model" => self.session_set_model(&params).await,
             other => Err(rpc_error(-32601, format!("Method not found: {other}"))),
         };
         Some(match result {
@@ -393,15 +399,20 @@ impl AcpHost {
             cancel: None,
             mode: mode.clone(),
             mode_frozen: mode.is_some(),
+            model: None,
             content: None,
             usage: TokenUsage::default(),
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
+        let models = self.session_models(&live).await;
         self.sessions.lock().await.insert(session_id.clone(), live);
         let mut result = json!({ "sessionId": session_id });
         if let Some(mode) = mode {
             result["mode"] = json!(mode);
+        }
+        if let Some(models) = models {
+            result["models"] = models;
         }
         Ok(result)
     }
@@ -428,6 +439,7 @@ impl AcpHost {
                 cancel: None,
                 mode: live.mode.clone(),
                 mode_frozen: live.mode_frozen,
+                model: live.model.clone(),
                 content: live.content.clone(),
                 usage: live.usage,
             }
@@ -445,6 +457,7 @@ impl AcpHost {
                 cancel: None,
                 mode: persisted.mode.clone(),
                 mode_frozen: persisted.mode_is_frozen(),
+                model: persisted.model.clone(),
                 content,
                 usage: TokenUsage::default(),
             };
@@ -464,10 +477,84 @@ impl AcpHost {
         if let Some(interrupted) = interrupted {
             result["_meta"]["shikigami"]["interrupted"] = interrupted;
         }
+        if let Some(models) = self.session_models(&live).await {
+            result["models"] = models;
+        }
         if let Some(run_id) = live.run_id {
             result["_meta"]["shikigami"]["runId"] = json!(run_id);
         }
         Ok(result)
+    }
+
+    /// The session's model catalog in ACP's (experimental) session model
+    /// shape: `currentModelId` and `availableModels`. `None` when the catalog
+    /// cannot be read (a governed plane that does not answer), so the client
+    /// offers no switch.
+    async fn session_models(&self, live: &LiveSession) -> Option<Value> {
+        let available = self.session_catalog(live).await.ok()?;
+        let harness = self
+            .harness_for_cwd(&live.cwd, live.mode.as_deref(), live.model.as_deref())
+            .ok()?;
+        let models: Vec<Value> = available
+            .iter()
+            .map(|m| json!({ "modelId": m.canonical_model, "name": m.canonical_model }))
+            .collect();
+        Some(json!({
+            "currentModelId": harness.effective_model_name(),
+            "availableModels": models,
+        }))
+    }
+
+    /// Models `live` may switch to. Built without the session's own choice,
+    /// so the configured model stays in the list after a switch.
+    async fn session_catalog(&self, live: &LiveSession) -> Result<Vec<AvailableModel>, String> {
+        let harness = self.harness_for_cwd(&live.cwd, live.mode.as_deref(), None)?;
+        harness.available_models().await.map_err(|e| e.to_string())
+    }
+
+    /// `session/set_model`: later prompts of the session use `modelId`. The
+    /// id must be in the session's catalog; governed, that catalog is the
+    /// plane's, and a plane that does not answer refuses the switch (fail
+    /// closed). A prompt already running keeps its model.
+    async fn session_set_model(&self, params: &Value) -> Result<Value, Value> {
+        self.require_init()?;
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| rpc_error(-32602, "session/set_model requires sessionId"))?;
+        let model_id = params
+            .get("modelId")
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| rpc_error(-32602, "session/set_model requires modelId"))?;
+        let live = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+        let available = self.session_catalog(&live).await.map_err(|detail| {
+            let mut value = rpc_error(-32000, "The model list is unavailable.");
+            value["data"] = json!({ "shikigami": { "kind": "modelCatalog", "detail": detail } });
+            value
+        })?;
+        if !available.iter().any(|m| m.canonical_model == model_id) {
+            return Err(rpc_error(
+                -32602,
+                format!("model `{model_id}` is not offered for this session"),
+            ));
+        }
+        let mut sessions = self.sessions.lock().await;
+        let live = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+        let previous = live.model.replace(model_id.to_string());
+        if let Err(e) = self.persist(session_id, live) {
+            live.model = previous;
+            return Err(rpc_error(-32603, e));
+        }
+        Ok(json!({}))
     }
 
     async fn session_compact(&self, params: &Value) -> Result<Value, Value> {
@@ -476,7 +563,7 @@ impl AcpHost {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .ok_or_else(|| rpc_error(-32602, "session/compact requires sessionId"))?;
-        let (cwd, run_id, mode) = {
+        let (cwd, run_id, mode, model) = {
             let sessions = self.sessions.lock().await;
             let live = sessions
                 .get(session_id)
@@ -484,13 +571,18 @@ impl AcpHost {
             if live.cancel.is_some() {
                 return Err(rpc_error(-32000, "prompt already in flight"));
             }
-            (live.cwd.clone(), live.run_id.clone(), live.mode.clone())
+            (
+                live.cwd.clone(),
+                live.run_id.clone(),
+                live.mode.clone(),
+                live.model.clone(),
+            )
         };
         let Some(run_id) = run_id else {
             return Ok(json!({ "before": 0, "after": 0 }));
         };
         let harness = self
-            .harness_for_cwd(&cwd, mode.as_deref())
+            .harness_for_cwd(&cwd, mode.as_deref(), model.as_deref())
             .map_err(|e| rpc_error(-32603, e))?;
         let mut checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -521,7 +613,7 @@ impl AcpHost {
             return Ok(None);
         };
         let harness = self
-            .harness_for_cwd(&live.cwd, live.mode.as_deref())
+            .harness_for_cwd(&live.cwd, live.mode.as_deref(), live.model.as_deref())
             .map_err(|e| rpc_error(-32603, e))?;
         let checkpoint = Checkpoint::load(&harness.state.runs_dir(), run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -563,7 +655,7 @@ impl AcpHost {
             .to_string();
         let parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
         let requested_mode = optional_mode(params)?;
-        let (cwd, resume_run_id, cancel_rx, mode, existing_content) = {
+        let (cwd, resume_run_id, cancel_rx, mode, model, existing_content) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
                 .get_mut(&session_id)
@@ -614,6 +706,7 @@ impl AcpHost {
                 live.run_id.clone(),
                 rx,
                 live.mode.clone(),
+                live.model.clone(),
                 live.content.clone(),
             )
         };
@@ -621,7 +714,7 @@ impl AcpHost {
         let before = self.session_usage(&session_id).await;
         let outcome = async {
             let harness = self
-                .harness_for_cwd(&cwd, mode.as_deref())
+                .harness_for_cwd(&cwd, mode.as_deref(), model.as_deref())
                 .map_err(|e| rpc_error(-32603, e))?;
             let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
@@ -930,13 +1023,26 @@ impl AcpHost {
     /// Where the built-in demo works, when no model is configured: a scratch
     /// directory under the state root, so the demo's permissioned write
     /// never lands in the user's project. `None` with a configured model.
+    /// The configured model id, before any session switches it
+    /// (`session/set_model`). The TUI shows another id only after a switch.
+    pub fn configured_model(&self) -> String {
+        self.harness.effective_model_name()
+    }
+
     pub fn demo_workspace(&self) -> Option<PathBuf> {
         let model = &self.harness.config.model;
         (model.adapter == "scripted" && model.script_json.is_none())
             .then(|| self.harness.state.path().join("demo-workspace"))
     }
 
-    fn harness_for_cwd(&self, cwd: &Path, mode: Option<&str>) -> Result<Harness, String> {
+    /// The harness one session prompt runs on: `cwd` in place (or the demo
+    /// workspace), the session mode, then the session's chosen `model`.
+    fn harness_for_cwd(
+        &self,
+        cwd: &Path,
+        mode: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Harness, String> {
         let mut config = self.harness.config.clone();
         config.workspace.adapter = "inplace".into();
         config.workspace.root = match self.demo_workspace() {
@@ -948,6 +1054,9 @@ impl AcpHost {
         };
         if let Some(mode) = mode {
             config.apply_session_mode(mode).map_err(|e| e.to_string())?;
+        }
+        if let Some(model) = model {
+            config.model.model = model.to_string();
         }
         Harness::from_config(config, self.harness.state.clone()).map_err(|e| e.to_string())
     }
@@ -1066,6 +1175,7 @@ impl AcpHost {
             run_id: live.run_id.clone(),
             mode: live.mode.clone(),
             mode_frozen: live.mode_frozen,
+            model: live.model.clone(),
         };
         std::fs::write(
             path,
@@ -4727,6 +4837,123 @@ mod tests {
         // Parks for the write, resumes after the allow: both segments count.
         let fourth = prompt(&host, &client, &session_id, text("write")).await;
         assert_eq!(usage(&fourth), json!({"inputTokens": 5, "outputTokens": 2}));
+    }
+
+    #[tokio::test]
+    async fn set_model_switches_later_turns_and_records_each_turns_model() {
+        let dir = tempdir().unwrap();
+        let script = r#"[{"content":"a"},{"content":"b"},{"content":"c"}]"#;
+        let with_alternate = |config: &mut Config| {
+            config.model.model = "model-a".into();
+            config.model.alternates = vec!["model-b".into()];
+        };
+        let host = scripted_host_with(dir.path(), script, with_alternate);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        host.handle(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": 1, "capabilities": {}}}),
+            &client,
+        )
+        .await
+        .unwrap();
+        let created = host
+            .handle(
+                json!({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                       "params": {"cwd": project, "mcpServers": []}}),
+                &client,
+            )
+            .await
+            .unwrap();
+        let models = &rpc_ok(&created)["models"];
+        assert_eq!(models["currentModelId"], "model-a", "{created}");
+        assert_eq!(
+            models["availableModels"],
+            json!([{"modelId": "model-a", "name": "model-a"},
+                   {"modelId": "model-b", "name": "model-b"}])
+        );
+        let session_id = rpc_ok(&created)["sessionId"].as_str().unwrap().to_string();
+        let set_model = |model: &str| {
+            json!({"jsonrpc": "2.0", "id": 4, "method": "session/set_model",
+                   "params": {"sessionId": session_id, "modelId": model}})
+        };
+        let text = |t: &str| json!([{ "type": "text", "text": t }]);
+
+        let first = prompt(&host, &client, &session_id, text("one")).await;
+        let refused = host.handle(set_model("model-z"), &client).await.unwrap();
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+        let switched = host.handle(set_model("model-b"), &client).await.unwrap();
+        assert_eq!(rpc_ok(&switched), &json!({}));
+        let second = prompt(&host, &client, &session_id, text("two")).await;
+        let run_id = rpc_ok(&second)["_meta"]["shikigami"]["runId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(rpc_ok(&first)["_meta"]["shikigami"]["runId"], run_id);
+
+        let log = host.harness.registry.event_log(&run_id).unwrap();
+        let turns: Vec<String> = log
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|event| event["event"] == "model_turn")
+            .map(|event| event["detail"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(turns, ["turn=1 model=model-a", "turn=2 model=model-b"]);
+
+        // A restarted host keeps the session's choice.
+        drop(host);
+        let host = scripted_host_with(dir.path(), script, with_alternate);
+        let loaded = load_after_restart(&host, &client, &session_id, &project).await;
+        let models = &rpc_ok(&loaded)["models"];
+        assert_eq!(models["currentModelId"], "model-b", "{loaded}");
+        assert_eq!(
+            models["availableModels"].as_array().unwrap().len(),
+            2,
+            "{loaded}"
+        );
+        let back = host.handle(set_model("model-a"), &client).await.unwrap();
+        assert_eq!(
+            rpc_ok(&back),
+            &json!({}),
+            "the configured model stays offered"
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_set_model_fails_closed_without_the_plane_catalog() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"a"}]"#, |config| {
+            config.governance.adapter = "sekai-chisei".into();
+            config.governance.fail_closed = true;
+            config.governance.endpoint = None;
+            config.model.alternates = vec!["model-b".into()];
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let session_id = init_and_new(&host, &client, &project).await;
+        let refused = host
+            .handle(
+                json!({"jsonrpc": "2.0", "id": 4, "method": "session/set_model",
+                       "params": {"sessionId": session_id, "modelId": "model-b"}}),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused["error"]["code"], -32000, "{refused}");
+        assert_eq!(
+            refused["error"]["data"]["shikigami"]["kind"],
+            "modelCatalog"
+        );
+        let persisted = host.load_persisted(&session_id).unwrap();
+        assert_eq!(persisted.model, None);
     }
 
     async fn prompt(
