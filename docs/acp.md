@@ -57,8 +57,9 @@ the same prompt. Hitting the budget parks `end_turn` with
 `stopReason: max_turn_requests` so the next prompt can continue. A readable
 session run that is not waiting fails closed instead of starting a new run.
 Background bash jobs stay running across the session's parks (prompt wait,
-ask, escalate, plan) and stay addressable by `bash_job_status` /
-`bash_job_logs`. Job logs stay in host scratch, not the workspace. They end
+ask, escalate, plan) and stay addressable by `bash_job_status`
+(poll, or wait with `timeout_ms`) / `bash_job_logs`. Job logs stay in host
+scratch, not the workspace. They end
 when the run completes or fails, when `session/cancel` interrupts a turn
 or a permission wait, and when the host exits on EOF, SIGINT, or SIGTERM.
 A host killed with SIGKILL cannot reap them. A host restart loses them:

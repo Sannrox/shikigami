@@ -348,13 +348,13 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
         ),
         def(
             "bash_background",
-            "Start a background shell command in the workspace; returns job_id. Poll with bash_job_status / bash_job_logs. Jobs are killed when the run ends.",
+            "Start a background shell command in the workspace; returns job_id. Wait or poll with bash_job_status / bash_job_logs. Jobs are killed when the run ends.",
             r#"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}"#,
         ),
         def(
             "bash_job_status",
-            "Status of a background bash job (running|exited|unknown).",
-            r#"{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}"#,
+            "Status of a background bash job (running|exited|unknown). Optional timeout_ms waits until exit or the bound, capped like foreground bash; omit to poll once.",
+            r#"{"type":"object","properties":{"job_id":{"type":"string"},"timeout_ms":{"type":"integer"}},"required":["job_id"]}"#,
         ),
         def(
             "bash_job_logs",
