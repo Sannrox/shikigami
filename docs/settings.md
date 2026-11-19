@@ -319,7 +319,8 @@ OTLP/HTTP tracing export). Does not interpose bash sockets; see
 Background jobs (when bash is enabled): start with `bash_background`, poll with
 `bash_job_status` / `bash_job_logs`. Jobs are killed when the run finishes
 (success, failure, or park). ACP sessions keep them across parks until the
-run ends or the host exits ([acp.md](acp.md)). Max 4 concurrent jobs; logs capped at 256KiB.
+run ends or the host exits ([acp.md](acp.md)). Max 4 concurrent jobs; logs
+capped at 256KiB and stored in host scratch, not the workspace.
 
 Foreground and background Bash share one explicitly reconstructed child
 environment. For 1.x compatibility, ordinary parent variables remain
