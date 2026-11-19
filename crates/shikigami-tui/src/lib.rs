@@ -34,10 +34,12 @@ use shikigami::acp::{AcpClient, AcpHost, SessionSummary};
 
 mod look;
 mod statusline;
+mod usage;
 use look::{Action, KeyMap, Look, Palette};
 use shikigami::harness::Harness;
 use shikigami::identity::{PRODUCT, VERSION};
 use statusline::StatusLine;
+use usage::Usage;
 
 /// Run the interactive host on a real terminal until quit, in a new session.
 pub async fn run(harness: Harness) -> Result<(), String> {
@@ -313,6 +315,8 @@ struct Shared {
     /// First output line of the `[tui.statusline]` command; `None` shows the
     /// default model and turn.
     statusline: Option<String>,
+    /// Token use the host reported per turn; the footer and `/usage` show it.
+    usage: Usage,
 }
 
 impl Shared {
@@ -344,6 +348,7 @@ impl Shared {
             pending_parts: Vec::new(),
             run_id: None,
             statusline: None,
+            usage: Usage::default(),
         }
     }
 
@@ -972,6 +977,10 @@ impl TuiSession {
                 hint: "show the run id for runs and export".into(),
             },
             SlashCommand {
+                name: "usage".into(),
+                hint: "token use per turn".into(),
+            },
+            SlashCommand {
                 name: "resume".into(),
                 hint: "load a persisted session".into(),
             },
@@ -1170,6 +1179,13 @@ impl TuiSession {
                 shared.dirty = true;
                 KeyResult::Continue
             }
+            "usage" => {
+                let mut shared = self.lock_shared();
+                let table = shared.usage.table(turn_count(&shared));
+                shared.transcript.push(TranscriptLine::System(table));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             "copy" => {
                 self.copy_last_assistant();
                 KeyResult::Continue
@@ -1252,6 +1268,7 @@ impl TuiSession {
         shared.queued = None;
         shared.pending_parts.clear();
         shared.run_id = None;
+        shared.usage = Usage::default();
         shared.status = "ready".into();
         shared.scroll_back = 0;
         shared.dock_scroll = 0;
@@ -1286,6 +1303,7 @@ impl TuiSession {
                 *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
                 let mut shared = self.lock_shared();
                 apply_load_result(&mut shared, &result);
+                shared.usage = Usage::default();
                 shared.status = "ready".into();
                 shared.dirty = true;
             }
@@ -1474,7 +1492,7 @@ fn prompt_line(shared: &Shared) -> String {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /copy  /attach  /exit  /quit  /skill:name  /help",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /copy  /attach  /exit  /quit  /skill:name  /help",
         keys.label(Action::Interrupt)
     )
 }
@@ -1765,6 +1783,9 @@ fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u16) -> Strin
         if turns > 0 {
             parts.push(format!("turn {turns}"));
         }
+    }
+    if let Some(tokens) = shared.usage.footer(turn_count(shared)) {
+        parts.push(tokens);
     }
     if shared.permission.is_some() {
         parts.push("esc cancel".into());
@@ -2343,6 +2364,8 @@ fn stop_word(reason: &str) -> &'static str {
 fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
     if let Some(result) = resp.and_then(|v| v.get("result")) {
         shared.run_id = run_id_of(result);
+        let turn = turn_count(shared);
+        shared.usage.record(turn, result);
     }
     if let Some(reason) = resp
         .and_then(|v| v.pointer("/result/stopReason"))
@@ -3376,7 +3399,7 @@ mod tests {
         let rows = drawn_rows(&session, 80, 24);
         assert_eq!(
             rows.last().unwrap(),
-            "  done  claude-sonnet-5-5  turn 1  ^c quit  pgup/pgdn/wheel"
+            "  done  claude-sonnet-5-5  turn 1  ? tok  ^c quit  pgup/pgdn/wheel"
         );
         let id = session.session_id();
         let short = &id["sess-".len().."sess-".len() + 8];
@@ -4210,7 +4233,7 @@ mod tests {
         let screen = rows.join("\n");
         let rule = "─".repeat(80);
         let expected = format!(
-            "{}you  write the ok file\n\n· write_file  ok.txt  cancelled\n{rule}\n>\n{rule}\n  cancelled  turn 1  ^c quit  ^o tool  pgup/pgdn/wheel",
+            "{}you  write the ok file\n\n· write_file  ok.txt  cancelled\n{rule}\n>\n{rule}\n  cancelled  turn 1  ? tok  ^c quit  ^o tool  pgup/pgdn/wheel",
             "\n".repeat(17)
         );
         assert_eq!(screen, expected);

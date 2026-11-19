@@ -528,6 +528,30 @@ fn demo_write_stays_out_of_the_project() {
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok\n");
 }
 
+/// #609: a scripted turn's reported usage shows in the footer total and in the
+/// `/usage` table.
+#[test]
+fn token_use_shows_in_the_footer_and_usage() {
+    let dir = temp_dir();
+    let mut tui = start_tui(
+        &dir,
+        Some(r#"[{"content":"counted","usage":{"input_tokens":1200,"output_tokens":340}}]"#),
+    );
+    let before = tui.output().len();
+    send(&tui, b"hi\r");
+    wait_turn_done(&mut tui, before);
+    tui.wait_for("the footer total", |t| screen(t).contains("1.5k tok"));
+    send(&tui, b"/usage\r");
+    tui.wait_for("the usage table", |t| {
+        let screen = screen(t);
+        screen
+            .lines()
+            .any(|l| l.split_whitespace().eq(["total", "1.2k", "340"]))
+    });
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
+
 /// #602: with no model configured the built-in demo answers, and launch says
 /// so before the first prompt; a configured model shows no such line.
 #[test]

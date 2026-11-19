@@ -29,7 +29,7 @@ use crate::governance::GovernanceError;
 use crate::harness::{Harness, HarnessError};
 use crate::identity::{PRODUCT, VERSION};
 use crate::mcp::framing;
-use crate::model::{ChatMessage, ModelError, ModelPort};
+use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage};
 use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
     compact_messages,
@@ -93,6 +93,10 @@ struct LiveSession {
     mode_frozen: bool,
     /// In-memory payload custody for a content session. Not persisted.
     content: Option<SessionContent>,
+    /// Tokens the session's runs reported while this host held it (each run
+    /// segment reports its own). In memory only; prompt results report the
+    /// difference a prompt made.
+    usage: TokenUsage,
 }
 
 #[derive(Clone)]
@@ -390,6 +394,7 @@ impl AcpHost {
             mode: mode.clone(),
             mode_frozen: mode.is_some(),
             content: None,
+            usage: TokenUsage::default(),
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -424,6 +429,7 @@ impl AcpHost {
                 mode: live.mode.clone(),
                 mode_frozen: live.mode_frozen,
                 content: live.content.clone(),
+                usage: live.usage,
             }
         } else {
             let persisted = self
@@ -440,6 +446,7 @@ impl AcpHost {
                 mode: persisted.mode.clone(),
                 mode_frozen: persisted.mode_is_frozen(),
                 content,
+                usage: TokenUsage::default(),
             };
             self.sessions
                 .lock()
@@ -611,6 +618,7 @@ impl AcpHost {
             )
         };
 
+        let before = self.session_usage(&session_id).await;
         let outcome = async {
             let harness = self
                 .harness_for_cwd(&cwd, mode.as_deref())
@@ -684,6 +692,18 @@ impl AcpHost {
             if let Some(run_id) = self.session_run_id(&session_id).await {
                 result["_meta"]["shikigami"]["runId"] = json!(run_id);
             }
+            // Tokens this prompt used; absent while unknown (zero).
+            let after = self.session_usage(&session_id).await;
+            let usage = TokenUsage {
+                input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
+                output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
+            };
+            if usage.total() > 0 {
+                result["_meta"]["shikigami"]["usage"] = json!({
+                    "inputTokens": usage.input_tokens,
+                    "outputTokens": usage.output_tokens,
+                });
+            }
             Ok(result)
         }
         .await;
@@ -753,6 +773,10 @@ impl AcpHost {
             self.set_run_id(session_id, Some(result.run_id.clone()))
                 .await
                 .map_err(|e| rpc_error(-32603, e))?;
+            if let Some(live) = self.sessions.lock().await.get_mut(session_id) {
+                live.usage.input_tokens += result.usage.input_tokens;
+                live.usage.output_tokens += result.usage.output_tokens;
+            }
 
             if result.termination == RunTermination::Cancelled {
                 self.retain_run_for_next_prompt(session_id, &harness, Some(result.run_id.clone()))
@@ -1147,6 +1171,15 @@ impl AcpHost {
             .into_iter()
             .next()
             .map(|session| session.session_id)
+    }
+
+    async fn session_usage(&self, session_id: &str) -> TokenUsage {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|live| live.usage)
+            .unwrap_or_default()
     }
 
     async fn session_run_id(&self, session_id: &str) -> Option<String> {
@@ -4655,6 +4688,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rpc_ok(&follow)["stopReason"], "end_turn");
+    }
+
+    /// #609: each prompt result carries the tokens that prompt used, summed
+    /// over its run segments, and leaves them out while none were reported.
+    #[tokio::test]
+    async fn prompt_result_carries_the_prompts_token_use() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[{"content":"a"},
+                {"content":"b","usage":{"input_tokens":10,"output_tokens":2}},
+                {"content":"c","usage":{"input_tokens":5,"output_tokens":1}},
+                {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"x.txt\",\"content\":\"x\"}"}],"usage":{"input_tokens":3,"output_tokens":1}},
+                {"content":"d","usage":{"input_tokens":2,"output_tokens":1}}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let session_id = init_and_new(&host, &client, &project).await;
+        let text = |t: &str| json!([{ "type": "text", "text": t }]);
+        let usage = |resp: &Value| rpc_ok(resp)["_meta"]["shikigami"]["usage"].clone();
+
+        let first = prompt(&host, &client, &session_id, text("one")).await;
+        assert_eq!(rpc_ok(&first)["stopReason"], "end_turn", "{first}");
+        assert_eq!(usage(&first), Value::Null, "{first}");
+        let second = prompt(&host, &client, &session_id, text("two")).await;
+        assert_eq!(
+            usage(&second),
+            json!({"inputTokens": 10, "outputTokens": 2}),
+            "{second}"
+        );
+        let third = prompt(&host, &client, &session_id, text("three")).await;
+        assert_eq!(usage(&third), json!({"inputTokens": 5, "outputTokens": 1}));
+        // Parks for the write, resumes after the allow: both segments count.
+        let fourth = prompt(&host, &client, &session_id, text("write")).await;
+        assert_eq!(usage(&fourth), json!({"inputTokens": 5, "outputTokens": 2}));
     }
 
     async fn prompt(

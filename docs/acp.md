@@ -132,6 +132,14 @@ The `session/prompt` and `session/load` results carry
 usually keeps the same run, but a rejected plan or a new run after a
 cancellation changes it, so read it from the latest result.
 
+A `session/prompt` result also carries `_meta.shikigami.usage`
+(`{"inputTokens": n, "outputTokens": n}`) with the tokens that prompt used,
+summed over its run segments (a prompt that waits for a permission is more
+than one). It is absent when the model reported no usage (a model that
+reports zero counts as none); absent means unknown, not zero. A segment that
+reports nothing adds nothing, so a prompt mixing both is a lower bound. A
+client adds prompts up for a session total.
+
 Session mode is [ADR 0016](decisions/0016-session-mode.md). `session/new` may
 name a catalog mode; the mapping lives in `[session.modes]` settings. Invalid
 mappings return `-32602` before session creation or first-prompt freezing.
