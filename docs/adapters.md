@@ -144,7 +144,7 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 | `handoff` | Brief event for a fresh session (`task` required); does not start a session, child run, or plane session |
 | `web_fetch` | Opt-in HTTP(S) GET; not in the coding default |
 | `bash` | Opt-in shell in workspace (timeout-bounded) |
-| `bash_background` / `bash_job_status` / `bash_job_logs` | Implicit when `bash` is enabled |
+| `bash_background` / `bash_job_status` / `bash_job_logs` | Implicit when `bash` is enabled. `bash_job_status` polls once, or waits with optional `timeout_ms` (same cap as foreground bash) |
 | `report` / `escalate` | Finish or park; exclusive batch. `report` takes `summary`, `success`, and an optional `data` JSON object for a structured answer |
 
 API: `ToolRegistry::from_config` → `definitions()` + `execute()`.

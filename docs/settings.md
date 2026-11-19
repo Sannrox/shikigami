@@ -316,8 +316,9 @@ OTLP/HTTP tracing export). Does not interpose bash sockets; see
 | `workspace` | coding default (no bash) |
 | `workspace_exec` | coding default + `bash` (also exposes `bash_background` / `bash_job_status` / `bash_job_logs`) |
 
-Background jobs (when bash is enabled): start with `bash_background`, poll with
-`bash_job_status` / `bash_job_logs`. Jobs are killed when the run finishes
+Background jobs (when bash is enabled): start with `bash_background`, wait or
+poll with `bash_job_status` (optional `timeout_ms`, same cap as foreground
+bash) / `bash_job_logs`. Jobs are killed when the run finishes
 (success, failure, or park). ACP sessions keep them across parks until the
 run ends or the host exits ([acp.md](acp.md)). Max 4 concurrent jobs; logs
 capped at 256KiB and stored in host scratch, not the workspace.

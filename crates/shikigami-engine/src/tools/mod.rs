@@ -287,6 +287,115 @@ mod tests {
         reg.kill_background_jobs().await;
     }
 
+    #[tokio::test]
+    async fn bash_job_status_wait_returns_exited_when_the_job_ends() {
+        let dir = tempdir().unwrap();
+        let reg = registry(&dir, &["bash"]);
+        let start = reg
+            .execute(
+                "bash_background",
+                r#"{"command":"sleep 0.2; printf done\\n"}"#,
+            )
+            .await
+            .unwrap();
+        let ToolOutput::Text(start_text) = start else {
+            panic!("text");
+        };
+        let job_id = start_text
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id="))
+            .expect("job_id line")
+            .to_string();
+        let began = std::time::Instant::now();
+        let status = reg
+            .execute(
+                "bash_job_status",
+                &format!(r#"{{"job_id":"{job_id}","timeout_ms":2000}}"#),
+            )
+            .await
+            .unwrap();
+        let elapsed = began.elapsed();
+        let ToolOutput::Text(status) = status else {
+            panic!("text");
+        };
+        assert!(
+            status.contains("status=exited") && status.contains("code=0"),
+            "{status}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "wait returned before the job could finish: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "wait should return near job exit, not the full timeout: {elapsed:?}"
+        );
+        reg.kill_background_jobs().await;
+    }
+
+    #[tokio::test]
+    async fn bash_job_status_wait_returns_running_when_the_timeout_elapses() {
+        let dir = tempdir().unwrap();
+        let reg = registry(&dir, &["bash"]);
+        let start = reg
+            .execute("bash_background", r#"{"command":"sleep 2"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(start_text) = start else {
+            panic!("text");
+        };
+        let job_id = start_text
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id="))
+            .expect("job_id line")
+            .to_string();
+        let began = std::time::Instant::now();
+        let status = reg
+            .execute(
+                "bash_job_status",
+                &format!(r#"{{"job_id":"{job_id}","timeout_ms":80}}"#),
+            )
+            .await
+            .unwrap();
+        let elapsed = began.elapsed();
+        let ToolOutput::Text(status) = status else {
+            panic!("text");
+        };
+        assert!(status.contains("status=running"), "{status}");
+        assert!(
+            elapsed >= Duration::from_millis(60),
+            "wait returned before the timeout: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "wait overran the timeout bound: {elapsed:?}"
+        );
+        reg.kill_background_jobs().await;
+    }
+
+    #[tokio::test]
+    async fn bash_job_status_wait_on_unknown_job_returns_immediately() {
+        let dir = tempdir().unwrap();
+        let reg = registry(&dir, &["bash"]);
+        let began = std::time::Instant::now();
+        let status = reg
+            .execute(
+                "bash_job_status",
+                r#"{"job_id":"job-missing","timeout_ms":5000}"#,
+            )
+            .await
+            .unwrap();
+        let elapsed = began.elapsed();
+        let ToolOutput::Text(status) = status else {
+            panic!("text");
+        };
+        assert_eq!(status, "job_id=job-missing status=unknown");
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "unknown jobs must not consume the wait bound: {elapsed:?}"
+        );
+    }
+
     /// Harness job logs must not appear in an inplace git tree: `.shikigami/`
     /// is the skills root, so gitignore of that directory is not the fix.
     #[tokio::test]

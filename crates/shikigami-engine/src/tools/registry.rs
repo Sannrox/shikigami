@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -437,24 +438,45 @@ impl ToolRegistry {
         #[derive(Deserialize)]
         struct Args {
             job_id: String,
+            timeout_ms: Option<u64>,
         }
         let args: Args = parse("bash_job_status", args_json)?;
-        let mut guard = self
-            .bg_jobs
-            .lock()
-            .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
-        let Some(job) = guard.jobs.get_mut(&args.job_id) else {
-            // Includes jobs lost to a host restart: they are never restarted.
-            return Ok(format!("job_id={} status=unknown", args.job_id));
-        };
-        match job.try_wait() {
-            Ok(Some(status)) => Ok(format!(
-                "job_id={} status=exited code={}",
-                args.job_id,
-                status.code().unwrap_or(-1)
-            )),
-            Ok(None) => Ok(format!("job_id={} status=running", args.job_id)),
-            Err(e) => Err(ToolError::Message(format!("bash_job_status: {e}"))),
+        // Omitted or zero timeout_ms stays a single poll. A positive bound is
+        // capped like foreground bash so one wait cannot outlast a bash call.
+        let wait_for = args
+            .timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::ZERO)
+            .min(self.executor.bash_timeout)
+            .min(Duration::from_secs(120));
+        let deadline = Instant::now() + wait_for;
+        loop {
+            {
+                let mut guard = self
+                    .bg_jobs
+                    .lock()
+                    .map_err(|_| ToolError::Message("bg jobs lock poisoned".into()))?;
+                let Some(job) = guard.jobs.get_mut(&args.job_id) else {
+                    // Includes jobs lost to a host restart: they are never restarted.
+                    return Ok(format!("job_id={} status=unknown", args.job_id));
+                };
+                match job.try_wait() {
+                    Ok(Some(status)) => {
+                        return Ok(format!(
+                            "job_id={} status=exited code={}",
+                            args.job_id,
+                            status.code().unwrap_or(-1)
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(ToolError::Message(format!("bash_job_status: {e}"))),
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(format!("job_id={} status=running", args.job_id));
+            }
+            tokio::time::sleep(remaining.min(Duration::from_millis(20))).await;
         }
     }
 
