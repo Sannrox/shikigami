@@ -528,6 +528,40 @@ fn demo_write_stays_out_of_the_project() {
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok\n");
 }
 
+/// #646: letters typed as a follow-up while a permission ask opens must not
+/// grant the tool. A deliberate `y` after the dock is idle still allows it.
+#[test]
+fn letters_typed_as_text_do_not_allow_a_tool() {
+    let dir = temp_dir();
+    let script = r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},{"content":"wrote it"}]"#;
+    let mut tui = start_tui(&dir, Some(script));
+    send(&tui, b"write it\rand");
+    tui.wait_for("the permission ask", |t| screen(t).contains("y allow"));
+    let project_file = dir.path().join("project/ok.txt");
+    assert!(
+        !project_file.exists(),
+        "queued follow-up letters must not allow"
+    );
+    send(&tui, b"xxx");
+    tui.wait_for("letters on the dock ignored", |t| {
+        screen(t).contains("y allow")
+    });
+    assert!(
+        !project_file.exists(),
+        "letters typed on the dock must not allow"
+    );
+    let typed = Instant::now();
+    tui.wait_for("typing to settle", |t| {
+        typed.elapsed() >= Duration::from_millis(400) && screen(t).contains("y allow")
+    });
+    let before = tui.output().len();
+    send(&tui, b"y");
+    wait_turn_done(&mut tui, before);
+    assert_eq!(std::fs::read_to_string(&project_file).unwrap(), "hi\n");
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
+
 /// #609: a scripted turn's reported usage shows in the footer total and in the
 /// `/usage` table.
 #[test]
