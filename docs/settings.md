@@ -419,7 +419,7 @@ credential, and HTTP `[[tools.mcp_servers]]` entries fail validation. See
 | `load_project_rules` | `true` | Load first matching rules file from the **workspace** root |
 | `rules_filenames` | `["AGENTS.md","shikigami.rules.md"]` | Tried in order; flat names only |
 | `max_rules_bytes` | `32768` | Truncate with a marker when larger |
-| `skills_root` | unset → `.shikigami/skills` under workspace | Root for skill packs. TUI `/skill:name` also searches `.agents/skills`. |
+| `skills_root` | unset → `.shikigami/skills` under workspace | Root for skill packs. The TUI offers each pack as `/name` (or `/skill:name`; built-ins win a collision) and also searches `.agents/skills`. |
 | `skills` | `[]` | Skill directory names (`<root>/<id>/SKILL.md`). The prompt lists them; the agent loads a body with `load_skill`. Without that tool, bodies go into the system prompt. |
 | `eager_skills` | `[]` | Ids from `skills` whose bodies go into the system prompt at run start |
 | `max_skill_bytes` | `32768` | Per-skill size cap |

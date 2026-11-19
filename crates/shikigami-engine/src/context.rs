@@ -70,7 +70,7 @@ fn skills_root(workspace: &Path, settings: &ContextSettings) -> PathBuf {
     }
 }
 
-/// Roots searched for `/skill:name`. Runtime packs first, then `.agents/skills`.
+/// Roots searched for TUI skill commands (`/name`, `/skill:name`). Runtime packs first, then `.agents/skills`.
 fn skill_search_roots(workspace: &Path, settings: &ContextSettings) -> Vec<PathBuf> {
     let primary = skills_root(workspace, settings);
     let agents = workspace.join(".agents/skills");
@@ -106,7 +106,7 @@ fn scan_skill_ids(root: &Path) -> Vec<String> {
     ids
 }
 
-/// Skill ids the TUI can offer as `/skill:name`.
+/// Skill ids the TUI can offer as slash commands (`/name` or `/skill:name`).
 ///
 /// Configured `context.skills` is an allow-list. When that list is empty,
 /// ids are discovered from `skills_root` and `<workspace>/.agents/skills`
