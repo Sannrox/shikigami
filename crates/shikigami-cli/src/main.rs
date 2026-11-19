@@ -40,7 +40,7 @@ enum ServeIntake {
     long_about = None
 )]
 struct Cli {
-    /// Where sessions and runs are kept. Default: a per-folder directory under the platform user-state directory.
+    /// Where sessions and runs are kept. Default: ~/.shikigami/projects/<this folder> (SHIKIGAMI_HOME moves ~/.shikigami).
     #[arg(long, global = true, env = "SHIKIGAMI_STATE")]
     state: Option<PathBuf>,
 
@@ -291,7 +291,10 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let state = StateRoot::resolve_host(cli.state.as_deref(), &cwd)?;
+    let (state, older_state) = StateRoot::resolve_host(cli.state.as_deref(), &cwd)?;
+    if let Some(older) = older_state {
+        human_eprintln!("note: {older}");
+    }
 
     // A cwd `shikigami.toml` is repository content, so it only loads on opt-in.
     // Note it when it would previously have been the selected file.

@@ -2,7 +2,7 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use shikigami::Config;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 #[test]
@@ -112,21 +112,30 @@ fn doctor_succeeds_on_local_defaults() {
         ));
 }
 
+/// A `shikigami` invocation in `cwd` whose homes all point at temp dirs.
+fn cli_in(cwd: &Path, shikigami_home: &Path, xdg: &Path) -> assert_cmd::Command {
+    let mut cmd = cargo_bin_cmd!("shikigami");
+    cmd.current_dir(cwd)
+        .env("SHIKIGAMI_HOME", shikigami_home)
+        .env("XDG_STATE_HOME", xdg)
+        .env_remove("SHIKIGAMI_STATE");
+    cmd
+}
+
 #[test]
-fn doctor_without_state_flag_uses_user_state_dir() {
+fn doctor_without_state_flag_uses_shikigami_home_projects() {
+    let home = tempdir().expect("home");
     let xdg = tempdir().expect("xdg");
     let cwd = tempdir().expect("cwd");
-    cargo_bin_cmd!("shikigami")
-        .current_dir(cwd.path())
-        .env("XDG_STATE_HOME", xdg.path())
-        .env_remove("SHIKIGAMI_STATE")
+    cli_in(cwd.path(), home.path(), xdg.path())
         .args(["doctor"])
         .assert()
         .success()
         .stdout(predicate::str::contains("status: ok"))
         .stdout(predicate::str::contains(
-            xdg.path().join("shikigami").display().to_string(),
-        ));
+            home.path().join("projects").display().to_string(),
+        ))
+        .stderr(predicate::str::contains("note: using state").not());
     assert!(
         !cwd.path().join(".shikigami-state").exists(),
         "cwd-local default must not be created"
@@ -134,77 +143,96 @@ fn doctor_without_state_flag_uses_user_state_dir() {
 }
 
 #[test]
+fn older_platform_state_is_kept_with_a_move_note() {
+    let home = tempdir().expect("home");
+    let xdg = tempdir().expect("xdg");
+    let cwd = tempdir().expect("cwd");
+    // Create the current root, then move it where 3.0 kept it.
+    cli_in(cwd.path(), home.path(), xdg.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let projects = home.path().join("projects");
+    let current = fs::read_dir(&projects)
+        .expect("projects")
+        .next()
+        .expect("one root")
+        .expect("entry")
+        .path();
+    let older = xdg
+        .path()
+        .join("shikigami")
+        .join(current.file_name().unwrap());
+    fs::create_dir_all(older.parent().unwrap()).expect("xdg base");
+    fs::rename(&current, &older).expect("move to 3.0 location");
+
+    cli_in(cwd.path(), home.path(), xdg.path())
+        .arg("runs")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "note: using state from the shikigami 3.x location",
+        ))
+        .stderr(predicate::str::contains("mv "));
+    assert!(older.is_dir(), "older root is never moved automatically");
+    assert!(!current.exists(), "current root is not created");
+}
+
+#[test]
 fn existing_project_state_is_refused_without_state_flag() {
+    let home = tempdir().expect("home");
     let xdg = tempdir().expect("xdg");
     let cwd = tempdir().expect("cwd");
     fs::create_dir(cwd.path().join(".shikigami-state")).expect("legacy state");
-    let cli = || {
-        let mut cmd = cargo_bin_cmd!("shikigami");
-        cmd.current_dir(cwd.path())
-            .env("XDG_STATE_HOME", xdg.path())
-            .env_remove("SHIKIGAMI_STATE");
-        cmd
-    };
 
-    cli()
+    cli_in(cwd.path(), home.path(), xdg.path())
         .arg("runs")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("found project state at"))
+        .stderr(predicate::str::contains("holds state from shikigami 2.x"))
+        .stderr(predicate::str::contains("mv "))
         .stderr(predicate::str::contains("--state"));
-    cli()
+    cli_in(cwd.path(), home.path(), xdg.path())
         .args(["--state", "./.shikigami-state", "runs"])
         .assert()
         .success();
 }
 
 #[test]
-fn doctor_without_xdg_uses_platform_user_state_under_home() {
+fn doctor_without_shikigami_home_uses_dot_shikigami_under_home() {
     let home = tempdir().expect("home");
     let cwd = tempdir().expect("cwd");
-    let expected = {
-        #[cfg(target_os = "macos")]
-        {
-            home.path()
-                .join("Library")
-                .join("Application Support")
-                .join("shikigami")
-        }
-        #[cfg(windows)]
-        {
-            home.path().join("AppData").join("Local").join("shikigami")
-        }
-        #[cfg(not(any(target_os = "macos", windows)))]
-        {
-            home.path().join(".local").join("state").join("shikigami")
-        }
-    };
     cargo_bin_cmd!("shikigami")
         .current_dir(cwd.path())
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
-        .env_remove("XDG_STATE_HOME")
-        .env_remove("LOCALAPPDATA")
+        .env("XDG_STATE_HOME", home.path().join("xdg"))
+        .env_remove("SHIKIGAMI_HOME")
         .env_remove("SHIKIGAMI_STATE")
         .args(["doctor"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(expected.display().to_string()));
+        .stdout(predicate::str::contains(
+            home.path()
+                .join(".shikigami")
+                .join("projects")
+                .display()
+                .to_string(),
+        ));
     assert!(!cwd.path().join(".shikigami-state").exists());
 }
 
 #[test]
-fn doctor_without_home_or_xdg_fails_closed() {
+fn doctor_without_home_fails_closed() {
     cargo_bin_cmd!("shikigami")
         .env_remove("HOME")
         .env_remove("USERPROFILE")
-        .env_remove("XDG_STATE_HOME")
-        .env_remove("LOCALAPPDATA")
+        .env_remove("SHIKIGAMI_HOME")
         .env_remove("SHIKIGAMI_STATE")
         .arg("doctor")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no user state directory"));
+        .stderr(predicate::str::contains("no home directory"));
 }
 
 #[test]
@@ -214,13 +242,12 @@ fn doctor_with_relative_home_fails_closed() {
         .current_dir(cwd.path())
         .env("HOME", ".")
         .env("USERPROFILE", ".")
-        .env_remove("XDG_STATE_HOME")
-        .env_remove("LOCALAPPDATA")
+        .env_remove("SHIKIGAMI_HOME")
         .env_remove("SHIKIGAMI_STATE")
         .arg("doctor")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no user state directory"));
+        .stderr(predicate::str::contains("no home directory"));
     assert!(!cwd.path().join(".shikigami-state").exists());
 }
 

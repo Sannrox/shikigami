@@ -13,7 +13,7 @@ shikigami tui --continue   # latest session in this folder
 
 The session is inplace on the current directory, except for the built-in demo
 (below). The process-host default puts
-`--state` in the platform user-state directory keyed by cwd, which sits outside
+`--state` at `~/.shikigami/projects/<encoded-cwd>`, which sits outside
 the workspace. `--state` / `SHIKIGAMI_STATE` still override; a root inside the
 workspace fails closed at launch: the TUI exits non-zero with the refusal before
 it writes anything, so the project stays unchanged.

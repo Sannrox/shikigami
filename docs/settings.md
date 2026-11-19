@@ -10,7 +10,7 @@ Later sources override earlier ones where documented:
 1. Built-in defaults (`profile = local`, governance `none`, model `scripted`)
 2. Config file (first match):
    - `--config` / `SHIKIGAMI_CONFIG`
-   - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: platform user-state directory keyed by cwd; see [cli.md](cli.md))
+   - `$SHIKIGAMI_STATE/shikigami.toml` (default state root: `~/.shikigami/projects/<encoded-cwd>`; see [cli.md](cli.md))
 3. Environment variables
 4. CLI flags (where provided)
 5. A preset (`--preset` / `SHIKIGAMI_PRESET`), which only narrows tools and
@@ -28,13 +28,16 @@ not errors.
 ## Host state root
 
 `--state` / `SHIKIGAMI_STATE` select the harness scratch root (runs, journals,
-serve queue, metrics). When unset, the process host uses the platform
-user-state directory keyed by the current working directory:
+serve queue, metrics). When unset, the process host uses a root per current
+working directory under the shikigami home:
 
-1. `$XDG_STATE_HOME/shikigami/<encoded-cwd>` when `XDG_STATE_HOME` is an absolute path (relative values are ignored)
-2. otherwise macOS: `~/Library/Application Support/shikigami/<encoded-cwd>`
-3. otherwise Windows: `%LOCALAPPDATA%\shikigami\<encoded-cwd>`
-4. otherwise Unix: `~/.local/state/shikigami/<encoded-cwd>`
+```text
+~/.shikigami/                  SHIKIGAMI_HOME replaces it (absolute path)
+  projects/<encoded-cwd>/      state root for one working directory
+```
+
+On Windows the home is `%USERPROFILE%\.shikigami`. A relative `SHIKIGAMI_HOME`,
+or no absolute `HOME` / `USERPROFILE` when it is unset, fails closed.
 
 `<encoded-cwd>` is `--<canonical-cwd>--<fingerprint>`: `/`, `\`, and `:` become
 `-`, then a 16-character SHA-256 prefix of the canonical OS path bytes so
@@ -43,17 +46,23 @@ to keep the directory name within 255 bytes. That root sits outside an inplace
 workspace, so `tui` and `acp` do not need `--state`. Project-local scratch is
 `--state ./.shikigami-state`. Embedders that want a cwd-local root call
 `StateRoot::default_in`; CLI-like hosts call `StateRoot::user_default` or
-`StateRoot::resolve_host`. Missing or relative `HOME` / `USERPROFILE` /
-`LOCALAPPDATA` fail closed.
-New state directories are created mode `0700` on Unix.
+`StateRoot::resolve_host`. New state directories are created mode `0700` on
+Unix.
 
-Without `--state`, an existing `./.shikigami-state` (the CLI default through 2.0.0)
-stops the CLI with an error instead of being ignored, so earlier runs, parked
-runs, and its config do not silently disappear. Pass
-`--state ./.shikigami-state` to keep using it, or move its contents to the
-user-state directory named in the error and remove it. It is never adopted
-automatically because a directory inside a repository may be repository
-content.
+Earlier defaults keep working:
+
+- **3.x location.** 3.0 kept roots under the platform state directory
+  (`$XDG_STATE_HOME/shikigami/`, else macOS `~/Library/Application Support/shikigami/`,
+  Windows `%LOCALAPPDATA%\shikigami\`, other Unix `~/.local/state/shikigami/`).
+  While `projects/<encoded-cwd>` does not exist and that root does, the CLI
+  keeps using it and prints a note with the command that moves it. Nothing is
+  moved automatically, because an older binary still writing there would split
+  the state. Run the move when no shikigami process uses the directory.
+- **2.x location.** Without `--state`, an existing `./.shikigami-state` stops the
+  CLI with an error that names the move command and the `--state` alternative,
+  so earlier runs, parked runs, and its config do not silently disappear. It is
+  never adopted automatically because a directory inside a repository may be
+  repository content.
 
 ## Profiles
 
@@ -230,7 +239,7 @@ today's spawn.
 | `snapshot` | `false` | After first materialize, copy workspace to `state/runs/<id>/snapshots/initial` and keep that copy across resume. Resume never creates the directory. Directory walks and file copies do not follow symbolic links. Not supported with `inplace`. This is the only original-input proof `replay-export` accepts. |
 
 For `inplace`, the harness **state** root must sit **outside** `workspace.root`.
-The process-host default (platform user-state directory keyed by cwd) already
+The process-host default (`~/.shikigami/projects/<encoded-cwd>`) already
 does. `--state` / `SHIKIGAMI_STATE` still win; a root inside the workspace fails
 closed. Hosts must serialize concurrent runs against the same inplace root.
 
@@ -587,7 +596,8 @@ field changes meaning or goes away; new fields may appear in the same version.
 
 | Variable | Purpose |
 | --- | --- |
-| `SHIKIGAMI_STATE` | State root directory (overrides the platform user-state default) |
+| `SHIKIGAMI_HOME` | Absolute path that replaces `~/.shikigami` as the home of per-project state roots |
+| `SHIKIGAMI_STATE` | State root directory (overrides the `SHIKIGAMI_HOME` default) |
 | `SHIKIGAMI_CONFIG` | Path to settings file |
 | `SHIKIGAMI_PROFILE` | Profile name |
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
