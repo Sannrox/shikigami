@@ -524,8 +524,8 @@ async fn unattended_park_reaps_background_jobs() {
     config.model.adapter = "scripted".into();
     config.model.script_json = Some(
         r#"[
-        {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$; exec sleep 30\"}"}]},
-        {"tool_calls":[{"name":"bash","args_json":"{\"command\":\"until [ -s .shikigami/jobs/job-1.log ]; do sleep 0.01; done\"}"}]},
+        {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$ > pid.txt; exec sleep 30\"}"}]},
+        {"tool_calls":[{"name":"bash","args_json":"{\"command\":\"until [ -s pid.txt ]; do sleep 0.01; done\"}"}]},
         {"tool_calls":[{"name":"escalate","args_json":"{\"reason\":\"need input\"}"}]}
     ]"#
         .into(),
@@ -539,8 +539,8 @@ async fn unattended_park_reaps_background_jobs() {
     let result = harness.run(request).await.unwrap();
     assert_eq!(result.termination, shikigami::RunTermination::Parked);
 
-    let log = std::fs::read_to_string(result.workspace.join(".shikigami/jobs/job-1.log")).unwrap();
-    let pid = log.trim();
+    let pid = std::fs::read_to_string(result.workspace.join("pid.txt")).unwrap();
+    let pid = pid.trim();
     assert!(!pid.is_empty(), "job wrote no pid");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {

@@ -287,6 +287,102 @@ mod tests {
         reg.kill_background_jobs().await;
     }
 
+    /// Harness job logs must not appear in an inplace git tree: `.shikigami/`
+    /// is the skills root, so gitignore of that directory is not the fix.
+    #[tokio::test]
+    async fn background_job_logs_stay_out_of_a_git_workspace() {
+        let dir = tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet", "-b", "main"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let first = registry(&dir, &["bash"]);
+        let start = first
+            .execute(
+                "bash_background",
+                r#"{"command":"printf 'hello-bg\\n'; sleep 0.2; printf 'done\\n'"}"#,
+            )
+            .await
+            .unwrap();
+        let ToolOutput::Text(start_text) = start else {
+            panic!("text");
+        };
+        let job_id = start_text
+            .lines()
+            .find_map(|line| line.strip_prefix("job_id="))
+            .expect("job_id line")
+            .to_string();
+        let log_path = start_text
+            .lines()
+            .find_map(|line| line.strip_prefix("log="))
+            .map(std::path::PathBuf::from)
+            .expect("log line");
+        assert!(
+            !log_path.starts_with(dir.path()),
+            "job log must not sit in the workspace: {}",
+            log_path.display()
+        );
+        let mut status = String::new();
+        for _ in 0..50 {
+            let text = first
+                .execute("bash_job_status", &format!(r#"{{"job_id":"{job_id}"}}"#))
+                .await
+                .unwrap();
+            let ToolOutput::Text(text) = text else {
+                panic!()
+            };
+            status = text;
+            if status.contains("exited") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(status.contains("exited"), "{status}");
+        assert!(
+            !dir.path().join(".shikigami").exists(),
+            "background jobs must not create workspace .shikigami/"
+        );
+        let add = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let porcelain = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(porcelain.status.success());
+        let tree = String::from_utf8_lossy(&porcelain.stdout);
+        assert!(
+            tree.is_empty(),
+            "git add -A must not stage job logs: {tree}"
+        );
+
+        let jobs = first.take_background_jobs().expect("jobs");
+        drop(first);
+        let parked = registry(&dir, &["bash"]);
+        parked.adopt_background_jobs(jobs);
+        let logs = parked
+            .execute("bash_job_logs", &format!(r#"{{"job_id":"{job_id}"}}"#))
+            .await
+            .unwrap();
+        let ToolOutput::Text(log_text) = logs else {
+            panic!()
+        };
+        assert!(log_text.contains("hello-bg"), "{log_text}");
+        parked.kill_background_jobs().await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn dropping_registry_reaps_background_bash_process_group() {

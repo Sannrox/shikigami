@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::config::{Config, ContextSettings, NetworkSettings, SandboxSettings};
 
 use super::JobCredentialHandle;
-use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES};
+use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES, create_job_log};
 use super::catalog::{
     BASH_HELPER_TOOLS, builtin_is_authorized, load_skill_definition,
     model_visible_builtin_definitions,
@@ -411,10 +411,8 @@ impl ToolRegistry {
         guard.forget_oldest_exited();
         let job_id = format!("job-{}", guard.next_id);
         guard.next_id += 1;
-        let log_dir = self.executor.workspace.join(".shikigami/jobs");
-        std::fs::create_dir_all(&log_dir)?;
-        let log_path = log_dir.join(format!("{job_id}.log"));
-        let log_file = std::fs::File::create(&log_path)?;
+        let log_path = guard.ensure_log_dir()?.join(format!("{job_id}.log"));
+        let log_file = create_job_log(&log_path)?;
         let stdout = Stdio::from(log_file.try_clone()?);
         let stderr = Stdio::from(log_file);
         let (mut command, applied) = self.executor.bash_command(&args.command)?;

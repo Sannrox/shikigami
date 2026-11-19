@@ -1,7 +1,7 @@
 //! Background bash job bookkeeping and bash output caps.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const MAX_BASH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_BG_JOBS: usize = 4;
@@ -9,13 +9,27 @@ pub(crate) const MAX_BG_JOBS: usize = 4;
 const MAX_BG_JOB_RECORDS: usize = 32;
 pub(crate) const MAX_BG_LOG_BYTES: usize = 256 * 1024;
 
+pub(crate) fn create_job_log(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).read(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Background jobs of one run. A session host moves the table into the run
 /// registry across a park ([`crate::registry::RunRegistry`]); dropping it
-/// kills every job.
+/// kills every job and removes its host-owned log directory.
 #[derive(Debug)]
 pub(crate) struct BackgroundJobs {
     pub(crate) next_id: u64,
     pub(crate) jobs: HashMap<String, BgJob>,
+    /// Host scratch for job stdout/stderr. Created on the first job, parked
+    /// with the table, never under the workspace (skills live in `.shikigami/`).
+    log_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -60,12 +74,41 @@ impl Drop for BgJob {
     }
 }
 
+impl Drop for BackgroundJobs {
+    fn drop(&mut self) {
+        self.jobs.clear();
+        if let Some(dir) = self.log_dir.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
 impl BackgroundJobs {
     pub(crate) fn new() -> Self {
         Self {
             next_id: 1,
             jobs: HashMap::new(),
+            log_dir: None,
         }
+    }
+
+    /// Host-owned directory for this table's log files. Outside the workspace
+    /// so an inplace `git add -A` cannot commit harness output.
+    pub(crate) fn ensure_log_dir(&mut self) -> std::io::Result<&Path> {
+        if self.log_dir.is_none() {
+            let path =
+                std::env::temp_dir().join(format!("shikigami-jobs-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            self.log_dir = Some(path);
+        }
+        self.log_dir
+            .as_deref()
+            .ok_or_else(|| std::io::Error::other("background job log directory missing"))
     }
 
     /// Jobs whose shell has not exited. Only these count against

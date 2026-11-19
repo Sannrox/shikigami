@@ -5880,11 +5880,11 @@ mod tests {
         !stat.is_empty() && !stat.starts_with('Z')
     }
 
-    /// Pid that `echo $$; exec sleep 30` wrote to the first job's log.
+    /// Pid that `echo $$ > pid.txt; exec sleep 30` wrote in the workspace.
     async fn first_job_pid(cwd: &Path) -> String {
-        let log = cwd.join(".shikigami/jobs/job-1.log");
+        let pid_file = cwd.join("pid.txt");
         for _ in 0..250 {
-            let pid = std::fs::read_to_string(&log).unwrap_or_default();
+            let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
             if !pid.trim().is_empty() {
                 return pid.trim().to_string();
             }
@@ -5899,7 +5899,7 @@ mod tests {
         let host = scripted_host_with(
             dir.path(),
             r#"[
-              {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$; exec sleep 30\"}"}]},
+              {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$ > pid.txt; exec sleep 30\"}"}]},
               {"content":"started"},
               {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"x\"}"}]},
               {"tool_calls":[{"name":"bash_job_status","args_json":"{\"job_id\":\"job-1\"}"}]},
@@ -5957,7 +5957,7 @@ mod tests {
         let host = scripted_host_with(
             dir.path(),
             r#"[
-              {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$; exec sleep 30\"}"}]},
+              {"tool_calls":[{"name":"bash_background","args_json":"{\"command\":\"echo $$ > pid.txt; exec sleep 30\"}"}]},
               {"content":"started"},
               {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"x\"}"}]}
             ]"#,
