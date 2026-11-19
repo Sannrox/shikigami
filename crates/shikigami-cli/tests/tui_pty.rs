@@ -776,3 +776,49 @@ fn at_mention_picks_a_workspace_file() {
     send(&tui, b"\x03");
     assert!(tui.wait_exit().success());
 }
+
+/// #650: a skill pack is a slash command by its id. `/demo extra` sends the
+/// pack body with `extra`, the list offers `demo`, `/skill:demo` still works,
+/// and a pack named like a built-in does not shadow it.
+#[test]
+fn skill_pack_runs_as_its_own_slash_command() {
+    let dir = temp_dir();
+    let skills = dir.path().join("project/.agents/skills");
+    for (id, body) in [("demo", "demo-pack-body"), ("help", "help-pack-body")] {
+        std::fs::create_dir_all(skills.join(id)).unwrap();
+        std::fs::write(skills.join(id).join("SKILL.md"), format!("{body}\n")).unwrap();
+    }
+    let mut tui = start_tui(
+        &dir,
+        Some(
+            r#"[{"requires_context":["demo-pack-body","extra"],"content":"skill-reply"},{"requires_context":["demo-pack-body"],"content":"alias-reply"}]"#,
+        ),
+    );
+    send(&tui, b"/de");
+    tui.wait_for("the skill in the slash list", |t| {
+        screen(t)
+            .lines()
+            .any(|l| l.split_whitespace().eq(["demo", "load", "skill", "pack"]))
+    });
+    send(&tui, b"mo extra\r");
+    tui.wait_for("the skill reply", |t| screen(t).contains("skill-reply"));
+    assert!(
+        screen(&tui).contains("you  /demo extra"),
+        "{}",
+        screen(&tui)
+    );
+    wait_turn_done(&mut tui, 0);
+
+    let before = tui.output().len();
+    send(&tui, b"/skill:demo\r");
+    tui.wait_for("the alias reply", |t| screen(t).contains("alias-reply"));
+    wait_turn_done(&mut tui, before);
+
+    send(&tui, b"/help\r");
+    tui.wait_for("the built-in help", |t| {
+        screen(t).contains("Shift+Enter newline")
+    });
+    assert!(!screen(&tui).contains("help-pack-body"), "{}", screen(&tui));
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}

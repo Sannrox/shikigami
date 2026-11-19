@@ -1021,56 +1021,24 @@ impl TuiSession {
         shared.dirty = true;
     }
 
+    /// Built-in commands, then skill packs as `/<id>`. A pack whose id names a
+    /// built-in (or itself starts with `skill:`) is listed as `/skill:<id>`,
+    /// so the built-in keeps its word.
     fn slash_catalog(&self) -> Vec<SlashCommand> {
-        let mut out = vec![
-            SlashCommand {
-                name: "help".into(),
-                hint: "keys and slash commands".into(),
-            },
-            SlashCommand {
-                name: "compact".into(),
-                hint: "shrink conversation history".into(),
-            },
-            SlashCommand {
-                name: "copy".into(),
-                hint: "copy last assistant".into(),
-            },
-            SlashCommand {
-                name: "attach".into(),
-                hint: "add prompt file".into(),
-            },
-            SlashCommand {
-                name: "exit".into(),
-                hint: "quit".into(),
-            },
-            SlashCommand {
-                name: "quit".into(),
-                hint: "quit".into(),
-            },
-            SlashCommand {
-                name: "new".into(),
-                hint: "start a new session".into(),
-            },
-            SlashCommand {
-                name: "run".into(),
-                hint: "show the run id for runs and export".into(),
-            },
-            SlashCommand {
-                name: "usage".into(),
-                hint: "token use per turn".into(),
-            },
-            SlashCommand {
-                name: "model".into(),
-                hint: "list or switch models".into(),
-            },
-            SlashCommand {
-                name: "resume".into(),
-                hint: "load a persisted session".into(),
-            },
-        ];
+        let mut out: Vec<SlashCommand> = BUILTIN_COMMANDS
+            .iter()
+            .map(|(name, hint)| SlashCommand {
+                name: (*name).into(),
+                hint: (*hint).into(),
+            })
+            .collect();
         for id in shikigami::context::list_skill_ids(&self.cwd, self.host.context_settings()) {
             out.push(SlashCommand {
-                name: format!("skill:{id}"),
+                name: if is_builtin_command(&id) || id.starts_with(SKILL_PREFIX) {
+                    format!("{SKILL_PREFIX}{id}")
+                } else {
+                    id
+                },
                 hint: "load skill pack".into(),
             });
         }
@@ -1286,7 +1254,7 @@ impl TuiSession {
                     .map(|cmd| cmd.name.clone())
             })
             .or_else(|| {
-                name.strip_prefix("skill:")
+                name.strip_prefix(SKILL_PREFIX)
                     .filter(|id| !id.is_empty())
                     .map(|_| name.to_string())
             });
@@ -1351,9 +1319,8 @@ impl TuiSession {
             "new" => KeyResult::NewSession,
             "resume" => self.open_resume_picker(),
             other => {
-                let Some(id) = other.strip_prefix("skill:") else {
-                    return KeyResult::Continue;
-                };
+                // A catalog skill is `/<id>`; `/skill:<id>` is the alias.
+                let id = other.strip_prefix(SKILL_PREFIX).unwrap_or(other);
                 match shikigami::context::load_skill(&self.cwd, self.host.context_settings(), id) {
                     Some(pack) => {
                         let display = if args.is_empty() {
@@ -1676,10 +1643,33 @@ fn prompt_line(shared: &Shared) -> String {
     format!("> {}", shared.input)
 }
 
+/// Built-in slash commands and their list hints. They win a name collision
+/// with a skill pack.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("help", "keys and slash commands"),
+    ("compact", "shrink conversation history"),
+    ("copy", "copy last assistant"),
+    ("attach", "add prompt file"),
+    ("exit", "quit"),
+    ("quit", "quit"),
+    ("new", "start a new session"),
+    ("run", "show the run id for runs and export"),
+    ("usage", "token use per turn"),
+    ("model", "list or switch models"),
+    ("resume", "load a persisted session"),
+];
+
+/// `/skill:<id>` reaches a pack by id even when a built-in has that name.
+const SKILL_PREFIX: &str = "skill:";
+
+fn is_builtin_command(name: &str) -> bool {
+    BUILTIN_COMMANDS.iter().any(|(builtin, _)| *builtin == name)
+}
+
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /model  /copy  /attach  /exit  /quit  /skill:name  /help",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /model  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Interrupt)
     )
 }
@@ -5708,21 +5698,132 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), "prefer tests first\n").unwrap();
         let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
         let session = TuiSession::start(host, &cwd, false).await.unwrap();
-        type_text(&session, "/skill:");
-        assert_eq!(
-            session
-                .slash_matches()
-                .iter()
-                .map(|cmd| cmd.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["skill:demo"]
-        );
+        type_text(&session, "/de");
+        assert_eq!(slash_names(&session), vec!["demo"]);
         match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
             KeyResult::Prompt { display, send, .. } => {
-                assert_eq!(display, "/skill:demo");
+                assert_eq!(display, "/demo");
                 assert!(send.contains("prefer tests first"), "{send}");
             }
             other => panic!("expected highlighted skill prompt, got {other:?}"),
+        }
+    }
+
+    fn slash_names(session: &TuiSession) -> Vec<String> {
+        session
+            .slash_matches()
+            .into_iter()
+            .map(|cmd| cmd.name)
+            .collect()
+    }
+
+    /// A session in `project` with skill packs `ids` under `.agents/skills`.
+    async fn session_with_skills(dir: &tempfile::TempDir, ids: &[&str]) -> TuiSession {
+        let cwd = dir.path().join("project");
+        for id in ids {
+            let skill_dir = cwd.join(".agents/skills").join(id);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), format!("{id} pack body\n")).unwrap();
+        }
+        start_session(dir, r#"[{"content":"ok"}]"#).await
+    }
+
+    /// #650: a skill is a slash command by its id, listed without `skill:`.
+    #[tokio::test]
+    async fn slash_skill_name_sends_pack_without_prefix() {
+        let dir = tempdir().unwrap();
+        let session = session_with_skills(&dir, &["demo"]).await;
+        type_text(&session, "/");
+        let names = slash_names(&session);
+        assert!(names.iter().any(|name| name == "demo"), "{names:?}");
+        assert!(
+            !names.iter().any(|name| name.starts_with("skill:")),
+            "{names:?}"
+        );
+        type_text(&session, "d");
+        let screen = drawn_text(&session);
+        assert!(screen.contains("  demo      load skill pack"), "{screen}");
+        session.lock_shared().clear_input();
+
+        type_text(&session, "/demo extra");
+        match handle_key(&session, enter_key()) {
+            KeyResult::Prompt {
+                display,
+                send,
+                parts,
+            } => {
+                assert_eq!(display, "/demo extra");
+                assert_eq!(send, "demo pack body\n\n\nextra");
+                assert_eq!(parts.len(), 1);
+            }
+            other => panic!("expected skill prompt, got {other:?}"),
+        }
+        assert!(session.lock_shared().input.is_empty());
+
+        type_text(&session, "/skill:demo");
+        match handle_key(&session, enter_key()) {
+            KeyResult::Prompt { display, send, .. } => {
+                assert_eq!(display, "/skill:demo");
+                assert!(send.starts_with("demo pack body"), "{send}");
+            }
+            other => panic!("expected alias skill prompt, got {other:?}"),
+        }
+    }
+
+    /// #650: a skill named like a built-in does not shadow it; it stays
+    /// reachable, and listed, as `/skill:<name>`.
+    #[tokio::test]
+    async fn slash_builtin_wins_over_a_skill_with_its_name() {
+        let dir = tempdir().unwrap();
+        let session = session_with_skills(&dir, &["help", "new"]).await;
+        type_text(&session, "/");
+        let names = slash_names(&session);
+        for name in ["help", "new"] {
+            assert_eq!(names.iter().filter(|n| *n == name).count(), 1, "{names:?}");
+            assert!(names.contains(&format!("skill:{name}")), "{names:?}");
+        }
+        session.lock_shared().clear_input();
+
+        type_text(&session, "/new");
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::NewSession
+        ));
+        type_text(&session, "/help");
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Continue
+        ));
+        assert!(last_system(&session).contains("/compact"));
+
+        type_text(&session, "/skill:help more");
+        match handle_key(&session, enter_key()) {
+            KeyResult::Prompt { display, send, .. } => {
+                assert_eq!(display, "/skill:help more");
+                assert_eq!(send, "help pack body\n\n\nmore");
+            }
+            other => panic!("expected colliding skill via alias, got {other:?}"),
+        }
+    }
+
+    /// #650: a skill cannot take over a built-in's abbreviation. Built-ins
+    /// list first, so `/co` + Enter still compacts; the pack stays reachable
+    /// as `/skill:co`.
+    #[tokio::test]
+    async fn slash_builtin_abbreviation_wins_over_a_skill() {
+        let dir = tempdir().unwrap();
+        let session = session_with_skills(&dir, &["co"]).await;
+        type_text(&session, "/co");
+        assert_eq!(slash_names(&session), vec!["compact", "copy", "co"]);
+        assert!(matches!(
+            handle_key(&session, enter_key()),
+            KeyResult::Compact
+        ));
+        session.lock_shared().clear_input();
+        type_text(&session, "/skill:co");
+        match handle_key(&session, enter_key()) {
+            KeyResult::Prompt { display, .. } => assert_eq!(display, "/skill:co"),
+            other => panic!("expected skill co via alias, got {other:?}"),
         }
     }
 

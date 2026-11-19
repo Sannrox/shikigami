@@ -10,7 +10,7 @@ Named **procedure packs** the agent loads when a task needs them.
 ```
 
 Or set `context.skills_root` to another directory (workspace-relative or absolute).
-`/skill:name` in the TUI searches `skills_root` first, then `.agents/skills`.
+`/name` (or `/skill:name`) in the TUI searches `skills_root` first, then `.agents/skills`.
 A runtime pack with the same id wins.
 
 ## Settings
@@ -49,10 +49,13 @@ the skills root and which ids are listed. Skills plus MCP are the extension
 surface; there is no plugin loader
 ([ADR 0018](decisions/0018-skills-mcp-extension.md)).
 
-`shikigami tui` offers `/skill:name` from `skills_root` and
-`.agents/skills`. Configured `context.skills` is an allow-list; when it is
-empty the TUI lists packs that exist on disk. `/skill:name` sends the pack
-body as the prompt. Configured ids still reach the run as above.
+`shikigami tui` offers each pack from `skills_root` and `.agents/skills` as a
+slash command by its id: `/name [args]` sends the pack body, then any args, as
+the prompt. Built-in commands win a name collision; a pack named like one
+(`help`, `new`, ...) is listed and reached as `/skill:name`, and `/skill:name`
+keeps working for every pack. Configured `context.skills` is an allow-list;
+when it is empty the TUI lists packs that exist on disk. Configured ids still
+reach the run as above.
 
 ## Context boundaries
 
