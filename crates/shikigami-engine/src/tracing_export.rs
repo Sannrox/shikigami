@@ -692,7 +692,7 @@ fn unix_nano() -> u128 {
 
 /// 32 hex chars derived from the run id: every attempt at one run shares it.
 fn trace_id_for(run_id: &str) -> String {
-    crate::evidence_queue::sha256_hex(run_id.as_bytes())[..32].to_owned()
+    crate::digest::sha256_hex(run_id.as_bytes())[..32].to_owned()
 }
 
 fn random_hex(chars: usize) -> String {
@@ -783,6 +783,23 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["turn", "tool"]);
+    }
+
+    #[test]
+    fn own_trace_id_is_a_valid_w3c_trace_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(dir.path().join("spans.jsonl").to_string_lossy().into());
+        let handle = RunHandle {
+            run_id: "run-1".into(),
+            operation_id: "run-1".into(),
+            namespace: String::new(),
+        };
+        let trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
+        let outbound = trace.run_outbound().unwrap();
+        assert!(parse_traceparent(&outbound.traceparent).is_some());
     }
 
     #[test]
