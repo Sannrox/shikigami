@@ -97,7 +97,7 @@ use shikigami::{Harness, StateRoot};
 
 async fn from_cwd() -> Result<Harness, shikigami::HarnessError> {
     let cwd = env::current_dir()?;
-    // CLI-like default: platform user-state directory keyed by cwd.
+    // CLI-like default: ~/.shikigami/projects/<encoded-cwd>.
     let state = StateRoot::user_default(&cwd)?;
     // Cwd-local alternative: StateRoot::default_in(&cwd)
     // Optional: Some(Path::new("/etc/shikigami.toml"))

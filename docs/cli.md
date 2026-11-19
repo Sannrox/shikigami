@@ -35,7 +35,7 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 
 | Flag / env | Purpose |
 | --- | --- |
-| `--state` / `SHIKIGAMI_STATE` | State root. Default: platform user-state directory keyed by cwd (`XDG_STATE_HOME/shikigami/<encoded-cwd>` when set; otherwise macOS Application Support, Windows `%LOCALAPPDATA%`, Unix `~/.local/state`). Project-local scratch: `--state ./.shikigami-state`. |
+| `--state` / `SHIKIGAMI_STATE` | State root. Default: `~/.shikigami/projects/<encoded-cwd>`; `SHIKIGAMI_HOME` replaces `~/.shikigami`. See [settings.md](settings.md#host-state-root). Project-local scratch: `--state ./.shikigami-state`. |
 | `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
 | `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
 | `--preset` / `SHIKIGAMI_PRESET` | Narrow tools and add a procedure: a built-in name or a preset `.toml` file; `code` means none. See [presets.md](presets.md) |

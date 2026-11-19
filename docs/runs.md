@@ -1,8 +1,8 @@
 # Run registry, artifacts, and local control
 
 Every harness run writes host-local operational state under
-`$SHIKIGAMI_STATE/runs/<run_id>/` (default: platform user-state directory
-keyed by cwd; see [cli.md](cli.md)):
+`$SHIKIGAMI_STATE/runs/<run_id>/` (default:
+`~/.shikigami/projects/<encoded-cwd>`; see [cli.md](cli.md)):
 
 ~~~
 run.json       # status, outcome, report data, model, prompt and preset ids,

@@ -102,7 +102,7 @@ pub use serve::{
     ControlOptions, QueueJob, QueueLayout, ServeOptions, ServeRuntimeOptions,
     run_serve_with_options,
 };
-pub use state::{StateError, StateRoot};
+pub use state::{OlderStateRoot, StateError, StateRoot};
 pub use tools::{TodoItem, TodoStatus};
 pub use transcript::{
     ExportOptions, TRANSCRIPT_SCHEMA_VERSION, TranscriptError, export_run_transcript,
