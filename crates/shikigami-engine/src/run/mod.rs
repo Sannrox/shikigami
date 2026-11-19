@@ -365,7 +365,13 @@ impl Engine {
     }
 
     pub(super) fn emit(&self, run_id: &str, event: HarnessEvent) {
-        self.registry.append_event(run_id, &event);
+        match event {
+            HarnessEvent::ModelTurn { .. } | HarnessEvent::ContentTurn { .. } => {
+                let model = crate::model::effective_model_name(&self.config);
+                self.registry.append_model_turn(run_id, &event, &model);
+            }
+            _ => self.registry.append_event(run_id, &event),
+        }
         self.events.emit(event);
     }
 

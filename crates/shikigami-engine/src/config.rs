@@ -889,6 +889,11 @@ pub struct ModelSettings {
     /// Opt-in governed local-model fallback. Denied by default.
     #[serde(default)]
     pub fallback: ModelFallbackSettings,
+    /// More model names a session may switch to (ACP `session/set_model`,
+    /// TUI `/model`) on the same adapter, endpoint, and key. Ungoverned only;
+    /// a governed catalog comes from the plane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<String>,
 }
 
 /// Additive local-model fallback settings. Delivery systems are not a key here.
@@ -936,6 +941,7 @@ impl Default for ModelSettings {
             input_usd_micros_per_mtok: None,
             output_usd_micros_per_mtok: None,
             fallback: ModelFallbackSettings::default(),
+            alternates: Vec::new(),
         }
     }
 }
@@ -1427,6 +1433,13 @@ impl Config {
         match self.model.adapter.as_str() {
             "scripted" | "http" | "plane" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
+        }
+        for (i, name) in self.model.alternates.iter().enumerate() {
+            if name.trim().is_empty() || self.model.alternates[..i].contains(name) {
+                return Err(ConfigError::Invalid(format!(
+                    "model.alternates entry `{name}` must be a distinct non-empty name"
+                )));
+            }
         }
         for (name, mapping) in &self.session.modes {
             if !SessionSettings::is_catalog_name(name) {
@@ -2492,6 +2505,11 @@ prompt = "be thorough"
                 .contains("do not intersect the host tool set"),
             "{err}"
         );
+
+        let mut repeated = Config::default();
+        repeated.model.alternates = vec!["model-b".into(), "model-b".into()];
+        let err = repeated.validate().unwrap_err();
+        assert!(err.to_string().contains("model.alternates"), "{err}");
 
         let mut empty_tools = Config::default();
         empty_tools.session.modes.insert(

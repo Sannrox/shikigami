@@ -210,18 +210,26 @@ impl Harness {
     /// Return the effective model catalog for this harness.
     ///
     /// Sekai-Chisei is authoritative for governed availability. Ungoverned
-    /// adapters expose their configured model as a compact local catalog.
+    /// adapters expose their configured model, then `[model].alternates`.
     pub async fn available_models(&self) -> Result<Vec<AvailableModel>, HarnessError> {
         if self.config.governance.adapter == "sekai-chisei" {
             return Ok(with_auto_route(self.governance.available_models().await?));
         }
-        let model = self.effective_model_name();
-        Ok(vec![AvailableModel {
-            provider: self.config.model.adapter.clone(),
-            upstream_model: model.clone(),
-            canonical_model: model,
-            lifecycle: "configured".into(),
-        }])
+        let mut names = vec![self.effective_model_name()];
+        for name in &self.config.model.alternates {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        Ok(names
+            .into_iter()
+            .map(|model| AvailableModel {
+                provider: self.config.model.adapter.clone(),
+                upstream_model: model.clone(),
+                canonical_model: model,
+                lifecycle: "configured".into(),
+            })
+            .collect())
     }
 
     pub fn doctor(&self) -> DoctorReport {
