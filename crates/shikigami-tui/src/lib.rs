@@ -9,7 +9,7 @@ use std::io::{self, IsTerminal, Write, stdin, stdout};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use crossterm::event::{
@@ -182,6 +182,11 @@ fn model_label(model: &shikigami::config::ModelSettings) -> String {
 /// termination signal ends the process.
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 
+/// Allow/deny keys count only after the permission dock has been drawn and
+/// typing has been idle this long. Fail closed: a letter that was part of a
+/// word never grants a tool call.
+const PERMISSION_ANSWER_SETTLE: Duration = Duration::from_millis(300);
+
 /// SIGTERM and SIGHUP (a closed terminal) handling for the TUI process.
 /// Installed before raw mode, so a signal never ends the process with the
 /// terminal still in TUI mode; the event loop restores it and then `reraise`
@@ -279,6 +284,11 @@ struct QueuedPrompt {
 struct Shared {
     transcript: Vec<TranscriptLine>,
     permission: Option<PendingPermission>,
+    /// Set on the first draw of the current permission dock.
+    permission_drawn: bool,
+    /// Last composer or discarded pre-prompt key. `None` means idle (a sent
+    /// prompt, not a word still being typed).
+    last_input_at: Option<Instant>,
     plan: Option<Plan>,
     show_plan: bool,
     status: String,
@@ -332,6 +342,8 @@ impl Shared {
         Self {
             transcript: Vec::new(),
             permission: None,
+            permission_drawn: false,
+            last_input_at: None,
             plan: None,
             show_plan: false,
             status: "ready".into(),
@@ -363,6 +375,35 @@ impl Shared {
         }
     }
 
+    fn note_input(&mut self) {
+        self.last_input_at = Some(Instant::now());
+    }
+
+    fn mark_input_idle(&mut self) {
+        self.last_input_at = None;
+    }
+
+    fn begin_permission(&mut self, pending: PendingPermission) {
+        self.status = "ask".into();
+        self.permission = Some(pending);
+        self.permission_drawn = false;
+        self.dock_scroll = 0;
+        self.dirty = true;
+    }
+
+    fn clear_permission(&mut self) -> Option<PendingPermission> {
+        self.permission_drawn = false;
+        self.permission.take()
+    }
+
+    fn permission_answers_live(&self, now: Instant) -> bool {
+        self.permission.is_some()
+            && self.permission_drawn
+            && self
+                .last_input_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= PERMISSION_ANSWER_SETTLE)
+    }
+
     fn insert_char(&mut self, ch: char) {
         self.insert_str(&ch.to_string());
     }
@@ -386,6 +427,7 @@ impl Shared {
         if extra.is_empty() {
             return;
         }
+        self.note_input();
         let mut chars: Vec<char> = self.input.chars().collect();
         let i = self.cursor.min(chars.len());
         let added = extra.len();
@@ -402,6 +444,7 @@ impl Shared {
         if self.cursor == 0 {
             return;
         }
+        self.note_input();
         let mut chars: Vec<char> = self.input.chars().collect();
         let i = self.cursor.min(chars.len());
         chars.remove(i - 1);
@@ -419,6 +462,7 @@ impl Shared {
         if i >= chars.len() {
             return;
         }
+        self.note_input();
         chars.remove(i);
         self.input = chars.into_iter().collect();
         self.history_idx = None;
@@ -467,6 +511,7 @@ impl Shared {
 
     fn take_input(&mut self) -> String {
         let text = std::mem::take(&mut self.input);
+        self.mark_input_idle();
         self.cursor = 0;
         self.history_idx = None;
         self.show_plan = false;
@@ -999,7 +1044,7 @@ impl TuiSession {
         });
         let mut shared = self.lock_shared();
         shared.drop_queue();
-        if let Some(pending) = shared.permission.take() {
+        if let Some(pending) = shared.clear_permission() {
             let _ = pending.tx.send(json!({
                 "outcome": { "outcome": "cancelled" }
             }));
@@ -1010,7 +1055,7 @@ impl TuiSession {
 
     fn answer_permission(&self, allow: bool) {
         let mut shared = self.lock_shared();
-        let Some(pending) = shared.permission.take() else {
+        let Some(pending) = shared.clear_permission() else {
             return;
         };
         let outcome = if allow { "allow" } else { "deny" };
@@ -1396,7 +1441,7 @@ impl TuiSession {
         shared.transcript.clear();
         shared.plan = None;
         shared.show_plan = false;
-        shared.permission = None;
+        let _ = shared.clear_permission();
         shared.queued = None;
         shared.pending_parts.clear();
         shared.run_id = None;
@@ -2300,14 +2345,11 @@ impl AcpClient for TuiClient {
             .unwrap_or(json!({}));
         {
             let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
-            shared.status = "ask".into();
-            shared.permission = Some(PendingPermission {
+            shared.begin_permission(PendingPermission {
                 title,
                 raw_input: raw_input.to_string(),
                 tx,
             });
-            shared.dock_scroll = 0;
-            shared.dirty = true;
         }
         rx.await
             .map_err(|_| "permission response dropped".to_string())
@@ -2764,10 +2806,17 @@ async fn run_terminal(
             osc_write_stdout(status).map_err(|e| e.to_string())?;
             last_program_status = Some(status);
         }
+        let first_permission_frame = {
+            let shared = session.lock_shared();
+            shared.permission.is_some() && !shared.permission_drawn && shared.dirty
+        };
         if session.lock_shared().dirty {
             terminal
                 .draw(|frame| draw(frame, &session))
                 .map_err(|e| e.to_string())?;
+        }
+        if first_permission_frame {
+            drain_keys_pressed_before_permission_frame(&mut rx, &session);
         }
 
         let finished = {
@@ -2883,6 +2932,77 @@ fn handle_mouse(session: &TuiSession, mouse: MouseEvent) {
     session.lock_shared().wheel(dir, mouse.column, mouse.row);
 }
 
+fn typing_event(ev: &Event) -> bool {
+    match ev {
+        Event::Paste(_) => true,
+        Event::Key(key) if key.kind == event::KeyEventKind::Press => {
+            !key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(
+                    key.code,
+                    KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Keys already queued when the permission dock first paints were meant for
+/// the composer. Drop them so they cannot answer the ask.
+fn drain_keys_pressed_before_permission_frame(
+    rx: &mut mpsc::Receiver<Event>,
+    session: &TuiSession,
+) {
+    while let Ok(ev) = rx.try_recv() {
+        if typing_event(&ev) {
+            session.lock_shared().note_input();
+        } else if !matches!(ev, Event::Key(_)) {
+            let _ = handle_event(session, ev);
+        }
+    }
+}
+
+fn handle_permission_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::PageUp => {
+            session.lock_shared().page_up();
+            return KeyResult::Continue;
+        }
+        KeyCode::PageDown => {
+            session.lock_shared().page_down();
+            return KeyResult::Continue;
+        }
+        KeyCode::Esc => {
+            session.cancel();
+            return KeyResult::Continue;
+        }
+        _ => {}
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let live = {
+        let mut shared = session.lock_shared();
+        let live = shared.permission_answers_live(Instant::now());
+        if !live
+            && !ctrl
+            && matches!(
+                key.code,
+                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+            )
+        {
+            shared.note_input();
+        }
+        live
+    };
+    if !live {
+        return KeyResult::Continue;
+    }
+    match key.code {
+        KeyCode::Char('y' | 'Y' | 'a' | 'A' | '1') => session.answer_permission(true),
+        KeyCode::Char('n' | 'N' | 'd' | 'D' | '2') => session.answer_permission(false),
+        _ => {}
+    }
+    KeyResult::Continue
+}
+
 fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let action = session.look.keys.action(&key);
@@ -2934,17 +3054,8 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
         Some(Action::LineStart | Action::LineEnd | Action::ClearInput) | None => {}
     }
 
-    let asking = session.lock_shared().permission.is_some();
-    if asking {
-        match key.code {
-            KeyCode::Char('y' | 'Y' | 'a' | 'A' | '1') => session.answer_permission(true),
-            KeyCode::Char('n' | 'N' | 'd' | 'D' | '2') => session.answer_permission(false),
-            KeyCode::PageUp => session.lock_shared().page_up(),
-            KeyCode::PageDown => session.lock_shared().page_down(),
-            KeyCode::Esc => session.cancel(),
-            _ => {}
-        }
-        return KeyResult::Continue;
+    if session.lock_shared().permission.is_some() {
+        return handle_permission_key(session, key);
     }
 
     match action {
@@ -3140,6 +3251,7 @@ fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
 
 fn handle_paste(session: &TuiSession, text: &str) {
     if session.lock_shared().permission.is_some() {
+        session.lock_shared().note_input();
         return;
     }
     session.lock_shared().insert_str(text);
@@ -3166,6 +3278,9 @@ fn draw(frame: &mut Frame, session: &TuiSession) {
     let mut shared = session.lock_shared();
     let area = frame.area();
     let asking = shared.permission.is_some();
+    if asking {
+        shared.permission_drawn = true;
+    }
     let planning = shared.show_plan && shared.plan.is_some() && !asking;
     let inner = composer_inner(&shared);
     let wrap_w = area.width.max(1);
@@ -4515,14 +4630,90 @@ mod tests {
                 );
             }
         }
+        arm_permission_answers(&session);
         assert!(matches!(
-            handle_key(
-                &session,
-                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)
-            ),
+            handle_key(&session, char_key('n')),
             KeyResult::Continue
         ));
         assert!(session.lock_shared().permission.is_none(), "n must answer");
+    }
+
+    /// #646: a letter meant as text must not grant a tool call. Allowing
+    /// fails closed until the dock has been shown and typing has paused.
+    #[tokio::test]
+    async fn letters_typed_as_text_do_not_allow_a_permission() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        install_permission(&session, r#"{"path":"ok.txt"}"#.into());
+        session.lock_shared().note_input();
+
+        for ch in ['y', 'Y', 'a', 'A', '1'] {
+            assert!(
+                matches!(handle_key(&session, char_key(ch)), KeyResult::Continue),
+                "{ch} before the dock is drawn"
+            );
+            assert!(
+                session.lock_shared().permission.is_some(),
+                "{ch} must not allow before draw"
+            );
+        }
+
+        let rows = drawn_rows(&session, 80, 24);
+        assert_screen_rules(&rows, 80);
+        assert!(rows.join("\n").contains("y allow"), "{}", rows.join("\n"));
+        session.lock_shared().note_input();
+        assert!(matches!(
+            handle_key(&session, char_key('y')),
+            KeyResult::Continue
+        ));
+        assert!(
+            session.lock_shared().permission.is_some(),
+            "a letter typed straight after the dock must not allow"
+        );
+
+        session.lock_shared().mark_input_idle();
+        assert!(matches!(
+            handle_key(&session, char_key('y')),
+            KeyResult::Continue
+        ));
+        assert!(
+            session.lock_shared().permission.is_none(),
+            "a deliberate y after the prompt is on screen still allows"
+        );
+    }
+
+    /// #646: deny and Esc still work once the prompt is ready; unarmed deny
+    /// leaves the request open (fail closed).
+    #[tokio::test]
+    async fn unarmed_permission_keys_leave_the_request_open() {
+        let dir = tempdir().unwrap();
+        let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+        install_permission(&session, r#"{"path":"ok.txt"}"#.into());
+        let _ = drawn_text(&session);
+        session.lock_shared().note_input();
+        assert!(matches!(
+            handle_key(&session, char_key('n')),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().permission.is_some());
+
+        assert!(matches!(
+            handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyResult::Continue
+        ));
+        assert!(
+            session.lock_shared().permission.is_none(),
+            "Esc still cancels while unarmed"
+        );
+
+        install_permission(&session, r#"{"path":"ok.txt"}"#.into());
+        let _ = drawn_text(&session);
+        arm_permission_answers(&session);
+        assert!(matches!(
+            handle_key(&session, char_key('n')),
+            KeyResult::Continue
+        ));
+        assert!(session.lock_shared().permission.is_none(), "n must deny");
     }
 
     /// A turn cancelled at the permission prompt, as the whole screen shows it.
@@ -4932,12 +5123,22 @@ mod tests {
 
     fn install_permission(session: &TuiSession, raw_input: String) {
         let (tx, _rx) = oneshot::channel();
-        let mut shared = session.lock_shared();
-        shared.permission = Some(PendingPermission {
+        session.lock_shared().begin_permission(PendingPermission {
             title: "write_file".into(),
             raw_input,
             tx,
         });
+    }
+
+    fn char_key(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    /// The user has seen the dock and typing has paused.
+    fn arm_permission_answers(session: &TuiSession) {
+        let mut shared = session.lock_shared();
+        shared.permission_drawn = true;
+        shared.last_input_at = None;
     }
 
     fn tall_permission_input() -> String {
