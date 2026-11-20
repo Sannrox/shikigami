@@ -10,10 +10,22 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use shikigami::acp::AcpHost;
-use shikigami::config::Config;
+use shikigami::config::{
+    Config, MCP_GATEWAY_NAME, McpGatewaySettings, McpServerSettings, ToolsSettings,
+};
 use shikigami::harness::Harness;
 use shikigami::state::StateRoot;
 use tempfile::tempdir;
+
+fn with_demo_mcp(config: &mut Config) {
+    config
+        .tools
+        .mcp_servers
+        .push(McpServerSettings::stdio("demo", "mock", Vec::new()));
+    let mut enabled = ToolsSettings::default_coding_tools();
+    enabled.push("mcp.demo.echo".into());
+    config.tools.enabled = enabled;
+}
 
 #[tokio::test]
 async fn slash_run_names_the_session_run() {
@@ -179,6 +191,138 @@ async fn model_command_lists_and_switches_the_sessions_model() {
     );
     let screen = drawn_text(&session);
     assert!(screen.contains("ready  model-b"), "{screen}");
+}
+
+#[tokio::test]
+async fn mcp_command_lists_disables_and_refuses_the_gateway() {
+    let empty_dir = tempdir().unwrap();
+    let empty = start_session(&empty_dir, r#"[{"content":"ok"}]"#).await;
+    let run = |session: &TuiSession, line: &str| {
+        session.lock_shared().input = line.into();
+        handle_key(session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    };
+    let KeyResult::Mcp { action, name } = run(&empty, "/mcp") else {
+        panic!("expected a list");
+    };
+    assert_eq!(action, "list");
+    assert!(name.is_none());
+    empty.mcp(&action, name.as_deref()).await;
+    assert_eq!(last_system(&empty), "No MCP servers attached.");
+
+    type_text(&empty, "/m");
+    assert_eq!(
+        empty
+            .slash_matches()
+            .iter()
+            .map(|cmd| cmd.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["model", "mcp"]
+    );
+
+    let dir = tempdir().unwrap();
+    let session = start_session_with(&dir, r#"[{"content":"ok"}]"#, |config| {
+        with_demo_mcp(config);
+        config.tools.mcp_gateway = Some(McpGatewaySettings::new("http://127.0.0.1:1/mcp"));
+    })
+    .await;
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp") else {
+        panic!("expected a list");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    let listed = last_system(&session);
+    assert!(listed.contains("MCP"), "{listed}");
+    assert!(listed.contains("demo  mcp.demo.echo"), "{listed}");
+    assert!(listed.contains(MCP_GATEWAY_NAME), "{listed}");
+    assert!(!listed.contains("disabled"), "{listed}");
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    let narrow = drawn_rows(&session, 40, 12);
+    assert_screen_rules(&narrow, 40);
+
+    assert!(matches!(run(&session, "/mcp disable"), KeyResult::Continue));
+    assert_eq!(last_system(&session), MCP_USAGE);
+
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp disable other") else {
+        panic!("expected disable");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    assert_eq!(
+        last_system(&session),
+        "No MCP server named other is attached."
+    );
+
+    let gateway_line = format!("/mcp disable {MCP_GATEWAY_NAME}");
+    let KeyResult::Mcp { action, name } = run(&session, &gateway_line) else {
+        panic!("expected disable");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    assert_eq!(last_system(&session), "gateway cannot be disabled.");
+
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp disable demo") else {
+        panic!("expected disable");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    assert_eq!(last_system(&session), "Disabled demo for this session.");
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp") else {
+        panic!("expected a list");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    assert!(
+        last_system(&session).contains("demo  mcp.demo.echo  disabled"),
+        "{}",
+        last_system(&session)
+    );
+
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp enable demo") else {
+        panic!("expected enable");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    assert_eq!(last_system(&session), "Enabled demo for this session.");
+}
+
+#[tokio::test]
+async fn mcp_disable_hides_the_tool_until_a_new_host() {
+    let dir = tempdir().unwrap();
+    let script = r#"[{"tool_calls":[{"name":"mcp.demo.echo","args_json":"{\"text\":\"hi\"}"}]},{"content":"first"},{"tool_calls":[{"name":"mcp.demo.echo","args_json":"{\"text\":\"hi\"}"}]},{"content":"second"}]"#;
+    let session = start_session_with(&dir, script, with_demo_mcp).await;
+    let run = |session: &TuiSession, line: &str| {
+        session.lock_shared().input = line.into();
+        handle_key(session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+    };
+
+    session.spawn_prompt("one".into()).await.unwrap();
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+    let first = session.transcript_text();
+    assert!(first.contains("echo:hi"), "{first}");
+
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp disable demo") else {
+        panic!("expected disable");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    session.lock_shared().transcript.clear();
+    session.spawn_prompt("two".into()).await.unwrap();
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+    let second = session.transcript_text();
+    assert!(
+        second.contains("mcp.demo.echo")
+            && (second.contains("not enabled")
+                || second.contains("unknown")
+                || second.contains("denies")),
+        "{second}"
+    );
+    assert!(!second.contains("echo:hi"), "{second}");
+
+    drop(session);
+    let session = continue_session_with(&dir, script, with_demo_mcp).await;
+    let KeyResult::Mcp { action, name } = run(&session, "/mcp") else {
+        panic!("expected a list");
+    };
+    session.mcp(&action, name.as_deref()).await;
+    let listed = last_system(&session);
+    assert!(listed.contains("demo  mcp.demo.echo"), "{listed}");
+    assert!(!listed.contains("disabled"), "{listed}");
 }
 
 #[tokio::test]

@@ -81,6 +81,8 @@ command = "mock"          # offline mock: registers mcp.demo.echo
 args = []
 ```
 
+The TUI `/mcp` command (ACP `session/mcp`) lists attached servers for the current session and can disable one until the host exits. The overlay is not persisted; `--continue` attaches from settings again. The MCP gateway cannot be disabled from the TUI.
+
 For a real stdio server (the MCP stdio specification frames one JSON-RPC
 message per line, so set `framing = "newline"`; the default `content-length`
 keeps compatibility with LSP-style hosts such as `shikigami mcp`):
