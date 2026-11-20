@@ -39,6 +39,8 @@ pub const ALLOWED_SPAN_ATTRIBUTES: &[&str] = &[
     "gen_ai.request.model",
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
+    "gen_ai.usage.cache_read.input_tokens",
+    "gen_ai.usage.cache_creation.input_tokens",
     // Run span.
     "parent.source",
     "shikigami.prompt_id",
@@ -366,6 +368,18 @@ impl RunSpanTrace {
                     "gen_ai.usage.output_tokens",
                     &usage.output_tokens.to_string(),
                 ));
+                if let Some(cached) = usage.cached_input_tokens {
+                    turn.attributes.extend(allow_attribute(
+                        "gen_ai.usage.cache_read.input_tokens",
+                        &cached.to_string(),
+                    ));
+                }
+                if let Some(created) = usage.cache_creation_input_tokens {
+                    turn.attributes.extend(allow_attribute(
+                        "gen_ai.usage.cache_creation.input_tokens",
+                        &created.to_string(),
+                    ));
+                }
             }
         }
         inner.close_turn(true);

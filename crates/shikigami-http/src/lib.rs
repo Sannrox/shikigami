@@ -436,30 +436,44 @@ impl HttpModel {
                 });
             }
         }
-        let usage = resp.get("usage").and_then(|u| {
-            let input = u
-                .get("prompt_tokens")
-                .or_else(|| u.get("input_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let output = u
-                .get("completion_tokens")
-                .or_else(|| u.get("output_tokens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            if input == 0 && output == 0 {
-                None
-            } else {
-                Some(TokenUsage {
-                    input_tokens: input,
-                    output_tokens: output,
-                })
-            }
-        });
+        let usage = resp.get("usage").and_then(token_usage_from_openai);
         Ok(ModelTurn {
             content,
             tool_calls,
             usage,
+        })
+    }
+}
+
+/// Map OpenAI-compatible `usage` (and common proxy aliases) onto [`TokenUsage`].
+/// Cache counts stay absent when the provider omitted them.
+fn token_usage_from_openai(usage: &serde_json::Value) -> Option<TokenUsage> {
+    let input = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cached = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(|v| v.as_u64());
+    let created = usage
+        .pointer("/prompt_tokens_details/cache_creation_tokens")
+        .or_else(|| usage.get("cache_creation_input_tokens"))
+        .and_then(|v| v.as_u64());
+    if input == 0 && output == 0 && cached.is_none() && created.is_none() {
+        None
+    } else {
+        Some(TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cached_input_tokens: cached,
+            cache_creation_input_tokens: created,
         })
     }
 }
@@ -984,8 +998,79 @@ mod tests {
         assert_eq!(turn.tool_calls[0].id, "c1");
         assert_eq!(turn.tool_calls[0].name, "read_file");
         assert_eq!(turn.tool_calls[0].args_json, r#"{"path":"a"}"#);
-        assert_eq!(turn.usage.unwrap().output_tokens, 2);
+        let usage = turn.usage.unwrap();
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
         assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn openai_cached_tokens_reach_the_turn_and_absent_ones_do_not() {
+        let cached = concat!(
+            "200 OK\n",
+            r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":80,"cache_creation_tokens":5}}}"#
+        );
+        let plain = concat!(
+            "200 OK\n",
+            r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#
+        );
+        let (base, server) = scripted_provider(vec![cached, plain]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_CACHE_KEY");
+
+        let cached_usage = model
+            .next_turn("system", &[], &[])
+            .await
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(cached_usage.input_tokens, 100);
+        assert_eq!(cached_usage.output_tokens, 7);
+        assert_eq!(cached_usage.cached_input_tokens, Some(80));
+        assert_eq!(cached_usage.cache_creation_input_tokens, Some(5));
+
+        let plain_usage = model
+            .next_turn("system", &[], &[])
+            .await
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(plain_usage.cached_input_tokens, None);
+        assert_eq!(plain_usage.cache_creation_input_tokens, None);
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn openai_usage_maps_cached_tokens_and_omits_them_when_absent() {
+        let openai = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 7,
+            "prompt_tokens_details": {
+                "cached_tokens": 80,
+                "cache_creation_tokens": 5
+            }
+        });
+        let usage = token_usage_from_openai(&openai).unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cached_input_tokens, Some(80));
+        assert_eq!(usage.cache_creation_input_tokens, Some(5));
+
+        let anthropic = serde_json::json!({
+            "input_tokens": 50,
+            "output_tokens": 2,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 10
+        });
+        let usage = token_usage_from_openai(&anthropic).unwrap();
+        assert_eq!(usage.cached_input_tokens, Some(40));
+        assert_eq!(usage.cache_creation_input_tokens, Some(10));
+
+        let plain = serde_json::json!({"prompt_tokens": 3, "completion_tokens": 2});
+        let usage = token_usage_from_openai(&plain).unwrap();
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert!(token_usage_from_openai(&serde_json::json!({})).is_none());
     }
 
     #[tokio::test]

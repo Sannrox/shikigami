@@ -106,6 +106,7 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `gen_ai.tool.name` | Tool name, including `mcp.<server>.<tool>` (tool spans) |
 | `gen_ai.request.model` | Model the turn used (turn spans) |
 | `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Token counts, when the model reported usage (turn spans) |
+| `gen_ai.usage.cache_read.input_tokens` / `gen_ai.usage.cache_creation.input_tokens` | Cached / written prompt-cache tokens, when the model reported them (turn spans). Subsets of `input_tokens`; omitted when the model did not report cache usage |
 | `shikigami.prompt_id` | Versioned prompt id (run span) |
 | `shikigami.preset_id` | Narrowing preset id, when the run has one (run span) |
 | `shikigami.termination` | How the run ended: `completed`, `failed`, `parked`, … (run span) |
