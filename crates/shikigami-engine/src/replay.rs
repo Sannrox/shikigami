@@ -326,7 +326,7 @@ pub fn export_replay_inputs(
         let skills = crate::context::skill_context(&snapshot, &config.context, true);
         let mut prompt = crate::context::compose_system_prompt(
             prompt_base.expect("prompt retained"),
-            rules.as_ref(),
+            &rules,
             &skills.eager,
         );
         crate::context::append_skill_catalog(&mut prompt, &skills.catalog);
@@ -2015,7 +2015,7 @@ mod tests {
         assert!(report.complete, "{:?}", report.missing);
         let evidence = report.evidence.expect("complete evidence");
         let rules = crate::context::load_project_rules(&snapshot, &Config::default().context);
-        let composed = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &[]);
+        let composed = crate::context::compose_system_prompt(SYSTEM_PROMPT, &rules, &[]);
         assert_eq!(evidence.bindings.prompt_digest, text_digest(&composed));
         assert_ne!(evidence.bindings.prompt_digest, text_digest(SYSTEM_PROMPT));
     }
@@ -2049,7 +2049,7 @@ mod tests {
         );
         let skills = crate::context::skill_context(&snapshot, &replay.context, true);
         assert!(skills.eager.is_empty());
-        let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, None, &[]);
+        let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, &[], &[]);
         crate::context::append_skill_catalog(&mut prompt, &skills.catalog);
         assert_eq!(bindings.prompt_digest, text_digest(&prompt));
     }

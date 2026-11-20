@@ -730,7 +730,7 @@ fn compose_context(
         eager: skills,
         catalog,
     } = crate::context::skill_context(&workspace.path, &engine.config.context, lazy_skills);
-    let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, rules.as_ref(), &skills);
+    let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, &rules, &skills);
     crate::context::append_skill_catalog(&mut prompt, &catalog);
     let finder_role = (engine.config.profile.name == SECURITY_FINDER_PROFILE)
         .then_some(engine.config.security_finder.role.as_deref())
@@ -811,12 +811,15 @@ fn compose_context(
             },
         );
     }
-    if let Some(rules) = rules {
+    for attached in &rules {
         engine.emit(
             run_id,
             HarnessEvent::Message {
                 level: "info".into(),
-                text: format!("project_rules {} digest={}", rules.filename, rules.digest),
+                text: format!(
+                    "project_rules {} digest={}",
+                    attached.filename, attached.digest
+                ),
             },
         );
     }
@@ -1009,5 +1012,50 @@ mod tests {
                 .system_prompt
                 .contains(crate::tools::PLAN_JAIL_PATH)
         );
+    }
+
+    #[tokio::test]
+    async fn listed_project_rules_all_reach_the_system_prompt() {
+        let directory = tempdir().unwrap();
+        let state = StateRoot::new(directory.path().join("state"));
+        state.ensure_ready_for_runs().unwrap();
+        let ws = directory.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "agents body\n").unwrap();
+        std::fs::write(ws.join("shikigami.rules.md"), "harness body\n").unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "local".into();
+        config.events.adapter = "none".into();
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = ws.to_string_lossy().into();
+        config.model.adapter = "scripted".into();
+        let registry = Arc::new(RunRegistry::new(state.path()).unwrap());
+        let engine = Engine::new(
+            config.clone(),
+            Arc::from(governance::from_config(&config).unwrap()),
+            Arc::from(workspace::from_config(&config).unwrap()),
+            Arc::from(crate::model::from_config(&config).unwrap()),
+            Arc::from(events::from_config(&config, &state.runs_dir()).unwrap()),
+            state.runs_dir(),
+            Arc::clone(&registry),
+        );
+        let run_id = "project-rules-prompt";
+        registry.start(run_id, "task", None, None).unwrap();
+        let mut request = RunRequest::new("task");
+        request.keep_workspace = true;
+        let prepared = prepare(&engine, &request, run_id.into(), None, None, None)
+            .await
+            .unwrap();
+        let agents_at = prepared
+            .system_prompt
+            .find("# Project rules (`AGENTS.md`)")
+            .unwrap();
+        let harness_at = prepared
+            .system_prompt
+            .find("# Project rules (`shikigami.rules.md`)")
+            .unwrap();
+        assert!(agents_at < harness_at, "{}", prepared.system_prompt);
+        assert!(prepared.system_prompt.contains("agents body"));
+        assert!(prepared.system_prompt.contains("harness body"));
     }
 }
