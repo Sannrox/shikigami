@@ -11,7 +11,8 @@ use shikigami::config::TuiStatusLine;
 use shikigami::hooks::run_operator_command;
 use tokio::task::JoinHandle;
 
-use crate::{Shared, TranscriptLine, truncate_one_line};
+use crate::render::truncate_one_line;
+use crate::session::{Shared, TranscriptLine};
 
 /// Bumped when a payload field changes meaning or goes away.
 const SCHEMA_VERSION: u32 = 1;

@@ -1,0 +1,505 @@
+use super::support::*;
+use crate::look::KeyMap;
+use crate::protocol::apply_prompt_result;
+use crate::render::{
+    ago, composer_height, follow_pad, permission_fields, prompt_block, scroll_offset, status_line,
+};
+use crate::session::*;
+use crate::slash::*;
+use shikigami::acp::AcpClient;
+use shikigami_types::terminal::terminal_text;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use ratatui::prelude::Rect;
+use serde_json::json;
+use tempfile::tempdir;
+
+#[test]
+fn scroll_offset_counts_wrapped_rows() {
+    let body = "a".repeat(40);
+    let area = Rect::new(0, 0, 10, 2);
+    assert_eq!(scroll_offset(&body, area), (2, 0));
+    let short = Rect::new(0, 0, 80, 20);
+    assert_eq!(scroll_offset("hello", short), (0, 0));
+    let words = "123456 123456 123456";
+    assert_eq!(scroll_offset(words, Rect::new(0, 0, 10, 2)), (1, 0));
+}
+
+#[test]
+fn follow_pad_pins_short_transcript_to_the_composer() {
+    assert_eq!(follow_pad(2, 20, 0), 18);
+    assert_eq!(follow_pad(30, 20, 0), 0);
+    assert_eq!(follow_pad(2, 20, 5), 0);
+}
+
+#[test]
+fn prompt_error_lands_in_transcript_not_the_footer() {
+    let mut shared = Shared::new();
+    apply_prompt_result(
+        &mut shared,
+        Some(&json!({
+            "error": { "message": "the state directory is inside the project /p; set --state or SHIKIGAMI_STATE to a directory outside it" }
+        })),
+    );
+    assert_eq!(shared.status, "error");
+    assert!(shared.transcript.iter().any(
+        |line| matches!(line, TranscriptLine::System(text) if text.contains("state directory"))
+    ));
+    let footer = status_line("claude-sonnet-5-5", &KeyMap::default(), &shared, 40);
+    assert!(footer.contains("error"));
+    assert!(!footer.contains("state directory"));
+    assert!(footer.chars().count() <= 40);
+}
+
+/// #598: the footer names the model and, once a prompt was sent, the turn.
+#[tokio::test]
+async fn footer_shows_model_and_turn_not_session_id() {
+    let dir = tempdir().unwrap();
+    let mut session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session.model = "claude-sonnet-5-5".into();
+    let rows = drawn_rows(&session, 80, 24);
+    assert_eq!(
+        rows.last().unwrap(),
+        "  ready  claude-sonnet-5-5  ^c quit  pgup/pgdn/wheel"
+    );
+    session.spawn_prompt("hi".into()).await.unwrap();
+    let _ = session.wait_prompt().await;
+    let rows = drawn_rows(&session, 80, 24);
+    assert_eq!(
+        rows.last().unwrap(),
+        "  done  claude-sonnet-5-5  turn 1  ? tok  ^c quit  pgup/pgdn/wheel"
+    );
+    let id = session.session_id();
+    let short = &id["sess-".len().."sess-".len() + 8];
+    assert!(!rows.join("\n").contains(short));
+}
+
+/// #603: a rebound key performs the action, the old key no longer does,
+/// and the footer and help name the new key.
+#[test]
+fn ago_reads_as_words() {
+    let mins = |m: u64| ago(Duration::from_secs(m * 60));
+    assert_eq!(mins(0), "just now");
+    assert_eq!(mins(1), "1 minute ago");
+    assert_eq!(mins(59), "59 minutes ago");
+    assert_eq!(mins(60), "1 hour ago");
+    assert_eq!(mins(23 * 60), "23 hours ago");
+    assert_eq!(mins(24 * 60), "yesterday");
+    assert_eq!(mins(3 * 24 * 60), "3 days ago");
+}
+
+/// #617: the footer says the session state in words, never the wire stop reason.
+#[test]
+fn footer_shows_state_words_not_stop_reasons() {
+    for (reason, word) in [
+        ("end_turn", "done"),
+        ("cancelled", "cancelled"),
+        ("max_turn_requests", "turn limit"),
+        ("max_tokens", "length limit"),
+        ("refusal", "refused"),
+        ("some_future_reason", "ready"),
+    ] {
+        let mut shared = Shared::new();
+        apply_prompt_result(
+            &mut shared,
+            Some(&json!({"result": {"stopReason": reason}})),
+        );
+        let footer = status_line("claude-sonnet-5-5", &KeyMap::default(), &shared, 80);
+        assert!(
+            footer.starts_with(&format!("  {word}  ")),
+            "{reason}: {footer}"
+        );
+        if reason != word {
+            assert!(!footer.contains(reason), "{reason}: {footer}");
+        }
+    }
+}
+
+#[test]
+fn composer_height_uses_wrapped_rows() {
+    let args = "x".repeat(400);
+    let text = format!("ask  write_file\n{args}\n> y allow\n  n deny");
+    let area = Rect::new(0, 0, 20, 24);
+    assert_eq!(composer_height(&text, area), 20);
+    assert_eq!(
+        composer_height("ask\nok\n> y allow\n  n deny", Rect::new(0, 0, 80, 24)),
+        4
+    );
+}
+
+#[tokio::test]
+async fn idle_draw_has_no_running_row_above_composer() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    assert!(!session.lock_shared().busy);
+    let (row, _) = slot_above_composer_rule(&session);
+    assert_ne!(row.trim(), RUNNING_MARKER, "{row:?}");
+    let footer = status_line(
+        &session.model,
+        &session.look.keys,
+        &session.lock_shared(),
+        80,
+    );
+    assert!(!footer.contains(RUNNING_MARKER), "{footer}");
+}
+
+#[tokio::test]
+async fn spawn_prompt_shows_dim_running_row_until_idle() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    let (idle_row, _) = slot_above_composer_rule(&session);
+    assert_ne!(idle_row.trim(), RUNNING_MARKER, "{idle_row:?}");
+
+    session.spawn_prompt("write".into()).await.unwrap();
+    assert!(session.lock_shared().busy);
+    let (row, dim) = slot_above_composer_rule(&session);
+    assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+    assert!(dim, "running marker must be dim: {row:?}");
+
+    let _ = session.wait_prompt().await;
+    assert!(!session.lock_shared().busy);
+    let (done_row, _) = slot_above_composer_rule(&session);
+    assert_ne!(done_row.trim(), RUNNING_MARKER, "{done_row:?}");
+}
+
+#[tokio::test]
+async fn running_marker_skips_idle_ticks() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    assert!(draw_if_dirty(&session));
+    for _ in 0..3 {
+        assert!(!draw_if_dirty(&session));
+    }
+
+    session.spawn_prompt("write".into()).await.unwrap();
+    wait_until(|| prompt_task_finished(&session)).await;
+    assert!(session.lock_shared().busy);
+    let mut frames = 0usize;
+    for _ in 0..5 {
+        if draw_if_dirty(&session) {
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, 1, "busy marker must not force extra idle frames");
+    assert!(!session.lock_shared().dirty);
+    let (row, dim) = slot_above_composer_rule(&session);
+    assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+    assert!(dim, "running marker must be dim: {row:?}");
+
+    let _ = session.wait_prompt().await;
+    frames = 0;
+    for _ in 0..5 {
+        if draw_if_dirty(&session) {
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, 1);
+    assert!(!session.lock_shared().busy);
+    let (done_row, _) = slot_above_composer_rule(&session);
+    assert_ne!(done_row.trim(), RUNNING_MARKER, "{done_row:?}");
+}
+
+#[tokio::test]
+async fn running_marker_reserves_composer_height() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session.spawn_prompt("write".into()).await.unwrap();
+    session
+        .lock_shared()
+        .insert_str(&format!("{}\n", "line").repeat(30));
+    let _ = drawn_text(&session);
+    let composer_h = session.lock_shared().composer_h;
+    assert!(
+        composer_h <= 19,
+        "busy overlay must stay in the 24-row budget: composer_h={composer_h}"
+    );
+    let (row, dim) = slot_above_composer_rule(&session);
+    assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+    assert!(dim, "running marker must be dim: {row:?}");
+    let _ = session.wait_prompt().await;
+}
+
+#[tokio::test]
+async fn plan_update_renders_plan_overlay() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session
+        .client
+        .notify(
+            "session/update",
+            json!({
+                "sessionId": session.session_id(),
+                "update": {
+                    "sessionUpdate": "plan",
+                    "entries": [
+                        {"content": "inspect the jail", "status": "pending"}
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let overlay = session.overlay_text().expect("plan overlay");
+    assert!(overlay.contains("inspect the jail"), "overlay={overlay}");
+    assert!(overlay.contains("pending"), "overlay={overlay}");
+}
+
+#[tokio::test]
+async fn tool_call_summarizes_path_from_raw_input() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session
+        .client
+        .notify(
+            "session/update",
+            json!({
+                "sessionId": session.session_id(),
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "c1",
+                    "title": "write_file",
+                    "status": "pending",
+                    "rawInput": {"path": "hello.txt", "content": "hi\n"}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let text = session.transcript_text();
+    assert!(text.contains("write_file"), "{text}");
+    assert!(text.contains("hello.txt"), "{text}");
+    assert!(!text.contains("{\"path\""), "{text}");
+}
+
+#[tokio::test]
+async fn cancelled_turn_screen() {
+    let dir = tempdir().unwrap();
+    let session = start_session(
+        &dir,
+        r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]}]"#,
+    )
+    .await;
+    session
+        .spawn_prompt("write the ok file".into())
+        .await
+        .unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    session.cancel();
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    let screen = rows.join("\n");
+    let rule = "─".repeat(80);
+    let expected = format!(
+        "{}you  write the ok file\n\n· write_file  ok.txt  cancelled\n{rule}\n>\n{rule}\n  cancelled  turn 1  ? tok  ^c quit  ^o tool  pgup/pgdn/wheel",
+        "\n".repeat(17)
+    );
+    assert_eq!(screen, expected);
+}
+
+/// #625: a turn's final answer in a long `report` summary reads in full,
+/// wrapped, without expanding tool lines.
+#[tokio::test]
+async fn long_report_summary_shows_in_full() {
+    let dir = tempdir().unwrap();
+    let summary = "The project has two files: README.md describes the tool and main.py \
+                   holds the entry point. The glob and the write both ran, and the new \
+                   file is in place.";
+    let script = format!(
+        r#"[{{"tool_calls":[{{"name":"report","args_json":"{{\"summary\":\"{summary}\",\"success\":true}}"}}]}}]"#
+    );
+    let session = start_session(&dir, &script).await;
+    session.spawn_prompt("what is here?".into()).await.unwrap();
+    session.wait_prompt().await;
+    for (width, height) in [(80, 24), (40, 12)] {
+        let rows = drawn_rows(&session, width, height);
+        assert_screen_rules(&rows, width);
+        let words = rows
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            words.contains(summary),
+            "{width}x{height}:\n{}",
+            rows.join("\n")
+        );
+    }
+}
+
+/// #616: returning to a session shows the outcomes the user saw live.
+#[tokio::test]
+async fn wide_and_long_lines_stay_inside_the_screen() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    {
+        let mut shared = session.lock_shared();
+        shared.transcript = vec![
+            TranscriptLine::User("雪の日 🌨️ を説明して".into()),
+            TranscriptLine::Assistant("x".repeat(300)),
+            TranscriptLine::Assistant("雪".repeat(70) + " 🎉🎉🎉 done"),
+        ];
+        shared.dirty = true;
+    }
+    // 39 columns is odd, so a wide character lands on the last column.
+    for (width, height) in [(80, 24), (39, 30), (40, 12), (39, 12)] {
+        let rows = drawn_rows(&session, width, height);
+        assert_screen_rules(&rows, width);
+        let screen = rows.join("\n");
+        assert!(
+            screen.contains("done"),
+            "the newest line is in view: {screen}"
+        );
+        if height < 24 {
+            continue;
+        }
+        // Tall enough for the whole transcript: wrapping keeps every character.
+        let xs: usize = rows
+            .iter()
+            .filter(|row| !row.is_empty() && row.chars().all(|c| c == 'x'))
+            .map(|row| row.len())
+            .sum();
+        assert_eq!(xs, 300, "{width}x{height}: {screen}");
+        assert_eq!(
+            screen.matches('雪').count(),
+            71,
+            "{width}x{height}: {screen}"
+        );
+        assert_eq!(
+            screen.matches('🎉').count(),
+            3,
+            "{width}x{height}: {screen}"
+        );
+        assert!(screen.contains("🌨"), "{width}x{height}: {screen}");
+    }
+}
+
+#[tokio::test]
+async fn untrusted_output_controls_are_inert_on_redraw() {
+    let dir = tempdir().unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start(host, dir.path(), false).await.unwrap();
+    let payload = "visible\x1b]52;c;Y2xpcA==\x07\x1b[2J\x1bPdata\x1b\\\x00\r\u{009b}end";
+    {
+        let mut shared = session.lock_shared();
+        shared.transcript = vec![
+            TranscriptLine::Assistant(payload.into()),
+            TranscriptLine::Tool(ToolLine {
+                id: "tool".into(),
+                title: payload.into(),
+                status: "completed".into(),
+                detail: payload.into(),
+                expanded: true,
+            }),
+        ];
+    }
+    let drawn = drawn_text(&session);
+    assert!(drawn.contains("visible"));
+    assert!(drawn.contains('\u{fffd}'));
+    assert!(
+        !drawn
+            .chars()
+            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+    );
+    install_permission(
+        &session,
+        serde_json::json!({"command": payload}).to_string(),
+    );
+    let drawn = drawn_text(&session);
+    assert!(drawn.contains("command"));
+    assert!(
+        !drawn
+            .chars()
+            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+    );
+    assert_eq!(terminal_text("plain 雪\n\ttext"), "plain 雪\n\ttext");
+}
+
+#[tokio::test]
+async fn collapsed_tool_stays_one_line_for_multiline_result() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    notify_multiline_tool(&session).await;
+    let text = session.transcript_text();
+    assert_eq!(tool_line_count(&text), 1, "{text}");
+    assert!(text.contains("first line of stdout"), "{text}");
+    assert!(!text.contains("later-unique-line"), "{text}");
+    assert!(!drawn_text(&session).contains("later-unique-line"));
+}
+
+#[test]
+fn prompt_block_grows_and_wraps() {
+    let (lines, x, y) = prompt_block("ab\ncd", 5, 80);
+    assert_eq!(lines, vec!["> ab".to_string(), "  cd".to_string()]);
+    assert_eq!(y, 1);
+    assert_eq!(x, 4);
+    let (lines, x, y) = prompt_block("ab", 1, 80);
+    assert_eq!(lines, vec!["> ab".to_string()]);
+    assert_eq!(y, 0);
+    assert_eq!(x, 3);
+    let (lines, x, y) = prompt_block("abc", 3, 6);
+    assert_eq!(lines, vec!["> abc".to_string()]);
+    assert_eq!(y, 0);
+    assert_eq!(x, 5);
+    let (lines, x, y) = prompt_block("abcdefghij", 10, 6);
+    assert_eq!(
+        lines,
+        vec![
+            "> abc".to_string(),
+            "  def".to_string(),
+            "  ghi".to_string(),
+            "  j".to_string()
+        ]
+    );
+    assert_eq!(y, 3);
+    assert_eq!(x, 3);
+    let (lines, x, y) = prompt_block("中文", 1, 6);
+    assert_eq!(lines, vec!["> 中".to_string(), "  文".to_string()]);
+    assert_eq!(y, 0);
+    assert_eq!(x, 4);
+    let (lines, _, y) = prompt_block("中文", 2, 4);
+    assert_eq!(lines, vec!["> 中".to_string(), "  文".to_string()]);
+    assert_eq!(y, 1);
+    let mut shared = Shared::new();
+    shared.composer_w = 6;
+    shared.insert_str("abc\nabc");
+    assert_eq!(shared.cursor, 7);
+    assert!(shared.move_cursor_row(-1));
+    assert_eq!(shared.cursor, 3);
+    shared.clear_input();
+    shared.insert_str("abcdef");
+    assert_eq!(shared.cursor, 6);
+    let (_, x, y) = prompt_block(&shared.input, 3, 6);
+    assert_eq!((x, y), (5, 0));
+    assert!(shared.move_cursor_row(-1));
+    assert_eq!(shared.cursor, 3);
+    let (_, x, y) = prompt_block(&shared.input, shared.cursor, 6);
+    assert_eq!((x, y), (5, 0));
+    assert!(shared.move_cursor_row(1));
+    assert_eq!(shared.cursor, 6);
+}
+
+#[test]
+fn permission_fields_keeps_multiline_command() {
+    let body = permission_fields(r#"{"command":"echo checking\nrm -rf /tmp/secret"}"#);
+    assert!(body.contains("echo checking"), "{body}");
+    assert!(body.contains("rm -rf /tmp/secret"), "{body}");
+    let long = "a".repeat(2000);
+    let body = permission_fields(&format!(r#"{{"command":"{long}"}}"#));
+    assert!(
+        body.contains(&long),
+        "ask must keep the full command, not a truncated prefix"
+    );
+}
