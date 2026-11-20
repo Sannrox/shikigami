@@ -12,8 +12,8 @@ use crate::mention;
 use crate::protocol::apply_load_result;
 use crate::render::{ago, elapsed_since, truncate_one_line, turn_count, turns_label};
 use crate::session::{
-    FileList, KeyResult, SESSION_IN_USE, SessionBackup, Shared, SlashCommand, TranscriptLine,
-    TuiSession,
+    FileList, KeyResult, NestedChild, SESSION_IN_USE, SessionBackup, Shared, SlashCommand,
+    TranscriptLine, TuiSession,
 };
 use crate::usage::Usage;
 
@@ -409,6 +409,7 @@ impl TuiSession {
         shared.pending_parts.clear();
         shared.run_id = None;
         shared.usage = Usage::default();
+        shared.nested_children.clear();
         shared.status = "ready".into();
         shared.scroll_back = 0;
         shared.dock_scroll = 0;
@@ -472,6 +473,7 @@ impl TuiSession {
     }
 
     pub(crate) async fn load_session(&self, session_id: &str) {
+        let previous_id = self.session_id();
         let backup = {
             let mut shared = self.lock_shared();
             let backup = SessionBackup {
@@ -481,6 +483,7 @@ impl TuiSession {
                 queued: shared.queued.take(),
                 scroll_back: shared.scroll_back,
                 dock_scroll: shared.dock_scroll,
+                nested_children: std::mem::take(&mut shared.nested_children),
             };
             shared.show_plan = false;
             shared.scroll_back = 0;
@@ -490,12 +493,12 @@ impl TuiSession {
             shared.dirty = true;
             backup
         };
+        *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
         match self
             .call("session/load", json!({ "sessionId": session_id }))
             .await
         {
             Ok(result) => {
-                *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.to_string();
                 let mut shared = self.lock_shared();
                 apply_load_result(&mut shared, &result);
                 shared.usage = Usage::default();
@@ -503,6 +506,7 @@ impl TuiSession {
                 shared.dirty = true;
             }
             Err(err) => {
+                *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = previous_id;
                 let mut shared = self.lock_shared();
                 shared.transcript = backup.transcript;
                 shared.plan = backup.plan;
@@ -510,6 +514,7 @@ impl TuiSession {
                 shared.queued = backup.queued;
                 shared.scroll_back = backup.scroll_back;
                 shared.dock_scroll = backup.dock_scroll;
+                shared.nested_children = backup.nested_children;
                 let line = if err == shikigami::acp::SESSION_IN_USE {
                     SESSION_IN_USE.to_string()
                 } else {
@@ -756,11 +761,28 @@ pub(crate) fn mention_visible(shared: &Shared) -> Option<(usize, String)> {
 
 /// One static dim row in the slash-list slot while a prompt is in flight.
 pub(crate) fn running_marker_visible(shared: &Shared) -> bool {
-    shared.busy && !shared.dock_open()
+    shared.busy && !shared.dock_open() && inflight_nested_children(shared).is_empty()
 }
 
 pub(crate) fn running_marker_row() -> String {
     format!("  {RUNNING_MARKER}")
+}
+
+/// Nested children that still belong in the dim slot (`running` / `parked`).
+pub(crate) fn inflight_nested_children(shared: &Shared) -> Vec<&NestedChild> {
+    shared
+        .nested_children
+        .iter()
+        .filter(|child| matches!(child.status.as_str(), "running" | "parked"))
+        .collect()
+}
+
+pub(crate) fn nested_children_visible(shared: &Shared) -> bool {
+    !shared.dock_open() && !inflight_nested_children(shared).is_empty()
+}
+
+pub(crate) fn nested_child_row(child: &NestedChild) -> String {
+    format!("  {}  {}  {}", child.run_id, child.profile, child.status)
 }
 
 /// A composer line that starts with `/`, before Enter runs it.

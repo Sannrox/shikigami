@@ -181,18 +181,48 @@ pub(super) fn row_is_dim(buf: &ratatui::buffer::Buffer, y: u16) -> bool {
 }
 
 pub(super) fn slot_above_composer_rule(session: &TuiSession) -> (String, bool) {
-    let backend = ratatui::backend::TestBackend::new(80, 24);
+    overlay_rows_above_composer(session, 80, 24)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+/// Dim overlay rows between the transcript and the composer rule.
+pub(super) fn overlay_rows_above_composer(
+    session: &TuiSession,
+    width: u16,
+    height: u16,
+) -> Vec<(String, bool)> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| draw(frame, session)).unwrap();
     let composer_y = session.lock_shared().composer_area.y;
+    let overlay_h = session.lock_shared().overlay_h;
     let buf = terminal.backend().buffer();
     let rule = buffer_row(buf, composer_y.saturating_sub(1));
     assert!(
         !rule.is_empty() && rule.chars().all(|ch| ch == '─'),
         "expected composer rule, got {rule:?}"
     );
-    let y = composer_y.saturating_sub(2);
-    (buffer_row(buf, y), row_is_dim(buf, y))
+    if overlay_h == 0 {
+        return vec![(buffer_row(buf, composer_y.saturating_sub(2)), false)];
+    }
+    (0..overlay_h)
+        .map(|i| {
+            let y = composer_y.saturating_sub(1 + overlay_h - i);
+            (buffer_row(buf, y), row_is_dim(buf, y))
+        })
+        .collect()
+}
+
+pub(super) fn children_update(session_id: &str, children: serde_json::Value) -> serde_json::Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "tool_call_update",
+            "_meta": { "shikigami": { "children": children } }
+        }
+    })
 }
 
 pub(super) fn wheel(kind: MouseEventKind, column: u16, row: u16) -> Event {

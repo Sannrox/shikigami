@@ -364,10 +364,7 @@ impl RunRegistry {
     /// The `bool` is `true` when this process already interned a signal
     /// (local start/finish). `false` means the watch was seeded from JSON,
     /// so another process may own the run.
-    pub(crate) fn watch_idle(
-        &self,
-        run_id: &str,
-    ) -> Result<(watch::Receiver<bool>, bool), RegistryError> {
+    pub fn watch_idle(&self, run_id: &str) -> Result<(watch::Receiver<bool>, bool), RegistryError> {
         validate_run_id(run_id)?;
         {
             let signals = self.idle_signals.lock().map_err(|_| RegistryError::Lock)?;

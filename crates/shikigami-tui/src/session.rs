@@ -67,6 +67,13 @@ pub(crate) struct ToolLine {
     pub(crate) expanded: bool,
 }
 
+/// One nested child the host reported on the parent session.
+pub(crate) struct NestedChild {
+    pub(crate) run_id: String,
+    pub(crate) profile: String,
+    pub(crate) status: String,
+}
+
 pub(crate) enum TranscriptLine {
     User(String),
     Assistant(String),
@@ -149,6 +156,10 @@ pub(crate) struct Shared {
     pub(crate) statusline: Option<String>,
     /// Token use the host reported per turn; the footer and `/usage` show it.
     pub(crate) usage: Usage,
+    /// Nested children the host last reported; the dim slot above the composer.
+    pub(crate) nested_children: Vec<NestedChild>,
+    /// Last drawn overlay height (slash list, nested children, or running).
+    pub(crate) overlay_h: u16,
 }
 
 impl Shared {
@@ -186,6 +197,8 @@ impl Shared {
             models: None,
             statusline: None,
             usage: Usage::default(),
+            nested_children: Vec::new(),
+            overlay_h: 0,
         }
     }
 
@@ -529,6 +542,7 @@ impl Shared {
 #[derive(Clone)]
 pub(crate) struct TuiClient {
     pub(crate) shared: Arc<Mutex<Shared>>,
+    pub(crate) session_id: Arc<Mutex<String>>,
 }
 
 /// The `@` list's workspace files for the current draft.
@@ -594,6 +608,7 @@ pub(crate) struct SessionBackup {
     pub(crate) queued: Option<QueuedPrompt>,
     pub(crate) scroll_back: u16,
     pub(crate) dock_scroll: u16,
+    pub(crate) nested_children: Vec<NestedChild>,
 }
 
 pub(crate) type OscWrite = fn(&[u8]) -> io::Result<()>;
@@ -601,7 +616,7 @@ pub(crate) type OscWrite = fn(&[u8]) -> io::Result<()>;
 pub(crate) struct TuiSession {
     pub(crate) host: Arc<AcpHost>,
     pub(crate) client: TuiClient,
-    pub(crate) session_id: Mutex<String>,
+    pub(crate) session_id: Arc<Mutex<String>>,
     pub(crate) cwd: std::path::PathBuf,
     pub(crate) next_id: AtomicU64,
     pub(crate) prompt: Mutex<Option<JoinHandle<Option<Value>>>>,
@@ -629,12 +644,14 @@ impl TuiSession {
             cwd.canonicalize().map_err(|e| e.to_string())?
         };
         let default_model_id = host.configured_model();
+        let session_id = Arc::new(Mutex::new(String::new()));
         let session = Self {
             host,
             client: TuiClient {
                 shared: Arc::new(Mutex::new(Shared::new())),
+                session_id: Arc::clone(&session_id),
             },
-            session_id: Mutex::new(String::new()),
+            session_id,
             cwd: cwd.clone(),
             next_id: AtomicU64::new(1),
             prompt: Mutex::new(None),
