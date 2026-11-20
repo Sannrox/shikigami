@@ -364,14 +364,16 @@ impl AcpHost {
         }
         let id = msg.get("id").cloned()?;
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        // Method futures include an engine run. Poll them from the heap so a
+        // Linux debug worker (2MiB) can host session/prompt with MCP tools.
         let result = match method {
             "initialize" => self.initialize(&params),
-            "session/new" => self.session_new(&params).await,
-            "session/load" => self.session_load(&params, client).await,
-            "session/prompt" => self.session_prompt(&params, client).await,
-            "session/compact" => self.session_compact(&params).await,
-            "session/set_model" => self.session_set_model(&params).await,
-            "session/mcp" => self.session_mcp(&params).await,
+            "session/new" => Box::pin(self.session_new(&params)).await,
+            "session/load" => Box::pin(self.session_load(&params, client)).await,
+            "session/prompt" => Box::pin(self.session_prompt(&params, client)).await,
+            "session/compact" => Box::pin(self.session_compact(&params)).await,
+            "session/set_model" => Box::pin(self.session_set_model(&params)).await,
+            "session/mcp" => Box::pin(self.session_mcp(&params)).await,
             other => Err(rpc_error(-32601, format!("Method not found: {other}"))),
         };
         Some(match result {
@@ -2007,6 +2009,27 @@ async fn resume_prompt_drive(
     Err(rpc_error(-32603, "session run is not waiting for a prompt"))
 }
 
+/// Aborts the spawned engine run if the ACP forwarder is dropped first.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn join_run(
+    joined: Result<Result<crate::run::RunResult, HarnessError>, tokio::task::JoinError>,
+) -> Result<crate::run::RunResult, HarnessError> {
+    match joined {
+        Ok(result) => result,
+        Err(error) if error.is_cancelled() => Err(HarnessError::Run(RunError::Cancelled)),
+        Err(error) => Err(HarnessError::Run(RunError::Message(format!(
+            "run task failed: {error}"
+        )))),
+    }
+}
+
 async fn run_and_forward(
     host: &AcpHost,
     harness: &Harness,
@@ -2023,22 +2046,26 @@ async fn run_and_forward(
     }
     let mut held = Vec::new();
     let mut streamed = HashSet::new();
-    let run_fut = async {
+    // Engine run poll frames are large (MCP attach + tool batch). Spawn so they
+    // do not nest under the ACP forwarder on a 2MiB Linux debug worker.
+    let harness_for_run = harness.clone();
+    let mut run_task = AbortOnDrop(tokio::spawn(async move {
         match drive {
-            PromptDrive::Text(request) => harness.run_with_events(request, Some(sink)).await,
-            PromptDrive::Content(request) => harness
+            PromptDrive::Text(request) => {
+                harness_for_run.run_with_events(request, Some(sink)).await
+            }
+            PromptDrive::Content(request) => harness_for_run
                 .run_content_with_events(request, Some(sink))
                 .await
                 .map(|result| result.run),
         }
-    };
-    tokio::pin!(run_fut);
+    }));
     let result = loop {
         tokio::select! {
-            result = &mut run_fut => break result,
+            joined = &mut run_task.0 => break join_run(joined),
             event = events.recv() => {
                 let Some(first) = event else {
-                    break (&mut run_fut).await;
+                    break join_run((&mut run_task.0).await);
                 };
                 let (mut updates, event_run_id) =
                     drain_event_batch(session_id, Some(first), events, &mut streamed);
@@ -2056,7 +2083,7 @@ async fn run_and_forward(
                         .map_err(update_error)
                     {
                         host.signal_cancel(session_id).await;
-                        let abandoned = (&mut run_fut).await;
+                        let abandoned = join_run((&mut run_task.0).await);
                         let run_id = abandoned
                             .as_ref()
                             .ok()
