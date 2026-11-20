@@ -22,7 +22,7 @@ counts against the time limit and is killed with the group.
 
 ```toml
 [[hooks]]
-event = "pre_tool"          # pre_run | post_run | pre_tool | post_tool | on_park | stop
+event = "pre_tool"          # pre_run | post_run | pre_tool | post_tool | on_park | pre_prompt | stop
 command = "/usr/local/bin/my-hook"
 args = []
 timeout_ms = 5000
@@ -35,7 +35,18 @@ fail_closed = true          # abort tool/run on failure or timeout
 | `command` | required | Executable path or name on `PATH` |
 | `args` | `[]` | Extra argv |
 | `timeout_ms` | `5000` | Kill after this duration (capped at 120s; `stop` at 1h) |
-| `fail_closed` | `false` | On failure/timeout: fail tool/run if true; ignore if false. `stop` always fails closed. |
+| `fail_closed` | `false` | On failure/timeout: fail tool/run if true; ignore if false. `stop` always fails closed. `pre_prompt` fails that prompt; the session stays. |
+
+## `pre_prompt`
+
+Fires on a session-wait host (ACP, TUI) immediately before a **new user prompt**
+goes to the model: the first `session/prompt` of a run, and each follow-up.
+It does not fire on ask=park, escalate, or plan resume of the same prompt, and
+it does not fire on unattended `run` (that path already has `pre_run`).
+
+Stdin is `{"event":"pre_prompt","payload":{"run_id","prompt"}}`. `prompt` is
+the user text, cut at 4000 characters. Fail-closed failure fails that prompt
+without persisting it, so the next prompt can try again.
 
 ## Payload
 

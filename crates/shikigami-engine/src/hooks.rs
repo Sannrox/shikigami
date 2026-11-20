@@ -21,6 +21,8 @@ pub enum HookEvent {
     PreTool,
     PostTool,
     OnPark,
+    /// New user prompt on a session-wait run (ACP/TUI). Not ask/plan/escalate resume.
+    PrePrompt,
 }
 
 impl HookEvent {
@@ -31,6 +33,7 @@ impl HookEvent {
             Self::PreTool => "pre_tool",
             Self::PostTool => "post_tool",
             Self::OnPark => "on_park",
+            Self::PrePrompt => "pre_prompt",
         }
     }
 
@@ -41,9 +44,23 @@ impl HookEvent {
             "pre_tool" => Some(Self::PreTool),
             "post_tool" => Some(Self::PostTool),
             "on_park" => Some(Self::OnPark),
+            "pre_prompt" => Some(Self::PrePrompt),
             _ => None,
         }
     }
+}
+
+/// Prompt text placed on `pre_prompt` stdin. Long prompts are cut with a marker.
+pub(crate) const PRE_PROMPT_CHARS: usize = 4000;
+
+pub(crate) fn truncated_prompt(text: &str) -> String {
+    let count = text.chars().count();
+    if count <= PRE_PROMPT_CHARS {
+        return text.to_string();
+    }
+    let mut body: String = text.chars().take(PRE_PROMPT_CHARS).collect();
+    body.push_str("\n\n… [prompt truncated]\n");
+    body
 }
 
 /// Run all hooks matching `event`. Returns error only when a matching hook is
@@ -466,6 +483,17 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    #[test]
+    fn pre_prompt_round_trips() {
+        assert_eq!(HookEvent::parse("pre_prompt"), Some(HookEvent::PrePrompt));
+        assert_eq!(HookEvent::PrePrompt.as_str(), "pre_prompt");
+        let long = "x".repeat(PRE_PROMPT_CHARS + 8);
+        let cut = truncated_prompt(&long);
+        assert!(cut.contains("… [prompt truncated]"));
+        assert!(cut.chars().count() > PRE_PROMPT_CHARS);
+        assert!(truncated_prompt("short") == "short");
     }
 
     #[tokio::test]

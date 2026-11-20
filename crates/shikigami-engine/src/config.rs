@@ -112,7 +112,7 @@ fn default_statusline_timeout_ms() -> u64 {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct HookSettings {
-    /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park` | `stop`
+    /// `pre_run` | `post_run` | `pre_tool` | `post_tool` | `on_park` | `pre_prompt` | `stop`
     pub event: String,
     pub command: String,
     #[serde(default)]

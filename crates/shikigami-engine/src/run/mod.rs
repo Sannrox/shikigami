@@ -1417,6 +1417,188 @@ mod tests {
         assert_eq!(parked.summary, "done");
     }
 
+    fn capture_hook(
+        dir: &tempfile::TempDir,
+        body: &str,
+    ) -> (std::path::PathBuf, crate::config::HookSettings) {
+        let script = dir.path().join("pre_prompt.sh");
+        let seen = dir.path().join("pre_prompt.jsonl");
+        std::fs::write(&script, body.replace("SEEN", &seen.display().to_string())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+        let hook = crate::config::HookSettings {
+            event: "pre_prompt".into(),
+            command: script.to_string_lossy().into(),
+            args: vec![],
+            timeout_ms: 2_000,
+            fail_closed: true,
+        };
+        (seen, hook)
+    }
+
+    fn hook_payloads(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_wait_pre_prompt_fires_per_new_user_prompt() {
+        let dir = tempdir().unwrap();
+        let (seen, hook) = capture_hook(&dir, "#!/bin/sh\ncat >> SEEN\nprintf '\\n' >> SEEN\n");
+        let mut config = base_config(&dir);
+        config.hooks.push(hook);
+        config.model.script_json = Some(r#"[{"content":"one"},{"content":"two"}]"#.into());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("first prompt");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+
+        let mut second = RunRequest::new("");
+        second.keep_workspace = true;
+        second.session_wait = true;
+        second.resume_run_id = Some(first.run_id.clone());
+        second.resume_prompt = Some("second prompt".into());
+        let parked = eng.run(second).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+
+        let payloads = hook_payloads(&seen);
+        assert_eq!(payloads.len(), 2, "{payloads:?}");
+        assert_eq!(payloads[0]["event"], "pre_prompt");
+        assert_eq!(payloads[0]["payload"]["prompt"], "first prompt");
+        assert_eq!(payloads[0]["payload"]["run_id"], first.run_id);
+        assert_eq!(payloads[1]["payload"]["prompt"], "second prompt");
+        assert_eq!(payloads[1]["payload"]["run_id"], first.run_id);
+    }
+
+    #[tokio::test]
+    async fn session_wait_ask_resume_does_not_fire_pre_prompt() {
+        let dir = tempdir().unwrap();
+        let (seen, hook) = capture_hook(&dir, "#!/bin/sh\ncat >> SEEN\nprintf '\\n' >> SEEN\n");
+        let mut config = base_config(&dir);
+        config.hooks.push(hook);
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},{"content":"done"}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+
+        let payloads = hook_payloads(&seen);
+        assert_eq!(payloads.len(), 1, "{payloads:?}");
+        assert_eq!(payloads[0]["payload"]["prompt"], "write");
+    }
+
+    #[tokio::test]
+    async fn session_wait_fail_closed_pre_prompt_leaves_the_session() {
+        let dir = tempdir().unwrap();
+        let count = dir.path().join("count");
+        let (seen, hook) = capture_hook(
+            &dir,
+            &format!(
+                "#!/bin/sh\ncat >> SEEN\nprintf '\\n' >> SEEN\nn=0\n[ -f {count} ] && n=$(cat {count})\nn=$((n+1))\necho $n > {count}\n[ \"$n\" -eq 2 ] && exit 1\nexit 0\n",
+                count = count.display()
+            ),
+        );
+        let mut config = base_config(&dir);
+        config.hooks.push(hook);
+        config.model.script_json = Some(r#"[{"content":"one"},{"content":"two"}]"#.into());
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("first");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+
+        let mut blocked = RunRequest::new("");
+        blocked.keep_workspace = true;
+        blocked.session_wait = true;
+        blocked.resume_run_id = Some(first.run_id.clone());
+        blocked.resume_prompt = Some("nope".into());
+        let err = eng.run(blocked).await.unwrap_err();
+        assert!(err.to_string().contains("pre-prompt hook failed"), "{err}");
+
+        let mut retry = RunRequest::new("");
+        retry.keep_workspace = true;
+        retry.session_wait = true;
+        retry.resume_run_id = Some(first.run_id.clone());
+        retry.resume_prompt = Some("nope".into());
+        let parked = eng.run(retry).await.unwrap();
+        assert_eq!(parked.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        let payloads = hook_payloads(&seen);
+        assert_eq!(payloads.len(), 3, "{payloads:?}");
+        assert_eq!(payloads[1]["payload"]["prompt"], "nope");
+        assert_eq!(payloads[2]["payload"]["prompt"], "nope");
+    }
+
+    #[tokio::test]
+    async fn unattended_run_does_not_fire_pre_prompt() {
+        let dir = tempdir().unwrap();
+        let (seen, hook) = capture_hook(&dir, "#!/bin/sh\ncat >> SEEN\nprintf '\\n' >> SEEN\n");
+        let pre_run_seen = dir.path().join("pre_run.jsonl");
+        let pre_run_script = dir.path().join("pre_run.sh");
+        std::fs::write(
+            &pre_run_script,
+            format!(
+                "#!/bin/sh\ncat >> {}\nprintf '\\n' >> {}\n",
+                pre_run_seen.display(),
+                pre_run_seen.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&pre_run_script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&pre_run_script, perms).unwrap();
+        }
+        let mut config = base_config(&dir);
+        config.hooks.push(hook);
+        config.hooks.push(crate::config::HookSettings {
+            event: "pre_run".into(),
+            command: pre_run_script.to_string_lossy().into(),
+            args: vec![],
+            timeout_ms: 2_000,
+            fail_closed: true,
+        });
+        config.model.script_json = Some(
+            r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+                .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("unattended");
+        req.keep_workspace = true;
+        let result = eng.run(req).await.unwrap();
+        assert!(result.success);
+        assert!(!seen.exists() || hook_payloads(&seen).is_empty());
+        let pre_run = hook_payloads(&pre_run_seen);
+        assert_eq!(pre_run.len(), 1, "{pre_run:?}");
+        assert_eq!(pre_run[0]["event"], "pre_run");
+    }
+
     #[tokio::test]
     async fn session_wait_parks_ask_on_mutating_tool() {
         let dir = tempdir().unwrap();

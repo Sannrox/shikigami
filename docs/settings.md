@@ -499,7 +499,7 @@ hooks. See [hooks.md](hooks.md).
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `event` | required | `pre_run` \| `post_run` \| `pre_tool` \| `post_tool` \| `on_park` \| `stop` ([verify before success](hooks.md#stop-verify-before-success)) |
+| `event` | required | `pre_run` \| `post_run` \| `pre_tool` \| `post_tool` \| `on_park` \| `pre_prompt` \| `stop` ([hooks.md](hooks.md)) |
 | `command` | required | Executable path or name on `PATH` |
 | `args` | `[]` | Extra argv |
 | `timeout_ms` | `5000` | Kill after this duration (capped at 120s; `stop` at 1h) |

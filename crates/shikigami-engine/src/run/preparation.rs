@@ -55,6 +55,11 @@ pub(super) async fn prepare(
             checkpoint.run_id
         )));
     }
+    let hook_run_id = request
+        .resume_run_id
+        .as_deref()
+        .unwrap_or(fresh_run_id.as_str());
+    run_pre_prompt_hook(engine, request, hook_run_id).await?;
     let is_resume = resume_checkpoint.is_some();
     let stored_prompt_start = resume_checkpoint
         .as_ref()
@@ -911,6 +916,41 @@ async fn run_pre_hook(
     .map_err(|error| {
         RunError::Governance(GovernanceError::Message(format!(
             "pre-run hook failed; governed state remains checkpointed for resume: {error}"
+        )))
+    })
+}
+
+/// Session-wait new user prompt only. Ask/plan/escalate resume of the same
+/// prompt does not fire. Unattended `run` does not fire (`pre_run` still does).
+/// Runs before the follow-up prompt is persisted so fail-closed leaves the
+/// parked session retryable.
+async fn run_pre_prompt_hook(
+    engine: &Engine,
+    request: &RunRequest,
+    run_id: &str,
+) -> Result<(), RunError> {
+    if !request.session_wait {
+        return Ok(());
+    }
+    if request.resume_run_id.is_some() && request.resume_prompt.is_none() {
+        return Ok(());
+    }
+    let prompt = request
+        .resume_prompt
+        .as_deref()
+        .unwrap_or(request.task.as_str());
+    hooks::run_hooks(
+        &engine.config.hooks,
+        HookEvent::PrePrompt,
+        json!({
+            "run_id": run_id,
+            "prompt": hooks::truncated_prompt(prompt),
+        }),
+    )
+    .await
+    .map_err(|error| {
+        RunError::Governance(GovernanceError::Message(format!(
+            "pre-prompt hook failed: {error}"
         )))
     })
 }
