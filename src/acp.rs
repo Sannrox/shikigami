@@ -502,8 +502,7 @@ impl AcpHost {
 
     /// The session's model catalog in ACP's (experimental) session model
     /// shape: `currentModelId` and `availableModels`. `None` when the catalog
-    /// cannot be read (a governed plane that does not answer), so the client
-    /// offers no switch.
+    /// cannot be read, so the client offers no switch.
     async fn session_models(&self, live: &LiveSession) -> Option<Value> {
         let available = self.session_catalog(live).await.ok()?;
         let harness = self
@@ -527,9 +526,8 @@ impl AcpHost {
     }
 
     /// `session/set_model`: later prompts of the session use `modelId`. The
-    /// id must be in the session's catalog; governed, that catalog is the
-    /// plane's, and a plane that does not answer refuses the switch (fail
-    /// closed). A prompt already running keeps its model.
+    /// id must be in the session's catalog. A prompt already running keeps
+    /// its model.
     async fn session_set_model(&self, params: &Value) -> Result<Value, Value> {
         self.require_init()?;
         let session_id = params
@@ -958,7 +956,7 @@ impl AcpHost {
                 Some(ParkKind::Approval) => {
                     return Err(rpc_error(
                         -32603,
-                        "governed approval parks are not mapped on ACP yet",
+                        "approval parks are not mapped on ACP yet",
                     ));
                 }
                 None => {
@@ -1894,7 +1892,7 @@ async fn resume_prompt_drive(
     {
         return Err(rpc_error(
             -32603,
-            "governed approval parks are not mapped on ACP yet",
+            "approval parks are not mapped on ACP yet",
         ));
     }
     Err(rpc_error(-32603, "session run is not waiting for a prompt"))
@@ -4935,39 +4933,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn governed_set_model_fails_closed_without_the_plane_catalog() {
-        let dir = tempdir().unwrap();
-        let host = scripted_host_with(dir.path(), r#"[{"content":"a"}]"#, |config| {
-            config.governance.adapter = "sekai-chisei".into();
-            config.governance.fail_closed = true;
-            config.governance.endpoint = None;
-            config.model.alternates = vec!["model-b".into()];
-        });
-        let client = RecordingClient {
-            updates: Mutex::new(Vec::new()),
-            permission: PermissionOutcome::Allow,
-        };
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        let session_id = init_and_new(&host, &client, &project).await;
-        let refused = host
-            .handle(
-                json!({"jsonrpc": "2.0", "id": 4, "method": "session/set_model",
-                       "params": {"sessionId": session_id, "modelId": "model-b"}}),
-                &client,
-            )
-            .await
-            .unwrap();
-        assert_eq!(refused["error"]["code"], -32000, "{refused}");
-        assert_eq!(
-            refused["error"]["data"]["shikigami"]["kind"],
-            "modelCatalog"
-        );
-        let persisted = host.load_persisted(&session_id).unwrap();
-        assert_eq!(persisted.model, None);
-    }
-
     async fn prompt(
         host: &AcpHost,
         client: &dyn AcpClient,
@@ -5481,12 +5446,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_plane_adapter_keeps_prompt_capabilities_false() {
+    async fn initialize_scripted_adapter_advertises_content_kinds() {
         let dir = tempdir().unwrap();
         let state = StateRoot::new(dir.path().join("state"));
         let mut config = Config::default();
         config.governance.adapter = "local".into();
-        config.model.adapter = "plane".into();
+        config.model.adapter = "scripted".into();
         config.events.adapter = "none".into();
         let host = AcpHost::new(Harness::from_config(config, state).unwrap());
         let client = RecordingClient {
@@ -5505,50 +5470,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_initialize_speaks_v1_with_prompt(rpc_ok(&init), false, false, false);
-
-        let cwd = dir.path().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let created = host
-            .handle(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "session/new",
-                    "params": { "cwd": cwd, "mcpServers": [] }
-                }),
-                &client,
-            )
-            .await
-            .unwrap();
-        let session_id = rpc_ok(&created)["sessionId"].as_str().unwrap().to_string();
-        let denied = host
-            .handle(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "session/prompt",
-                    "params": {
-                        "sessionId": session_id,
-                        "prompt": [
-                            {"type":"text","text":"inspect"},
-                            {"type":"image","mimeType":"image/png","data": encode_base64(b"\x89PNG")}
-                        ]
-                    }
-                }),
-                &client,
-            )
-            .await
-            .unwrap();
-        assert_eq!(denied["error"]["code"], -32602);
-        assert!(
-            denied["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("cannot read image"),
-            "{}",
-            denied["error"]["message"]
-        );
+        assert_initialize_speaks_v1_with_prompt(rpc_ok(&init), true, true, true);
     }
 
     fn http_acp_host(dir: &std::path::Path) -> AcpHost {

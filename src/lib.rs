@@ -18,34 +18,26 @@
 //! # }
 //! ```
 //!
-//! Ports are selected by [Config] settings. Production governance is
-//! `sekai-chisei`. Tenkai delivers the binary only — not a runtime port.
+//! Ports are selected by [Config] settings. Rusui is the plane caller
+//! ([ADR 0024](https://github.com/Sannrox/shikigami/blob/main/docs/decisions/0024-local-guest-rusui-plane-caller.md)).
+//! Tenkai delivers the binary only — not a runtime port.
 
 pub use shikigami_engine::{
     artifacts, checkpoint, config, content, context, events, evidence_queue, fallback, hooks,
     identity, mcp, metrics, prompts, registry, replay, run, sandbox, security_finder,
-    security_triage, state, tools, tracing_export, transcript, worker_lifecycle, workspace,
+    security_triage, state, tools, tracing_export, transcript, workspace,
 };
 
-pub(crate) use shikigami_engine::digest;
-
 pub mod acp;
-pub mod agent_turn;
 pub mod governance;
 pub mod harness;
 pub mod mcp_server;
 pub mod model;
-pub mod plane_host;
-pub mod plane_intake;
 pub mod serve;
 
 #[cfg(test)]
 mod content_tests;
 
-pub use agent_turn::{
-    AgentTurnAck, AgentTurnContinuation, AgentTurnPort, AgentTurnServeOptions, ClaimedAgentTurn,
-    PublishedAgentDefinition, SiteAgentInstanceView, run_agent_turn_serve,
-};
 pub use config::{
     Config, ConfigSource, EgressMode, HookSettings, McpFraming, McpServerSettings, PermissionMode,
     SandboxBackend, SandboxSettings, ToolSockets, TracingSettings,
@@ -71,18 +63,6 @@ pub use identity::{PRODUCT, PRODUCT_DESCRIPTION, VERSION};
 pub use mcp_server::McpRunSummary;
 pub use metrics::{Metrics, MetricsError, MetricsSnapshot};
 pub use model::{CostEstimate, TokenUsage};
-pub use plane_host::{PlaneHostError, PlaneHostInfo, PlaneHostOptions};
-#[cfg(feature = "governance-sekai-chisei")]
-pub use plane_host::{
-    PreparedAgentTurnHost, PreparedPlaneHost, prepare_agent_turn_host, prepare_plane_host,
-};
-pub use plane_intake::{
-    CLAIMED_STATUS, ClaimedPlaneWork, ClaimedWorkMappingError, ClaimedWorkPolicy,
-    DEFAULT_MAX_CLAIMED_TASK_BYTES, DEFAULT_MAX_CONTINUATION_BYTES, PlaneAck, PlaneAckOutcome,
-    PlaneCheckpoint, PlaneClaim, PlaneClaimEventKind, PlaneClaimLease, PlaneIntakeError,
-    PlaneIntakePort, PlaneServeOptions, PlaneWorkContinuation, RUNTIME_DISPATCH_KIND, RuntimeToken,
-    map_claimed_work, run_plane_serve,
-};
 pub use prompts::{DEFAULT_PROMPT, HARNESS_V1, PromptAsset};
 pub use registry::{RunEventRecord, RunRecord, RunRegistry};
 pub use replay::{
@@ -107,13 +87,6 @@ pub use tools::{TodoItem, TodoStatus};
 pub use transcript::{
     ExportOptions, TRANSCRIPT_SCHEMA_VERSION, TranscriptError, export_run_transcript,
 };
-pub use worker_lifecycle::{
-    TerminalOutcome, WORKER_LIFECYCLE_CONCURRENCY_V1, WORKER_LIFECYCLE_PROTOCOL,
-    WORKER_LIFECYCLE_SCHEMA_VERSION, WorkerLifecycle, WorkerLifecycleError,
-    WorkerLifecycleIdentity, WorkerLifecycleSnapshot, WorkerLifecycleState, lifecycle_path,
-    resolve_state, serve_lifecycle_http,
-};
-
 /// Library liveness probe.
 pub fn ping() -> PingResponse {
     PingResponse {

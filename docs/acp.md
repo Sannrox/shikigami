@@ -77,9 +77,10 @@ park. `escalate` parks use the same permission RPC; allow/deny resume with
 `resume_answer` (`approved` / `denied`, or `outcome.answer` when the client
 sends it). Plan write-jail (`run.plan_jail`) parks `report` as `ParkKind::Plan`
 with the plan text in the permission question; Allow accepts execute authority
-on the same run, Deny rejects, completes failed, and keeps the jail. Governed approval parks stay
-fail-closed. `http-callback` and sekai-chisei stay brokered. Clients that cannot
-answer `session/request_permission` cannot complete a mutating prompt.
+on the same run, Deny rejects, completes failed, and keeps the jail. Ask parks
+stay fail-closed. `http-callback` stays brokered for non-ACP process hosts.
+Clients that cannot answer `session/request_permission` cannot complete a
+mutating prompt.
 
 Content parts reuse `run_content` bounds. `session/prompt` concatenates `text`
 parts. A session whose first prompt carries attachments is a content session

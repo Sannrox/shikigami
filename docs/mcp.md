@@ -164,11 +164,11 @@ describe an error.
 
 ### Client security
 
-- Tools execute through the same `authorize_tool` path when governed.
+- Tools execute through the same `authorize_tool` path.
 - Prefer `tools.mode` without bash when combining MCP and least privilege.
 - Stdio MCP children use the same reconstructed environment as Bash: harness
   `governance.token_env`, HTTP `model.api_key_env`, and MCP `token_env` names
-  are removed before spawn (children do not inherit plane/model secrets).
+  are removed before spawn (children do not inherit host/model secrets).
 - HTTP MCP transports consult `[network]` egress policy.
 - Stdio responses are decoded by a dedicated reader so a deadline cannot leave
   the stream mid-frame; a late response is discarded by request id. The reader
@@ -180,100 +180,12 @@ describe an error.
 `command = "mock"` registers a deterministic echo tool without spawning MCP.
 An optional `link` argument comes back as a `resource_link`.
 
-## Governed ontology reads and Action calls (`sekai-mcp`)
+## Plane MCP servers (retired)
 
-sekai-chisei ships `sekai-mcp`, a stdio projection host over three native
-RPCs: `sekai.objects.get` (`GetObject`), `sekai.actions.submit`
-(`SubmitActionInstance`), and `chisei.receipt.read` (`GetOperationReceipt`).
-Attaching it lets a run consume the same object and Action contracts as an
-ordinary SDK client. Shikigami adds no ontology or policy model of its own:
-the plane owns objects, admission decisions, and receipts; the harness owns
-the run, its tool authorization, and run/tool correlation.
-
-Two authorization layers stay in force and either one alone prevents the
-effect:
-
-| Layer | Owner | Denial surface |
-| --- | --- | --- |
-| Harness tool authorization (`tools.enabled`, governance `authorize_tool`) | Shikigami | Tool never reaches the server; `ToolEnd.ok = false`, detail `... denies tool ...` |
-| Native admission (namespace access, policy, budget) | sekai-chisei | `sekai.actions.submit` returns `instance.status = "denied"` with `deny_reason`, or a `permission_denied` tool error |
-
-Every call carries the plane operation identity the run was started with:
-
-```json
-{"operation_id": "<logical_operation_id>", "input": {"id": "widget-1"}}
-{"operation_id": "<logical_operation_id>", "input": {"type_id": "review.intake", "version": "1.0.0", "parameters_json": "{\"summary\":\"approve\"}", "idempotency_key": "<logical_operation_id>/review.intake"}}
-{"operation_id": "<logical_operation_id>", "input": {"operation_id": "<logical_operation_id>"}}
-```
-
-The plane binds `request_id` to that operation, so the instance's
-`operation_id`, the receipt spine, and the run record's
-`logical_operation_id` all name the same operation, while `ToolStart` /
-`ToolEnd` events keep `run_id` and `call_id` next to it. Reserved session
-metadata (`authorization`, `principal`, `x-sekai-*`, `x-chisei-*`) in tool
-arguments is rejected by the server; credentials stay in its process
-environment and are never part of a tool call.
-
-Duplicate-effect protection is the plane's idempotency contract, and the
-harness must not paper over it:
-
-| Situation | Plane behavior | Required harness behavior |
-| --- | --- | --- |
-| Same idempotency key, same parameters | `replay: true`, same `instance_id` | Treat as the earlier effect, not a new one |
-| Same key, changed parameters | `already_exists` tool error | Report failure; do not invent a new key |
-| Access revoked | `tools/list` or the call fails `permission_denied` | Fail closed; nothing to reconcile |
-| Deadline or cancellation mid-call | Effect may or may not have been admitted | Read `chisei.receipt.read` for the operation before claiming success or retrying |
-| Attempt killed, replacement started | Instance persists under the operation | Replacement reads the receipt, then re-submits with the same key and observes `replay: true` |
-
-### Offline proof
-
-`tests/mcp_governed_action.rs` (`cargo test --test mcp_governed_action`)
-runs this matrix without a plane. The test binary re-executes itself as a
-stdio server shaped like `sekai-mcp` — newline framing, the three tools,
-`operation_id` + `input` arguments, session binding on every dispatch,
-reserved-metadata rejection, idempotent replay, digest conflicts, policy
-denials, receipts, a durable effect ledger, and a journal of every native RPC
-(the reference SDK view). Scripted runs cover the happy path, harness denial,
-plane denial, revoked discovery, revoked admission, replay, changed-parameter
-conflict, deadline reconciliation, and a SIGKILLed attempt followed by a
-replacement under the same operation. Each case asserts the effect ledger
-count, compares harness-side transcripts and events with the journal
-(object identity, selected Action version, `instance_id`, `request_digest`,
-`operation_id`), and checks run/tool correlation.
-
-### Local integration recipe (live plane)
-
-Not run in CI. Requires a local sekai-chisei with a namespace the principal
-can read and one enabled governed Action type.
-
-1. Build `sekai-mcp` from the sekai-chisei checkout
-   (`cargo build --bin sekai-mcp`) and seed the plane: a namespace, a typed
-   object, and a governed Action type (`review.intake@1.0.0` with a
-   `summary` parameter in the upstream synthetic example). Keep the bearer
-   token in `SEKAI_CREDENTIAL` only.
-2. Configure the harness ([examples/governed-mcp-action.toml](../examples/governed-mcp-action.toml)):
-   `governance.adapter = "local"` for a harness-only proof or
-   `sekai-chisei` for the fully governed path, `framing = "newline"`,
-   `timeout_secs = 10`, and `tools.enabled` listing exactly the three
-   `mcp.sekai.*` tools plus `report`.
-3. Run the scripted read → submit → receipt sequence. The CLI `run` derives
-   the operation from the run id; an embedding host sets
-   `RunRequest.logical_operation_id`, and plane-admitted work receives it
-   through `serve --intake plane`. Use the same value as the `operation_id`
-   argument of every MCP call. Keep the workspace and JSONL events.
-4. Compare with the reference SDK calls through the plane's admin client or
-   CLI: `GetObject(id)` must return the same `id`, `kind`, and `namespace`;
-   `GetActionInstance` must show the same `instance_id`, `version`,
-   `status`, and `request_digest`; `GetOperationReceipt(operation_id)` must
-   attribute the effect to that instance.
-5. Repeat the submit with the same key (expect `replay: true`), with changed
-   parameters (expect `already_exists`), after revoking the principal's
-   namespace grant (expect `permission_denied` and no effect), and once with
-   `timeout_secs = 1` against a paused plane (expect `deadline_exceeded`
-   followed by a receipt read that settles the outcome).
-
-Record the run id, operation id, and receipt in the change that relies on the
-proof; the plane, not the harness transcript, remains the system of record.
+Attaching a plane projection host from this crate is not a supported governed
+path. Rusui is the plane caller
+([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)). Generic MCP
+stdio/HTTP servers still attach through `[[tools.mcp_servers]]`.
 
 ## Non-goals (v1)
 

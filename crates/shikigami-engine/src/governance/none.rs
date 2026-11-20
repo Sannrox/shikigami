@@ -4,13 +4,8 @@ use crate::checkpoint::{
     ApprovalPark, GovernanceCheckpoint, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
 use crate::config::Config;
-use crate::content::ContentModelTurnV1;
-use crate::model::{ChatMessage, ModelTurn};
-use crate::tools::ToolDef;
 
-use super::{
-    ContentTurnContext, GovernanceError, GovernancePort, LocalDurability, RunHandle, RunOutcome,
-};
+use super::{GovernanceError, GovernancePort, LocalDurability, RunHandle, RunOutcome};
 
 pub struct NoneGovernance {
     enabled_tools: Vec<String>,
@@ -30,10 +25,6 @@ impl NoneGovernance {
 impl GovernancePort for NoneGovernance {
     fn id(&self) -> &'static str {
         "none"
-    }
-
-    fn plans_with_local_model(&self) -> bool {
-        true
     }
 
     fn health_detail(&self) -> String {
@@ -166,37 +157,6 @@ impl GovernancePort for NoneGovernance {
         self.report_tool(handle, name, ok, detail).await
     }
 
-    async fn plan_turn(
-        &self,
-        _handle: &RunHandle,
-        system: &str,
-        messages: &[ChatMessage],
-        tools: &[ToolDef],
-        local_model: &dyn crate::model::ModelPort,
-    ) -> Result<ModelTurn, GovernanceError> {
-        local_model
-            .next_turn(system, messages, tools)
-            .await
-            .map_err(GovernanceError::Model)
-    }
-
-    async fn plan_content_turn(
-        &self,
-        _handle: &RunHandle,
-        system: &str,
-        context: ContentTurnContext<'_>,
-    ) -> Result<ContentModelTurnV1, GovernanceError> {
-        super::plan_local_content_turn(
-            context.local_model,
-            system,
-            context.messages,
-            context.tools,
-            context.capabilities,
-            context.resolver,
-        )
-        .await
-    }
-
     async fn authorize_tool(
         &self,
         _handle: &RunHandle,
@@ -228,35 +188,5 @@ impl GovernancePort for NoneGovernance {
         _outcome: RunOutcome,
     ) -> Result<(), GovernanceError> {
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{ModelError, ScriptedModel};
-
-    /// A model failure surfaces as the model's own error, not as governance.
-    #[tokio::test]
-    async fn model_failure_is_reported_as_a_model_error() {
-        let mut config = Config::default();
-        config.model.script_json = Some("[]".into());
-        let model = ScriptedModel::from_config(&config).unwrap();
-        let handle = RunHandle {
-            run_id: "run-1".into(),
-            operation_id: "run-1".into(),
-            namespace: "local".into(),
-        };
-
-        let error = NoneGovernance::from_config(&config)
-            .plan_turn(&handle, "", &[], &[], &model)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            GovernanceError::Model(ModelError::ScriptExhausted)
-        ));
-        assert_eq!(error.to_string(), "scripted turns exhausted");
     }
 }

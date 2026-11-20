@@ -20,30 +20,25 @@ artifacts/
 
 Each `model_turn` (and `content_turn`) line names the model that answered it
 in its detail, `turn=3 model=<id>`, because an ACP or TUI session can switch
-models between prompts of one run (`session/set_model`, `/model`). For a
-governed run the id is the routing preference sent to the plane. `run.json`
+models between prompts of one run (`session/set_model`, `/model`). `run.json`
 `model` is the model when the run finished. Older journals show `turn=<n>`
 only.
 
-The registry is an operator convenience and crash-recovery aid. Governed
-operation truth, policy, leases, budgets, and retry limits remain owned by
-sekai-chisei. A durable per-run ownership lease prevents another process from
-resuming an active run; the lease is refreshed independently while a model or
-tool call is in progress and expires only after the owner stops heartbeating.
-Local checkpoints are not governed receipts. After an abrupt host death,
-authorizing-only tool markers may retry the original identity; a started or
-completed host effect is in-doubt and is not redispatched; staged tool reports
-are replayed without repeating the effect; a checkpointed terminal `report`
-completes the same run, with its `data`. A `require_approval` park keeps the staged tool
-`Authorizing`, records the plane approval identity, and resumes without
-`--answer`; the next wake re-validates current authority. The process-kill
-matrix lives in `tests/governed_tool_crash_recovery.rs`.
+The registry is an operator convenience and crash-recovery aid. A durable
+per-run ownership lease prevents another process from resuming an active run;
+the lease is refreshed independently while a model or tool call is in progress
+and expires only after the owner stops heartbeating. After an abrupt host
+death, authorizing-only tool markers may retry the original identity; a
+started or completed host effect is in-doubt and is not redispatched; staged
+tool reports are replayed without repeating the effect; a checkpointed
+terminal `report` completes the same run, with its `data`. Session `ask=park`
+keeps the staged tool `Authorizing` and resumes through the same permission
+path.
 
 Replay attempts use the same run directory layout and registry lifecycle. Their
 checkpoint adds a manifest digest, source identity, isolated workspace binding,
 and comparison cursor. That block is recovery metadata only; the immutable
-host-supplied replay evidence bundle remains the comparison input, and the
-governance plane remains authoritative when used. `replay-export` may
+host-supplied replay evidence bundle remains the comparison input. `replay-export` may
 recompute that bundle from retained artifacts when `snapshots/initial` and the
 other bindings are present; the live workspace is not original-input proof.
 See [replay.md](replay.md).
@@ -193,8 +188,9 @@ Routes:
 | POST | /runs/<id>/cleanup[?force=1] | Terminal record cleanup |
 
 Use Authorization: Bearer <token> on every request. Tokens are required even
-for loopback binds to prevent browser-based cross-site task submission. The HTTP surface does not admit governed work or
-override governance; plane intake remains the explicit --intake plane path.
+for loopback binds to prevent browser-based cross-site task submission. The
+HTTP surface admits filesystem-queue work only. Plane-claim intake was
+removed ([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 
 `POST /runs` accepts a W3C `traceparent` (and optional `tracestate`) header.
 The queued run then continues the caller's trace; see

@@ -362,20 +362,6 @@ pub fn from_config(config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
     match config.model.adapter.as_str() {
         "scripted" => Ok(Box::new(ScriptedModel::from_config(config)?)),
         "http" => Err(ModelError::HttpUnavailable),
-        "plane" => {
-            if config.model.fallback.enabled {
-                match config.model.fallback.adapter.as_deref() {
-                    Some("scripted") => Ok(Box::new(ScriptedModel::from_fallback_config(config)?)),
-                    Some("http") => Err(ModelError::HttpUnavailable),
-                    Some(other) => Err(ModelError::Message(format!(
-                        "unknown model.fallback.adapter `{other}`"
-                    ))),
-                    None => Ok(Box::new(PlaneModelPlaceholder)),
-                }
-            } else {
-                Ok(Box::new(PlaneModelPlaceholder))
-            }
-        }
         other => Err(ModelError::Message(format!(
             "unknown model adapter `{other}`"
         ))),
@@ -401,17 +387,6 @@ impl ScriptedModel {
             .model
             .script_json
             .clone()
-            .unwrap_or_else(default_script_json);
-        Self::from_script_json(&raw, config)
-    }
-
-    pub fn from_fallback_config(config: &Config) -> Result<Self, ModelError> {
-        let raw = config
-            .model
-            .fallback
-            .script_json
-            .clone()
-            .or_else(|| config.model.script_json.clone())
             .unwrap_or_else(default_script_json);
         Self::from_script_json(&raw, config)
     }
@@ -634,33 +609,8 @@ impl ModelPort for ScriptedModel {
     }
 
     fn fresh_for_child(&self, config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
-        // Rebuild through the engine selector so plane+scripted fallback still
-        // uses `from_fallback_config`. Nested tests that stash a child script
-        // on `config.model.script_json` stay on the `scripted` adapter path.
-        from_config(config)
-    }
-}
-
-struct PlaneModelPlaceholder;
-
-#[async_trait]
-impl ModelPort for PlaneModelPlaceholder {
-    fn id(&self) -> &'static str {
-        "plane"
-    }
-
-    async fn next_turn(
-        &self,
-        _system: &str,
-        _messages: &[ChatMessage],
-        _tools: &[ToolDef],
-    ) -> Result<ModelTurn, ModelError> {
-        Err(ModelError::Message(
-            "model adapter `plane` is only used through sekai-chisei governance".into(),
-        ))
-    }
-
-    fn fresh_for_child(&self, config: &Config) -> Result<Box<dyn ModelPort>, ModelError> {
+        // Rebuild from settings so nested tests that stash a child script on
+        // `config.model.script_json` stay on the `scripted` adapter path.
         from_config(config)
     }
 }
@@ -669,8 +619,7 @@ const DEFAULT_HTTP_MODEL: &str = "gpt-4.1-mini";
 
 /// Resolve the model name an adapter will actually use.
 pub fn effective_model_name(config: &Config) -> String {
-    if config.model.adapter == "http" && config.model.model == "auto" && !config.uses_plane_model()
-    {
+    if config.model.adapter == "http" && config.model.model == "auto" {
         DEFAULT_HTTP_MODEL.into()
     } else {
         config.model.model.clone()
@@ -746,25 +695,8 @@ mod cost_tests {
         config.model.adapter = "http".into();
         assert_eq!(effective_model_name(&config), "gpt-4.1-mini");
 
-        config.governance.adapter = "sekai-chisei".into();
-        assert_eq!(effective_model_name(&config), "auto");
-
         config.model.model = "openai/gpt-5.5".into();
         assert_eq!(effective_model_name(&config), "openai/gpt-5.5");
-    }
-
-    #[test]
-    fn fresh_for_child_keeps_scripted_fallback_script() {
-        let mut config = Config::default();
-        config.model.adapter = "plane".into();
-        config.model.fallback.enabled = true;
-        config.model.fallback.adapter = Some("scripted".into());
-        config.model.script_json = Some(r#"[{"content":"primary"}]"#.into());
-        config.model.fallback.script_json = Some(r#"[{"content":"fallback"}]"#.into());
-        let parent = ScriptedModel::from_fallback_config(&config).unwrap();
-        let child = parent.fresh_for_child(&config).unwrap();
-        assert_eq!(child.id(), "scripted");
-        assert_eq!(child.content_digest(), parent.content_digest());
     }
 
     #[tokio::test]
@@ -790,14 +722,6 @@ mod cost_tests {
     fn engine_from_config_leaves_http_to_the_host_crate() {
         let mut config = Config::default();
         config.model.adapter = "http".into();
-        assert!(matches!(
-            from_config(&config),
-            Err(ModelError::HttpUnavailable)
-        ));
-
-        config.model.adapter = "plane".into();
-        config.model.fallback.enabled = true;
-        config.model.fallback.adapter = Some("http".into());
         assert!(matches!(
             from_config(&config),
             Err(ModelError::HttpUnavailable)

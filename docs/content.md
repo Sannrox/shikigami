@@ -87,9 +87,7 @@ Opaque references must be credential-free 8–256 character identifiers.
 
 Ungoverned scripted runs provide deterministic fixtures for every part kind.
 Other model adapters deny content unless they implement the content-specific
-port method. Governed runs use only the sekai-chisei content RPC; they never
-fall back to the local text or HTTP path. The plane may redact, omit, or reject
-parts based on policy and provider capability. Content v1 rejects the
+port method. Content turns always go through `ModelPort`. Content v1 rejects the
 `escalate`/park tool because its request contract has no operator-answer field.
 
 ## Resume and export

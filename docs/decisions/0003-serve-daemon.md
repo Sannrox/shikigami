@@ -1,6 +1,7 @@
 # ADR 0003: `shikigami serve` local-queue daemon
 
-- Status: Accepted
+- Status: Accepted; plane-claim intake later shipped and then removed by
+  [0024](0024-local-guest-rusui-plane-caller.md). Filesystem serve remains.
 - Date: 2026-07-25
 - Supersedes: —
 
@@ -21,8 +22,8 @@ a second control plane.
    status file). Health is not a multi-tenant control plane.
 4. **Graceful shutdown** drains in-flight runs or cancels them on signal
    (SIGTERM/SIGINT), then exits.
-5. **Not a control plane.** sekai-chisei remains governance; serve only hosts
-   execution.
+5. **Not a control plane.** Serve only hosts execution. Policy, when a plane
+   is used, lives in the caller (rusui).
 
 ## Consequences
 
@@ -33,6 +34,7 @@ a second control plane.
 
 ## Later
 
-Filesystem `POST /runs` and `--intake plane` later shipped as additive host
-surfaces. The filesystem queue remains the offline default. See
-[serve.md](../serve.md).
+Filesystem `POST /runs` shipped as an additive host surface. `--intake plane`
+later shipped and was removed by
+[ADR 0024](0024-local-guest-rusui-plane-caller.md). The filesystem queue
+remains. See [serve.md](../serve.md).

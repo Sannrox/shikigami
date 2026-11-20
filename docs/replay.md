@@ -179,15 +179,9 @@ cost evidence.
 
 ## Governance boundary
 
-Replay evidence and checkpoints are harness-local comparative state, not
-sekai-chisei receipts. Profiles that require governance fail before model or
-tool execution unless their adapter can verify the bound policy and receipt
-evidence.
-
-The current sekai-chisei facade does not expose that replay-verification
-contract, so required governed replay is reported as unverifiable rather than
-falling back to `local` or `none`. Offline deterministic replay remains fully
-testable without a live service.
+Replay evidence and checkpoints are harness-local comparative state. They are
+not plane receipts. Offline deterministic replay remains fully testable
+without a live service.
 
 ## Related boundaries
 

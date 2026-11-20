@@ -19,7 +19,7 @@ shikigami [--state DIR] [--config FILE] [--model MODEL] [--preset PRESET] <COMMA
 | `runs [ID] [--diagnose], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([runs.md](runs.md)) |
 | `artifacts ID [--patch]` | Export retained artifact metadata or a captured patch |
 | `metrics [--json\|--prometheus]` | Export aggregate durable metrics ([metrics.md](metrics.md)) |
-| `serve [--intake filesystem\|plane] [--poll-ms N] [--max-jobs N]` | Filesystem-queue or plane-claim daemon host; filesystem supports bounded worker/control options ([serve.md](serve.md)) |
+| `serve [--poll-ms N] [--max-jobs N]` | Filesystem-queue daemon host with bounded worker/control options ([serve.md](serve.md)) |
 | `mcp` | MCP stdio server: `doctor`, `run`, `run_start`/`run_status`/`run_wait` ([mcp.md](mcp.md)) |
 | `acp` | ACP session host, newline JSON-RPC ([acp.md](acp.md)). Evolving; not freeze-core |
 | `tui` | Chat with an agent that works on the files in this folder ([tui.md](tui.md)). Evolving; not freeze-core |
@@ -28,8 +28,8 @@ shikigami [--state DIR] [--config FILE] [--model MODEL] [--preset PRESET] <COMMA
 | `replay-export <run_id> [--json] [-o DIR]` | Reconstruct a replay package from retained artifacts, or report missing bindings ([replay.md](replay.md)) |
 | `run-content --request FILE --payloads DIR [--json]` | Bounded content run through a versioned process request ([content.md](content.md)) |
 
-Task text is optional with `run --resume`. Approval parks re-validate plane
-authority on resume; see the [governed guide](governed-path.md#run-requires-plane--model-providers).
+Task text is optional with `run --resume`. Mutating-tool parks resume through
+the same ask path; ACP uses `session/request_permission` ([acp.md](acp.md)).
 
 ## Common options
 
@@ -37,7 +37,7 @@ authority on resume; see the [governed guide](governed-path.md#run-requires-plan
 | --- | --- |
 | `--state` / `SHIKIGAMI_STATE` | State root. Default: `~/.shikigami/projects/<encoded-cwd>`; `SHIKIGAMI_HOME` replaces `~/.shikigami`. See [settings.md](settings.md#host-state-root). Project-local scratch: `--state ./.shikigami-state`. |
 | `--config` / `SHIKIGAMI_CONFIG` | Settings file path |
-| `--model` / `SHIKIGAMI_MODEL` | Final model override; `auto` delegates routing to sekai-chisei |
+| `--model` / `SHIKIGAMI_MODEL` | Final model override; HTTP `auto` maps to `gpt-4.1-mini` |
 | `--preset` / `SHIKIGAMI_PRESET` | Narrow tools and add a procedure: a built-in name or a preset `.toml` file; `code` means none. See [presets.md](presets.md) |
 | `run --keep-workspace` | Keep the workspace after a successful run |
 | `run --json` | Print the run result as JSON on stdout (same shape as the MCP `run` result, including report `data`); exit status unchanged |

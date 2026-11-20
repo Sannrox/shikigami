@@ -1,32 +1,32 @@
 # Credential helper patterns
 
-How to supply plane tokens and model API keys **without** putting secrets in
-TOML, git, doctor output, or event streams.
+How to supply model API keys and host-callback tokens **without** putting
+secrets in TOML, git, doctor output, or event streams.
 
 ## Recommended pattern: environment variables
 
 | Secret | Settings field | Typical env |
 | --- | --- | --- |
-| Plane service-principal client secret | `governance.client_secret_env` | `SEKAI_CLIENT_SECRET` |
 | HTTP model API key | `model.api_key_env` | `OPENAI_API_KEY` (or `CLIPROXY_API_KEY` for a local OpenAI-compatible gateway; see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)) |
+| Host-callback Bearer token | `governance.token_env` | a host-chosen name |
 
 Settings store **names of env vars**, never secret values.
 
 ```toml
-# examples/governed-sekai-chisei.toml
-[governance]
-adapter = "sekai-chisei"
-endpoint = "http://127.0.0.1:50051"
-namespace = "team-a"
-client_secret_env = "SEKAI_CLIENT_SECRET"
+[model]
+adapter = "http"
+api_key_env = "OPENAI_API_KEY"
 ```
 
 ```bash
-export SEKAI_CLIENT_SECRET="…"  # shell / CI secret store / agent host
-export OPENAI_API_KEY="…"       # only for ungoverned http model
+export OPENAI_API_KEY="…"       # HTTP model
 export CLIPROXY_API_KEY="…"     # gateway access key when using examples/cliproxy-http.toml
-shikigami --config examples/governed-sekai-chisei.toml doctor
+shikigami --config examples/cliproxy-http.toml doctor
 ```
+
+Plane service-principal secrets (`governance.client_secret_env`) were removed
+with the in-tree plane client. Rusui holds plane credentials
+([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 
 ### Anti-patterns
 
@@ -55,22 +55,20 @@ model content are host/workspace data — do not put secrets there.
 ## Bash subprocesses
 
 Foreground and background Bash environments are explicitly reconstructed from
-the parent environment. Any configured plane token, client secret, active HTTP
+the parent environment. Any configured host-callback token, active HTTP
 model key, or MCP bearer-token env name is removed, so those harness
 credentials cannot be expanded or printed by Bash. Shell-startup controls are
 also removed and Bash startup files are disabled.
 
 When a claimed job has a live runtime token, Bash receives only that grant as
 `SHIKIGAMI_JOB_TOKEN` (and `SHIKIGAMI_JOB_TENANT` / `SHIKIGAMI_JOB_NAMESPACE`
-when set). The grant expires with the claim; an expired token is omitted.
-Heartbeat refresh of the runtime token updates the grant for later child
-spawns. Leftover `SHIKIGAMI_JOB_*` variables from the parent environment are
+when set). Leftover `SHIKIGAMI_JOB_*` variables from the parent environment are
 stripped so they cannot impersonate a live grant.
 
 The supported 1.x API intentionally preserves other parent variables for local
 compatibility. Managed hosts must therefore launch Shikigami with an allowlist
 containing only the process variables tools require. Provider keys should stay
-in the external model/governance service rather than the Shikigami process.
+in the external model service rather than the Shikigami process.
 This protection covers Bash child environments and MCP stdio server children
 (same protected-name reconstruction). An OS sandbox or container is still
 required to isolate files, processes, and network access.
@@ -82,11 +80,11 @@ starting shikigami (no first-party keyring feature required):
 
 ```bash
 # example pattern (macOS)
-export SEKAI_CLIENT_SECRET="$(security find-generic-password -s sekai-client-secret -w)"
+export OPENAI_API_KEY="$(security find-generic-password -s openai-api-key -w)"
 ```
 
-Hosts such as onmyoji may inject credentials into the process environment
-instead. Shikigami only reads env var names declared in settings.
+Hosts may inject credentials into the process environment instead. Shikigami
+only reads env var names declared in settings.
 
 ## CI
 

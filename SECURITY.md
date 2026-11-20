@@ -43,27 +43,31 @@ Operators and integrators should understand:
 - **Bash is opt-in.** Default tool allow-lists exclude `bash`. Enabling it
   increases blast radius. Bash receives an explicitly constructed environment;
   configured harness credential variables are always removed. Under
-  `governed` / `fail_closed`, Bash also requires `sandbox.backend=rlimit` and
-  non-unrestricted `network.egress` (still not a full OS/container jail).
-- **Governance fail-closed.** Profiles with `fail_closed` or `governed` must not
-  run when the plane is missing or unhealthy. Mid-run tool authorization for
-  `sekai-chisei` / `http-callback` always denies on transport/policy errors.
-  If you need offline operation, use the `local` profile deliberately.
-- **Secrets.** Use environment variables for plane tokens and model API keys.
-  Never commit `.shikigami-state/`, `.env` files with secrets, or tokens in TOML.
-- **Plane trust.** When using sekai-chisei, the plane is a trusted control
-  boundary for model routing and policy. Secure the plane and its credentials
-  separately (see sekai-chisei security docs).
+  `fail_closed` or a remote host-callback adapter, Bash also requires
+  `sandbox.backend=rlimit` and non-unrestricted `network.egress` (still not a
+  full OS/container jail).
+- **Governance fail-closed.** `fail_closed` or `http-callback` / `host-authz`
+  must not run when the configured host broker is missing or unhealthy.
+  Mid-run tool authorization for `http-callback` always denies on
+  transport/policy errors. If you need offline operation, use the `local`
+  profile deliberately. The in-tree plane client was removed; rusui is the
+  plane caller ([ADR 0024](docs/decisions/0024-local-guest-rusui-plane-caller.md)).
+- **Secrets.** Use environment variables for host-callback tokens and model
+  API keys. Never commit `.shikigami-state/`, `.env` files with secrets, or
+  tokens in TOML.
+- **Caller trust.** When rusui uses a plane, that plane is a trusted control
+  boundary for model routing and policy. Secure it and its credentials in the
+  caller, not in this guest.
 - **Delivery.** Installing the binary via tenkai or other tools is out of band;
   verify release signatures and supply chain according to your delivery system.
 
 ## Safe defaults checklist
 
-- Prefer `profile = local` for demos and CI without a plane.
+- Prefer `profile = local` for demos and CI.
 - Keep `bash` out of `tools.enabled` unless required.
 - For managed Bash runs, launch Shikigami with an allowlisted parent
   environment containing only variables tools require.
-- Set `fail_closed = true` only when a plane is actually operated.
+- Set `fail_closed = true` only when a host broker is actually operated.
 - Run untrusted tasks in disposable workspaces; use `--keep-workspace` only when
   you need forensic inspection.
 
@@ -73,8 +77,8 @@ Operators and integrators should understand:
 ### Assets
 
 - Host filesystem outside the run workspace
-- Plane credentials and model API keys in the environment
-- Integrity of governed audit trails (when using sekai-chisei)
+- Host-callback tokens and model API keys in the environment
+- Integrity of local run journals and checkpoints
 
 ### Adversaries / abuse cases
 
@@ -89,8 +93,9 @@ Operators and integrators should understand:
 - Output and file size caps in the tool executor
 - Explicit foreground/background Bash environments with mandatory harness
   credential and shell-startup-variable removal
-- Fail-closed doctor/run for governed profiles without a healthy plane
+- Fail-closed doctor/run when `fail_closed` or `http-callback` is unhealthy
 - Secrets via env / `token_env`, not TOML
+- Retired plane-client names fail at resolve rather than running locally
 
 ### Non-goals (v0)
 

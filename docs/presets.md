@@ -52,12 +52,11 @@ closed with a startup error:
   Only listed MCP tools are attached, and servers with none listed are not
   started.
 - A listed MCP tool keeps the base authority. In-process governance allows it
-  only when the base `tools.enabled` lists it; governed runs leave the
-  decision to the plane.
+  only when the base `tools.enabled` lists it.
 - Every listed MCP tool must exist once its servers attach, or the run refuses
   to start and names the missing tools.
-- The `site-agent`, `security-finder`, and `security-triage` profiles refuse
-  presets.
+- The `security-finder` profile refuses presets. Retired `site-agent` and
+  `security-triage` names fail at resolve.
 - A [session mode](settings.md#sessionmodesname) can narrow the preset's tools
   further.
 

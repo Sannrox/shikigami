@@ -1,6 +1,7 @@
 # ADR 0001: Ports and settings (sekai-chisei first-party)
 
-- Status: Accepted
+- Status: Accepted; clause 2 (first-party `sekai-chisei` adapter) superseded by
+  [0024](0024-local-guest-rusui-plane-caller.md)
 - Date: 2026-07-25
 - Supersedes: —
 

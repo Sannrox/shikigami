@@ -1201,9 +1201,7 @@ mod tests {
         let config = http_config("SHIKIGAMI_HTTP_TEST_KEY_ADAPTER", "adapter-key");
         let parent = HttpModel::from_config(&config).unwrap();
         let mut other = config.clone();
-        other.model.adapter = "plane".into();
-        other.model.fallback.enabled = true;
-        other.model.fallback.adapter = Some("http".into());
+        other.model.base_url = Some("http://127.0.0.1:9/v1".into());
         let child = HttpModel::from_config_reusing(&other, Some(&parent)).unwrap();
         assert!(!Arc::ptr_eq(&parent.client, &child.client));
     }

@@ -1,8 +1,7 @@
 //! The red-team probe author (`examples/red-team.toml`, #466): it reads an RPC
 //! surface diff and past bug reports, emits `sekai.probe-spec/v1` specs only
 //! through its final `report`, holds no network or RPC tool, and ends blocked
-//! when its budget runs out. The model is scripted; a real-model run is
-//! sekai-chisei#1622's evidence.
+//! when its budget runs out. The model is scripted.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,8 +62,7 @@ async fn run(
     (result, events)
 }
 
-// A test-side mirror of `sekai.probe-spec/v1`. The guarded runner in
-// sekai-chisei is the authority and re-validates every spec it loads.
+// A test-side mirror of `sekai.probe-spec/v1`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProbeSpec {

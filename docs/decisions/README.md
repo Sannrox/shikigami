@@ -4,10 +4,10 @@ Accepted decisions that must outlive a single PR.
 
 | ADR | Title | Status |
 | --- | --- | --- |
-| [0001](0001-ports-and-settings.md) | Ports and settings (sekai-chisei first-party) | Accepted |
+| [0001](0001-ports-and-settings.md) | Ports and settings (sekai-chisei first-party) | Accepted; clause 2 superseded by 0024 |
 | [0002](0002-run-identity.md) | Run identity and plane operation lineage | Accepted |
 | [0003](0003-serve-daemon.md) | `shikigami serve` local-queue daemon | Accepted |
-| [0004](0004-v1-contract.md) | v1.0 contract and bright-future sequencing | Accepted |
+| [0004](0004-v1-contract.md) | v1.0 contract and bright-future sequencing | Accepted; governed-path freeze row superseded by 0024 |
 | [0005](0005-governed-run-replay.md) | Governed run replay | Accepted |
 | [0006](0006-bounded-content-parts.md) | Bounded multimodal content | Accepted |
 | [0007](0007-governed-local-fallback.md) | Governed local-model fallback | Accepted |
@@ -27,6 +27,7 @@ Accepted decisions that must outlive a single PR.
 | [0021](0021-session-attachment-custody.md) | ACP sessions keep their attachments | Accepted |
 | [0022](0022-narrowing-presets.md) | Presets narrow the operator config | Accepted |
 | [0023](0023-tui-customization.md) | TUI customization is declarative | Accepted |
+| [0024](0024-local-guest-rusui-plane-caller.md) | Shikigami is a local guest; rusui is the plane caller | Accepted |
 
 ## When to write an ADR
 

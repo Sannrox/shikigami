@@ -12,9 +12,8 @@ use crate::config::{Config, ConfigError, ConfigSource};
 
 /// Filesystem layout for local Shikigami state.
 ///
-/// Operational truth for governed operations lives in the governance plane
-/// (sekai-chisei when selected). This root holds optional host config, scratch,
-/// and run workspaces.
+/// This root holds optional host config, scratch, and run workspaces.
+/// Durable operational truth, when a plane is used, lives in the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRoot {
     path: PathBuf,

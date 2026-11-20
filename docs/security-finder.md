@@ -62,8 +62,9 @@ shikigami --config examples/security-finder.toml run \
   "Review dependencies and advisories in this workspace"
 ```
 
-A claimed plane Action uses the same profile with governance `sekai-chisei`
-and `serve --intake plane`. Agent-turn intake stays the site-agent profile.
+This profile is local. It does not select a plane adapter. Site-agent and
+security-triage overlays were removed with the in-tree plane client
+([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 
 ## Blocked runs
 

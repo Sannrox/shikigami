@@ -3,20 +3,16 @@ members = [
     "crates/shikigami-cli",
     "crates/shikigami-tui",
     "crates/shikigami-types",
-    "crates/shikigami-plane-intake",
     "crates/shikigami-engine",
     "crates/shikigami-http",
-    "crates/shikigami-governance-sekai",
 ]
 default-members = [
     ".",
     "crates/shikigami-cli",
     "crates/shikigami-tui",
     "crates/shikigami-types",
-    "crates/shikigami-plane-intake",
     "crates/shikigami-engine",
     "crates/shikigami-http",
-    "crates/shikigami-governance-sekai",
 ]
 resolver = "2"
 
@@ -33,21 +29,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 readme = "README.md"
-description = "Open-source local-first headless agent harness with pluggable governance adapters."
+description = "Open-source local-first headless agent harness."
 repository.workspace = true
 publish.workspace = true
 
 [features]
-default = ["governance-sekai-chisei", "model-http"]
-governance-sekai-chisei = ["dep:shikigami-governance-sekai"]
+default = ["model-http"]
 model-http = ["dep:reqwest", "dep:shikigami-http", "shikigami-engine/model-http"]
 
 [dependencies]
 bytes = "1"
 shikigami-engine = { path = "crates/shikigami-engine", default-features = false }
 shikigami-http = { path = "crates/shikigami-http", optional = true }
-shikigami-governance-sekai = { path = "crates/shikigami-governance-sekai", optional = true }
-shikigami-plane-intake = { path = "crates/shikigami-plane-intake" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -69,16 +62,6 @@ uuid = { version = "1", features = ["v4"] }
 # Optional: OpenAI-compatible HTTP model for local/ungoverned runs
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 url = "2.5.8"
-
-[[test]]
-name = "governed_tool_crash_recovery"
-path = "tests/governed_tool_crash_recovery.rs"
-harness = false
-
-[[test]]
-name = "mcp_governed_action"
-path = "tests/mcp_governed_action.rs"
-harness = false
 
 [dev-dependencies]
 async-trait = "0.1"

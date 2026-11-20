@@ -1,6 +1,7 @@
 # ADR 0005: Governed run replay
 
-- Status: Accepted
+- Status: Accepted; plane-receipt verification superseded by
+  [0024](0024-local-guest-rusui-plane-caller.md) (this crate no longer calls the plane)
 - Date: 2026-08-23
 - Resolves: [Issue #231](https://github.com/Sannrox/shikigami/issues/231)
 - Discussion: [#235](https://github.com/Sannrox/shikigami/discussions/235)

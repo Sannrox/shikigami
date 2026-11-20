@@ -11,22 +11,19 @@ Operator and contributor documentation for **shikigami**.
 | Understand architecture | [../DESIGN.md](../DESIGN.md) |
 | Look up CLI commands and options | [cli.md](cli.md) |
 | Configure profiles and env vars | [settings.md](settings.md) |
-| Run against sekai-chisei | [governed-path.md](governed-path.md) |
-| Operate Action admit → claim → run | [plane-action-run.md](plane-action-run.md) |
-| Map run outcomes to plane harvest | [harvest.md](harvest.md) |
+| Understand the local-guest cut | [decisions/0024-local-guest-rusui-plane-caller.md](decisions/0024-local-guest-rusui-plane-caller.md) |
 | Correlate run / operation / attempt ids | [identity.md](identity.md) |
 | Versioned prompts and attribution | [prompts.md](prompts.md) |
 | Runtime skill packs | [skills.md](skills.md) |
 | Narrow tools per task with presets | [presets.md](presets.md) |
-| Plane/model credential patterns | [credentials.md](credentials.md) |
-| Run serve (queue or plane claim) + worker lifecycle | [serve.md](serve.md) |
+| Model and host-callback credential patterns | [credentials.md](credentials.md) |
+| Run serve (filesystem queue) | [serve.md](serve.md) |
 | Inspect runs, cancel, artifacts, and HTTP control | [runs.md](runs.md) |
 | Run with bounded image, audio, and document parts | [content.md](content.md) |
 | Replay a run from content-bound evidence | [replay.md](replay.md) |
 | Propose isolation probe specs from RPC diffs | [red-team.md](red-team.md) |
 | Run specialised read-only security reviews | [security-finder.md](security-finder.md) |
-| Turn findings into evidence-backed exposure verdicts | [security-triage.md](security-triage.md) |
-| Run site-agent turns fail-closed, gateway-only | [site-agent.md](site-agent.md) |
+| Retired plane-client pages | [governed-path.md](governed-path.md), [plane-action-run.md](plane-action-run.md), [harvest.md](harvest.md), [site-agent.md](site-agent.md), [security-triage.md](security-triage.md) |
 | Deliver binary via tenkai | [tenkai-delivery.md](tenkai-delivery.md) |
 | Build or consume the OCI image | [oci-image.md](oci-image.md) |
 | Run deterministic project checks | [project-verification.md](project-verification.md) |
@@ -52,7 +49,7 @@ Dated closeouts. Use the operator pages above for current behavior.
 | 1.0 freeze audit (2026-07-26 no-go) | [1.0-freeze-audit.md](1.0-freeze-audit.md) |
 | External embedding product position (research #141) | [research/141-external-embedding-position.md](research/141-external-embedding-position.md) |
 | Profile and adapter configuration recommendation (research #142) | [research/142-profile-adapter-configuration.md](research/142-profile-adapter-configuration.md) |
-| Plane work intake recommendation (research #129); shipped as [serve.md](serve.md) / [plane-action-run.md](plane-action-run.md) | [research/129-plane-work-intake.md](research/129-plane-work-intake.md) |
+| Plane work intake recommendation (research #129); filesystem serve remains in [serve.md](serve.md); plane claim retired by [ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md) | [research/129-plane-work-intake.md](research/129-plane-work-intake.md) |
 | OS-level sandbox research #281; shipped backends in [settings.md](settings.md) and [ADR 0013](decisions/0013-os-sandbox-adapter.md) | [research/281-os-sandbox-adapter.md](research/281-os-sandbox-adapter.md) |
 | Usable agent guest (ACP, TUI, loop copies; 2026-10-03); shipped contract in [ADR 0014](decisions/0014-usable-guest-hosts.md) / [ADR 0015](decisions/0015-nested-child-runs.md) | [research/usable-agent-guest.md](research/usable-agent-guest.md) |
 | Guest session surfaces (mode, attachments, extension, skill seams; 2026-10-06); [ADR 0016](decisions/0016-session-mode.md)–[0019](decisions/0019-skill-context-boundaries.md) | [research/guest-session-surfaces.md](research/guest-session-surfaces.md) |
