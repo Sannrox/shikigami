@@ -66,5 +66,5 @@ text must not drop the task, policy, or authority limits.
 Procedures that need a clean window are a new run or session. The host
 starts a fresh session and may pass a `handoff` brief as the first prompt.
 Nested `child_run` isolates a subtask inside one session. Host compact stays
-operator-owned: `compact_after_messages`, TUI `/compact`, ACP
-`session/compact`.
+operator-owned: `compact_after_messages`, `context_window_tokens` /
+`compact_at_usage_percent`, TUI `/compact`, ACP `session/compact`.

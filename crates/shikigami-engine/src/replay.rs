@@ -678,6 +678,7 @@ pub fn replay_config(config: &Config) -> Config {
     replay.hooks.clear();
     // Ordered replay evidence must remain append-only in the checkpoint.
     replay.run.compact_after_messages = None;
+    replay.run.context_window_tokens = None;
     replay
 }
 
@@ -1844,7 +1845,10 @@ mod tests {
     fn replay_runtime_disables_context_compaction() {
         let mut config = Config::default();
         config.run.compact_after_messages = Some(4);
-        assert_eq!(replay_config(&config).run.compact_after_messages, None);
+        config.run.context_window_tokens = Some(1000);
+        let replay = replay_config(&config);
+        assert_eq!(replay.run.compact_after_messages, None);
+        assert_eq!(replay.run.context_window_tokens, None);
     }
 
     fn seed_export_run(

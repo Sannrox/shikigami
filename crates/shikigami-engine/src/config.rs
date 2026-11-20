@@ -620,6 +620,16 @@ pub struct RunSettings {
     /// Messages to retain after the initial user task when compacting (default 8).
     #[serde(default = "default_compact_keep_tail")]
     pub compact_keep_tail: u32,
+    /// Operator-declared context window in tokens. Unset keeps fill-based
+    /// compact off. Compared to the last completed turn's reported
+    /// `input_tokens` using [`Self::compact_at_usage_percent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    /// Compact before the next model call when last-turn `input_tokens` is at
+    /// or above this percent of [`Self::context_window_tokens`] (1–100).
+    /// Consulted only when the window is set.
+    #[serde(default = "default_compact_at_usage_percent")]
+    pub compact_at_usage_percent: u32,
     /// Restrict mutating tools to `.shikigami/plan.md` until the parked plan
     /// is accepted. Additive; default off.
     #[serde(default)]
@@ -720,6 +730,10 @@ fn default_compact_keep_tail() -> u32 {
     8
 }
 
+fn default_compact_at_usage_percent() -> u32 {
+    80
+}
+
 impl Default for RunSettings {
     fn default() -> Self {
         Self {
@@ -728,6 +742,8 @@ impl Default for RunSettings {
             timeout_secs: None,
             compact_after_messages: None,
             compact_keep_tail: default_compact_keep_tail(),
+            context_window_tokens: None,
+            compact_at_usage_percent: default_compact_at_usage_percent(),
             plan_jail: false,
             nested: false,
             nested_max_depth: default_nested_max_depth(),
@@ -1366,6 +1382,16 @@ impl Config {
         if self.run.nested_max_children == 0 {
             return Err(ConfigError::Invalid(
                 "run.nested_max_children must be greater than zero".into(),
+            ));
+        }
+        if self.run.context_window_tokens == Some(0) {
+            return Err(ConfigError::Invalid(
+                "run.context_window_tokens must be greater than zero".into(),
+            ));
+        }
+        if !(1..=100).contains(&self.run.compact_at_usage_percent) {
+            return Err(ConfigError::Invalid(
+                "run.compact_at_usage_percent must be between 1 and 100".into(),
             ));
         }
         match self.model.adapter.as_str() {
@@ -2235,6 +2261,53 @@ prompt = "be thorough"
         config.run.nested_max_children = 0;
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("nested_max_children"), "{err}");
+    }
+
+    #[test]
+    fn fill_compact_settings_default_off_and_refuse_zero_window_or_bad_percent() {
+        let config = Config::default();
+        assert_eq!(config.run.context_window_tokens, None);
+        assert_eq!(config.run.compact_at_usage_percent, 80);
+        config.validate().unwrap();
+
+        let mut zero_window = Config::default();
+        zero_window.run.context_window_tokens = Some(0);
+        let err = zero_window.validate().unwrap_err();
+        assert!(err.to_string().contains("context_window_tokens"), "{err}");
+
+        let mut percent = Config::default();
+        percent.run.compact_at_usage_percent = 0;
+        let err = percent.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("compact_at_usage_percent"),
+            "{err}"
+        );
+        percent.run.compact_at_usage_percent = 101;
+        let err = percent.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("compact_at_usage_percent"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn fill_compact_settings_load_from_toml() {
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[run]
+context_window_tokens = 1000
+compact_at_usage_percent = 75
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::resolve(&path).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.run.context_window_tokens, Some(1000));
+        assert_eq!(config.run.compact_at_usage_percent, 75);
     }
 
     #[test]

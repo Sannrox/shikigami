@@ -744,6 +744,28 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_context_window_when_set() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.run.context_window_tokens = Some(1000);
+        config.run.compact_at_usage_percent = 80;
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        assert!(
+            report.lines.iter().any(|line| {
+                line.contains("context_window") && line.contains("1000") && line.contains("80%")
+            }),
+            "expected context_window doctor line: {:?}",
+            report.lines
+        );
+        assert!(
+            report.to_json_value().get("context_window").is_none(),
+            "context_window must stay in lines, not the JSON schema"
+        );
+    }
+
+    #[test]
     fn doctor_names_plan_jail_when_selected() {
         let dir = tempdir().unwrap();
         let state = StateRoot::new(dir.path().join("state"));
