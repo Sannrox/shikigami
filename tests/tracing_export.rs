@@ -36,8 +36,8 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
 
     let exported = fs::read_to_string(&spans_path).unwrap();
     assert!(exported.contains("\"name\":\"run\""), "{exported}");
-    assert!(exported.contains("\"name\":\"turn\""), "{exported}");
-    assert!(exported.contains("\"name\":\"tool\""), "{exported}");
+    assert!(exported.contains("\"name\":\"chat "), "{exported}");
+    assert!(exported.contains("\"name\":\"execute_tool "), "{exported}");
     assert!(exported.contains(&result.run_id), "{exported}");
     assert!(exported.contains("parent-op-284"), "{exported}");
     assert!(exported.contains("\"key\":\"run_id\""), "{exported}");
@@ -64,11 +64,12 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
         "no preset: {run:?}"
     );
     assert_eq!(run["parent.source"], "none");
-    let turns = &spans["turn"];
+    let turns = operation_spans(&exported, "chat");
     let tokens: Vec<_> = turns
         .iter()
         .map(|turn| {
             assert_eq!(turn["gen_ai.request.model"], result.model);
+            assert_eq!(turn["gen_ai.operation.name"], "chat");
             (
                 turn["gen_ai.usage.input_tokens"].as_str(),
                 turn["gen_ai.usage.output_tokens"].as_str(),
@@ -76,7 +77,7 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
         })
         .collect();
     assert_eq!(tokens, [("11", "7"), ("13", "5")]);
-    for turn in turns {
+    for turn in &turns {
         assert!(
             !turn.contains_key("gen_ai.usage.cache_read.input_tokens"),
             "unreported cache must not appear: {turn:?}"
@@ -86,9 +87,9 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
             "unreported cache write must not appear: {turn:?}"
         );
     }
-    let mut tools: Vec<_> = spans["tool"]
-        .iter()
-        .map(|tool| tool["gen_ai.tool.name"].as_str())
+    let mut tools: Vec<_> = operation_spans(&exported, "execute_tool")
+        .into_iter()
+        .map(|tool| tool["gen_ai.tool.name"].as_str().to_owned())
         .collect();
     tools.sort_unstable();
     assert_eq!(tools, ["report", "write_file"]);
@@ -133,7 +134,7 @@ async fn tool_and_turn_spans_export_closed_end_reasons() {
         !exported.contains("SECRET"),
         "payload leaked into spans: {exported}"
     );
-    let tools = &spans_by_name(&exported)["tool"];
+    let tools = operation_spans(&exported, "execute_tool");
     let bash_errors: Vec<_> = tools
         .iter()
         .filter(|tool| tool["gen_ai.tool.name"] == "bash")
@@ -156,7 +157,7 @@ async fn tool_and_turn_spans_export_closed_end_reasons() {
         !report.contains_key("error.type"),
         "successful report: {report:?}"
     );
-    let turns = &spans_by_name(&exported)["turn"];
+    let turns = operation_spans(&exported, "chat");
     assert!(
         turns.iter().any(|turn| {
             turn.get("gen_ai.response.finish_reasons")
@@ -164,6 +165,77 @@ async fn tool_and_turn_spans_export_closed_end_reasons() {
                 == Some("length")
         }),
         "missing length finish reason: {exported}"
+    );
+}
+
+#[tokio::test]
+async fn semantic_names_and_background_job_span_match_runtime() {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.json");
+    let mut config = offline_config(dir.path());
+    config.tracing.enabled = true;
+    config.tracing.exporter = "otlp".into();
+    config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+    config.tools.enabled = vec!["bash".into(), "report".into()];
+    let start = serde_json::json!({"tool_calls":[{
+        "name":"bash_background",
+        "args_json": serde_json::json!({"command":"sleep 0.25"}).to_string(),
+    }]});
+    let wait = serde_json::json!({"tool_calls":[{
+        "name":"bash_job_status",
+        "args_json": serde_json::json!({"job_id":"job-1","timeout_ms":2000}).to_string(),
+    }]});
+    let report = r#"{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}"#;
+    config.model.script_json = Some(format!("[{start},{wait},{report}]"));
+
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let mut request = RunRequest::new("jobs");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success, "{}", result.summary);
+
+    let exported = fs::read_to_string(&spans_path).unwrap();
+    assert!(
+        !exported.contains("sleep"),
+        "job command leaked into spans: {exported}"
+    );
+    let spans = exported_spans(&exported);
+    let chat = spans
+        .iter()
+        .find(|span| {
+            span["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("chat "))
+        })
+        .unwrap_or_else(|| panic!("missing chat span: {exported}"));
+    assert!(
+        chat["name"].as_str().unwrap().ends_with(&result.model),
+        "{}",
+        chat["name"]
+    );
+    let tool = spans
+        .iter()
+        .find(|span| span["name"] == "execute_tool bash_background")
+        .unwrap_or_else(|| panic!("missing tool span: {exported}"));
+    let job = spans
+        .iter()
+        .find(|span| span["name"] == "job job-1")
+        .unwrap_or_else(|| panic!("missing job span: {exported}"));
+    assert_eq!(job["parentSpanId"], tool["spanId"]);
+    let start_ns: u128 = job["startTimeUnixNano"].as_str().unwrap().parse().unwrap();
+    let end_ns: u128 = job["endTimeUnixNano"].as_str().unwrap().parse().unwrap();
+    assert!(
+        end_ns.saturating_sub(start_ns) >= 200_000_000,
+        "job span shorter than the job: {start_ns} {end_ns} {exported}"
+    );
+    let job_attrs = span_attributes(job);
+    assert_eq!(
+        job_attrs.get("shikigami.job.id").map(String::as_str),
+        Some("job-1")
+    );
+    assert_eq!(
+        job_attrs.get("process.exit.code").map(String::as_str),
+        Some("0")
     );
 }
 
@@ -194,7 +266,7 @@ async fn cached_input_tokens_reach_turn_spans_when_reported() {
     assert_eq!(result.usage.cache_creation_input_tokens, Some(5));
 
     let exported = fs::read_to_string(&spans_path).unwrap();
-    let turns = &spans_by_name(&exported)["turn"];
+    let turns = operation_spans(&exported, "chat");
     assert_eq!(
         turns[0]["gen_ai.usage.cache_read.input_tokens"].as_str(),
         "80"
@@ -378,7 +450,11 @@ async fn bash_sees_the_tool_spans_traceparent() {
     let spans = exported_spans(&exported);
     let tool = spans
         .iter()
-        .find(|span| span["name"] == "tool")
+        .find(|span| {
+            span["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("execute_tool "))
+        })
         .unwrap_or_else(|| panic!("{exported}"));
     let expected = format!(
         "00-{}-{}-01",
@@ -469,28 +545,42 @@ fn exported_spans(exported: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn span_attributes(span: &serde_json::Value) -> BTreeMap<String, String> {
+    span["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|attribute| {
+            (
+                attribute["key"].as_str().unwrap().to_owned(),
+                attribute["value"]["stringValue"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
 /// Attributes of each exported span, grouped by span name in export order.
 fn spans_by_name(exported: &str) -> HashMap<String, Vec<BTreeMap<String, String>>> {
     let mut spans: HashMap<String, Vec<_>> = HashMap::new();
     for span in exported_spans(exported) {
-        let attributes = span["attributes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|attribute| {
-                (
-                    attribute["key"].as_str().unwrap().to_owned(),
-                    attribute["value"]["stringValue"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                )
-            })
-            .collect();
         spans
             .entry(span["name"].as_str().unwrap().to_owned())
             .or_default()
-            .push(attributes);
+            .push(span_attributes(&span));
     }
     spans
+}
+
+/// Attributes of spans whose `gen_ai.operation.name` matches, in export order.
+fn operation_spans(exported: &str, operation: &str) -> Vec<BTreeMap<String, String>> {
+    exported_spans(exported)
+        .into_iter()
+        .map(|span| span_attributes(&span))
+        .filter(|attributes| {
+            attributes.get("gen_ai.operation.name").map(String::as_str) == Some(operation)
+        })
+        .collect()
 }

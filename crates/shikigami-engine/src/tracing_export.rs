@@ -80,6 +80,7 @@ pub const ALLOWED_SPAN_ATTRIBUTES: &[&str] = &[
     "call_id",
     // Tool spans.
     "gen_ai.tool.name",
+    "gen_ai.operation.name",
     "error.type",
     // Turn spans.
     "gen_ai.request.model",
@@ -93,6 +94,8 @@ pub const ALLOWED_SPAN_ATTRIBUTES: &[&str] = &[
     "shikigami.prompt_id",
     "shikigami.preset_id",
     "shikigami.termination",
+    "shikigami.job.id",
+    "process.exit.code",
 ];
 
 /// Where a run's parent trace context came from.
@@ -235,6 +238,8 @@ struct ActiveTrace {
     run_span: OpenSpan,
     current_turn: Option<OpenSpan>,
     current_tools: Vec<OpenSpan>,
+    /// Background bash jobs; they outlive the tool span that started them.
+    current_jobs: Vec<OpenSpan>,
     /// Ended spans not yet handed to the exporter.
     finished_spans: Vec<FinishedSpan>,
     /// HTTP exports in flight; `finish` awaits them.
@@ -338,6 +343,7 @@ impl RunSpanTrace {
                 },
                 current_turn: None,
                 current_tools: Vec::new(),
+                current_jobs: Vec::new(),
                 finished_spans: Vec::new(),
                 in_flight: Vec::new(),
                 first_error: None,
@@ -383,17 +389,19 @@ impl RunSpanTrace {
         };
         inner.close_turn(false);
         let parent = inner.run_span.span_id.clone();
+        let mut attributes = identity_attributes(
+            &inner.identities.run_id,
+            &inner.identities.logical_operation_id,
+            &inner.identities.plan_operation_id,
+            None,
+        );
+        attributes.extend(allow_attribute("gen_ai.operation.name", "chat"));
         inner.current_turn = Some(OpenSpan {
             span_id: random_hex(16),
             parent_span_id: parent,
-            name: "turn".into(),
+            name: "chat".into(),
             start_unix_nano: unix_nano(),
-            attributes: identity_attributes(
-                &inner.identities.run_id,
-                &inner.identities.logical_operation_id,
-                &inner.identities.plan_operation_id,
-                None,
-            ),
+            attributes,
         });
     }
 
@@ -409,6 +417,9 @@ impl RunSpanTrace {
             return;
         };
         if let Some(turn) = inner.current_turn.as_mut() {
+            if !model.is_empty() {
+                turn.name = format!("chat {model}");
+            }
             turn.attributes
                 .extend(allow_attribute("gen_ai.request.model", model));
             if let Some(usage) = usage {
@@ -458,14 +469,65 @@ impl RunSpanTrace {
             &inner.identities.plan_operation_id,
             Some(call_id),
         );
+        attributes.extend(allow_attribute("gen_ai.operation.name", "execute_tool"));
         attributes.extend(allow_attribute("gen_ai.tool.name", tool_name));
         inner.current_tools.push(OpenSpan {
             span_id: random_hex(16),
             parent_span_id: parent,
-            name: "tool".into(),
+            name: format!("execute_tool {tool_name}"),
             start_unix_nano: unix_nano(),
             attributes,
         });
+    }
+
+    /// Opens a span for a background job, parented to the tool span that
+    /// started it. The job span stays open after that tool span ends.
+    pub fn start_job(&mut self, job_id: &str, parent_call_id: &str) {
+        let Some(inner) = self.inner.as_mut() else {
+            return;
+        };
+        let parent = inner
+            .current_tools
+            .iter()
+            .rfind(|span| span.attribute("call_id") == Some(parent_call_id))
+            .map(|span| span.span_id.clone())
+            .or_else(|| inner.current_turn.as_ref().map(|span| span.span_id.clone()))
+            .unwrap_or_else(|| inner.run_span.span_id.clone());
+        let mut attributes = identity_attributes(
+            &inner.identities.run_id,
+            &inner.identities.logical_operation_id,
+            &inner.identities.plan_operation_id,
+            None,
+        );
+        attributes.extend(allow_attribute("shikigami.job.id", job_id));
+        inner.current_jobs.push(OpenSpan {
+            span_id: random_hex(16),
+            parent_span_id: parent,
+            name: format!("job {job_id}"),
+            start_unix_nano: unix_nano(),
+            attributes,
+        });
+    }
+
+    /// Closes the job span with the process exit code when the job was
+    /// observed to exit. `None` is an abandoned or killed job.
+    pub fn end_job(&mut self, job_id: &str, exit_code: Option<i32>) {
+        let Some(inner) = self.inner.as_mut() else {
+            return;
+        };
+        if let Some(index) = inner
+            .current_jobs
+            .iter()
+            .rposition(|span| span.attribute("shikigami.job.id") == Some(job_id))
+        {
+            let mut open = inner.current_jobs.remove(index);
+            if let Some(code) = exit_code {
+                open.attributes
+                    .extend(allow_attribute("process.exit.code", &code.to_string()));
+            }
+            inner.finished_spans.push(open.finish(exit_code == Some(0)));
+            inner.flush();
+        }
     }
 
     pub fn end_tool(&mut self, call_id: &str, ok: bool, error: Option<ToolSpanError>) {
@@ -500,6 +562,7 @@ impl RunSpanTrace {
         if inner.finished {
             return Ok(());
         }
+        inner.close_jobs();
         inner.close_turn(success);
         inner
             .run_span
@@ -548,6 +611,13 @@ impl ActiveTrace {
         }
         if let Some(open) = self.current_turn.take() {
             self.finished_spans.push(open.finish(ok));
+        }
+        self.flush();
+    }
+
+    fn close_jobs(&mut self) {
+        while let Some(open) = self.current_jobs.pop() {
+            self.finished_spans.push(open.finish(false));
         }
         self.flush();
     }
@@ -860,7 +930,62 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        assert_eq!(names, ["turn", "tool"]);
+        assert_eq!(names, ["chat model", "execute_tool read_file"]);
+    }
+
+    #[test]
+    fn background_job_span_parents_to_the_starting_tool_and_exports_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spans.jsonl");
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(path.to_string_lossy().into());
+        let handle = RunHandle {
+            run_id: "run-1".into(),
+            operation_id: "run-1".into(),
+            namespace: String::new(),
+        };
+        let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
+        trace.start_tool("tool-1-0", "bash_background");
+        trace.start_job("job-1", "tool-1-0");
+        trace.end_tool("tool-1-0", true, None);
+        trace.end_job("job-1", Some(0));
+        drop(trace);
+        let exported = std::fs::read_to_string(&path).unwrap();
+        let spans: Vec<Value> = exported
+            .lines()
+            .flat_map(|line| {
+                let payload: Value = serde_json::from_str(line).unwrap();
+                payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let tool = spans
+            .iter()
+            .find(|span| span["name"] == "execute_tool bash_background")
+            .unwrap();
+        let job = spans
+            .iter()
+            .find(|span| span["name"] == "job job-1")
+            .unwrap_or_else(|| panic!("{exported}"));
+        assert_eq!(job["parentSpanId"], tool["spanId"]);
+        let keys: Vec<_> = job["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attribute| {
+                (
+                    attribute["key"].as_str().unwrap(),
+                    attribute["value"]["stringValue"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert!(keys.contains(&("shikigami.job.id", "job-1")), "{keys:?}");
+        assert!(keys.contains(&("process.exit.code", "0")), "{keys:?}");
+        assert!(!exported.contains("sleep"), "{exported}");
     }
 
     #[test]
