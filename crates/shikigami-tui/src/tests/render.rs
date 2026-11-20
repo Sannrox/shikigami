@@ -127,6 +127,13 @@ fn composer_height_uses_wrapped_rows() {
         composer_height("ask\nok\n> y allow\n  n deny", Rect::new(0, 0, 80, 24)),
         4
     );
+    assert_eq!(
+        composer_height(
+            "ask\nok\n> y allow\n  a allow for session\n  n deny",
+            Rect::new(0, 0, 80, 24)
+        ),
+        5
+    );
 }
 
 #[tokio::test]

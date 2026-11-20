@@ -57,6 +57,14 @@ pub(crate) fn format_tool(tool: &ToolLine) -> String {
     out
 }
 
+pub(crate) fn permission_answers(session_allow: bool) -> &'static str {
+    if session_allow {
+        "> y allow\n  a allow for session\n  n deny"
+    } else {
+        "> y allow\n  n deny"
+    }
+}
+
 pub(crate) fn permission_dock(pending: &PendingPermission) -> String {
     let mut out = format!("ask  {}", pending.title);
     let body = permission_fields(&pending.raw_input);
@@ -134,7 +142,11 @@ pub(crate) fn format_plan(plan: &Plan) -> String {
 
 pub(crate) fn composer_inner(shared: &Shared) -> String {
     terminal_text(&if let Some(pending) = shared.permission.as_ref() {
-        format!("{}\n> y allow\n  n deny", permission_dock(pending))
+        format!(
+            "{}\n{}",
+            permission_dock(pending),
+            permission_answers(pending.session_allow)
+        )
     } else if shared.show_plan
         && let Some(plan) = shared.plan.as_ref()
     {

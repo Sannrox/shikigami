@@ -94,6 +94,8 @@ pub(crate) struct PendingPermission {
     pub(crate) title: String,
     pub(crate) raw_input: String,
     pub(crate) tx: oneshot::Sender<Value>,
+    /// Host offered `allow_always` for this ungoverned mutating tool.
+    pub(crate) session_allow: bool,
 }
 
 pub(crate) struct QueuedPrompt {
@@ -889,13 +891,21 @@ impl TuiSession {
     }
 
     pub(crate) fn answer_permission(&self, allow: bool) {
+        let option = if allow { "allow" } else { "deny" };
+        self.send_permission(option, option);
+    }
+
+    pub(crate) fn answer_session_permission(&self) {
+        self.send_permission("selected", "allow_session");
+    }
+
+    fn send_permission(&self, outcome: &str, option_id: &str) {
         let mut shared = self.lock_shared();
         let Some(pending) = shared.clear_permission() else {
             return;
         };
-        let outcome = if allow { "allow" } else { "deny" };
         let _ = pending.tx.send(json!({
-            "outcome": { "outcome": outcome, "optionId": outcome }
+            "outcome": { "outcome": outcome, "optionId": option_id }
         }));
         shared.dock_scroll = 0;
         shared.dirty = true;

@@ -899,6 +899,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::HandoffBrief { .. } => "handoff_brief",
         HarnessEvent::SessionMode { .. } => "session_mode",
         HarnessEvent::VerificationFinished { .. } => "verification_finished",
+        HarnessEvent::AskGrant { .. } => "ask_grant",
     }
 }
 
@@ -949,6 +950,7 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
             passed,
             cases,
         } => format!("attempt={attempt} passed={passed} cases={}", cases.len()),
+        HarnessEvent::AskGrant { name, scope } => format!("{name} scope={scope}"),
     };
     Some(detail)
 }

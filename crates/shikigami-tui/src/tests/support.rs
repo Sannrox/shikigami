@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
-use serde_json::json;
+use serde_json::{Value, json};
 use shikigami::acp::{AcpClient, AcpHost};
 use shikigami::config::Config;
 use shikigami::harness::Harness;
@@ -339,12 +339,22 @@ pub(super) fn tool_line_count(text: &str) -> usize {
 }
 
 pub(super) fn install_permission(session: &TuiSession, raw_input: String) {
-    let (tx, _rx) = oneshot::channel();
+    drop(install_permission_choice(session, raw_input, false));
+}
+
+pub(super) fn install_permission_choice(
+    session: &TuiSession,
+    raw_input: String,
+    session_allow: bool,
+) -> oneshot::Receiver<Value> {
+    let (tx, rx) = oneshot::channel();
     session.lock_shared().begin_permission(PendingPermission {
         title: "write_file".into(),
         raw_input,
         tx,
+        session_allow,
     });
+    rx
 }
 
 pub(super) fn char_key(ch: char) -> KeyEvent {

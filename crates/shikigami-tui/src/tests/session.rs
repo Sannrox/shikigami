@@ -30,6 +30,7 @@ fn program_status_reports_prompt_lifecycle() {
         title: "tool".into(),
         raw_input: "{}".into(),
         tx,
+        session_allow: false,
     });
     assert_eq!(
         program_status(&shared),

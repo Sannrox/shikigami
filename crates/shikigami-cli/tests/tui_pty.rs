@@ -528,6 +528,39 @@ fn demo_write_stays_out_of_the_project() {
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok\n");
 }
 
+/// Session-allow (`a`) lets later calls of the same mutating tool through
+/// without a second dock; a different tool still asks.
+#[test]
+fn session_allow_key_skips_the_next_write() {
+    let dir = temp_dir();
+    let script = r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"},{"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}]},{"content":"wrote-both"}]"#;
+    let mut tui = start_tui(&dir, Some(script));
+    let before = tui.output().len();
+    send(&tui, b"write\r");
+    tui.wait_for("the session-allow hint", |t| {
+        screen(t).contains("a allow for session")
+    });
+    let typed = Instant::now();
+    tui.wait_for("typing to settle", |t| {
+        typed.elapsed() >= Duration::from_millis(400) && screen(t).contains("a allow for session")
+    });
+    send(&tui, b"a");
+    tui.wait_for("both writes", |t| {
+        contains(&t.output()[before..], b"wrote-both")
+    });
+    wait_turn_done(&mut tui, before);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("project/a.txt")).unwrap(),
+        "a\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("project/b.txt")).unwrap(),
+        "b\n"
+    );
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
+
 /// #646: letters typed as a follow-up while a permission ask opens must not
 /// grant the tool. A deliberate `y` after the dock is idle still allows it.
 #[test]

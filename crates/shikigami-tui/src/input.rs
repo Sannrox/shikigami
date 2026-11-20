@@ -105,7 +105,19 @@ pub(crate) fn handle_permission_key(session: &TuiSession, key: KeyEvent) -> KeyR
         return KeyResult::Continue;
     }
     match key.code {
-        KeyCode::Char('y' | 'Y' | 'a' | 'A' | '1') => session.answer_permission(true),
+        KeyCode::Char('y' | 'Y' | '1') => session.answer_permission(true),
+        KeyCode::Char('a' | 'A') => {
+            let session_allow = session
+                .lock_shared()
+                .permission
+                .as_ref()
+                .is_some_and(|pending| pending.session_allow);
+            if session_allow {
+                session.answer_session_permission();
+            } else {
+                session.answer_permission(true);
+            }
+        }
         KeyCode::Char('n' | 'N' | 'd' | 'D' | '2') => session.answer_permission(false),
         _ => {}
     }

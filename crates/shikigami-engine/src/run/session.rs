@@ -4,7 +4,7 @@
 //! They do not restate messages, turns, todos, workspace, or retention at each
 //! durability point.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,6 +46,8 @@ pub(super) struct RunSession {
     resumed_ask_park: Option<ParkedState>,
     /// Call id of an ask=park tool that this resume is allowed to execute.
     ask_allow_call_id: Option<String>,
+    /// Ungoverned mutating names that skip ask=park for the rest of this attempt.
+    ask_session_grants: BTreeSet<String>,
     /// Turn count when the current session prompt started (`session_wait`).
     pub prompt_start_turns: Option<u32>,
     /// Plan write-jail is still active for this attempt.
@@ -123,6 +125,7 @@ impl RunSession {
             resumed_approval_park: None,
             resumed_ask_park: None,
             ask_allow_call_id: None,
+            ask_session_grants: BTreeSet::new(),
             prompt_start_turns: None,
             plan_jail: false,
             nested: false,
@@ -193,6 +196,17 @@ impl RunSession {
 
     pub fn ask_allow_call_id(&self) -> Option<&str> {
         self.ask_allow_call_id.as_deref()
+    }
+
+    pub fn set_ask_session_grants(&mut self, names: BTreeSet<String>) {
+        self.ask_session_grants = names
+            .into_iter()
+            .filter(|name| crate::tools::mutates_workspace(name))
+            .collect();
+    }
+
+    pub fn ask_session_granted(&self, name: &str) -> bool {
+        crate::tools::mutates_workspace(name) && self.ask_session_grants.contains(name)
     }
 
     /// The resumed approval park, only while governance still holds the wait.

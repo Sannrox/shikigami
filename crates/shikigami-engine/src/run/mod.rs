@@ -11,6 +11,7 @@
 //! - [`resume`] — checkpoint workspace boundary checks
 //! - [`artifact_lifecycle`] — retained artifact finalization
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -126,6 +127,9 @@ pub struct RunRequest {
     /// Caller's W3C trace context; the run's spans join that trace. Used only
     /// when the run starts: a resume keeps the context the run started with.
     pub trace_context: Option<crate::tracing_export::TraceContext>,
+    /// Ungoverned mutating tool names that skip ask=park for this attempt.
+    /// Session hosts fill this from live memory; it is not checkpointed.
+    pub ask_session_grants: BTreeSet<String>,
 }
 
 /// Session-host decision for an ask=park mutating tool.
@@ -186,6 +190,15 @@ impl RunRequest {
             assigned_run_id: None,
             job_credential: None,
             trace_context: None,
+            ask_session_grants: BTreeSet::new(),
+        }
+    }
+
+    /// Remember an ungoverned mutating tool name so later calls skip ask=park.
+    pub fn grant_session_ask(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if crate::tools::mutates_workspace(&name) {
+            self.ask_session_grants.insert(name);
         }
     }
 }
@@ -666,6 +679,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap_err();
@@ -709,6 +723,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap_err();
@@ -765,6 +780,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap_err();
@@ -838,6 +854,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap();
@@ -961,6 +978,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap_err();
@@ -1049,6 +1067,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap();
@@ -1152,6 +1171,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                ask_session_grants: BTreeSet::new(),
             })
             .await
             .unwrap_err();
@@ -1669,6 +1689,116 @@ mod tests {
             std::fs::read_to_string(third.workspace.join("b.txt")).unwrap(),
             "b\n"
         );
+    }
+
+    #[tokio::test]
+    async fn session_wait_session_grant_skips_later_same_tool() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[
+                {"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"},
+                {"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"},
+                {"name":"edit","args_json":"{\"path\":\"a.txt\",\"old\":\"a\\n\",\"new\":\"aa\\n\"}"}
+              ]},
+              {"content":"done"}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        resume.grant_session_ask("write_file");
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::Ask);
+        assert_eq!(
+            second.park.as_ref().unwrap().reason,
+            "ask:edit",
+            "session grant is per tool name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("a.txt")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("b.txt")).unwrap(),
+            "b\n"
+        );
+
+        let mut resume2 = RunRequest::new("");
+        resume2.keep_workspace = true;
+        resume2.session_wait = true;
+        resume2.resume_run_id = Some(second.run_id.clone());
+        resume2.resume_ask = Some(AskDecision::Allow);
+        resume2.grant_session_ask("write_file");
+        let third = eng.run(resume2).await.unwrap();
+        assert_eq!(third.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(
+            std::fs::read_to_string(third.workspace.join("a.txt")).unwrap(),
+            "aa\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_wait_session_grant_does_not_revive_from_checkpoint() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        config.model.script_json = Some(
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}]},
+              {"content":"done"},
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"c.txt\",\"content\":\"c\\n\"}"}]}
+            ]"#
+            .into(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("write");
+        req.keep_workspace = true;
+        req.session_wait = true;
+        let first = eng.run(req).await.unwrap();
+        assert_eq!(first.park.as_ref().unwrap().kind, ParkKind::Ask);
+
+        let mut resume = RunRequest::new("");
+        resume.keep_workspace = true;
+        resume.session_wait = true;
+        resume.resume_run_id = Some(first.run_id.clone());
+        resume.resume_ask = Some(AskDecision::Allow);
+        resume.grant_session_ask("write_file");
+        let second = eng.run(resume).await.unwrap();
+        assert_eq!(second.park.as_ref().unwrap().kind, ParkKind::PromptWait);
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("a.txt")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.workspace.join("b.txt")).unwrap(),
+            "b\n"
+        );
+
+        let mut again = RunRequest::new("");
+        again.keep_workspace = true;
+        again.session_wait = true;
+        again.resume_run_id = Some(second.run_id.clone());
+        again.resume_prompt = Some("again".into());
+        let third = eng.run(again).await.unwrap();
+        assert_eq!(
+            third.park.as_ref().unwrap().kind,
+            ParkKind::Ask,
+            "grants are not checkpointed"
+        );
+        assert_eq!(third.park.as_ref().unwrap().reason, "ask:write_file");
+        assert!(!third.workspace.join("c.txt").exists());
     }
 
     #[tokio::test]

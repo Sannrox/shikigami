@@ -416,7 +416,8 @@ impl<'a> DurableToolBatch<'a> {
                     let conversation_id = conversation_tool_call_id(call, session.turns, index);
                     let ask_granted = session
                         .ask_allow_call_id()
-                        .is_some_and(|token| token == stable_call_id || token == conversation_id);
+                        .is_some_and(|token| token == stable_call_id || token == conversation_id)
+                        || session.ask_session_granted(&call.name);
                     if session.plan_jail
                         && let Some(denied) = plan_jail_deny(call, &session.workspace)
                     {
