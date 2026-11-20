@@ -1,6 +1,6 @@
 use super::support::*;
 use crate::look::KeyMap;
-use crate::protocol::apply_prompt_result;
+use crate::protocol::{apply_load_result, apply_prompt_result};
 use crate::render::{
     ago, composer_height, follow_pad, permission_fields, prompt_block, scroll_offset, status_line,
 };
@@ -219,6 +219,265 @@ async fn running_marker_reserves_composer_height() {
     assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
     assert!(dim, "running marker must be dim: {row:?}");
     let _ = session.wait_prompt().await;
+}
+
+#[tokio::test]
+async fn nested_children_dim_block_lists_inflight_then_clears() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session
+        .client
+        .notify(
+            "session/update",
+            json!({
+                "sessionId": session.session_id(),
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "c1",
+                    "title": "child_run",
+                    "status": "pending",
+                    "rawInput": {"profile": "explore", "task": "scout-a", "wait": false}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    session
+        .client
+        .notify(
+            "session/update",
+            children_update(
+                &session.session_id(),
+                json!([
+                    {"runId": "run-a", "profile": "explore", "status": "running"},
+                    {"runId": "run-b", "profile": "explore", "status": "running"}
+                ]),
+            ),
+        )
+        .await
+        .unwrap();
+
+    for (width, height) in [(80, 24), (40, 12)] {
+        let rows = drawn_rows(&session, width, height);
+        assert_screen_rules(&rows, width);
+        let overlay = overlay_rows_above_composer(&session, width, height);
+        assert_eq!(overlay.len(), 2, "{overlay:?}");
+        assert!(
+            overlay.iter().all(|(_, dim)| *dim),
+            "nested children must be dim: {overlay:?}"
+        );
+        let text = overlay
+            .iter()
+            .map(|(row, _)| row.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("run-a"), "{text}");
+        assert!(text.contains("run-b"), "{text}");
+        assert!(text.contains("explore"), "{text}");
+        assert!(
+            overlay
+                .iter()
+                .any(|(row, _)| row.contains("running") && row.contains("run-a")),
+            "{text}"
+        );
+        assert!(
+            overlay.iter().all(|(row, _)| row.trim() != RUNNING_MARKER),
+            "{text}"
+        );
+    }
+    assert!(
+        session.transcript_text().contains("child_run"),
+        "{}",
+        session.transcript_text()
+    );
+
+    session
+        .client
+        .notify(
+            "session/update",
+            children_update(
+                &session.session_id(),
+                json!([
+                    {"runId": "run-a", "profile": "explore", "status": "done"},
+                    {"runId": "run-b", "profile": "explore", "status": "failed"}
+                ]),
+            ),
+        )
+        .await
+        .unwrap();
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    let text = overlay
+        .iter()
+        .map(|(row, _)| row.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("run-a"), "{text}");
+    assert!(!text.contains("run-b"), "{text}");
+    assert_ne!(text.trim(), RUNNING_MARKER, "{text}");
+}
+
+#[tokio::test]
+async fn nested_children_hide_when_slash_list_or_dock_is_open() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session
+        .client
+        .notify(
+            "session/update",
+            children_update(
+                &session.session_id(),
+                json!([{"runId": "run-a", "profile": "plan", "status": "parked"}]),
+            ),
+        )
+        .await
+        .unwrap();
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    assert!(
+        overlay
+            .iter()
+            .any(|(row, dim)| *dim && row.contains("run-a") && row.contains("parked")),
+        "{overlay:?}"
+    );
+
+    type_text(&session, "/he");
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    let text = overlay
+        .iter()
+        .map(|(row, _)| row.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("help"), "{text}");
+    assert!(!text.contains("run-a"), "{text}");
+
+    session.lock_shared().clear_input();
+    install_permission(&session, "{}".into());
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    let text = overlay
+        .iter()
+        .map(|(row, _)| row.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("run-a"), "{text}");
+}
+
+#[tokio::test]
+async fn nested_off_session_never_shows_child_block() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session.spawn_prompt("write".into()).await.unwrap();
+    let (row, _) = slot_above_composer_rule(&session);
+    assert_eq!(row.trim(), RUNNING_MARKER, "{row:?}");
+    assert!(session.lock_shared().nested_children.is_empty());
+    let _ = session.wait_prompt().await;
+}
+
+#[tokio::test]
+async fn replayed_child_run_json_does_not_fill_nested_overlay() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session
+        .client
+        .notify(
+            "session/update",
+            json!({
+                "sessionId": session.session_id(),
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "c1",
+                    "status": "completed",
+                    "content": [{
+                        "type": "content",
+                        "content": {
+                            "type": "text",
+                            "text": "{\"run_id\":\"run-a\",\"profile\":\"explore\",\"status\":\"running\"}"
+                        }
+                    }]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    let text = overlay
+        .iter()
+        .map(|(row, _)| row.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("run-a"), "{text}");
+    assert!(session.lock_shared().nested_children.is_empty());
+}
+
+#[tokio::test]
+async fn nested_children_update_for_another_session_is_ignored() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session
+        .client
+        .notify(
+            "session/update",
+            children_update(
+                "other-session",
+                json!([{"runId": "run-a", "profile": "explore", "status": "running"}]),
+            ),
+        )
+        .await
+        .unwrap();
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    let text = overlay
+        .iter()
+        .map(|(row, _)| row.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("run-a"), "{text}");
+    assert!(session.lock_shared().nested_children.is_empty());
+
+    session
+        .client
+        .notify(
+            "session/update",
+            children_update(
+                &session.session_id(),
+                json!([{"runId": "run-a", "profile": "explore", "status": "running"}]),
+            ),
+        )
+        .await
+        .unwrap();
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    assert!(
+        overlay
+            .iter()
+            .any(|(row, dim)| *dim && row.contains("run-a") && row.contains("running")),
+        "{overlay:?}"
+    );
+}
+
+#[tokio::test]
+async fn load_result_children_meta_fills_nested_overlay() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    {
+        let mut shared = session.lock_shared();
+        apply_load_result(
+            &mut shared,
+            &json!({
+                "_meta": {
+                    "shikigami": {
+                        "runId": "parent",
+                        "children": [
+                            {"runId": "run-a", "profile": "explore", "status": "running"}
+                        ]
+                    }
+                }
+            }),
+        );
+    }
+    let overlay = overlay_rows_above_composer(&session, 80, 24);
+    assert!(
+        overlay
+            .iter()
+            .any(|(row, dim)| *dim && row.contains("run-a") && row.contains("explore")),
+        "{overlay:?}"
+    );
 }
 
 #[tokio::test]

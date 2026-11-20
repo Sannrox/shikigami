@@ -12,8 +12,8 @@ use crate::look::{Action, KeyMap, Palette};
 use crate::protocol::{TOOL_CANCELLED, TOOL_IN_DOUBT, TOOL_NOT_RUN};
 use crate::session::{PendingPermission, Plan, Shared, ToolLine, TranscriptLine, TuiSession};
 use crate::slash::{
-    mention_visible, running_marker_row, running_marker_visible, slash_row_text, slash_visible,
-    slash_window,
+    inflight_nested_children, mention_visible, nested_child_row, nested_children_visible,
+    running_marker_row, running_marker_visible, slash_row_text, slash_visible, slash_window,
 };
 use shikigami_types::terminal::terminal_text;
 
@@ -518,14 +518,27 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
     }
     let (slash_start, slash_vis) = slash_window(shared.slash_selected, slash_cmds.len(), slash_cap);
     let slash_h = slash_vis as u16;
-    let running_row = running_marker_visible(&shared) && slash_h == 0;
+    let child_rows: Vec<String> = if slash_h == 0 && nested_children_visible(&shared) {
+        inflight_nested_children(&shared)
+            .into_iter()
+            .take(slash_cap)
+            .map(nested_child_row)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let child_h = child_rows.len() as u16;
+    let running_row = running_marker_visible(&shared) && slash_h == 0 && child_h == 0;
     let overlay_h = if slash_h > 0 {
         slash_h
+    } else if child_h > 0 {
+        child_h
     } else if running_row {
         1
     } else {
         0
     };
+    shared.overlay_h = overlay_h;
     let composer_budget = area.height.saturating_sub(4 + overlay_h).max(1);
     let composer_h = if asking || planning {
         composer_height(&inner, area)
@@ -615,6 +628,17 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
             })
             .collect();
         frame.render_widget(Paragraph::new(rows), slash_area);
+    } else if child_h > 0 {
+        let overlay = chunks[idx];
+        idx += 1;
+        let rows: Vec<Line> = child_rows
+            .iter()
+            .map(|row| {
+                let text = truncate_display(&terminal_text(row), overlay.width as usize);
+                Line::from(Span::styled(text, palette.muted))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(rows), overlay);
     } else if running_row {
         let overlay = chunks[idx];
         idx += 1;

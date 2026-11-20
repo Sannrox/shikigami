@@ -8,7 +8,8 @@ use shikigami::acp::AcpClient;
 
 use crate::render::{compact_value, turn_count};
 use crate::session::{
-    PendingPermission, Plan, PlanEntry, SessionModels, Shared, ToolLine, TranscriptLine, TuiClient,
+    NestedChild, PendingPermission, Plan, PlanEntry, SessionModels, Shared, ToolLine,
+    TranscriptLine, TuiClient,
 };
 
 /// Replayed where compaction cut earlier messages from the run's history.
@@ -41,9 +42,23 @@ pub(crate) fn model_failure_lead(cause: Option<&str>) -> &'static str {
 
 #[async_trait]
 impl AcpClient for TuiClient {
+    fn clone_arc(&self) -> Option<std::sync::Arc<dyn AcpClient>> {
+        Some(std::sync::Arc::new(self.clone()))
+    }
+
     async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         if method != "session/update" {
             return Ok(());
+        }
+        if let Some(id) = params.get("sessionId").and_then(|v| v.as_str()) {
+            let current = self
+                .session_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if !current.is_empty() && current != id {
+                return Ok(());
+            }
         }
         let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         apply_update(&mut shared, &params);
@@ -79,6 +94,7 @@ impl AcpClient for TuiClient {
 
 pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
     let update = params.get("update").unwrap_or(params);
+    let children = apply_children_meta(shared, update);
     let kind = update
         .get("sessionUpdate")
         .and_then(|v| v.as_str())
@@ -213,6 +229,7 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
                 shared.dock_scroll = 0;
             }
         }
+        _ if children => {}
         _ => return,
     }
     shared.dirty = true;
@@ -234,6 +251,7 @@ pub(crate) fn apply_load_result(shared: &mut Shared, result: &Value) {
     shared.models = SessionModels::of(result);
     mark_unanswered_prompts(&mut shared.transcript);
     apply_interruption(shared, result);
+    apply_children_meta(shared, result);
 }
 
 /// After a replay, a prompt followed by another prompt or by nothing failed or
@@ -311,6 +329,44 @@ pub(crate) fn tool_update_detail(update: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Replace the nested-child list from `_meta.shikigami.children`.
+pub(crate) fn apply_children_meta(shared: &mut Shared, value: &Value) -> bool {
+    let Some(children) = value
+        .pointer("/_meta/shikigami/children")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    shared.nested_children = children.iter().filter_map(nested_child_from_meta).collect();
+    true
+}
+
+fn nested_child_from_meta(value: &Value) -> Option<NestedChild> {
+    let run_id = value.get("runId").and_then(Value::as_str)?.to_string();
+    if run_id.is_empty() {
+        return None;
+    }
+    let profile = value.get("profile").and_then(Value::as_str).unwrap_or("");
+    if !matches!(profile, "explore" | "plan" | "full") {
+        return None;
+    }
+    Some(NestedChild {
+        run_id,
+        profile: profile.to_string(),
+        status: overlay_child_status(value.get("status").and_then(Value::as_str).unwrap_or("")),
+    })
+}
+
+fn overlay_child_status(raw: &str) -> String {
+    match raw {
+        "starting" | "running" => "running".into(),
+        "parked" => "parked".into(),
+        "completed" | "done" => "done".into(),
+        "cancelled" | "timed_out" | "failed" | "max_turns" => "failed".into(),
+        _ => "running".into(),
+    }
+}
+
 pub(crate) fn merge_text(lines: &mut Vec<TranscriptLine>, kind: TranscriptLine, text: String) {
     match (lines.last_mut(), kind) {
         (Some(TranscriptLine::User(existing)), TranscriptLine::User(_)) => existing.push_str(&text),
@@ -346,6 +402,7 @@ pub(crate) fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
         shared.run_id = run_id_of(result);
         let turn = turn_count(shared);
         shared.usage.record(turn, result);
+        apply_children_meta(shared, result);
     }
     if let Some(reason) = resp
         .and_then(|v| v.pointer("/result/stopReason"))

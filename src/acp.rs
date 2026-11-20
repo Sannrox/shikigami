@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -51,6 +51,10 @@ type PendingPermissions = HashMap<u64, (String, oneshot::Sender<Value>)>;
 pub trait AcpClient: Send + Sync {
     async fn notify(&self, method: &str, params: Value) -> Result<(), String>;
     async fn request(&self, method: &str, params: Value) -> Result<Value, String>;
+    /// Clone for host tasks that outlive a request (nested child status).
+    fn clone_arc(&self) -> Option<Arc<dyn AcpClient>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +109,8 @@ struct LiveSession {
     /// MCP servers hidden for later prompts of this host process. Not persisted;
     /// `--continue` / a new process attaches from settings again.
     disabled_mcp: HashSet<String>,
+    /// Child run ids this session already watches for idle status.
+    watched_children: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -440,6 +446,7 @@ impl AcpHost {
             content: None,
             usage: TokenUsage::default(),
             disabled_mcp: HashSet::new(),
+            watched_children: HashSet::new(),
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -481,6 +488,7 @@ impl AcpHost {
                 content: live.content.clone(),
                 usage: live.usage,
                 disabled_mcp: live.disabled_mcp.clone(),
+                watched_children: live.watched_children.clone(),
             }
         } else {
             let persisted = self
@@ -500,6 +508,7 @@ impl AcpHost {
                 content,
                 usage: TokenUsage::default(),
                 disabled_mcp: HashSet::new(),
+                watched_children: HashSet::new(),
             };
             self.sessions
                 .lock()
@@ -522,6 +531,15 @@ impl AcpHost {
         }
         if let Some(run_id) = live.run_id {
             result["_meta"]["shikigami"]["runId"] = json!(run_id);
+            if let Ok(harness) =
+                self.harness_for_cwd(&live.cwd, live.mode.as_deref(), live.model.as_deref())
+            {
+                let children = children_snapshot(&harness, &run_id);
+                if !children.is_empty() {
+                    result["_meta"]["shikigami"]["children"] = json!(children);
+                }
+                watch_loaded_children(self, &harness, client, session_id, &run_id, &children).await;
+            }
         }
         Ok(result)
     }
@@ -893,6 +911,10 @@ impl AcpHost {
             // The run that `shikigami runs` and `shikigami export` accept for this session.
             if let Some(run_id) = self.session_run_id(&session_id).await {
                 result["_meta"]["shikigami"]["runId"] = json!(run_id);
+                let children = children_snapshot(&self.harness, &run_id);
+                if !children.is_empty() {
+                    result["_meta"]["shikigami"]["children"] = json!(children);
+                }
             }
             // Tokens this prompt used; absent while unknown (zero).
             let after = self.session_usage(&session_id).await;
@@ -2078,6 +2100,9 @@ async fn run_and_forward(
                 if let Some(run_id) = run_id {
                     let store = session_content_store(host, session_id).await;
                     fill_content_live_updates(&mut held, harness, run_id, store.as_deref());
+                    attach_nested_children_meta(&mut held, harness, run_id);
+                    watch_background_children(host, harness, client, session_id, run_id, &held)
+                        .await;
                     if let Err(error) = send_updates(client, std::mem::take(&mut held))
                         .await
                         .map_err(update_error)
@@ -2121,6 +2146,8 @@ async fn run_and_forward(
         persist_session_run(host, session_id, run_id).await;
         let store = session_content_store(host, session_id).await;
         fill_content_live_updates(&mut held, harness, run_id, store.as_deref());
+        attach_nested_children_meta(&mut held, harness, run_id);
+        watch_background_children(host, harness, client, session_id, run_id, &held).await;
     }
     let send = send_updates(client, held).await.map_err(update_error);
     if let Err(error) = send {
@@ -2713,6 +2740,200 @@ const STREAMED_MARK: &str = "_shikigamiStreamed";
 
 fn is_delta(update: &Value) -> bool {
     update["update"][DELTA_MARK] == true
+}
+
+fn children_snapshot(harness: &Harness, parent_run_id: &str) -> Vec<Value> {
+    let Ok(checkpoint) = Checkpoint::load(&harness.state.runs_dir(), parent_run_id) else {
+        return Vec::new();
+    };
+    checkpoint
+        .children
+        .iter()
+        .map(|child| {
+            json!({
+                "runId": child.run_id,
+                "profile": child.profile,
+                "status": child_overlay_status(harness, &child.run_id),
+            })
+        })
+        .collect()
+}
+
+fn child_overlay_status(harness: &Harness, child_id: &str) -> &'static str {
+    if let Ok(checkpoint) = Checkpoint::load(&harness.state.runs_dir(), child_id)
+        && checkpoint.park.is_some()
+    {
+        return "parked";
+    }
+    let active = harness.registry.run_is_active(child_id).unwrap_or(false);
+    match harness.registry.load(child_id) {
+        Ok(record) => match record.status.as_str() {
+            "starting" | "running" if active => "running",
+            "starting" | "running" => "failed",
+            "parked" => "parked",
+            "completed" => "done",
+            "cancelled" | "timed_out" | "failed" | "max_turns" => "failed",
+            _ if record.success == Some(true) => "done",
+            _ if record.success == Some(false) => "failed",
+            _ if active => "running",
+            _ => "failed",
+        },
+        Err(_) if active => "running",
+        Err(_) => "failed",
+    }
+}
+
+fn child_run_output(update: &Value) -> Option<Value> {
+    let inner = update.get("update").unwrap_or(update);
+    let detail = inner
+        .pointer("/content/0/content/text")
+        .or_else(|| inner.pointer("/content/0/text"))
+        .and_then(Value::as_str)?;
+    serde_json::from_str::<Value>(detail).ok().filter(|value| {
+        value.get("run_id").and_then(Value::as_str).is_some()
+            && value.get("profile").and_then(Value::as_str).is_some()
+    })
+}
+
+fn update_carries_child_run(update: &Value) -> bool {
+    let inner = update.get("update").unwrap_or(update);
+    (inner.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call")
+        && inner.get("title").and_then(Value::as_str) == Some("child_run"))
+        || child_run_output(update).is_some()
+}
+
+fn attach_nested_children_meta(updates: &mut [Value], harness: &Harness, parent_run_id: &str) {
+    let children = children_snapshot(harness, parent_run_id);
+    for update in updates {
+        if update_carries_child_run(update) {
+            update["update"]["_meta"]["shikigami"]["children"] = json!(children);
+        }
+    }
+}
+
+async fn watch_background_children(
+    host: &AcpHost,
+    harness: &Harness,
+    client: &dyn AcpClient,
+    session_id: &str,
+    parent_run_id: &str,
+    updates: &[Value],
+) {
+    let Some(client) = client.clone_arc() else {
+        return;
+    };
+    let mut to_watch = Vec::new();
+    {
+        let mut sessions = host.sessions.lock().await;
+        let Some(live) = sessions.get_mut(session_id) else {
+            return;
+        };
+        for update in updates {
+            let Some(output) = child_run_output(update) else {
+                continue;
+            };
+            if output.get("status").and_then(Value::as_str) != Some("running") {
+                continue;
+            }
+            let Some(child_id) = output.get("run_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if live.watched_children.insert(child_id.to_string()) {
+                to_watch.push(child_id.to_string());
+            }
+        }
+    }
+    for child_id in to_watch {
+        spawn_child_idle_watch(
+            harness.clone(),
+            Arc::clone(&client),
+            session_id.to_string(),
+            parent_run_id.to_string(),
+            child_id,
+        );
+    }
+}
+
+async fn watch_loaded_children(
+    host: &AcpHost,
+    harness: &Harness,
+    client: &dyn AcpClient,
+    session_id: &str,
+    parent_run_id: &str,
+    children: &[Value],
+) {
+    let Some(client) = client.clone_arc() else {
+        return;
+    };
+    let mut to_watch = Vec::new();
+    {
+        let mut sessions = host.sessions.lock().await;
+        let Some(live) = sessions.get_mut(session_id) else {
+            return;
+        };
+        for child in children {
+            if child.get("status").and_then(Value::as_str) != Some("running") {
+                continue;
+            }
+            let Some(child_id) = child.get("runId").and_then(Value::as_str) else {
+                continue;
+            };
+            if live.watched_children.insert(child_id.to_string()) {
+                to_watch.push(child_id.to_string());
+            }
+        }
+    }
+    for child_id in to_watch {
+        spawn_child_idle_watch(
+            harness.clone(),
+            Arc::clone(&client),
+            session_id.to_string(),
+            parent_run_id.to_string(),
+            child_id,
+        );
+    }
+}
+
+fn spawn_child_idle_watch(
+    harness: Harness,
+    client: Arc<dyn AcpClient>,
+    session_id: String,
+    parent_run_id: String,
+    child_id: String,
+) {
+    tokio::spawn(async move {
+        let Ok((mut rx, local)) = harness.registry.watch_idle(&child_id) else {
+            return;
+        };
+        if !*rx.borrow() {
+            if local {
+                let _ = rx.changed().await;
+            } else {
+                loop {
+                    if *rx.borrow() || !harness.registry.run_is_active(&child_id).unwrap_or(false) {
+                        break;
+                    }
+                    tokio::select! {
+                        changed = rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        }
+        let children = children_snapshot(&harness, &parent_run_id);
+        let update = json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "_meta": { "shikigami": { "children": children } }
+            }
+        });
+        let _ = client.notify("session/update", update).await;
+    });
 }
 
 async fn send_updates(client: &dyn AcpClient, updates: Vec<Value>) -> Result<(), Value> {
@@ -3433,6 +3654,10 @@ impl StdioClient {
 
 #[async_trait]
 impl AcpClient for StdioClient {
+    fn clone_arc(&self) -> Option<Arc<dyn AcpClient>> {
+        Some(Arc::new(self.clone()))
+    }
+
     async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
         let mut out = self.writer.lock().await;
@@ -4033,6 +4258,130 @@ mod tests {
             .filter(|u| u["update"]["sessionUpdate"] == "agent_message_chunk")
             .collect();
         assert_eq!(chunks.len(), 2, "{updates:?}");
+    }
+
+    #[tokio::test]
+    async fn nested_child_run_tool_updates_carry_children_meta() {
+        let dir = tempdir().unwrap();
+        let script = serde_json::json!([
+            {
+                "tool_calls": [
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "scout-a",
+                            "wait": false
+                        }).to_string()
+                    },
+                    {
+                        "name": "child_run",
+                        "args_json": serde_json::json!({
+                            "profile": "explore",
+                            "task": "scout-b",
+                            "wait": false
+                        }).to_string()
+                    }
+                ]
+            },
+            {
+                "tool_calls": [{
+                    "name": "report",
+                    "args_json": serde_json::json!({
+                        "summary": "parent done",
+                        "success": true
+                    }).to_string()
+                }]
+            }
+        ])
+        .to_string();
+        let host = scripted_host_with(dir.path(), &script, |config| {
+            config.run.nested = true;
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"delegate"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt}");
+        let updates = client.updates.lock().await;
+        let children_meta: Vec<&Value> = updates
+            .iter()
+            .filter_map(|update| update.pointer("/update/_meta/shikigami/children"))
+            .collect();
+        assert!(
+            !children_meta.is_empty(),
+            "child_run updates must carry _meta.shikigami.children: {updates:?}"
+        );
+        let listed = children_meta
+            .iter()
+            .flat_map(|value| value.as_array().into_iter().flatten())
+            .filter_map(|child| {
+                Some((
+                    child.get("runId")?.as_str()?,
+                    child.get("profile")?.as_str()?,
+                    child.get("status")?.as_str()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            listed
+                .iter()
+                .filter(|(_, profile, _)| *profile == "explore")
+                .count()
+                >= 2,
+            "expected two explore children, got {listed:?}"
+        );
+        for (_, _, status) in &listed {
+            assert!(
+                matches!(*status, "running" | "parked" | "done" | "failed"),
+                "unexpected child status in {listed:?}"
+            );
+        }
+        let result_children = rpc_ok(&prompt)
+            .pointer("/_meta/shikigami/children")
+            .and_then(Value::as_array);
+        assert!(
+            result_children.is_some(),
+            "prompt result should list children: {prompt}"
+        );
+        drop(updates);
+        let load = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert!(
+            rpc_ok(&load)
+                .pointer("/_meta/shikigami/children")
+                .and_then(Value::as_array)
+                .is_some(),
+            "session/load should list children: {load}"
+        );
     }
 
     #[tokio::test]

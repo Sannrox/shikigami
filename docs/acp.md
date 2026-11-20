@@ -67,7 +67,11 @@ A host killed with SIGKILL cannot reap them. A host restart loses them:
 their ids report `status=unknown`, and nothing restarts them. Exited jobs
 stay readable and stop counting against the four-job limit once their
 shell exits; leftover children are killed then. Nested `child_run` is a tool event on the parent session; there is
-no extra ACP method.
+no extra ACP method. `wait=false` tool results, later `session/update`s,
+`session/prompt` results, and `session/load` results carry
+`_meta.shikigami.children`: `{ "runId", "profile", "status" }` with
+`status` one of `running` / `parked` / `done` / `failed`. Clients that ignore
+`_meta` keep the tool line only.
 `session/cancel` keeps the session run and parks it for the next prompt.
 A later prompt on an outstanding ask/escalate park restores the permission
 wait; an unreadable checkpoint fails closed instead of starting a new run.
