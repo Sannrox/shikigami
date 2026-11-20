@@ -308,6 +308,20 @@ pub struct AcpHost {
     held: std::sync::Mutex<HashMap<String, fs::File>>,
 }
 
+fn session_usage_json(usage: TokenUsage) -> Value {
+    let mut body = json!({
+        "inputTokens": usage.input_tokens,
+        "outputTokens": usage.output_tokens,
+    });
+    if let Some(cached) = usage.cached_input_tokens {
+        body["cachedInputTokens"] = json!(cached);
+    }
+    if let Some(created) = usage.cache_creation_input_tokens {
+        body["cacheCreationInputTokens"] = json!(created);
+    }
+    body
+}
+
 impl AcpHost {
     pub fn new(harness: Harness) -> Self {
         let host = Self {
@@ -787,15 +801,9 @@ impl AcpHost {
             }
             // Tokens this prompt used; absent while unknown (zero).
             let after = self.session_usage(&session_id).await;
-            let usage = TokenUsage {
-                input_tokens: after.input_tokens.saturating_sub(before.input_tokens),
-                output_tokens: after.output_tokens.saturating_sub(before.output_tokens),
-            };
+            let usage = after.saturating_sub(before);
             if usage.total() > 0 {
-                result["_meta"]["shikigami"]["usage"] = json!({
-                    "inputTokens": usage.input_tokens,
-                    "outputTokens": usage.output_tokens,
-                });
+                result["_meta"]["shikigami"]["usage"] = session_usage_json(usage);
             }
             Ok(result)
         }
@@ -867,8 +875,7 @@ impl AcpHost {
                 .await
                 .map_err(|e| rpc_error(-32603, e))?;
             if let Some(live) = self.sessions.lock().await.get_mut(session_id) {
-                live.usage.input_tokens += result.usage.input_tokens;
-                live.usage.output_tokens += result.usage.output_tokens;
+                live.usage = live.usage.saturating_add(result.usage);
             }
 
             if result.termination == RunTermination::Cancelled {
@@ -4808,7 +4815,7 @@ mod tests {
         let host = scripted_host(
             dir.path(),
             r#"[{"content":"a"},
-                {"content":"b","usage":{"input_tokens":10,"output_tokens":2}},
+                {"content":"b","usage":{"input_tokens":10,"output_tokens":2,"cached_input_tokens":8,"cache_creation_input_tokens":1}},
                 {"content":"c","usage":{"input_tokens":5,"output_tokens":1}},
                 {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"x.txt\",\"content\":\"x\"}"}],"usage":{"input_tokens":3,"output_tokens":1}},
                 {"content":"d","usage":{"input_tokens":2,"output_tokens":1}}]"#,
@@ -4829,7 +4836,12 @@ mod tests {
         let second = prompt(&host, &client, &session_id, text("two")).await;
         assert_eq!(
             usage(&second),
-            json!({"inputTokens": 10, "outputTokens": 2}),
+            json!({
+                "inputTokens": 10,
+                "outputTokens": 2,
+                "cachedInputTokens": 8,
+                "cacheCreationInputTokens": 1
+            }),
             "{second}"
         );
         let third = prompt(&host, &client, &session_id, text("three")).await;

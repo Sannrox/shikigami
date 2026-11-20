@@ -332,10 +332,7 @@ impl<'a> DurableModelTurn<'a> {
         let failure = match result {
             Ok(turn) => {
                 if let Some(usage) = turn.usage {
-                    self.usage.input_tokens =
-                        self.usage.input_tokens.saturating_add(usage.input_tokens);
-                    self.usage.output_tokens =
-                        self.usage.output_tokens.saturating_add(usage.output_tokens);
+                    self.usage = self.usage.saturating_add(usage);
                 }
                 let summary = turn.content.trim();
                 if !turn.tool_calls.is_empty() {
@@ -437,10 +434,7 @@ impl<'a> DurableModelTurn<'a> {
             let turn = planned?;
             session.turns += 1;
             if let Some(usage) = turn.usage {
-                self.usage.input_tokens =
-                    self.usage.input_tokens.saturating_add(usage.input_tokens);
-                self.usage.output_tokens =
-                    self.usage.output_tokens.saturating_add(usage.output_tokens);
+                self.usage = self.usage.saturating_add(usage);
             }
             session.set_content_usage(self.usage);
             let model_turn = ModelTurn {
@@ -535,10 +529,7 @@ impl<'a> DurableModelTurn<'a> {
             let turn = planned?;
             session.turns += 1;
             if let Some(usage) = turn.usage {
-                self.usage.input_tokens =
-                    self.usage.input_tokens.saturating_add(usage.input_tokens);
-                self.usage.output_tokens =
-                    self.usage.output_tokens.saturating_add(usage.output_tokens);
+                self.usage = self.usage.saturating_add(usage);
             }
             session.set_replay_usage(self.usage);
             self.engine.emit(

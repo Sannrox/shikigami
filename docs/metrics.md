@@ -18,7 +18,7 @@ client crate; export is JSON and/or Prometheus *text format*.
 | `shikigami_tokens_input_total` | counter | Input tokens when reported |
 | `shikigami_tokens_output_total` | counter | Output tokens when reported |
 
-`RunResult.usage` carries per-run totals (`input_tokens` / `output_tokens`). Zero means unknown, not free.
+`RunResult.usage` carries per-run totals (`input_tokens` / `output_tokens`). Zero means unknown, not free. Optional `cached_input_tokens` and `cache_creation_input_tokens` are present only when a model reported cache usage; they are subsets of `input_tokens`.
 
 ## API
 

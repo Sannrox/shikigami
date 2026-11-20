@@ -69,15 +69,69 @@ mod stable_id_tests {
 }
 
 /// Token counts when the provider (or script) reports them.
+///
+/// Cache counts are subsets of [`Self::input_tokens`], not extra tokens.
+/// They stay `None` when the model did not report cache usage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 impl TokenUsage {
     pub fn total(self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// Sum two reports. Cache fields stay absent when neither side reported them.
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cached_input_tokens: add_optional_tokens(
+                self.cached_input_tokens,
+                other.cached_input_tokens,
+            ),
+            cache_creation_input_tokens: add_optional_tokens(
+                self.cache_creation_input_tokens,
+                other.cache_creation_input_tokens,
+            ),
+        }
+    }
+
+    /// Prompt-delta between two cumulative session totals.
+    pub fn saturating_sub(self, earlier: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_sub(earlier.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(earlier.output_tokens),
+            cached_input_tokens: sub_optional_tokens(
+                self.cached_input_tokens,
+                earlier.cached_input_tokens,
+            ),
+            cache_creation_input_tokens: sub_optional_tokens(
+                self.cache_creation_input_tokens,
+                earlier.cache_creation_input_tokens,
+            ),
+        }
+    }
+}
+
+fn add_optional_tokens(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
+    }
+}
+
+fn sub_optional_tokens(after: Option<u64>, before: Option<u64>) -> Option<u64> {
+    match (after, before) {
+        (Some(after), Some(before)) if after == before => None,
+        (Some(after), before) => Some(after.saturating_sub(before.unwrap_or(0))),
+        _ => None,
     }
 }
 
@@ -589,6 +643,7 @@ mod cost_tests {
         let u = TokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 500_000,
+            ..Default::default()
         };
         assert!(CostEstimate::from_usage_and_rates(u, None, None).is_none());
         assert!(CostEstimate::from_usage_and_rates(u, Some(1), None).is_none());
@@ -600,12 +655,44 @@ mod cost_tests {
         let u = TokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 500_000,
+            ..Default::default()
         };
         let c = CostEstimate::from_usage_and_rates(u, Some(1_000_000), Some(2_000_000)).unwrap();
         assert_eq!(c.currency, "USD");
         assert_eq!(c.input_usd_micros, 1_000_000);
         assert_eq!(c.output_usd_micros, 1_000_000);
         assert_eq!(c.total_usd_micros, 2_000_000);
+    }
+
+    #[test]
+    fn cache_counts_sum_only_when_reported() {
+        let none = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 1,
+            ..Default::default()
+        };
+        let cached = TokenUsage {
+            input_tokens: 20,
+            output_tokens: 2,
+            cached_input_tokens: Some(15),
+            cache_creation_input_tokens: Some(3),
+        };
+        assert_eq!(none.saturating_add(none).cached_input_tokens, None);
+        let sum = none.saturating_add(cached);
+        assert_eq!(sum.input_tokens, 30);
+        assert_eq!(sum.cached_input_tokens, Some(15));
+        assert_eq!(sum.cache_creation_input_tokens, Some(3));
+        assert_eq!(cached.saturating_sub(none).cached_input_tokens, Some(15));
+        assert_eq!(sum.saturating_sub(cached).cached_input_tokens, None);
+    }
+
+    #[test]
+    fn stored_usage_without_cache_fields_round_trips() {
+        let old: TokenUsage =
+            serde_json::from_str(r#"{"input_tokens":1,"output_tokens":2}"#).unwrap();
+        assert_eq!(old.cached_input_tokens, None);
+        let dumped = serde_json::to_string(&old).unwrap();
+        assert!(!dumped.contains("cached"), "{dumped}");
     }
 
     #[test]

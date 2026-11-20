@@ -76,6 +76,16 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
         })
         .collect();
     assert_eq!(tokens, [("11", "7"), ("13", "5")]);
+    for turn in turns {
+        assert!(
+            !turn.contains_key("gen_ai.usage.cache_read.input_tokens"),
+            "unreported cache must not appear: {turn:?}"
+        );
+        assert!(
+            !turn.contains_key("gen_ai.usage.cache_creation.input_tokens"),
+            "unreported cache write must not appear: {turn:?}"
+        );
+    }
     let mut tools: Vec<_> = spans["tool"]
         .iter()
         .map(|tool| tool["gen_ai.tool.name"].as_str())
@@ -88,6 +98,49 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
             "payload leaked into spans: {secret}\n{exported}"
         );
     }
+}
+
+#[tokio::test]
+async fn cached_input_tokens_reach_turn_spans_when_reported() {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.json");
+    let mut config = offline_config(dir.path());
+    config.tracing.enabled = true;
+    config.tracing.exporter = "otlp".into();
+    config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"note.txt\",\"content\":\"n\"}"}],
+         "usage":{"input_tokens":100,"output_tokens":7,"cached_input_tokens":80,"cache_creation_input_tokens":5}},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}],
+         "usage":{"input_tokens":13,"output_tokens":5}}
+    ]"#
+        .into(),
+    );
+
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let mut request = RunRequest::new("cache");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success, "{}", result.summary);
+    assert_eq!(result.usage.cached_input_tokens, Some(80));
+    assert_eq!(result.usage.cache_creation_input_tokens, Some(5));
+
+    let exported = fs::read_to_string(&spans_path).unwrap();
+    let turns = &spans_by_name(&exported)["turn"];
+    assert_eq!(
+        turns[0]["gen_ai.usage.cache_read.input_tokens"].as_str(),
+        "80"
+    );
+    assert_eq!(
+        turns[0]["gen_ai.usage.cache_creation.input_tokens"].as_str(),
+        "5"
+    );
+    assert!(
+        !turns[1].contains_key("gen_ai.usage.cache_read.input_tokens"),
+        "second turn reported no cache: {:?}",
+        turns[1]
+    );
 }
 
 #[tokio::test]

@@ -87,7 +87,8 @@ use, and keys; long errors go to the transcript). The session's run id is one
 `/run` away. Token use is the sum of what each prompt reported (`14.2k tok`);
 a turn whose model reported none, or one replayed from before this window, is
 unknown, so the total shows as `? tok` or a lower bound such as `≥1.2k tok`,
-never as zero. `/usage` lists in and out tokens per turn with the total. No
+never as zero. `/usage` lists in and out tokens per turn with the total, and
+cached / cache-write counts when the host reported them. No
 money is shown.
 The state word is plain: `ready`, `running`, `ask`, `done` after a finished
 turn, `cancelled`, `turn limit`, `length limit`, `refused`, or `error`; protocol

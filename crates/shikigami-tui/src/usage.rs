@@ -11,6 +11,8 @@ use serde_json::Value;
 struct Tokens {
     input: u64,
     output: u64,
+    cached: Option<u64>,
+    created: Option<u64>,
 }
 
 /// Reported token use per turn (1-based, as the footer counts turns).
@@ -28,7 +30,15 @@ impl Usage {
                 .and_then(Value::as_u64)
         };
         if let (Some(input), Some(output)) = (field("inputTokens"), field("outputTokens")) {
-            self.turns.insert(turn, Tokens { input, output });
+            self.turns.insert(
+                turn,
+                Tokens {
+                    input,
+                    output,
+                    cached: field("cachedInputTokens"),
+                    created: field("cacheCreationInputTokens"),
+                },
+            );
         }
     }
 
@@ -67,20 +77,54 @@ impl Usage {
         })
     }
 
+    fn shows_cache(&self) -> bool {
+        self.turns
+            .values()
+            .any(|tokens| tokens.cached.is_some() || tokens.created.is_some())
+    }
+
+    fn cache_total(&self, field: fn(&Tokens) -> Option<u64>) -> String {
+        let mut n = 0;
+        let mut any = false;
+        for tokens in self.turns.values() {
+            if let Some(value) = field(tokens) {
+                n += value;
+                any = true;
+            }
+        }
+        if any { compact(n) } else { "?".into() }
+    }
+
     /// The `/usage` table: one row per turn, then the total.
     pub(crate) fn table(&self, turns: usize) -> String {
         if turns == 0 {
             return "No token use yet. Send a prompt first.".into();
         }
+        let cache = self.shows_cache();
+        let mut out = String::from("Token use this session\n");
+        let mut push = |turn: &str, input: &str, output: &str, cached: &str, created: &str| {
+            if cache {
+                out.push_str(&format!(
+                    "{turn:<6} {input:>7} {output:>7} {cached:>7} {created:>7}\n"
+                ));
+            } else {
+                out.push_str(&format!("{turn:<6} {input:>7} {output:>7}\n"));
+            }
+        };
+        push("turn", "in", "out", "cached", "wrote");
         let cell =
             |t: Option<Tokens>, f: fn(Tokens) -> u64| t.map_or("?".into(), |t| compact(f(t)));
-        let mut rows = vec![("turn".to_string(), "in".to_string(), "out".to_string())];
+        let opt_cell = |t: Option<Tokens>, f: fn(Tokens) -> Option<u64>| {
+            t.and_then(f).map_or("?".into(), compact)
+        };
         for (turn, tokens) in self.known(turns) {
-            rows.push((
-                turn.to_string(),
-                cell(tokens, |t| t.input),
-                cell(tokens, |t| t.output),
-            ));
+            push(
+                &turn.to_string(),
+                &cell(tokens, |t| t.input),
+                &cell(tokens, |t| t.output),
+                &opt_cell(tokens, |t| t.cached),
+                &opt_cell(tokens, |t| t.created),
+            );
         }
         let (sum, complete) = self.total(turns);
         let total = |n: u64| match (n, complete) {
@@ -88,11 +132,13 @@ impl Usage {
             (0, false) => "?".into(),
             (_, false) => format!("≥{}", compact(n)),
         };
-        rows.push(("total".into(), total(sum.input), total(sum.output)));
-        let mut out = String::from("Token use this session\n");
-        for (turn, input, output) in rows {
-            out.push_str(&format!("{turn:<6} {input:>7} {output:>7}\n"));
-        }
+        push(
+            "total",
+            &total(sum.input),
+            &total(sum.output),
+            &self.cache_total(|t| t.cached),
+            &self.cache_total(|t| t.created),
+        );
         if !complete {
             out.push_str("? means the model did not report usage for that turn.");
         }
@@ -122,6 +168,15 @@ mod tests {
 
     fn reported(input: u64, output: u64) -> Value {
         json!({ "_meta": { "shikigami": { "usage": { "inputTokens": input, "outputTokens": output } } } })
+    }
+
+    fn reported_cache(input: u64, output: u64, cached: u64, created: u64) -> Value {
+        json!({ "_meta": { "shikigami": { "usage": {
+            "inputTokens": input,
+            "outputTokens": output,
+            "cachedInputTokens": cached,
+            "cacheCreationInputTokens": created,
+        } } } })
     }
 
     #[test]
@@ -170,5 +225,37 @@ mod tests {
             "{table}"
         );
         assert!(table.contains("did not report usage"), "{table}");
+    }
+
+    #[test]
+    fn cache_columns_appear_only_when_a_turn_reported_them() {
+        let mut usage = Usage::default();
+        usage.record(1, &reported_cache(1_200, 300, 900, 40));
+        usage.record(2, &reported(800, 40));
+        let table = usage.table(2);
+        assert!(
+            rows(&table).contains(&vec!["turn", "in", "out", "cached", "wrote"]),
+            "{table}"
+        );
+        assert!(
+            rows(&table).contains(&vec!["1", "1.2k", "300", "900", "40"]),
+            "{table}"
+        );
+        assert!(
+            rows(&table).contains(&vec!["2", "800", "40", "?", "?"]),
+            "{table}"
+        );
+        assert!(
+            rows(&table).contains(&vec!["total", "2k", "340", "900", "40"]),
+            "{table}"
+        );
+        let mut plain = Usage::default();
+        plain.record(1, &reported(1_200, 340));
+        let table = plain.table(1);
+        assert!(
+            rows(&table).contains(&vec!["total", "1.2k", "340"]),
+            "{table}"
+        );
+        assert!(!table.contains("cached"), "{table}");
     }
 }
