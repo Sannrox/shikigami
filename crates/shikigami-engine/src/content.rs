@@ -357,6 +357,9 @@ pub struct ContentRunRequestV1 {
     pub resume_parts: Vec<ContentPartDescriptor>,
     /// Allow or deny a `ParkKind::Ask` mutating tool on resume.
     pub resume_ask: Option<AskDecision>,
+    /// Ungoverned mutating tool names that skip ask=park for this attempt.
+    /// Session hosts fill this from live memory; it is not checkpointed.
+    pub ask_session_grants: std::collections::BTreeSet<String>,
     /// Accept or reject a `ParkKind::Plan` park on resume.
     pub resume_plan: Option<PlanDecision>,
     /// Operator answer when resuming a parked run (from `escalate`).
@@ -385,8 +388,17 @@ impl ContentRunRequestV1 {
             resume_prompt: None,
             resume_parts: Vec::new(),
             resume_ask: None,
+            ask_session_grants: std::collections::BTreeSet::new(),
             resume_plan: None,
             resume_answer: None,
+        }
+    }
+
+    /// Remember an ungoverned mutating tool name so later calls skip ask=park.
+    pub fn grant_session_ask(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if crate::tools::mutates_workspace(&name) {
+            self.ask_session_grants.insert(name);
         }
     }
 }
@@ -490,6 +502,7 @@ impl ContentProcessRequestV1 {
             resume_prompt: None,
             resume_parts: Vec::new(),
             resume_ask: None,
+            ask_session_grants: std::collections::BTreeSet::new(),
             resume_plan: None,
             resume_answer: None,
         })

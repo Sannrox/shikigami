@@ -78,14 +78,19 @@ wait; an unreadable checkpoint fails closed instead of starting a new run.
 
 Ungoverned mutating tools (`write_file`, `edit`, `multi_edit`, `apply_patch`,
 `bash`, `bash_background`) **ask=park** with the same tool identity as approval
-park. `escalate` parks use the same permission RPC; allow/deny resume with
-`resume_answer` (`approved` / `denied`, or `outcome.answer` when the client
-sends it). Plan write-jail (`run.plan_jail`) parks `report` as `ParkKind::Plan`
-with the plan text in the permission question; Allow accepts execute authority
-on the same run, Deny rejects, completes failed, and keeps the jail. Ask parks
-stay fail-closed. `http-callback` stays brokered for non-ACP process hosts.
-Clients that cannot answer `session/request_permission` cannot complete a
-mutating prompt.
+park. The permission options are `allow` (`allow_once`), `allow_session`
+(`allow_always`), and `deny` (`reject_once`). `allow_session` records that tool
+name on the live host session so later calls of the same name skip the dock;
+`/new`, `session/load`, and a new process start empty. The grant is not
+checkpointed. `escalate` parks use the same permission RPC without
+`allow_session`; allow/deny resume with `resume_answer` (`approved` / `denied`,
+or `outcome.answer` when the client sends it). Plan write-jail (`run.plan_jail`)
+parks `report` as `ParkKind::Plan` with the plan text in the permission
+question; Allow accepts execute authority on the same run, Deny rejects,
+completes failed, and keeps the jail. `child_run` `full` / `plan` /
+`worktree=true` parks stay one-shot. Ask parks stay fail-closed. Brokered
+adapters (`http-callback` / plane) do not ask=park. Clients that cannot answer
+`session/request_permission` cannot complete a mutating prompt.
 
 Content parts reuse `run_content` bounds. `session/prompt` concatenates `text`
 parts. A session whose first prompt carries attachments is a content session

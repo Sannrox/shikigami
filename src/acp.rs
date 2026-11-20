@@ -111,6 +111,9 @@ struct LiveSession {
     disabled_mcp: HashSet<String>,
     /// Child run ids this session already watches for idle status.
     watched_children: HashSet<String>,
+    /// Ungoverned mutating tool names allowed for the rest of this host session.
+    /// In memory only; session/load and a new process start empty.
+    ask_grants: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -447,6 +450,7 @@ impl AcpHost {
             usage: TokenUsage::default(),
             disabled_mcp: HashSet::new(),
             watched_children: HashSet::new(),
+            ask_grants: HashSet::new(),
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -478,6 +482,9 @@ impl AcpHost {
         let live_session = self.sessions.lock().await.get(session_id).cloned();
         let restored = live_session.is_none();
         let live = if let Some(live) = live_session {
+            if let Some(stored) = self.sessions.lock().await.get_mut(session_id) {
+                stored.ask_grants.clear();
+            }
             LiveSession {
                 cwd: live.cwd.clone(),
                 run_id: live.run_id.clone(),
@@ -489,6 +496,7 @@ impl AcpHost {
                 usage: live.usage,
                 disabled_mcp: live.disabled_mcp.clone(),
                 watched_children: live.watched_children.clone(),
+                ask_grants: HashSet::new(),
             }
         } else {
             let persisted = self
@@ -509,6 +517,7 @@ impl AcpHost {
                 usage: TokenUsage::default(),
                 disabled_mcp: HashSet::new(),
                 watched_children: HashSet::new(),
+                ask_grants: HashSet::new(),
             };
             self.sessions
                 .lock()
@@ -781,7 +790,16 @@ impl AcpHost {
             .to_string();
         let parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
         let requested_mode = optional_mode(params)?;
-        let (cwd, resume_run_id, cancel_rx, mode, model, existing_content, disabled_mcp) = {
+        let (
+            cwd,
+            resume_run_id,
+            cancel_rx,
+            mode,
+            model,
+            existing_content,
+            disabled_mcp,
+            ask_grants,
+        ) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
                 .get_mut(&session_id)
@@ -835,6 +853,7 @@ impl AcpHost {
                 live.model.clone(),
                 live.content.clone(),
                 live.disabled_mcp.clone(),
+                live.ask_grants.clone(),
             )
         };
 
@@ -903,6 +922,8 @@ impl AcpHost {
                 request.cancel = Some(cancel_rx);
                 PromptDrive::Text(request)
             };
+            drive.grant_session_asks(ask_grants.iter().cloned());
+            self.persist_ask_grants(&session_id, &drive).await;
 
             let stop = self
                 .drive_prompt(&session_id, harness, &mut drive, client, sink, &mut events)
@@ -1029,7 +1050,10 @@ impl AcpHost {
                                 .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
-                        PermissionOutcome::Allow => {
+                        PermissionOutcome::Allow | PermissionOutcome::AllowSession => {
+                            if outcome == PermissionOutcome::AllowSession {
+                                self.remember_session_ask(session_id, park, drive).await;
+                            }
                             drive.resume_ask(result.run_id.clone(), AskDecision::Allow);
                         }
                         PermissionOutcome::Deny => {
@@ -1048,7 +1072,7 @@ impl AcpHost {
                                 .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
-                        PermissionOutcome::Allow => {
+                        PermissionOutcome::Allow | PermissionOutcome::AllowSession => {
                             drive.resume_plan(result.run_id.clone(), PlanDecision::Accept);
                         }
                         PermissionOutcome::Deny => {
@@ -1067,7 +1091,9 @@ impl AcpHost {
                                 .map_err(|e| rpc_error(-32603, e))?;
                             return Ok("cancelled");
                         }
-                        PermissionOutcome::Allow | PermissionOutcome::Deny => {
+                        PermissionOutcome::Allow
+                        | PermissionOutcome::AllowSession
+                        | PermissionOutcome::Deny => {
                             drive.resume_answer(result.run_id.clone(), answer);
                         }
                     }
@@ -1475,6 +1501,7 @@ impl AcpHost {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PermissionOutcome {
     Allow,
+    AllowSession,
     Deny,
     Cancelled,
 }
@@ -1754,17 +1781,7 @@ async fn request_permission(
             "status": "pending",
             "rawInput": json_raw_input(park.args_json.as_deref())
         },
-        "options": if park.kind == ParkKind::Plan {
-            json!([
-                {"optionId": "allow", "name": "Accept plan", "kind": "allow_once"},
-                {"optionId": "deny", "name": "Reject plan", "kind": "reject_once"}
-            ])
-        } else {
-            json!([
-                {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
-                {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
-            ])
-        }
+        "options": permission_options(park)
     });
     if cancel_requested(cancel) {
         return Ok((PermissionOutcome::Cancelled, String::new()));
@@ -1801,10 +1818,35 @@ fn permission_answer(result: &Value, outcome: PermissionOutcome) -> String {
         return text.to_string();
     }
     match outcome {
-        PermissionOutcome::Allow => "approved".into(),
+        PermissionOutcome::Allow | PermissionOutcome::AllowSession => "approved".into(),
         PermissionOutcome::Deny => "denied".into(),
         PermissionOutcome::Cancelled => String::new(),
     }
+}
+
+fn permission_options(park: &crate::run::ParkInfo) -> Value {
+    if park.kind == ParkKind::Plan {
+        return json!([
+            {"optionId": "allow", "name": "Accept plan", "kind": "allow_once"},
+            {"optionId": "deny", "name": "Reject plan", "kind": "reject_once"}
+        ]);
+    }
+    let mut options = vec![json!({"optionId": "allow", "name": "Allow", "kind": "allow_once"})];
+    if park.kind == ParkKind::Ask
+        && ask_tool_name(park).is_some_and(crate::tools::mutates_workspace)
+    {
+        options.push(json!({
+            "optionId": "allow_session",
+            "name": "Allow for session",
+            "kind": "allow_always"
+        }));
+    }
+    options.push(json!({"optionId": "deny", "name": "Deny", "kind": "reject_once"}));
+    json!(options)
+}
+
+fn ask_tool_name(park: &crate::run::ParkInfo) -> Option<&str> {
+    park.reason.strip_prefix("ask:")
 }
 
 fn parse_permission(result: &Value) -> Result<PermissionOutcome, Value> {
@@ -1819,6 +1861,9 @@ fn parse_permission(result: &Value) -> Result<PermissionOutcome, Value> {
         .unwrap_or("");
     match (outcome, option) {
         ("cancelled", _) => Ok(PermissionOutcome::Cancelled),
+        ("selected", "allow_session") | ("allow_always", _) | (_, "allow_session") => {
+            Ok(PermissionOutcome::AllowSession)
+        }
         ("selected" | "allow" | "allow_once", "allow") => Ok(PermissionOutcome::Allow),
         ("deny" | "rejected" | "reject_once", _) | ("selected", "deny") | (_, "deny") => {
             Ok(PermissionOutcome::Deny)
@@ -1832,6 +1877,37 @@ fn parse_permission(result: &Value) -> Result<PermissionOutcome, Value> {
 
 async fn persist_session_run(host: &AcpHost, session_id: &str, run_id: &str) {
     let _ = host.set_run_id(session_id, Some(run_id.to_string())).await;
+}
+
+impl AcpHost {
+    async fn remember_session_ask(
+        &self,
+        session_id: &str,
+        park: &crate::run::ParkInfo,
+        drive: &mut PromptDrive,
+    ) {
+        let Some(name) = ask_tool_name(park).filter(|name| crate::tools::mutates_workspace(name))
+        else {
+            return;
+        };
+        if let Some(live) = self.sessions.lock().await.get_mut(session_id) {
+            live.ask_grants.insert(name.to_string());
+        }
+        drive.grant_session_asks(std::iter::once(name.to_string()));
+    }
+
+    async fn persist_ask_grants(&self, session_id: &str, drive: &PromptDrive) {
+        let names: Vec<String> = match drive {
+            PromptDrive::Text(request) => request.ask_session_grants.iter().cloned().collect(),
+            PromptDrive::Content(request) => request.ask_session_grants.iter().cloned().collect(),
+        };
+        if names.is_empty() {
+            return;
+        }
+        if let Some(live) = self.sessions.lock().await.get_mut(session_id) {
+            live.ask_grants.extend(names);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1890,6 +1966,15 @@ impl PromptDrive {
         match self {
             Self::Text(request) => request.resume_ask = Some(decision),
             Self::Content(request) => request.resume_ask = Some(decision),
+        }
+    }
+
+    fn grant_session_asks(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            match self {
+                Self::Text(request) => request.grant_session_ask(name),
+                Self::Content(request) => request.grant_session_ask(name),
+            }
         }
     }
 
@@ -1996,10 +2081,22 @@ async fn resume_prompt_drive(
             return Ok(ResumeOutcome::Done(json!({ "stopReason": "cancelled" })));
         }
         if checkpoint.is_ask_park() {
+            if outcome == PermissionOutcome::AllowSession {
+                // Grants for a restored park land on the drive; the live
+                // session table is filled after this returns.
+                drive.grant_session_asks(
+                    ask_tool_name(&info)
+                        .map(str::to_string)
+                        .into_iter()
+                        .filter(|name| crate::tools::mutates_workspace(name)),
+                );
+            }
             drive.resume_ask(
                 run_id,
                 match outcome {
-                    PermissionOutcome::Allow => AskDecision::Allow,
+                    PermissionOutcome::Allow | PermissionOutcome::AllowSession => {
+                        AskDecision::Allow
+                    }
                     PermissionOutcome::Deny => AskDecision::Deny,
                     PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
                 },
@@ -2008,7 +2105,9 @@ async fn resume_prompt_drive(
             drive.resume_plan(
                 run_id,
                 match outcome {
-                    PermissionOutcome::Allow => PlanDecision::Accept,
+                    PermissionOutcome::Allow | PermissionOutcome::AllowSession => {
+                        PlanDecision::Accept
+                    }
                     PermissionOutcome::Deny => PlanDecision::Reject,
                     PermissionOutcome::Cancelled => unreachable!("cancelled returned"),
                 },
@@ -3689,6 +3788,20 @@ impl AcpClient for StdioClient {
 }
 
 #[cfg(test)]
+fn permission_result(permission: PermissionOutcome) -> Value {
+    match permission {
+        PermissionOutcome::Allow => {
+            json!({ "outcome": { "outcome": "allow", "optionId": "allow" } })
+        }
+        PermissionOutcome::AllowSession => {
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow_session" } })
+        }
+        PermissionOutcome::Deny => json!({ "outcome": { "outcome": "deny", "optionId": "deny" } }),
+        PermissionOutcome::Cancelled => json!({ "outcome": { "outcome": "cancelled" } }),
+    }
+}
+
+#[cfg(test)]
 struct RecordingClient {
     updates: Mutex<Vec<Value>>,
     permission: PermissionOutcome,
@@ -3706,12 +3819,7 @@ impl AcpClient for RecordingClient {
         if method != "session/request_permission" {
             return Err(format!("unexpected agent request {method}"));
         }
-        let outcome = match self.permission {
-            PermissionOutcome::Allow => "allow",
-            PermissionOutcome::Deny => "deny",
-            PermissionOutcome::Cancelled => "cancelled",
-        };
-        Ok(json!({ "outcome": { "outcome": outcome, "optionId": outcome } }))
+        Ok(permission_result(self.permission))
     }
 }
 
@@ -3830,12 +3938,7 @@ impl AcpClient for CapturePermissionClient {
             return Err(format!("unexpected agent request {method}"));
         }
         self.permissions.lock().await.push(params);
-        let outcome = match self.permission {
-            PermissionOutcome::Allow => "allow",
-            PermissionOutcome::Deny => "deny",
-            PermissionOutcome::Cancelled => "cancelled",
-        };
-        Ok(json!({ "outcome": { "outcome": outcome, "optionId": outcome } }))
+        Ok(permission_result(self.permission))
     }
 }
 
@@ -6479,6 +6582,148 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ask_park_session_allow_skips_later_same_tool() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[
+                {"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"},
+                {"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"},
+                {"name":"edit","args_json":"{\"path\":\"a.txt\",\"old\":\"a\\n\",\"new\":\"aa\\n\"}"}
+              ]},
+              {"content":"wrote them"}
+            ]"#,
+        );
+        let client = CapturePermissionClient {
+            updates: Mutex::new(Vec::new()),
+            permissions: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::AllowSession,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        let asked: Vec<String> = client
+            .permissions
+            .lock()
+            .await
+            .iter()
+            .map(|params| {
+                params["toolCall"]["title"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(
+            asked[0].contains("write_file"),
+            "first ask is write_file: {asked:?}"
+        );
+        assert!(
+            asked[1].contains("edit"),
+            "session grant does not cover edit: {asked:?}"
+        );
+        let options = &client.permissions.lock().await[0]["options"];
+        assert!(
+            options
+                .as_array()
+                .is_some_and(|opts| opts.iter().any(|opt| opt["optionId"] == "allow_session")),
+            "mutating ask offers session allow: {options}"
+        );
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "aa\n");
+        assert_eq!(std::fs::read_to_string(cwd.join("b.txt")).unwrap(), "b\n");
+    }
+
+    #[tokio::test]
+    async fn session_load_does_not_revive_ask_grants() {
+        let dir = tempdir().unwrap();
+        let script = r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+              {"content":"first"},
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}]},
+              {"content":"second"}
+            ]"#;
+        let host = scripted_host(dir.path(), script);
+        let client = CapturePermissionClient {
+            updates: Mutex::new(Vec::new()),
+            permissions: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::AllowSession,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let first = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&first)["stopReason"], "end_turn");
+        assert_eq!(client.permissions.lock().await.len(), 1);
+
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "session/load",
+                "params": { "sessionId": session_id }
+            }),
+            &client,
+        )
+        .await
+        .unwrap();
+        client.permissions.lock().await.clear();
+        let second = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write again"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&second)["stopReason"], "end_turn");
+        assert_eq!(
+            client.permissions.lock().await.len(),
+            1,
+            "load must drop session grants"
+        );
+        assert_eq!(std::fs::read_to_string(cwd.join("b.txt")).unwrap(), "b\n");
+    }
+
     /// A process that is gone or a zombie awaiting its reaper.
     fn process_alive(pid: &str) -> bool {
         let out = std::process::Command::new("ps")
@@ -7397,6 +7642,13 @@ mod tests {
         assert!(matches!(
             parse_permission(&json!({"outcome":{"outcome":"deny","optionId":"deny"}})).unwrap(),
             PermissionOutcome::Deny
+        ));
+        assert!(matches!(
+            parse_permission(&json!({
+                "outcome": {"outcome": "selected", "optionId": "allow_session"}
+            }))
+            .unwrap(),
+            PermissionOutcome::AllowSession
         ));
     }
 

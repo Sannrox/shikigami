@@ -131,6 +131,12 @@ pub enum HarnessEvent {
         passed: bool,
         cases: Vec<VerificationCase>,
     },
+    /// Operator allowed this mutating tool name for the rest of the live session.
+    AskGrant {
+        name: String,
+        /// `session` today; one-shot allow stays on `resume_ask`.
+        scope: String,
+    },
 }
 
 /// One check a `stop` hook reported, or the hook itself when it reported none.

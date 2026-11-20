@@ -34,6 +34,10 @@ async fn park_mutating_tool_renders_permission_overlay_then_resumes() {
     );
     assert!(overlay.contains("y allow"));
     assert!(
+        overlay.contains("a allow for session"),
+        "ungoverned mutating ask offers session allow: {overlay}"
+    );
+    assert!(
         overlay.contains("ok.txt"),
         "ask should show path field: {overlay}"
     );
@@ -47,6 +51,131 @@ async fn park_mutating_tool_renders_permission_overlay_then_resumes() {
     );
     assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
     assert!(session.transcript_text().contains("wrote it"));
+}
+
+#[tokio::test]
+async fn session_allow_skips_later_same_tool_and_still_asks_edit() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(
+        dir.path(),
+        r#"[
+          {"tool_calls":[
+            {"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"},
+            {"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"},
+            {"name":"edit","args_json":"{\"path\":\"a.txt\",\"old\":\"a\\n\",\"new\":\"aa\\n\"}"}
+          ]},
+          {"content":"wrote them"}
+        ]"#,
+    ));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("write".into()).await.unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    let overlay = session.overlay_text().expect("permission overlay");
+    assert!(overlay.contains("write_file"), "{overlay}");
+    assert!(overlay.contains("a allow for session"), "{overlay}");
+    session.answer_session_permission();
+    wait_until(|| {
+        session
+            .overlay_text()
+            .is_some_and(|text| text.contains("edit"))
+    })
+    .await;
+    let overlay = session.overlay_text().expect("edit dock");
+    assert!(overlay.contains("edit"), "{overlay}");
+    session.answer_permission(true);
+    let stop = session.wait_prompt().await;
+    assert_eq!(
+        stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("end_turn"))
+    );
+    assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "aa\n");
+    assert_eq!(std::fs::read_to_string(cwd.join("b.txt")).unwrap(), "b\n");
+}
+
+#[tokio::test]
+async fn one_shot_allow_still_asks_the_next_write() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(
+        dir.path(),
+        r#"[
+          {"tool_calls":[
+            {"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"},
+            {"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}
+          ]},
+          {"content":"wrote them"}
+        ]"#,
+    ));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("write".into()).await.unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    session.answer_permission(true);
+    wait_until(|| {
+        session
+            .overlay_text()
+            .is_some_and(|text| text.contains("b.txt"))
+    })
+    .await;
+    session.answer_permission(true);
+    session.wait_prompt().await;
+    assert_eq!(std::fs::read_to_string(cwd.join("b.txt")).unwrap(), "b\n");
+}
+
+#[tokio::test]
+async fn session_allow_key_selects_allow_session() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    let rx = install_permission_choice(&session, r#"{"path":"ok.txt"}"#.into(), true);
+    arm_permission_answers(&session);
+    handle_key(&session, char_key('a'));
+    let reply = rx.await.expect("permission reply");
+    assert_eq!(
+        reply.pointer("/outcome/optionId").and_then(|v| v.as_str()),
+        Some("allow_session")
+    );
+}
+
+/// `--continue` / `session/load` starts with an empty grant table.
+#[tokio::test]
+async fn continue_does_not_revive_session_allow() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let script = r#"[
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"a.txt\",\"content\":\"a\\n\"}"}]},
+          {"content":"first"},
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"b.txt\",\"content\":\"b\\n\"}"}]},
+          {"content":"second"}
+        ]"#;
+    let host = Arc::new(scripted_host(dir.path(), script));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("write".into()).await.unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    session.answer_session_permission();
+    session.wait_prompt().await;
+    assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "a\n");
+    drop(session);
+
+    let continued = continue_session(&dir, script).await;
+    assert!(
+        continued
+            .transcript_text()
+            .contains("Continued your session"),
+        "must reopen the same session: {}",
+        continued.transcript_text()
+    );
+    continued.spawn_prompt("write again".into()).await.unwrap();
+    wait_until(|| continued.overlay_text().is_some()).await;
+    let overlay = continued.overlay_text().expect("ask after continue");
+    assert!(
+        overlay.contains("write_file"),
+        "continue must drop the session grant: {overlay}"
+    );
+    continued.answer_permission(true);
+    continued.wait_prompt().await;
 }
 
 /// #592: a host that dies at the permission prompt leaves the run parked;
@@ -470,6 +599,27 @@ async fn permission_dock_stays_answerable_when_small() {
                 "{hint} unreachable at {width}x{height}:\n{seen}"
             );
         }
+    }
+    session.lock_shared().clear_permission();
+    install_permission_choice(&session, r#"{"path":"notes/todo.txt"}"#.into(), true);
+    for (width, height) in [(80, 24), (40, 12), (20, 8)] {
+        session.lock_shared().dock_scroll = 0;
+        let mut seen = String::new();
+        for _ in 0..8 {
+            let rows = drawn_rows(&session, width, height);
+            assert_screen_rules(&rows, width);
+            seen.push_str(&rows.join("\n"));
+            let before = session.lock_shared().dock_scroll;
+            handle_event(&session, Event::Key(page_key(KeyCode::PageDown)));
+            if session.lock_shared().dock_scroll == before {
+                break;
+            }
+        }
+        let flat = seen.replace('\n', " ");
+        assert!(
+            flat.contains("a allow for session"),
+            "session-allow unreachable at {width}x{height}:\n{seen}"
+        );
     }
     arm_permission_answers(&session);
     assert!(matches!(

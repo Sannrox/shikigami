@@ -309,6 +309,7 @@ pub(super) async fn prepare(
                 stored_prompt_start.or(Some(session.turns))
             };
     }
+    session.set_ask_session_grants(request.ask_session_grants.clone());
     if request.resume_ask == Some(super::AskDecision::Allow) {
         session.set_ask_allow_call_id(
             resumed_park
@@ -323,6 +324,20 @@ pub(super) async fn prepare(
                 }),
         );
         session.set_resumed_ask_park(resumed_park.clone());
+        if let Some(name) = resumed_park
+            .as_ref()
+            .filter(|park| park.kind == crate::checkpoint::ParkKind::Ask)
+            .and_then(|park| park.reason.strip_prefix("ask:"))
+            .filter(|name| session.ask_session_granted(name))
+        {
+            engine.emit(
+                &session.run_id,
+                HarnessEvent::AskGrant {
+                    name: name.to_string(),
+                    scope: "session".into(),
+                },
+            );
+        }
     }
     session.plan_jail = plan_jail;
     session.stop_repairs = stored_stop_repairs;

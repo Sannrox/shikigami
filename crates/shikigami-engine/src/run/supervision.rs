@@ -140,6 +140,7 @@ impl<'a> RunSupervision<'a> {
             resume_prompt,
             resume_parts,
             resume_ask,
+            ask_session_grants,
             resume_plan,
             resume_answer,
         } = request;
@@ -164,6 +165,7 @@ impl<'a> RunSupervision<'a> {
             nested_profile: None,
             assigned_run_id: None,
             trace_context: None,
+            ask_session_grants,
         };
         self.execute_inner(
             run_request,

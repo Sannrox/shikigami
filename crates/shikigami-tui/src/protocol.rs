@@ -85,11 +85,24 @@ impl AcpClient for TuiClient {
                 title,
                 raw_input: raw_input.to_string(),
                 tx,
+                session_allow: permission_offers_session_allow(&params),
             });
         }
         rx.await
             .map_err(|_| "permission response dropped".to_string())
     }
+}
+
+fn permission_offers_session_allow(params: &Value) -> bool {
+    params
+        .get("options")
+        .and_then(|value| value.as_array())
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option.get("optionId").and_then(|v| v.as_str()) == Some("allow_session")
+                    || option.get("kind").and_then(|v| v.as_str()) == Some("allow_always")
+            })
+        })
 }
 
 pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
