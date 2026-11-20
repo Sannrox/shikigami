@@ -899,4 +899,9 @@ pub(crate) enum KeyResult {
     LoadSession(String),
     /// `/model <id>`: switch later prompts to `id`.
     SetModel(String),
+    /// `/mcp` list, or disable/enable one attached server for this process.
+    Mcp {
+        action: String,
+        name: Option<String>,
+    },
 }

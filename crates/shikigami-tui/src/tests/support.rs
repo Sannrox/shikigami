@@ -16,6 +16,14 @@ use shikigami::state::StateRoot;
 use tokio::sync::oneshot;
 
 pub(super) fn scripted_host(dir: &Path, script: &str) -> AcpHost {
+    scripted_host_with(dir, script, |_| {})
+}
+
+pub(super) fn scripted_host_with(
+    dir: &Path,
+    script: &str,
+    tweak: impl FnOnce(&mut Config),
+) -> AcpHost {
     let state = StateRoot::new(dir.join("state"));
     let mut config = Config::default();
     config.governance.adapter = "local".into();
@@ -23,6 +31,7 @@ pub(super) fn scripted_host(dir: &Path, script: &str) -> AcpHost {
     config.model.script_json = Some(script.into());
     config.events.adapter = "none".into();
     config.workspace.root = dir.join("ws").to_string_lossy().into();
+    tweak(&mut config);
     let harness = Harness::from_config(config, state).unwrap();
     AcpHost::new(harness)
 }
@@ -44,9 +53,17 @@ where
 /// #598: a plain start is a new session; `--continue` replays the
 /// latest one and says how old it is.
 pub(super) async fn start_session(dir: &tempfile::TempDir, script: &str) -> TuiSession {
+    start_session_with(dir, script, |_| {}).await
+}
+
+pub(super) async fn start_session_with(
+    dir: &tempfile::TempDir,
+    script: &str,
+    tweak: impl FnOnce(&mut Config),
+) -> TuiSession {
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
-    let host = Arc::new(scripted_host(dir.path(), script));
+    let host = Arc::new(scripted_host_with(dir.path(), script, tweak));
     TuiSession::start(host, &cwd, false).await.unwrap()
 }
 
@@ -55,10 +72,20 @@ pub(super) async fn start_session(dir: &tempfile::TempDir, script: &str) -> TuiS
 /// process another test forks in parallel keeps the old lock's descriptor
 /// until it execs.
 pub(super) async fn continue_session(dir: &tempfile::TempDir, script: &str) -> TuiSession {
+    continue_session_with(dir, script, |_| {}).await
+}
+
+pub(super) async fn continue_session_with(
+    dir: &tempfile::TempDir,
+    script: &str,
+    tweak: impl Fn(&mut Config),
+) -> TuiSession {
     let cwd = dir.path().join("project");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let host = Arc::new(scripted_host(dir.path(), script));
+        let host = Arc::new(scripted_host_with(dir.path(), script, |config| {
+            tweak(config)
+        }));
         let session = TuiSession::start(host, &cwd, true).await.unwrap();
         if session.transcript_text() != CONTINUE_IN_USE || tokio::time::Instant::now() > deadline {
             return session;

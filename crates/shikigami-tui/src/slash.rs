@@ -299,6 +299,17 @@ impl TuiSession {
                 KeyResult::Continue
             }
             "model" if !args.trim().is_empty() => KeyResult::SetModel(args.trim().to_string()),
+            "mcp" => match slash_mcp(args) {
+                Some(result) => result,
+                None => {
+                    let mut shared = self.lock_shared();
+                    shared
+                        .transcript
+                        .push(TranscriptLine::System(MCP_USAGE.into()));
+                    shared.dirty = true;
+                    KeyResult::Continue
+                }
+            },
             "model" => {
                 let mut shared = self.lock_shared();
                 let line = match &shared.models {
@@ -403,6 +414,29 @@ impl TuiSession {
         shared.dock_scroll = 0;
         shared.dirty = true;
         Ok(())
+    }
+
+    /// `/mcp`, `/mcp disable <name>`, `/mcp enable <name>`.
+    pub(crate) async fn mcp(&self, action: &str, name: Option<&str>) {
+        let mut params = json!({ "sessionId": self.session_id(), "action": action });
+        if let Some(name) = name {
+            params["name"] = json!(name);
+        }
+        let result = self.call("session/mcp", params).await;
+        let mut shared = self.lock_shared();
+        let line = match result {
+            Ok(value) if action == "list" => mcp_listing(&value),
+            Ok(_) if action == "disable" => {
+                format!("Disabled {} for this session.", name.unwrap_or("server"))
+            }
+            Ok(_) if action == "enable" => {
+                format!("Enabled {} for this session.", name.unwrap_or("server"))
+            }
+            Ok(_) => "MCP.".into(),
+            Err(err) => mcp_error_line(name, &err),
+        };
+        shared.transcript.push(TranscriptLine::System(line));
+        shared.dirty = true;
     }
 
     /// `/model <id>`: ask the host to switch the session's later prompts.
@@ -532,6 +566,7 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("run", "show the run id for runs and export"),
     ("usage", "token use per turn"),
     ("model", "list or switch models"),
+    ("mcp", "list or disable MCP servers"),
     ("resume", "load a persisted session"),
 ];
 
@@ -545,7 +580,7 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /model  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Interrupt)
     )
 }
@@ -776,6 +811,87 @@ pub(crate) fn unknown_command_line(name: &str, catalog: &[SlashCommand]) -> Stri
 pub(crate) fn slash_query(input: &str) -> &str {
     slash_name_args(input).0
 }
+
+fn slash_mcp(args: &str) -> Option<KeyResult> {
+    let rest = args.trim();
+    if rest.is_empty() {
+        return Some(KeyResult::Mcp {
+            action: "list".into(),
+            name: None,
+        });
+    }
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    match (
+        parts.next(),
+        parts.next().map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        (Some("disable"), Some(name)) => Some(KeyResult::Mcp {
+            action: "disable".into(),
+            name: Some(name.to_string()),
+        }),
+        (Some("enable"), Some(name)) => Some(KeyResult::Mcp {
+            action: "enable".into(),
+            name: Some(name.to_string()),
+        }),
+        _ => None,
+    }
+}
+
+fn mcp_listing(result: &Value) -> String {
+    let Some(servers) = result
+        .get("servers")
+        .and_then(|value| value.as_array())
+        .filter(|servers| !servers.is_empty())
+    else {
+        return "No MCP servers attached.".into();
+    };
+    let mut lines = vec!["MCP".to_string()];
+    for server in servers {
+        let name = server
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let tools = server
+            .get("tools")
+            .and_then(|value| value.as_array())
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let disabled = server
+            .get("disabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let mut line = name.to_string();
+        if !tools.is_empty() {
+            line.push_str("  ");
+            line.push_str(&tools);
+        }
+        if disabled {
+            line.push_str("  disabled");
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn mcp_error_line(name: Option<&str>, err: &str) -> String {
+    if err.contains("cannot be disabled") {
+        return "gateway cannot be disabled.".into();
+    }
+    if err.contains("is not attached")
+        && let Some(name) = name
+    {
+        return format!("No MCP server named {name} is attached.");
+    }
+    err.trim_end_matches('.').to_string()
+}
+
+pub(crate) const MCP_USAGE: &str = "Usage: /mcp, /mcp disable <name>, /mcp enable <name>";
 
 pub(crate) fn slash_name_args(input: &str) -> (&str, &str) {
     let rest = input.strip_prefix('/').unwrap_or(input).trim();

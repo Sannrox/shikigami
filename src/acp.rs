@@ -102,6 +102,9 @@ struct LiveSession {
     /// segment reports its own). In memory only; prompt results report the
     /// difference a prompt made.
     usage: TokenUsage,
+    /// MCP servers hidden for later prompts of this host process. Not persisted;
+    /// `--continue` / a new process attaches from settings again.
+    disabled_mcp: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -298,6 +301,23 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Servers this host would attach at run start, with known mock tool names.
+fn mcp_inventory(config: &crate::config::Config) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    if config.tools.mcp_gateway.is_some() {
+        out.push((crate::config::MCP_GATEWAY_NAME.to_string(), Vec::new()));
+    }
+    for server in &config.tools.mcp_servers {
+        let tools = if server.command == "mock" {
+            vec![format!("mcp.{}.echo", server.name)]
+        } else {
+            Vec::new()
+        };
+        out.push((server.name.clone(), tools));
+    }
+    out
+}
+
 /// In-process ACP agent. Stdio and tests share this.
 pub struct AcpHost {
     harness: Harness,
@@ -344,13 +364,16 @@ impl AcpHost {
         }
         let id = msg.get("id").cloned()?;
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        // Method futures include an engine run. Poll them from the heap so a
+        // Linux debug worker (2MiB) can host session/prompt with MCP tools.
         let result = match method {
             "initialize" => self.initialize(&params),
-            "session/new" => self.session_new(&params).await,
-            "session/load" => self.session_load(&params, client).await,
-            "session/prompt" => self.session_prompt(&params, client).await,
-            "session/compact" => self.session_compact(&params).await,
-            "session/set_model" => self.session_set_model(&params).await,
+            "session/new" => Box::pin(self.session_new(&params)).await,
+            "session/load" => Box::pin(self.session_load(&params, client)).await,
+            "session/prompt" => Box::pin(self.session_prompt(&params, client)).await,
+            "session/compact" => Box::pin(self.session_compact(&params)).await,
+            "session/set_model" => Box::pin(self.session_set_model(&params)).await,
+            "session/mcp" => Box::pin(self.session_mcp(&params)).await,
             other => Err(rpc_error(-32601, format!("Method not found: {other}"))),
         };
         Some(match result {
@@ -416,6 +439,7 @@ impl AcpHost {
             model: None,
             content: None,
             usage: TokenUsage::default(),
+            disabled_mcp: HashSet::new(),
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -456,6 +480,7 @@ impl AcpHost {
                 model: live.model.clone(),
                 content: live.content.clone(),
                 usage: live.usage,
+                disabled_mcp: live.disabled_mcp.clone(),
             }
         } else {
             let persisted = self
@@ -474,6 +499,7 @@ impl AcpHost {
                 model: persisted.model.clone(),
                 content,
                 usage: TokenUsage::default(),
+                disabled_mcp: HashSet::new(),
             };
             self.sessions
                 .lock()
@@ -567,6 +593,76 @@ impl AcpHost {
             return Err(rpc_error(-32603, e));
         }
         Ok(json!({}))
+    }
+
+    /// `session/mcp`: list attached MCP servers, or disable/enable one for later
+    /// prompts of this process. Disable does not rewrite settings.
+    async fn session_mcp(&self, params: &Value) -> Result<Value, Value> {
+        self.require_init()?;
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| rpc_error(-32602, "session/mcp requires sessionId"))?;
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list");
+        let inventory = mcp_inventory(&self.harness.config);
+        match action {
+            "list" => {
+                let disabled = {
+                    let sessions = self.sessions.lock().await;
+                    let live = sessions
+                        .get(session_id)
+                        .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+                    live.disabled_mcp.clone()
+                };
+                let servers: Vec<Value> = inventory
+                    .iter()
+                    .map(|(name, tools)| {
+                        json!({
+                            "name": name,
+                            "tools": tools,
+                            "disabled": disabled.contains(name),
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "servers": servers }))
+            }
+            "disable" | "enable" => {
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        rpc_error(-32602, format!("session/mcp {action} requires name"))
+                    })?;
+                if name == crate::config::MCP_GATEWAY_NAME {
+                    return Err(rpc_error(-32602, "MCP gateway cannot be disabled"));
+                }
+                if !inventory.iter().any(|(server, _)| server == name) {
+                    return Err(rpc_error(
+                        -32602,
+                        format!("MCP server `{name}` is not attached"),
+                    ));
+                }
+                let mut sessions = self.sessions.lock().await;
+                let live = sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+                if action == "disable" {
+                    live.disabled_mcp.insert(name.to_string());
+                } else {
+                    live.disabled_mcp.remove(name);
+                }
+                Ok(json!({}))
+            }
+            other => Err(rpc_error(
+                -32602,
+                format!("session/mcp action `{other}` is not offered"),
+            )),
+        }
     }
 
     async fn session_compact(&self, params: &Value) -> Result<Value, Value> {
@@ -667,7 +763,7 @@ impl AcpHost {
             .to_string();
         let parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
         let requested_mode = optional_mode(params)?;
-        let (cwd, resume_run_id, cancel_rx, mode, model, existing_content) = {
+        let (cwd, resume_run_id, cancel_rx, mode, model, existing_content, disabled_mcp) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
                 .get_mut(&session_id)
@@ -720,13 +816,14 @@ impl AcpHost {
                 live.mode.clone(),
                 live.model.clone(),
                 live.content.clone(),
+                live.disabled_mcp.clone(),
             )
         };
 
         let before = self.session_usage(&session_id).await;
         let outcome = async {
             let harness = self
-                .harness_for_cwd(&cwd, mode.as_deref(), model.as_deref())
+                .harness_for_session(&cwd, mode.as_deref(), model.as_deref(), &disabled_mcp)
                 .map_err(|e| rpc_error(-32603, e))?;
             let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
@@ -1048,6 +1145,16 @@ impl AcpHost {
         mode: Option<&str>,
         model: Option<&str>,
     ) -> Result<Harness, String> {
+        self.harness_for_session(cwd, mode, model, &HashSet::new())
+    }
+
+    fn harness_for_session(
+        &self,
+        cwd: &Path,
+        mode: Option<&str>,
+        model: Option<&str>,
+        disabled_mcp: &HashSet<String>,
+    ) -> Result<Harness, String> {
         let mut config = self.harness.config.clone();
         config.workspace.adapter = "inplace".into();
         config.workspace.root = match self.demo_workspace() {
@@ -1063,6 +1170,10 @@ impl AcpHost {
         if let Some(model) = model {
             config.model.model = model.to_string();
         }
+        config
+            .tools
+            .mcp_servers
+            .retain(|server| !disabled_mcp.contains(&server.name));
         Harness::from_config(config, self.harness.state.clone()).map_err(|e| e.to_string())
     }
 
@@ -1898,6 +2009,27 @@ async fn resume_prompt_drive(
     Err(rpc_error(-32603, "session run is not waiting for a prompt"))
 }
 
+/// Aborts the spawned engine run if the ACP forwarder is dropped first.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn join_run(
+    joined: Result<Result<crate::run::RunResult, HarnessError>, tokio::task::JoinError>,
+) -> Result<crate::run::RunResult, HarnessError> {
+    match joined {
+        Ok(result) => result,
+        Err(error) if error.is_cancelled() => Err(HarnessError::Run(RunError::Cancelled)),
+        Err(error) => Err(HarnessError::Run(RunError::Message(format!(
+            "run task failed: {error}"
+        )))),
+    }
+}
+
 async fn run_and_forward(
     host: &AcpHost,
     harness: &Harness,
@@ -1914,22 +2046,26 @@ async fn run_and_forward(
     }
     let mut held = Vec::new();
     let mut streamed = HashSet::new();
-    let run_fut = async {
+    // Engine run poll frames are large (MCP attach + tool batch). Spawn so they
+    // do not nest under the ACP forwarder on a 2MiB Linux debug worker.
+    let harness_for_run = harness.clone();
+    let mut run_task = AbortOnDrop(tokio::spawn(async move {
         match drive {
-            PromptDrive::Text(request) => harness.run_with_events(request, Some(sink)).await,
-            PromptDrive::Content(request) => harness
+            PromptDrive::Text(request) => {
+                harness_for_run.run_with_events(request, Some(sink)).await
+            }
+            PromptDrive::Content(request) => harness_for_run
                 .run_content_with_events(request, Some(sink))
                 .await
                 .map(|result| result.run),
         }
-    };
-    tokio::pin!(run_fut);
+    }));
     let result = loop {
         tokio::select! {
-            result = &mut run_fut => break result,
+            joined = &mut run_task.0 => break join_run(joined),
             event = events.recv() => {
                 let Some(first) = event else {
-                    break (&mut run_fut).await;
+                    break join_run((&mut run_task.0).await);
                 };
                 let (mut updates, event_run_id) =
                     drain_event_batch(session_id, Some(first), events, &mut streamed);
@@ -1947,7 +2083,7 @@ async fn run_and_forward(
                         .map_err(update_error)
                     {
                         host.signal_cancel(session_id).await;
-                        let abandoned = (&mut run_fut).await;
+                        let abandoned = join_run((&mut run_task.0).await);
                         let run_id = abandoned
                             .as_ref()
                             .ok()
@@ -3523,7 +3659,9 @@ mod tests {
     }
 
     use super::*;
-    use crate::config::Config;
+    use crate::config::{
+        Config, MCP_GATEWAY_NAME, McpGatewaySettings, McpServerSettings, ToolsSettings,
+    };
     use crate::state::StateRoot;
     use tempfile::tempdir;
 
@@ -4931,6 +5069,195 @@ mod tests {
             &json!({}),
             "the configured model stays offered"
         );
+    }
+
+    fn with_demo_mcp(config: &mut Config) {
+        config
+            .tools
+            .mcp_servers
+            .push(McpServerSettings::stdio("demo", "mock", Vec::new()));
+        let mut enabled = ToolsSettings::default_coding_tools();
+        enabled.push("mcp.demo.echo".into());
+        config.tools.enabled = enabled;
+    }
+
+    fn session_mcp(session_id: &str, action: &str, name: Option<&str>) -> Value {
+        let mut params = json!({ "sessionId": session_id, "action": action });
+        if let Some(name) = name {
+            params["name"] = json!(name);
+        }
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "session/mcp",
+            "params": params
+        })
+    }
+
+    fn tool_result_texts(updates: &[Value]) -> Vec<String> {
+        updates
+            .iter()
+            .filter(|update| update["update"]["sessionUpdate"] == "tool_call_update")
+            .map(|update| {
+                update["update"]["content"][0]["content"]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn session_mcp_lists_disables_and_refuses_the_gateway() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"ok"}]"#, |config| {
+            with_demo_mcp(config);
+            config.tools.mcp_gateway = Some(McpGatewaySettings::new("http://127.0.0.1:1/mcp"));
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let session_id = init_and_new(&host, &client, &project).await;
+
+        let listed = host
+            .handle(session_mcp(&session_id, "list", None), &client)
+            .await
+            .unwrap();
+        assert_eq!(
+            rpc_ok(&listed)["servers"],
+            json!([
+                {"name": MCP_GATEWAY_NAME, "tools": [], "disabled": false},
+                {"name": "demo", "tools": ["mcp.demo.echo"], "disabled": false}
+            ]),
+            "{listed}"
+        );
+
+        let gateway = host
+            .handle(
+                session_mcp(&session_id, "disable", Some(MCP_GATEWAY_NAME)),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(gateway["error"]["code"], -32602, "{gateway}");
+        assert!(
+            gateway["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be disabled"),
+            "{gateway}"
+        );
+
+        let missing = host
+            .handle(session_mcp(&session_id, "disable", Some("other")), &client)
+            .await
+            .unwrap();
+        assert_eq!(missing["error"]["code"], -32602, "{missing}");
+        assert!(
+            missing["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("is not attached"),
+            "{missing}"
+        );
+
+        let disabled = host
+            .handle(session_mcp(&session_id, "disable", Some("demo")), &client)
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&disabled), &json!({}));
+        let listed = host
+            .handle(session_mcp(&session_id, "list", None), &client)
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&listed)["servers"][1]["disabled"], true, "{listed}");
+
+        let enabled = host
+            .handle(session_mcp(&session_id, "enable", Some("demo")), &client)
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&enabled), &json!({}));
+        let listed = host
+            .handle(session_mcp(&session_id, "list", None), &client)
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&listed)["servers"][1]["disabled"], false, "{listed}");
+    }
+
+    #[tokio::test]
+    async fn session_mcp_disable_hides_tools_on_later_prompts_and_does_not_persist() {
+        let dir = tempdir().unwrap();
+        let script = r#"[{"tool_calls":[{"name":"mcp.demo.echo","args_json":"{\"text\":\"hi\"}"}]},{"content":"first"},{"tool_calls":[{"name":"mcp.demo.echo","args_json":"{\"text\":\"hi\"}"}]},{"content":"second"},{"tool_calls":[{"name":"mcp.demo.echo","args_json":"{\"text\":\"hi\"}"}]},{"content":"third"}]"#;
+        let host = scripted_host_with(dir.path(), script, with_demo_mcp);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let session_id = init_and_new(&host, &client, &project).await;
+        let text = |t: &str| json!([{ "type": "text", "text": t }]);
+
+        let first = prompt(&host, &client, &session_id, text("one")).await;
+        assert_eq!(rpc_ok(&first)["stopReason"], "end_turn", "{first}");
+        {
+            let updates = client.updates.lock().await;
+            let details = tool_result_texts(&updates);
+            assert!(
+                details.iter().any(|detail| detail == "echo:hi"),
+                "attached mock must run, got {details:?}"
+            );
+        }
+
+        let disabled = host
+            .handle(session_mcp(&session_id, "disable", Some("demo")), &client)
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&disabled), &json!({}));
+        client.updates.lock().await.clear();
+        let second = prompt(&host, &client, &session_id, text("two")).await;
+        assert_eq!(rpc_ok(&second)["stopReason"], "end_turn", "{second}");
+        {
+            let updates = client.updates.lock().await;
+            let details = tool_result_texts(&updates);
+            assert!(
+                details.iter().any(|detail| {
+                    detail.contains("mcp.demo.echo")
+                        && (detail.contains("not enabled")
+                            || detail.contains("unknown")
+                            || detail.contains("denies"))
+                }),
+                "disabled mock must not run, got {details:?}"
+            );
+        }
+
+        drop(host);
+        let host = scripted_host_with(dir.path(), script, with_demo_mcp);
+        let loaded = load_after_restart(&host, &client, &session_id, &project).await;
+        assert_eq!(rpc_ok(&loaded)["sessionId"], session_id, "{loaded}");
+        let listed = host
+            .handle(session_mcp(&session_id, "list", None), &client)
+            .await
+            .unwrap();
+        assert_eq!(
+            rpc_ok(&listed)["servers"],
+            json!([{"name": "demo", "tools": ["mcp.demo.echo"], "disabled": false}]),
+            "{listed}"
+        );
+        client.updates.lock().await.clear();
+        let third = prompt(&host, &client, &session_id, text("three")).await;
+        assert_eq!(rpc_ok(&third)["stopReason"], "end_turn", "{third}");
+        {
+            let updates = client.updates.lock().await;
+            let details = tool_result_texts(&updates);
+            assert!(
+                details.iter().any(|detail| detail == "echo:hi"),
+                "a restarted host follows settings again, got {details:?}"
+            );
+        }
     }
 
     async fn prompt(
