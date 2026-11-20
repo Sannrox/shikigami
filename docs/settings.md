@@ -275,8 +275,8 @@ Under `governance.fail_closed = true` or a remote governance adapter
 
 ### `[network]`
 
-Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`, and
-OTLP/HTTP tracing export). Does not interpose bash sockets; see
+Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`,
+`web_search`, and OTLP/HTTP tracing export). Does not interpose bash sockets; see
 [network.md](network.md).
 
 | Field | Default | Description |
@@ -288,7 +288,7 @@ OTLP/HTTP tracing export). Does not interpose bash sockets; see
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `tool_concurrency` | `4` | Max concurrent tools when a turn’s batch is **all parallel-safe** (`read_file`, `glob`, `grep`, `web_fetch`). `1` forces sequential. Any write/bash/`todo_write`/`handoff`/`report`/`escalate` batch runs **serially**. Isolated `wait=false` `child_run`s are not globally parallel-safe; they share a nested start-wait under `nested_max_children` when the batch has no workspace-mutating tools. `wait=true` stays serial. Tool messages are applied in original call order. |
+| `tool_concurrency` | `4` | Max concurrent tools when a turn’s batch is **all parallel-safe** (`read_file`, `glob`, `grep`, `web_fetch`, `web_search`). `1` forces sequential. Any write/bash/`todo_write`/`handoff`/`report`/`escalate` batch runs **serially**. Isolated `wait=false` `child_run`s are not globally parallel-safe; they share a nested start-wait under `nested_max_children` when the batch has no workspace-mutating tools. `wait=true` stays serial. Tool messages are applied in original call order. |
 
 ### `[tools]`
 
@@ -348,6 +348,10 @@ records and per-model failure aggregation.
 `web_fetch` is **opt-in only** (not in coding default or mode presets). Add it via
 `tools.enabled` (custom mode or intersect). See [network.md](network.md).
 
+`web_search` is the same opt-in class. It is not registered until
+`[tools.web_search].url` is set **and** `web_search` is in `tools.enabled`.
+`tools.mode = read` does not include it. See [network.md](network.md).
+
 Modes are host policy, not an OS sandbox.
 
 `shikigami doctor` explains this composition without changing it:
@@ -391,6 +395,19 @@ Each entry attaches one MCP server whose tools join the registry as
 
 A `tools/call` result flagged `isError` is a failed tool call (`ok = false` in
 governance reports and events). See [mcp.md](mcp.md).
+
+### `[tools.web_search]`
+
+Off when `url` is unset. The builtin is not in the coding default or mode
+presets. POST JSON `{"query":"..."}` to `url`; the endpoint must answer
+`{"results":[{"title":"...","url":"...","snippet":"..."}]}`. At most 5
+results, each title/snippet clipped, and the tool message capped. Result URLs
+are not fetched here; later `web_fetch` still applies SSRF and egress.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `url` | unset | Search POST endpoint, checked against `[network]` egress |
+| `token_env` | unset | Env var holding a Bearer token; never written to events |
 
 ### `[tools.mcp_gateway]`
 

@@ -11,6 +11,7 @@ mod path;
 mod registry;
 mod todo;
 mod web_fetch;
+mod web_search;
 
 pub(crate) use bash::BackgroundJobs;
 pub(crate) use catalog::BASH_HELPER_TOOLS;
@@ -1187,6 +1188,149 @@ mod tests {
     fn web_fetch_not_in_default_coding_tools() {
         use crate::config::ToolsSettings;
         assert!(!ToolsSettings::default_coding_tools().contains(&"web_fetch".into()));
+    }
+
+    #[test]
+    fn web_search_stays_unregistered_until_url_and_enabled() {
+        use crate::config::{Config, ToolsSettings};
+
+        assert!(!ToolsSettings::default_coding_tools().contains(&"web_search".into()));
+        assert!(
+            !ToolsSettings::tools_for_mode(crate::config::PermissionMode::Read)
+                .contains(&"web_search".into())
+        );
+        let dir = tempdir().unwrap();
+        let mut config = Config::default();
+        config.tools.enabled = vec!["web_search".into(), "report".into()];
+        let registry = ToolRegistry::from_config(dir.path(), &config).unwrap();
+        assert!(!registry.is_enabled("web_search"));
+        assert!(
+            !registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name == "web_search")
+        );
+    }
+
+    async fn spawn_search_endpoint(
+        hits: usize,
+        seen: Arc<AtomicUsize>,
+        expect_bearer: Option<&'static str>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                seen.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                if let Some(token) = expect_bearer {
+                    let needle = format!("bearer {token}");
+                    assert!(request.to_ascii_lowercase().contains(&needle), "{request}");
+                }
+                let results: Vec<_> = (1..=hits)
+                    .map(|i| {
+                        serde_json::json!({
+                            "title": format!("Title {i}"),
+                            "url": format!("https://example.com/{i}"),
+                            "snippet": format!("Snippet {i}"),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({"results": results}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+            }
+        });
+        format!("http://127.0.0.1:{}/search", addr.port())
+    }
+
+    #[tokio::test]
+    async fn web_search_returns_bounded_results_from_configured_endpoint() {
+        use crate::config::{Config, EgressMode};
+
+        let dir = tempdir().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let url = spawn_search_endpoint(8, Arc::clone(&seen), None).await;
+        let mut config = Config::default();
+        config.tools.enabled = vec!["web_search".into()];
+        config.tools.web_search.url = Some(url);
+        config.network.egress = EgressMode::Unrestricted;
+        let registry = ToolRegistry::from_config(dir.path(), &config).unwrap();
+        assert!(registry.is_enabled("web_search"));
+        let out = registry
+            .execute("web_search", r#"{"query":"mars rust"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert!(text.contains("Title 1"), "{text}");
+        assert!(text.contains("url=https://example.com/1"), "{text}");
+        assert!(text.contains("Snippet 1"), "{text}");
+        assert!(!text.contains("https://example.com/6"), "{text}");
+        assert!(text.len() <= 8 * 1024 + 32, "{}", text.len());
+        assert!(seen.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn web_search_deny_does_not_contact_the_endpoint() {
+        use crate::config::{Config, EgressMode};
+
+        let dir = tempdir().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let url = spawn_search_endpoint(1, Arc::clone(&seen), None).await;
+        let mut config = Config::default();
+        config.tools.enabled = vec!["web_search".into()];
+        config.tools.web_search.url = Some(url);
+        config.network.egress = EgressMode::Deny;
+        let registry = ToolRegistry::from_config(dir.path(), &config).unwrap();
+        let err = registry
+            .execute("web_search", r#"{"query":"mars rust"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("denied"), "{err}");
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn web_search_sends_bearer_and_omits_it_from_the_tool_message() {
+        use crate::config::Config;
+
+        let dir = tempdir().unwrap();
+        let token_name = format!("SHIKIGAMI_TEST_SEARCH_TOKEN_{}", std::process::id());
+        let token = "search-token-value-682";
+        unsafe {
+            std::env::set_var(&token_name, token);
+        }
+        let seen = Arc::new(AtomicUsize::new(0));
+        let url = spawn_search_endpoint(1, Arc::clone(&seen), Some(token)).await;
+        let mut config = Config::default();
+        config.tools.enabled = vec!["web_search".into()];
+        config.tools.web_search.url = Some(url);
+        config.tools.web_search.token_env = Some(token_name.clone());
+        let registry = ToolRegistry::from_config(dir.path(), &config).unwrap();
+        let out = registry
+            .execute("web_search", r#"{"query":"mars rust"}"#)
+            .await
+            .unwrap();
+        unsafe {
+            std::env::remove_var(&token_name);
+        }
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert!(!text.contains(token), "{text}");
+        assert!(text.contains("Title 1"), "{text}");
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Tool registry: enabled builtins, external tools, todos, web_fetch, background bash.
+//! Tool registry: enabled builtins, external tools, todos, web_fetch, web_search, background bash.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::config::{Config, ContextSettings, NetworkSettings, SandboxSettings};
+use crate::config::{Config, ContextSettings, NetworkSettings, SandboxSettings, WebSearchSettings};
 
 use super::JobCredentialHandle;
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES, create_job_log};
@@ -47,6 +47,7 @@ pub struct ToolRegistry {
     todos: Arc<Mutex<Vec<TodoItem>>>,
     network: NetworkSettings,
     web_fetcher: Arc<dyn WebFetcher>,
+    web_search: WebSearchSettings,
     bg_jobs: Arc<Mutex<BackgroundJobs>>,
     /// Set when the run lists lazy skill packs; enables `load_skill`.
     skills: Option<SkillLoader>,
@@ -81,7 +82,7 @@ impl ToolRegistry {
         config: &Config,
         enabled: Vec<String>,
     ) -> Result<Self, ToolError> {
-        Self::with_builtins_sandbox_protected_environment(
+        let mut registry = Self::with_builtins_sandbox_protected_environment(
             workspace,
             enabled,
             config.tools.bash_timeout_secs,
@@ -90,7 +91,9 @@ impl ToolRegistry {
             &config.protected_tool_environment_names(),
             config.sandbox.clone(),
             None,
-        )
+        )?;
+        registry.web_search = config.tools.web_search.clone();
+        Ok(registry)
     }
 
     /// Same as [`Self::from_config_enabled`] with a live job grant injected
@@ -101,7 +104,7 @@ impl ToolRegistry {
         enabled: Vec<String>,
         job: Option<&JobCredentialHandle>,
     ) -> Result<Self, ToolError> {
-        Self::with_builtins_sandbox_protected_environment(
+        let mut registry = Self::with_builtins_sandbox_protected_environment(
             workspace,
             enabled,
             config.tools.bash_timeout_secs,
@@ -110,7 +113,9 @@ impl ToolRegistry {
             &config.protected_tool_environment_names(),
             config.sandbox.clone(),
             job,
-        )
+        )?;
+        registry.web_search = config.tools.web_search.clone();
+        Ok(registry)
     }
 
     /// Bootstrap builtins filtered by the settings allow-list.
@@ -186,6 +191,7 @@ impl ToolRegistry {
             todos: Arc::new(Mutex::new(Vec::new())),
             network,
             web_fetcher,
+            web_search: WebSearchSettings::default(),
             bg_jobs: Arc::new(Mutex::new(BackgroundJobs::new())),
             skills: None,
         })
@@ -302,6 +308,9 @@ impl ToolRegistry {
     /// Model-facing tool definitions for enabled builtins + external tools.
     pub fn definitions(&self) -> Vec<ToolDef> {
         let mut defs = model_visible_builtin_definitions(&self.executor.enabled);
+        if !super::web_search::is_configured(&self.web_search) {
+            defs.retain(|definition| definition.name != "web_search");
+        }
         if self.skills.is_some() {
             defs.push(load_skill_definition());
         }
@@ -316,6 +325,9 @@ impl ToolRegistry {
     }
 
     pub fn is_enabled(&self, name: &str) -> bool {
+        if name == "web_search" && !super::web_search::is_configured(&self.web_search) {
+            return false;
+        }
         builtin_is_authorized(&self.executor.enabled, name)
             || (name == "load_skill" && self.skills.is_some())
             || self.external.iter().any(|t| t.definition().name == name)
@@ -376,6 +388,14 @@ impl ToolRegistry {
         }
         if name == "web_fetch" {
             let text = self.web_fetch(args_json).await?;
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(text),
+                edit_outcome: None,
+                resource_uris: Vec::new(),
+            });
+        }
+        if name == "web_search" {
+            let text = self.web_search(args_json).await?;
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(text),
                 edit_outcome: None,
@@ -541,6 +561,15 @@ impl ToolRegistry {
             ));
         }
         unreachable!("bounded redirect loop always returns")
+    }
+
+    async fn web_search(&self, args_json: &str) -> Result<String, ToolError> {
+        super::web_search::search(
+            &self.web_search,
+            |url| self.network.check_http_url(url),
+            args_json,
+        )
+        .await
     }
 }
 

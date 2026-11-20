@@ -50,8 +50,9 @@ pub const PLAN_JAIL_PATH: &str = ".shikigami/plan.md";
 /// runs unsandboxed `git worktree add` against the parent checkout.
 pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
     match name {
-        "read_file" | "glob" | "grep" | "web_fetch" | "todo_write" | "handoff" | "report"
-        | "escalate" | "bash_job_status" | "bash_job_logs" | "child_status" | "load_skill" => true,
+        "read_file" | "glob" | "grep" | "web_fetch" | "web_search" | "todo_write" | "handoff"
+        | "report" | "escalate" | "bash_job_status" | "bash_job_logs" | "child_status"
+        | "load_skill" => true,
         "child_run" => child_run_plan_jail_ok(args_json),
         "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
         "apply_patch" => apply_patch_is_plan(args_json),
@@ -388,6 +389,11 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#,
         ),
         def(
+            "web_search",
+            "Search the public web through the operator-configured HTTP endpoint. Returns a bounded list of title, URL, and snippet. Opt-in; not registered until [tools.web_search].url is set and the name is in tools.enabled. Respects [network] egress. Not a browser.",
+            r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#,
+        ),
+        def(
             "child_run",
             "Start a nested child Run. Profiles: explore (read-only), plan (write-jail), full (parent authority). The child shares the parent workspace; worktree=true isolates with git-worktree. wait (default true) returns the child summary; false returns the child run_id.",
             r#"{"type":"object","properties":{"profile":{"type":"string","enum":["explore","plan","full"]},"task":{"type":"string"},"wait":{"type":"boolean"},"worktree":{"type":"boolean"}},"required":["profile","task"]}"#,
@@ -416,14 +422,17 @@ pub fn must_be_exclusive_batch(name: &str) -> bool {
 }
 
 /// Tools safe to run concurrently with each other (workspace reads plus
-/// `web_fetch`; no workspace mutation).
+/// `web_fetch` / `web_search`; no workspace mutation).
 ///
 /// Write tools, bash, todo_write, handoff, report/escalate, and `child_run`
 /// stay serial for the whole batch. Isolated `wait=false` `child_run`s may
 /// share a nested start-wait under `nested_max_children` without being
 /// globally parallel-safe (that would overlap children with writes).
 pub fn is_parallel_safe_tool(name: &str) -> bool {
-    matches!(name, "read_file" | "glob" | "grep" | "web_fetch")
+    matches!(
+        name,
+        "read_file" | "glob" | "grep" | "web_fetch" | "web_search"
+    )
 }
 
 /// Conservative replay classification. Unknown and external tools are denied.
@@ -557,6 +566,8 @@ mod tests {
         assert!(!is_parallel_safe_tool("handoff"));
         assert!(!is_parallel_safe_tool("child_run"));
         assert!(!is_parallel_safe_tool("child_status"));
+        assert!(is_parallel_safe_tool("web_search"));
+        assert!(plan_jail_allows("web_search", r#"{"query":"x"}"#));
         assert_eq!(
             replay_tool_authority("handoff"),
             ReplayToolAuthority::Denied
