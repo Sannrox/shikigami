@@ -101,6 +101,73 @@ async fn scripted_run_exports_metadata_spans_without_payloads() {
 }
 
 #[tokio::test]
+async fn tool_and_turn_spans_export_closed_end_reasons() {
+    let dir = tempdir().unwrap();
+    let spans_path = dir.path().join("spans.json");
+    let mut config = offline_config(dir.path());
+    config.tracing.enabled = true;
+    config.tracing.exporter = "otlp".into();
+    config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+    config.tools.enabled = vec!["bash".into(), "report".into()];
+    let timeout = serde_json::json!({"tool_calls":[{
+        "name":"bash",
+        "args_json": serde_json::json!({"command":"sleep 30","timeout_ms":80}).to_string(),
+    }]});
+    let nonzero = serde_json::json!({"tool_calls":[{
+        "name":"bash",
+        "args_json": serde_json::json!({"command":"exit 7"}).to_string(),
+    }]});
+    let refused =
+        r#"{"tool_calls":[{"name":"web_fetch","args_json":"{\"url\":\"http://127.0.0.1/x\"}"}]}"#;
+    let length = r#"{"content":"cut","finish_reason":"length","tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}"#;
+    config.model.script_json = Some(format!("[{timeout},{nonzero},{refused},{length}]"));
+
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let mut request = RunRequest::new("reasons");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success, "{}", result.summary);
+
+    let exported = fs::read_to_string(&spans_path).unwrap();
+    assert!(
+        !exported.contains("SECRET"),
+        "payload leaked into spans: {exported}"
+    );
+    let tools = &spans_by_name(&exported)["tool"];
+    let bash_errors: Vec<_> = tools
+        .iter()
+        .filter(|tool| tool["gen_ai.tool.name"] == "bash")
+        .map(|tool| tool.get("error.type").map(String::as_str))
+        .collect();
+    assert_eq!(bash_errors, [Some("timeout"), Some("nonzero_exit")]);
+    let refused = tools
+        .iter()
+        .find(|tool| tool["gen_ai.tool.name"] == "web_fetch")
+        .unwrap_or_else(|| panic!("missing refused tool span: {exported}"));
+    assert_eq!(
+        refused.get("error.type").map(String::as_str),
+        Some("not_enabled")
+    );
+    let report = tools
+        .iter()
+        .find(|tool| tool["gen_ai.tool.name"] == "report")
+        .unwrap_or_else(|| panic!("missing report span: {exported}"));
+    assert!(
+        !report.contains_key("error.type"),
+        "successful report: {report:?}"
+    );
+    let turns = &spans_by_name(&exported)["turn"];
+    assert!(
+        turns.iter().any(|turn| {
+            turn.get("gen_ai.response.finish_reasons")
+                .map(String::as_str)
+                == Some("length")
+        }),
+        "missing length finish reason: {exported}"
+    );
+}
+
+#[tokio::test]
 async fn cached_input_tokens_reach_turn_spans_when_reported() {
     let dir = tempdir().unwrap();
     let spans_path = dir.path().join("spans.json");

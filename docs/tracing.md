@@ -104,9 +104,11 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `plan_operation_id` | Plane decision / host `PlanExecution` id when a governance checkpoint recorded one; empty on ungoverned runs |
 | `call_id` | Durable tool-call id `tool-{turn}-{index}[-{model_id}]` (tool spans only) |
 | `gen_ai.tool.name` | Tool name, including `mcp.<server>.<tool>` (tool spans) |
+| `error.type` | Closed-set tool failure: `not_enabled`, `denied`, `invalid_arguments`, `timeout`, `nonzero_exit`, `error` (failed tool spans). Tool output and error text are never exported |
 | `gen_ai.request.model` | Model the turn used (turn spans) |
 | `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Token counts, when the model reported usage (turn spans) |
 | `gen_ai.usage.cache_read.input_tokens` / `gen_ai.usage.cache_creation.input_tokens` | Cached / written prompt-cache tokens, when the model reported them (turn spans). Subsets of `input_tokens`; omitted when the model did not report cache usage |
+| `gen_ai.response.finish_reasons` | Model finish reason when reported: `stop`, `length`, `tool_calls`, `content_filter` (turn spans). Unknown provider strings are dropped |
 | `shikigami.prompt_id` | Versioned prompt id (run span) |
 | `shikigami.preset_id` | Narrowing preset id, when the run has one (run span) |
 | `shikigami.termination` | How the run ended: `completed`, `failed`, `parked`, … (run span) |

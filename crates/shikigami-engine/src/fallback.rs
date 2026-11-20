@@ -714,6 +714,7 @@ mod tests {
                 content: "fallback-turn".into(),
                 tool_calls: vec![],
                 usage: None,
+                finish_reason: None,
             },
         };
         let turn = invoke_if_admitted(Some(&auth), &view, &model)
@@ -816,6 +817,7 @@ mod tests {
                     content: "should-not-run".into(),
                     tool_calls: vec![],
                     usage: None,
+                    finish_reason: None,
                 },
             };
             let auth_ref = present.and(Some(&auth));

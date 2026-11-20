@@ -170,11 +170,45 @@ impl CostEstimate {
     }
 }
 
+/// Closed-set model finish reason exported on a turn span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelFinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+}
+
+impl ModelFinishReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+        }
+    }
+
+    /// Map a provider or scripted finish reason onto the closed set.
+    /// Unknown values are dropped so they never become span attributes.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "stop" => Some(Self::Stop),
+            "length" | "max_tokens" => Some(Self::Length),
+            "tool_calls" | "function_call" => Some(Self::ToolCalls),
+            "content_filter" => Some(Self::ContentFilter),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelTurn {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<TokenUsage>,
+    pub finish_reason: Option<ModelFinishReason>,
 }
 
 #[derive(Debug, Error)]
@@ -399,6 +433,10 @@ impl ScriptedModel {
             .map(|t| ModelTurn {
                 content: t.content.unwrap_or_else(|| t.chunks.concat()),
                 usage: t.usage,
+                finish_reason: t
+                    .finish_reason
+                    .as_deref()
+                    .and_then(ModelFinishReason::parse),
                 tool_calls: t
                     .tool_calls
                     .into_iter()
@@ -469,6 +507,10 @@ struct ScriptedTurn {
     tool_calls: Vec<ScriptedCall>,
     #[serde(default)]
     usage: Option<TokenUsage>,
+    /// OpenAI-style finish reason (`stop`, `length`, …). Unknown values
+    /// are dropped when the turn is built.
+    #[serde(default)]
+    finish_reason: Option<String>,
     /// Text that must appear in some message the turn sees, or the turn
     /// fails. Lets a fixture prove a fact survived compaction.
     #[serde(default)]
@@ -505,6 +547,7 @@ impl ModelPort for ScriptedModel {
             content,
             tool_calls: vec![],
             usage: None,
+            finish_reason: None,
         })
     }
 

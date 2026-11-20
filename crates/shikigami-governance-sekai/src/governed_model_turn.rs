@@ -132,6 +132,7 @@ async fn execute_plane(
             })
             .collect(),
         usage: None, // plane usage surfaces via harvest when available
+        finish_reason: None,
     })
 }
 

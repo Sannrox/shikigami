@@ -21,7 +21,52 @@ use uuid::Uuid;
 use crate::config::{Config, NetworkSettings, TracingSettings};
 use crate::governance::RunHandle;
 use crate::identity::{PRODUCT, VERSION};
-use crate::model::TokenUsage;
+use crate::model::{ModelFinishReason, TokenUsage};
+
+/// Closed-set `error.type` on a failed tool span. Tool output and error
+/// text are never exported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolSpanError {
+    NotEnabled,
+    Denied,
+    InvalidArguments,
+    Timeout,
+    NonzeroExit,
+    Error,
+}
+
+impl ToolSpanError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotEnabled => "not_enabled",
+            Self::Denied => "denied",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::Timeout => "timeout",
+            Self::NonzeroExit => "nonzero_exit",
+            Self::Error => "error",
+        }
+    }
+
+    /// Classify a tool-failure detail already shown to the model. Matches
+    /// [`crate::tools::ToolError`] and governance deny Displays; anything
+    /// else is [`Self::Error`].
+    pub fn from_failure(detail: &str) -> Self {
+        if detail.starts_with("tool not enabled:") || detail.starts_with("unknown tool:") {
+            Self::NotEnabled
+        } else if detail.starts_with("tool denied:") || detail.starts_with("plan jail:") {
+            Self::Denied
+        } else if detail.starts_with("invalid arguments for ") {
+            Self::InvalidArguments
+        } else if detail.starts_with("bash timed out after ") {
+            Self::Timeout
+        } else if detail.starts_with("bash failed with status ") {
+            Self::NonzeroExit
+        } else {
+            Self::Error
+        }
+    }
+}
 
 /// Span attributes: correlation ids, plus names and counts that follow the
 /// OpenTelemetry generative-AI conventions where one exists. Anything else is
@@ -35,12 +80,14 @@ pub const ALLOWED_SPAN_ATTRIBUTES: &[&str] = &[
     "call_id",
     // Tool spans.
     "gen_ai.tool.name",
+    "error.type",
     // Turn spans.
     "gen_ai.request.model",
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
     "gen_ai.usage.cache_read.input_tokens",
     "gen_ai.usage.cache_creation.input_tokens",
+    "gen_ai.response.finish_reasons",
     // Run span.
     "parent.source",
     "shikigami.prompt_id",
@@ -351,8 +398,13 @@ impl RunSpanTrace {
     }
 
     /// Closes the turn span with the model it used and, when the model
-    /// reported it, the turn's token usage.
-    pub fn end_turn(&mut self, model: &str, usage: Option<TokenUsage>) {
+    /// reported them, token usage and a closed-set finish reason.
+    pub fn end_turn(
+        &mut self,
+        model: &str,
+        usage: Option<TokenUsage>,
+        finish_reason: Option<ModelFinishReason>,
+    ) {
         let Some(inner) = self.inner.as_mut() else {
             return;
         };
@@ -380,6 +432,12 @@ impl RunSpanTrace {
                         &created.to_string(),
                     ));
                 }
+            }
+            if let Some(reason) = finish_reason {
+                turn.attributes.extend(allow_attribute(
+                    "gen_ai.response.finish_reasons",
+                    reason.as_str(),
+                ));
             }
         }
         inner.close_turn(true);
@@ -410,7 +468,7 @@ impl RunSpanTrace {
         });
     }
 
-    pub fn end_tool(&mut self, call_id: &str, ok: bool) {
+    pub fn end_tool(&mut self, call_id: &str, ok: bool, error: Option<ToolSpanError>) {
         let Some(inner) = self.inner.as_mut() else {
             return;
         };
@@ -419,7 +477,13 @@ impl RunSpanTrace {
             .iter()
             .rposition(|span| span.attribute("call_id") == Some(call_id))
         {
-            let open = inner.current_tools.remove(index);
+            let mut open = inner.current_tools.remove(index);
+            if !ok {
+                open.attributes.extend(allow_attribute(
+                    "error.type",
+                    error.unwrap_or(ToolSpanError::Error).as_str(),
+                ));
+            }
             inner.finished_spans.push(open.finish(ok));
             inner.flush();
         }
@@ -774,9 +838,9 @@ mod tests {
         };
         let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
         trace.start_turn(1);
-        trace.end_turn("model", None);
+        trace.end_turn("model", None, None);
         trace.start_tool("tool-1-0", "read_file");
-        trace.end_tool("tool-1-0", true);
+        trace.end_tool("tool-1-0", true, None);
         // No `finish`: the process dies here.
         drop(trace);
 
@@ -814,6 +878,91 @@ mod tests {
         let trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
         let outbound = trace.run_outbound().unwrap();
         assert!(parse_traceparent(&outbound.traceparent).is_some());
+    }
+
+    #[test]
+    fn failed_tool_span_exports_closed_error_type_not_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spans.jsonl");
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(path.to_string_lossy().into());
+        let handle = RunHandle {
+            run_id: "run-1".into(),
+            operation_id: "run-1".into(),
+            namespace: String::new(),
+        };
+        let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
+        trace.start_tool("tool-1-0", "bash");
+        trace.end_tool("tool-1-0", false, Some(ToolSpanError::Timeout));
+        drop(trace);
+        let exported = std::fs::read_to_string(&path).unwrap();
+        assert!(exported.contains("\"key\":\"error.type\""), "{exported}");
+        assert!(exported.contains("timeout"), "{exported}");
+        assert!(!exported.contains("SECRET"), "{exported}");
+        assert!(!exported.contains("timed out after"), "{exported}");
+    }
+
+    #[test]
+    fn turn_span_exports_closed_finish_reason_when_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spans.jsonl");
+        let mut config = Config::default();
+        config.tracing.enabled = true;
+        config.tracing.exporter = "otlp".into();
+        config.tracing.endpoint = Some(path.to_string_lossy().into());
+        let handle = RunHandle {
+            run_id: "run-1".into(),
+            operation_id: "run-1".into(),
+            namespace: String::new(),
+        };
+        let mut trace = RunSpanTrace::begin(&config, &handle, "", "prompt", "", None).unwrap();
+        trace.start_turn(1);
+        trace.end_turn("model", None, Some(ModelFinishReason::Length));
+        drop(trace);
+        let exported = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            exported.contains("\"key\":\"gen_ai.response.finish_reasons\""),
+            "{exported}"
+        );
+        assert!(exported.contains("length"), "{exported}");
+    }
+
+    #[test]
+    fn from_failure_maps_known_prefixes_and_drops_the_rest_to_error() {
+        assert_eq!(
+            ToolSpanError::from_failure("tool not enabled: web_fetch"),
+            ToolSpanError::NotEnabled
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("unknown tool: nope"),
+            ToolSpanError::NotEnabled
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("tool denied: policy"),
+            ToolSpanError::Denied
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("plan jail: mutating tools may only write `PLAN.md`"),
+            ToolSpanError::Denied
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("invalid arguments for bash: missing field `command`"),
+            ToolSpanError::InvalidArguments
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("bash timed out after 300ms"),
+            ToolSpanError::Timeout
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("bash failed with status exit status: 7: SECRET_OUTPUT"),
+            ToolSpanError::NonzeroExit
+        );
+        assert_eq!(
+            ToolSpanError::from_failure("I/O: SECRET_PATH"),
+            ToolSpanError::Error
+        );
     }
 
     #[test]

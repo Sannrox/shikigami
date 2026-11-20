@@ -13,7 +13,8 @@ use shikigami_engine::content::{
     ResolvedContent, ResolvedContentPart, sha256_digest, tool_arguments_part_id, validate_messages,
 };
 use shikigami_engine::model::{
-    ChatMessage, ModelError, ModelPort, ModelTurn, TokenUsage, ToolCall, effective_model_name,
+    ChatMessage, ModelError, ModelFinishReason, ModelPort, ModelTurn, TokenUsage, ToolCall,
+    effective_model_name,
 };
 use shikigami_engine::tools::ToolDef;
 
@@ -150,6 +151,7 @@ struct StreamedTurn {
     /// `(id, name, arguments)` by stream index.
     tool_calls: Vec<(String, String, String)>,
     usage: Option<serde_json::Value>,
+    finish_reason: Option<String>,
 }
 
 impl StreamedTurn {
@@ -169,6 +171,13 @@ impl StreamedTurn {
         };
         if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
             self.usage = Some(usage.clone());
+        }
+        if let Some(reason) = event
+            .pointer("/choices/0/finish_reason")
+            .and_then(|value| value.as_str())
+            .filter(|reason| !reason.is_empty())
+        {
+            self.finish_reason = Some(reason.to_owned());
         }
         let Some(delta) = event.pointer("/choices/0/delta") else {
             return false;
@@ -215,7 +224,10 @@ impl StreamedTurn {
             })
             .collect();
         serde_json::json!({
-            "choices": [{ "message": { "content": self.content, "tool_calls": tool_calls } }],
+            "choices": [{
+                "message": { "content": self.content, "tool_calls": tool_calls },
+                "finish_reason": self.finish_reason,
+            }],
             "usage": self.usage,
         })
     }
@@ -441,8 +453,17 @@ impl HttpModel {
             content,
             tool_calls,
             usage,
+            finish_reason: finish_reason_from_openai(&resp),
         })
     }
+}
+
+/// Map OpenAI-compatible `choices[0].finish_reason` onto the closed set.
+/// Unknown or missing values stay absent.
+fn finish_reason_from_openai(resp: &serde_json::Value) -> Option<ModelFinishReason> {
+    resp.pointer("/choices/0/finish_reason")
+        .and_then(|value| value.as_str())
+        .and_then(ModelFinishReason::parse)
 }
 
 /// Map OpenAI-compatible `usage` (and common proxy aliases) onto [`TokenUsage`].
@@ -1071,6 +1092,32 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, None);
         assert_eq!(usage.cache_creation_input_tokens, None);
         assert!(token_usage_from_openai(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn openai_finish_reason_maps_the_closed_set_and_drops_unknown() {
+        let length = serde_json::json!({
+            "choices": [{ "finish_reason": "length", "message": { "content": "cut" } }]
+        });
+        assert_eq!(
+            finish_reason_from_openai(&length),
+            Some(ModelFinishReason::Length)
+        );
+        let max_tokens = serde_json::json!({
+            "choices": [{ "finish_reason": "max_tokens", "message": { "content": "cut" } }]
+        });
+        assert_eq!(
+            finish_reason_from_openai(&max_tokens),
+            Some(ModelFinishReason::Length)
+        );
+        let unknown = serde_json::json!({
+            "choices": [{ "finish_reason": "SECRET_REASON", "message": { "content": "ok" } }]
+        });
+        assert_eq!(finish_reason_from_openai(&unknown), None);
+        assert_eq!(
+            finish_reason_from_openai(&serde_json::json!({"choices": [{}]})),
+            None
+        );
     }
 
     #[tokio::test]
