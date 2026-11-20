@@ -391,8 +391,8 @@ Rows beyond `## Testing Guidelines`:
 Facts the `tui-e2e` skill reads.
 
 - Test command: `cargo test --locked -p shikigami-tui`.
-- Headless backend: ratatui `TestBackend` in the test module of
-  `crates/shikigami-tui/src/lib.rs`. Render with `draw(frame, &session)`,
+- Headless backend: ratatui `TestBackend` in `crates/shikigami-tui/src/tests/`.
+  Render with `draw(frame, &session)`,
   read rows with `buffer_row`, and send keys with
   `handle_key(&session, KeyEvent::new(..))`; `session_with_assistant` builds a
   session over a temp directory. There is no snapshot tool; tests assert on
