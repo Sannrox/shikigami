@@ -1,6 +1,6 @@
 //! Durable execution and reporting for one model-produced tool batch.
 
-use crate::tracing_export::Outbound;
+use crate::tracing_export::{Outbound, ToolSpanError};
 use crate::typed_report::{TypedProfile, stored_text};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1074,7 +1074,7 @@ impl<'a> DurableToolBatch<'a> {
                     if call.name == "load_skill" {
                         emit_skill_loads(self.engine, &session.run_id, tools.as_ref());
                     }
-                    session.spans.end_tool(&report_call_id, true);
+                    session.spans.end_tool(&report_call_id, true, None);
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -1120,7 +1120,11 @@ impl<'a> DurableToolBatch<'a> {
                             &detail,
                         )
                         .await?;
-                    session.spans.end_tool(&report_call_id, report.success);
+                    session.spans.end_tool(
+                        &report_call_id,
+                        report.success,
+                        (!report.success).then_some(ToolSpanError::Error),
+                    );
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -1170,7 +1174,9 @@ impl<'a> DurableToolBatch<'a> {
                     // resume can retry if the report failed.
                     session.save_recoverable(Some(parked), tools.as_ref())?;
                     report_result?;
-                    session.spans.end_tool(&report_call_id, false);
+                    session
+                        .spans
+                        .end_tool(&report_call_id, false, Some(ToolSpanError::Error));
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -1208,7 +1214,11 @@ impl<'a> DurableToolBatch<'a> {
                             &reported_detail,
                         )
                         .await?;
-                    session.spans.end_tool(&report_call_id, false);
+                    session.spans.end_tool(
+                        &report_call_id,
+                        false,
+                        Some(ToolSpanError::from_failure(&detail)),
+                    );
                     self.engine.emit(
                         &session.run_id,
                         HarnessEvent::ToolEnd {
@@ -1517,7 +1527,9 @@ impl<'a> DurableToolBatch<'a> {
         *pending_park = Some(parked.clone());
         session.save_recoverable(Some(parked), self.tools.as_ref())?;
         self.emit_prefix_tool_ends(session, emissions).await?;
-        session.spans.end_tool(&report_call_id, false);
+        session
+            .spans
+            .end_tool(&report_call_id, false, Some(ToolSpanError::Error));
         self.engine.emit(
             &session.run_id,
             HarnessEvent::ToolEnd {
@@ -1573,7 +1585,11 @@ impl<'a> DurableToolBatch<'a> {
             if name == "load_skill" {
                 emit_skill_loads(self.engine, &session.run_id, self.tools.as_ref());
             }
-            session.spans.end_tool(&prefix_call_id, ok);
+            session.spans.end_tool(
+                &prefix_call_id,
+                ok,
+                (!ok).then(|| ToolSpanError::from_failure(&detail)),
+            );
             self.engine.emit(
                 &session.run_id,
                 HarnessEvent::ToolEnd {

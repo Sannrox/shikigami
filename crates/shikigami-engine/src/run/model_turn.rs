@@ -441,6 +441,7 @@ impl<'a> DurableModelTurn<'a> {
                 content: turn.text.clone(),
                 tool_calls: turn.tool_calls.clone(),
                 usage: turn.usage,
+                finish_reason: None,
             };
             session.append_content_model_turn(&turn).await?;
             let content_message = session
@@ -568,6 +569,7 @@ impl<'a> DurableModelTurn<'a> {
         session.spans.end_turn(
             &crate::model::effective_model_name(&self.engine.config),
             turn.usage,
+            turn.finish_reason,
         );
         Ok(turn)
     }
@@ -645,6 +647,7 @@ async fn content_to_model_turn(
         content: text,
         tool_calls,
         usage: turn.usage,
+        finish_reason: None,
     })
 }
 
@@ -665,6 +668,7 @@ fn staged_model_turn(
             content: message.content.clone(),
             tool_calls: message.tool_calls.clone(),
             usage: None,
+            finish_reason: None,
         });
     }
     let assistant_idx = messages
@@ -692,6 +696,7 @@ fn staged_model_turn(
         content: message.content.clone(),
         tool_calls: message.tool_calls.clone(),
         usage: None,
+        finish_reason: None,
     })
 }
 

@@ -4,8 +4,8 @@
 //! wires the OpenAI-compatible HTTP adapter onto the engine port.
 
 pub use shikigami_engine::model::{
-    ChatMessage, CostEstimate, ModelError, ModelPort, ModelTurn, ScriptedModel, TokenUsage,
-    ToolCall, effective_model_name, stable_tool_call_id,
+    ChatMessage, CostEstimate, ModelError, ModelFinishReason, ModelPort, ModelTurn, ScriptedModel,
+    TokenUsage, ToolCall, effective_model_name, stable_tool_call_id,
 };
 
 #[cfg(feature = "model-http")]

@@ -732,6 +732,7 @@ mod tests {
                 args_json: r#"{"path":"partial.txt","content":"hello"}"#.into(),
             }],
             usage: None,
+            finish_reason: None,
         }]);
         let eng = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
@@ -793,6 +794,7 @@ mod tests {
                     args_json: r#"{"path":"partial.txt","content":"hello"}"#.into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
             ModelTurn {
                 content: String::new(),
@@ -802,6 +804,7 @@ mod tests {
                     args_json: r#"{"summary":"resumed ok","success":true}"#.into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
         ]);
         let eng2 = Engine {
@@ -873,6 +876,7 @@ mod tests {
                     },
                 ],
                 usage: None,
+                finish_reason: None,
             },
             ModelTurn {
                 content: String::new(),
@@ -882,6 +886,7 @@ mod tests {
                     args_json: r#"{"summary":"parallel ok","success":true}"#.into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
         ]);
         let eng = Engine {
@@ -923,6 +928,7 @@ mod tests {
                         .into(),
             }],
             usage: None,
+            finish_reason: None,
         }]);
         let eng = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
@@ -987,6 +993,7 @@ mod tests {
                             .into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
             ModelTurn {
                 content: String::new(),
@@ -998,6 +1005,7 @@ mod tests {
                             .into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
             ModelTurn {
                 content: String::new(),
@@ -1007,6 +1015,7 @@ mod tests {
                     args_json: r#"{"summary":"todos done","success":true}"#.into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
         ]);
         let eng2 = Engine {
@@ -1092,6 +1101,7 @@ mod tests {
                 args_json: r#"{"reason":"need human","question":"approve?"}"#.into(),
             }],
             usage: None,
+            finish_reason: None,
         }]);
         let eng = Engine {
             governance: Arc::from(governance::from_config(&config).unwrap()),
@@ -1158,6 +1168,7 @@ mod tests {
                     args_json: r#"{"reason":"need human","question":"approve?"}"#.into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
             ModelTurn {
                 content: String::new(),
@@ -1167,6 +1178,7 @@ mod tests {
                     args_json: r#"{"summary":"approved and done","success":true}"#.into(),
                 }],
                 usage: None,
+                finish_reason: None,
             },
         ]);
         let eng3 = Engine {
