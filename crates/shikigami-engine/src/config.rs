@@ -332,6 +332,46 @@ pub struct ToolsSettings {
     /// `mcp_servers` are refused. Third-party credentials stay in the gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_gateway: Option<McpGatewaySettings>,
+    /// Opt-in `web_search` HTTP endpoint. Off when `url` is unset; the tool
+    /// is not registered until both this url and `tools.enabled` name it.
+    #[serde(default, skip_serializing_if = "WebSearchSettings::is_unset")]
+    pub web_search: WebSearchSettings,
+}
+
+/// `[tools.web_search]`: operator HTTP search endpoint for the opt-in builtin.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct WebSearchSettings {
+    /// Search POST URL. Empty or omitted leaves `web_search` unregistered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Env var holding a Bearer token. Never written to events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+}
+
+impl WebSearchSettings {
+    /// True when no endpoint is configured.
+    pub fn is_unset(settings: &Self) -> bool {
+        settings.endpoint().is_none() && settings.token_env_name().is_none()
+    }
+
+    /// Trimmed search URL, if the operator set one.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    }
+
+    /// Trimmed token env name, if set.
+    pub fn token_env_name(&self) -> Option<&str> {
+        self.token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
 }
 
 /// Profile for site-agent turns (#487): governed, gateway-only tools.
@@ -519,6 +559,7 @@ impl Default for ToolsSettings {
             respect_ignore: default_respect_ignore(),
             mcp_servers: Vec::new(),
             mcp_gateway: None,
+            web_search: WebSearchSettings::default(),
         }
     }
 }
@@ -1060,8 +1101,8 @@ pub enum EgressMode {
     /// No harness-level network restriction (default OSS behavior).
     #[default]
     Unrestricted,
-    /// Block harness HTTP client calls (model `http` adapter, MCP HTTP, and
-    /// `web_fetch`). Bash sockets are still unrestricted.
+    /// Block harness HTTP client calls (model `http` adapter, MCP HTTP,
+    /// `web_fetch`, and `web_search`). Bash sockets are still unrestricted.
     Deny,
     /// Only listed hosts for harness HTTP client.
     Allowlist,
@@ -1701,6 +1742,7 @@ impl Config {
                 .iter()
                 .filter_map(|server| server.token_env.clone()),
         );
+        names.extend(self.tools.web_search.token_env_name().map(str::to_string));
         names.extend([
             "SHIKIGAMI_JOB_TOKEN".into(),
             "SHIKIGAMI_JOB_TENANT".into(),
@@ -1743,6 +1785,15 @@ pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
     if let Ok(v) = std::env::var(&config.model.api_key_env)
         && !v.is_empty()
     {
+        secrets.push(v);
+    }
+    if let Some(name) = config.tools.web_search.token_env_name()
+        && let Ok(v) = std::env::var(name)
+        && !v.is_empty()
+    {
+        if let Some(stripped) = v.strip_prefix("Bearer ") {
+            secrets.push(stripped.to_string());
+        }
         secrets.push(v);
     }
     // Longest first so partial overlaps redact fully.
@@ -1967,6 +2018,7 @@ script_json = "[]"
             framing: McpFraming::ContentLength,
             timeout_secs: 30,
         });
+        config.tools.web_search.token_env = Some("SEARCH_TOKEN".into());
 
         assert_eq!(
             config.protected_tool_environment_names(),
@@ -1974,6 +2026,7 @@ script_json = "[]"
                 "MCP_TOKEN",
                 "MODEL_KEY",
                 "PLANE_TOKEN",
+                "SEARCH_TOKEN",
                 "SHIKIGAMI_JOB_NAMESPACE",
                 "SHIKIGAMI_JOB_TENANT",
                 "SHIKIGAMI_JOB_TOKEN",
@@ -2004,6 +2057,37 @@ tool_sockets = "host"
         .unwrap();
         let (config, _) = Config::resolve(&path).unwrap();
         assert_eq!(config.sandbox.tool_sockets, ToolSockets::Host);
+    }
+
+    #[test]
+    fn web_search_settings_parse_and_default_off() {
+        assert!(Config::default().tools.web_search.endpoint().is_none());
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+
+[tools.web_search]
+url = "https://search.example/v1"
+token_env = "SEARCH_TOKEN"
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::resolve(&path).unwrap();
+        assert_eq!(
+            config.tools.web_search.endpoint(),
+            Some("https://search.example/v1")
+        );
+        assert_eq!(
+            config.tools.web_search.token_env_name(),
+            Some("SEARCH_TOKEN")
+        );
+        assert!(!ToolsSettings::default_coding_tools().contains(&"web_search".into()));
+        assert!(
+            !ToolsSettings::tools_for_mode(PermissionMode::Read).contains(&"web_search".into())
+        );
     }
 
     #[test]
