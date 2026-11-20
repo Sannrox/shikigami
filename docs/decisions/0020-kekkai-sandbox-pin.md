@@ -34,6 +34,11 @@ plus later host-capability work.
 - Security fixes in the sandbox land in kekkai first, then this pin.
 - The kekkai git pin is a parallel-lane collision surface.
 
+## Later
+
+`seatbelt` maps onto kekkai `Backend::Macos`. Settings keep the name
+`seatbelt` (ADR 0013). Denial tests live in `tests/seatbelt_sandbox.rs`.
+
 ## Rejected alternatives
 
 - **Copy the sandbox into kako.** Drifts from Shikigami's hardened

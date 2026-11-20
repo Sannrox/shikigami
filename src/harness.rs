@@ -632,6 +632,52 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_seatbelt_or_refuses_it_off_macos() {
+        let dir = tempdir().unwrap();
+        let state = StateRoot::new(dir.path().join("state-seatbelt"));
+        let mut config = Config::default();
+        config.governance.fail_closed = true;
+        config.sandbox.backend = crate::config::SandboxBackend::Seatbelt;
+        config.tools.enabled = vec!["bash".into(), "report".into()];
+        if cfg!(target_os = "macos") {
+            config.governance.fail_closed = false;
+            config.network.egress = crate::config::EgressMode::Deny;
+            let harness = Harness::from_config(config, state).unwrap();
+            let report = harness.doctor();
+            if report.ok {
+                assert!(
+                    report
+                        .lines
+                        .iter()
+                        .any(|line| line.contains("backend=seatbelt")),
+                    "{:?}",
+                    report.lines
+                );
+            } else {
+                assert!(
+                    report.lines.iter().any(|line| line.contains("seatbelt")
+                        || line.contains("unavailable")
+                        || line.contains("macos")),
+                    "{:?}",
+                    report.lines
+                );
+            }
+        } else {
+            let harness = Harness::from_config(config, state).unwrap();
+            let report = harness.doctor();
+            assert!(!report.ok, "{:?}", report.lines);
+            assert!(
+                report
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("seatbelt") && line.contains("macOS")),
+                "{:?}",
+                report.lines
+            );
+        }
+    }
+
+    #[test]
     fn doctor_reports_retired_plane_adapter_as_config_error() {
         let mut config = Config::default();
         config.governance.adapter = "sekai-chisei".into();

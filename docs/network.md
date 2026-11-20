@@ -37,15 +37,16 @@ This is not an OS sandbox and does not replace container/seccomp isolation.
 ## Residual risk (bash)
 
 `bash` is **not** interposing network syscalls unless `sandbox.backend =
-linux_native` is selected on Linux. That backend denies `socket()` in the
-child; `[network]` still governs only the harness-owned HTTP clients above.
-Prefer `tools.mode = "workspace"` (no bash) when you need lower network risk
-without OS isolation, or on hosts that cannot provide `linux_native`.
+linux_native` is selected on Linux or `sandbox.backend = seatbelt` on macOS.
+Those backends deny child sockets; `[network]` still governs only the
+harness-owned HTTP clients above. Prefer `tools.mode = "workspace"` (no bash)
+when you need lower network risk without OS isolation, or on hosts that cannot
+provide those backends.
 
 MCP HTTP transports already call `NetworkSettings::check_http_url`. See
 [mcp.md](mcp.md).
 
-`linux_native` denies every child `socket()` unless the job sets
+`linux_native` and `seatbelt` deny child sockets unless the job sets
 `sandbox.tool_sockets = "host"` (ADR 0013). That grant is host-enforced and
 unverified by the harness. An address-level egress allowlist for tool children
 remains a separate decision.

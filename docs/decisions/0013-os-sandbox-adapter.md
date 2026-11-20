@@ -123,11 +123,13 @@ cannot read a `sockaddr`.
 
 `linux_native` (Landlock + total socket deny, `read_only_paths`, doctor ABI
 reporting) shipped. `sandbox.tool_sockets` (`deny` default, `host` grant)
-shipped in #442. `sandbox.backend` is currently `none | rlimit |
-linux_native`. `seatbelt` remains a subsequent additive deliverable.
+shipped in #442. `seatbelt` ships as `sandbox.backend = "seatbelt"` mapped
+onto kekkai `Backend::Macos` ([ADR 0020](0020-kekkai-sandbox-pin.md)); other
+hosts fail closed. `sandbox.backend` is `none | rlimit | linux_native |
+seatbelt`.
 
 Enforcement for those backends now lives in a pinned kekkai release;
-settings names and doctor lines stay here ([ADR 0020](0020-kekkai-sandbox-pin.md)).
+settings names and doctor lines stay here.
 
 ## Rejected alternatives
 

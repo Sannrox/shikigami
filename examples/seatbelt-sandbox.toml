@@ -1,0 +1,42 @@
+# macOS development sandbox: Seatbelt on Bash children via kekkai `macos`.
+# Linux and Windows reject `seatbelt` at validate/doctor/run.
+version = 1
+
+[profile]
+name = "local"
+
+[governance]
+adapter = "local"
+
+[workspace]
+adapter = "directory"
+root = "."
+
+[sandbox]
+backend = "seatbelt"
+# Additive host toolchains (absolute, existing, canonicalized at apply time):
+# read_only_paths = ["/opt/homebrew"]
+# tool_sockets defaults to deny (no child sockets). Set "host" only when the
+# job explicitly needs host sockets. This profile is development-only.
+
+[network]
+egress = "deny"
+
+[tools]
+enabled = ["bash", "read_file", "write_file", "report"]
+bash_timeout_secs = 60
+
+[run]
+max_turns = 8
+
+[events]
+adapter = "stderr"
+
+[model]
+adapter = "scripted"
+script_json = """
+[
+  {"tool_calls":[{"name":"bash","args_json":"{\\"command\\":\\"echo ok > SANDBOX_OK.txt\\"}"}]},
+  {"tool_calls":[{"name":"report","args_json":"{\\"summary\\":\\"workspace write under seatbelt\\",\\"success\\":true}"}]}
+]
+"""

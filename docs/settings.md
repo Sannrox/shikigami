@@ -227,19 +227,20 @@ closed. Hosts must serialize concurrent runs against the same inplace root.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| backend | "none" | `none` (no isolation), Unix-only `rlimit` (limits + process group), or Linux-only `linux_native` (Landlock + seccomp via pinned kekkai; ADR 0013, ADR 0020) |
+| backend | "none" | `none` (no isolation), Unix-only `rlimit` (limits + process group), Linux-only `linux_native` (Landlock + seccomp via pinned kekkai), or macOS-only `seatbelt` (Seatbelt via kekkai `macos`; ADR 0013, ADR 0020) |
 | cpu_time_secs | unset | CPU seconds for Bash children |
 | memory_mb | unset | Address-space limit for Bash children |
 | user_processes | unset | Per-real-user process ceiling (RLIMIT_NPROC); not isolated per run |
 | file_size_mb | unset | Maximum child-created file size |
 | open_files | unset | Maximum open descriptors |
-| read_only_paths | `[]` | Extra absolute paths granted read/execute under `linux_native` only |
-| tool_sockets | `deny` | `deny` (default): `linux_native` children cannot `socket()`. `host`: explicit job/operator grant that lifts the seccomp socket gate; doctor reports host-enforced, unverified by the harness (ADR 0013) |
+| read_only_paths | `[]` | Extra absolute paths granted read/execute under `linux_native` and `seatbelt` |
+| tool_sockets | `deny` | `deny` (default): `linux_native` and `seatbelt` children cannot open sockets. `host`: explicit job/operator grant that lifts the socket gate; doctor reports host-enforced, unverified by the harness (ADR 0013) |
 
 `none` is the historical default and produces a doctor warning. `rlimit` is
 opt-in limits-only (doctor label: `limits`); it is not OS isolation. Non-Unix
-hosts reject `rlimit`; non-Linux hosts reject `linux_native`. Selecting a
-backend the host cannot provide fails `doctor` and `run` under every profile.
+hosts reject `rlimit`; non-Linux hosts reject `linux_native`; non-macOS hosts
+reject `seatbelt`. Selecting a backend the host cannot provide fails `doctor`
+and `run` under every profile.
 
 `linux_native` applies in the child's `pre_exec`: Landlock ABI 3+ (kernel 6.2)
 is required so `truncate` is mediated. ABI 6 (kernel 6.12) additionally scopes
@@ -251,7 +252,16 @@ fails for every address family (`socketpair` is limited to `AF_UNIX` stream
 pairs for pipelines). Landlock does not mediate `chmod`/`chown`/`setxattr` on
 inaccessible paths; that is a kernel residual, not an allowlist. Tool-child sockets
 stay denied even when `[network]` is an allowlist unless `sandbox.tool_sockets
-= "host"`. `[network]` still governs only harness-owned HTTP clients. See
+= "host"`. `[network]` still governs only harness-owned HTTP clients.
+
+`seatbelt` is the macOS development profile (never a hosted tier). It maps
+onto kekkai `Backend::Macos` and keeps the settings name `seatbelt`. Doctor
+reports `backend=seatbelt`. The profile is deny-default reads with a system
+allowlist (including the root directory inode, not the whole tree), canonical
+workspace plus a run-owned `TMPDIR` as the writable set, and network denied
+unless `tool_sockets = "host"`. Bash children exec `/bin/bash` so the
+interpreter is inside that allowlist. Toolchains outside the allowlist go in
+`read_only_paths`. See
 [network.md](network.md),
 [ADR 0013](decisions/0013-os-sandbox-adapter.md), and
 [ADR 0020](decisions/0020-kekkai-sandbox-pin.md).
@@ -260,8 +270,8 @@ Under `governance.fail_closed = true` or a remote governance adapter
 (`http-callback`, `host-authz`), enabling Bash (explicitly or via
 `tools.mode = workspace_exec`) **refuses** configuration when
 `sandbox.backend = none` or `network.egress = unrestricted`. Operators must set
-`sandbox.backend = rlimit` or `linux_native`, and `network.egress = deny` or
-`allowlist`.
+`sandbox.backend = rlimit`, `linux_native`, or `seatbelt`, and
+`network.egress = deny` or `allowlist`.
 
 ### `[network]`
 
@@ -645,9 +655,9 @@ For each host that selects `http-callback` or `host-authz`:
 2. Expect doctor, `run`, and `serve` to refuse when the host broker is
    unreachable or refuses, even without `fail_closed = true`. `fail_closed =
    false` no longer relaxes a remote adapter.
-3. If Bash is enabled, set `sandbox.backend = rlimit` or `linux_native` and
-   `network.egress = deny` or `allowlist`; the fail-closed Bash rule now
-   applies.
+3. If Bash is enabled, set `sandbox.backend = rlimit`, `linux_native`, or
+   `seatbelt` and `network.egress = deny` or `allowlist`; the fail-closed
+   Bash rule now applies.
 4. Run `shikigami doctor` with the new settings before starting the host.
 
 A config that still sets `governance.adapter = "sekai-chisei"` or
@@ -657,6 +667,7 @@ A config that still sets `governance.adapter = "sekai-chisei"` or
 
 - [../examples/local-run.toml](../examples/local-run.toml)
 - [../examples/cliproxy-http.toml](../examples/cliproxy-http.toml)
+- [../examples/seatbelt-sandbox.toml](../examples/seatbelt-sandbox.toml)
 
 Adapter semantics: [adapters.md](adapters.md).
 
