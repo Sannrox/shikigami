@@ -512,6 +512,112 @@ async fn load_skill_attributes_each_pack_once_at_load() {
     assert_eq!(load_results, [true, true, false], "{events:?}");
 }
 
+#[tokio::test]
+async fn listed_project_rules_all_attach_on_a_scripted_run() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "agents house rules\n").unwrap();
+    std::fs::write(ws.join("shikigami.rules.md"), "harness house rules\n").unwrap();
+    std::fs::create_dir_all(ws.join("nested")).unwrap();
+    std::fs::write(ws.join("nested/secret.md"), "must not attach\n").unwrap();
+
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+            .into(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "inplace".into();
+    config.workspace.root = ws.to_string_lossy().into();
+    config.context.rules_filenames = vec![
+        "AGENTS.md".into(),
+        "nested/secret.md".into(),
+        "missing.md".into(),
+        "shikigami.rules.md".into(),
+    ];
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("follow the house rules");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let rules: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            HarnessEvent::Message { text, .. } if text.starts_with("project_rules ") => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rules.len(), 2, "{events:?}");
+    assert!(
+        rules[0].starts_with("project_rules AGENTS.md digest="),
+        "{rules:?}"
+    );
+    assert!(
+        rules[1].starts_with("project_rules shikigami.rules.md digest="),
+        "{rules:?}"
+    );
+}
+
+#[tokio::test]
+async fn disabled_project_rules_attach_nothing_on_a_scripted_run() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("AGENTS.md"), "agents house rules\n").unwrap();
+    std::fs::write(ws.join("shikigami.rules.md"), "harness house rules\n").unwrap();
+
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"done\",\"success\":true}"}]}]"#
+            .into(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "inplace".into();
+    config.workspace.root = ws.to_string_lossy().into();
+    config.context.load_project_rules = false;
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("ignore house rules");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::Message { text, .. } if text.starts_with("project_rules ")
+        )),
+        "{events:?}"
+    );
+}
+
 /// Unattended `run` keeps reaping background jobs when it parks; only
 /// session hosts keep them across a park.
 #[tokio::test]

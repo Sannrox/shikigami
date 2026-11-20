@@ -21,13 +21,23 @@ impl ProjectRules {
     }
 }
 
-/// Discover the first configured rules file under the workspace root.
-pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Option<ProjectRules> {
+/// Load every existing listed rules file under the workspace root.
+///
+/// Names are attached in `rules_filenames` order. Missing names are skipped.
+/// `..`, `/`, and `\\` are ignored (flat workspace-root names only). A shared
+/// `max_rules_bytes` budget covers all files: the file that would cross the
+/// cap is truncated with the existing marker and later files are omitted.
+pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Vec<ProjectRules> {
     if !settings.load_project_rules {
-        return None;
+        return Vec::new();
     }
     let max = settings.max_rules_bytes.clamp(1, MAX_DEFAULT * 4);
+    let mut remaining = max;
+    let mut loaded = Vec::new();
     for name in &settings.rules_filenames {
+        if remaining == 0 {
+            break;
+        }
         if name.contains("..") || name.contains('/') || name.contains('\\') {
             continue; // only flat workspace-root names
         }
@@ -35,16 +45,24 @@ pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Optio
         if !path.is_file() {
             continue;
         }
-        let (body, digest, truncated) =
-            load_truncated_text(&path, max, "\n\n… [project rules truncated]\n")?;
-        return Some(ProjectRules {
+        let Some((body, digest, truncated)) =
+            load_truncated_text(&path, remaining, "\n\n… [project rules truncated]\n")
+        else {
+            continue;
+        };
+        if truncated {
+            remaining = 0;
+        } else {
+            remaining = remaining.saturating_sub(body.len());
+        }
+        loaded.push(ProjectRules {
             filename: name.clone(),
             body,
             digest,
             truncated,
         });
     }
-    None
+    loaded
 }
 
 /// A loaded skill pack (SKILL.md text + digest).
@@ -271,14 +289,10 @@ fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String,
     Some((body, digest, truncated))
 }
 
-/// Compose system prompt with optional project rules and skill packs.
-pub fn compose_system_prompt(
-    base: &str,
-    rules: Option<&ProjectRules>,
-    skills: &[SkillPack],
-) -> String {
+/// Compose system prompt with project rules and skill packs.
+pub fn compose_system_prompt(base: &str, rules: &[ProjectRules], skills: &[SkillPack]) -> String {
     let mut out = base.to_string();
-    if let Some(r) = rules {
+    for r in rules {
         out.push_str(&format!(
             "\n\n# Project rules (`{}`)\n\n{}",
             r.filename, r.body
@@ -300,28 +314,113 @@ mod tests {
     fn loads_agents_md() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "use small PRs\n").unwrap();
-        let rules = load_project_rules(dir.path(), &ContextSettings::default()).unwrap();
-        assert_eq!(rules.filename, "AGENTS.md");
-        assert!(rules.body.contains("small PRs"));
-        assert!(!rules.truncated);
-        assert_eq!(rules.digest.len(), 64);
+        let rules = load_project_rules(dir.path(), &ContextSettings::default());
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].filename, "AGENTS.md");
+        assert!(rules[0].body.contains("small PRs"));
+        assert!(!rules[0].truncated);
+        assert_eq!(rules[0].digest.len(), 64);
     }
 
     #[test]
-    fn missing_is_none() {
+    fn missing_is_empty() {
         let dir = tempdir().unwrap();
-        assert!(load_project_rules(dir.path(), &ContextSettings::default()).is_none());
+        assert!(load_project_rules(dir.path(), &ContextSettings::default()).is_empty());
     }
 
     #[test]
     fn disable_skips() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "x\n").unwrap();
+        std::fs::write(dir.path().join("shikigami.rules.md"), "y\n").unwrap();
         let s = ContextSettings {
             load_project_rules: false,
             ..Default::default()
         };
-        assert!(load_project_rules(dir.path(), &s).is_none());
+        assert!(load_project_rules(dir.path(), &s).is_empty());
+    }
+
+    #[test]
+    fn loads_every_listed_file_in_order() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "agents body\n").unwrap();
+        std::fs::write(dir.path().join("shikigami.rules.md"), "harness body\n").unwrap();
+        let rules = load_project_rules(dir.path(), &ContextSettings::default());
+        assert_eq!(
+            rules
+                .iter()
+                .map(|r| r.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["AGENTS.md", "shikigami.rules.md"]
+        );
+        assert_ne!(rules[0].digest, rules[1].digest);
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        let agents_at = prompt.find("# Project rules (`AGENTS.md`)").unwrap();
+        let harness_at = prompt
+            .find("# Project rules (`shikigami.rules.md`)")
+            .unwrap();
+        assert!(agents_at < harness_at, "{prompt}");
+        assert!(prompt.contains("agents body"));
+        assert!(prompt.contains("harness body"));
+    }
+
+    #[test]
+    fn slash_and_missing_names_are_skipped() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/secret.md"), "nope\n").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "keep\n").unwrap();
+        let s = ContextSettings {
+            rules_filenames: vec![
+                "nested/secret.md".into(),
+                "missing.md".into(),
+                "AGENTS.md".into(),
+            ],
+            ..Default::default()
+        };
+        let rules = load_project_rules(dir.path(), &s);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].filename, "AGENTS.md");
+        assert!(rules[0].body.contains("keep"));
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        assert!(!prompt.contains("nope"));
+    }
+
+    #[test]
+    fn shared_byte_budget_truncates_and_omits_later_files() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "AAAA").unwrap();
+        std::fs::write(dir.path().join("shikigami.rules.md"), "BBBB").unwrap();
+        let s = ContextSettings {
+            max_rules_bytes: 3,
+            ..Default::default()
+        };
+        let rules = load_project_rules(dir.path(), &s);
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].truncated);
+        assert!(rules[0].body.starts_with("AAA"));
+        assert!(rules[0].body.contains("… [project rules truncated]"));
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        assert!(!prompt.contains("BBBB"));
+        assert!(!prompt.contains("shikigami.rules.md"));
+    }
+
+    #[test]
+    fn later_file_is_truncated_when_it_crosses_the_cap() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "AA").unwrap();
+        std::fs::write(dir.path().join("shikigami.rules.md"), "BBBB").unwrap();
+        let s = ContextSettings {
+            max_rules_bytes: 4,
+            ..Default::default()
+        };
+        let rules = load_project_rules(dir.path(), &s);
+        assert_eq!(rules.len(), 2);
+        assert!(!rules[0].truncated);
+        assert_eq!(rules[0].body, "AA");
+        assert!(rules[1].truncated);
+        assert!(rules[1].body.starts_with("BB"));
+        assert!(rules[1].body.contains("… [project rules truncated]"));
     }
 
     fn write_pack(workspace: &Path, id: &str, body: &str) {
@@ -346,7 +445,7 @@ mod tests {
             ..Default::default()
         };
         let skills = skill_context(dir.path(), &s, true);
-        let mut prompt = compose_system_prompt("BASE", None, &skills.eager);
+        let mut prompt = compose_system_prompt("BASE", &[], &skills.eager);
         append_skill_catalog(&mut prompt, &skills.catalog);
         for id in &ids {
             assert!(
@@ -408,7 +507,7 @@ mod tests {
         assert_eq!(packs.len(), 1);
         assert_eq!(packs[0].id, "demo");
         assert!(packs[0].body.contains("tests first"));
-        let composed = compose_system_prompt("BASE", None, &packs);
+        let composed = compose_system_prompt("BASE", &[], &packs);
         assert!(composed.contains("Skill `demo`"));
         assert!(composed.contains("tests first"));
     }
