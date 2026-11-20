@@ -125,7 +125,8 @@ impl AttemptError {
     }
 
     /// 408, 429, and 5xx are the provider saying "not now"; other statuses are final.
-    fn from_status(response: &reqwest::Response) -> Self {
+    /// A context-window refusal is permanent so the run loop can compact and retry.
+    async fn from_error_response(response: reqwest::Response) -> Self {
         let status = response.status();
         let retry_after = response
             .headers()
@@ -133,6 +134,14 @@ impl AttemptError {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(|secs| Duration::from_secs(secs).min(MAX_BACKOFF));
+        let body = response.text().await.unwrap_or_default();
+        if context_length_refusal(status.as_u16(), &body) {
+            return Self {
+                error: ModelError::ContextLength,
+                transient: false,
+                retry_after: None,
+            };
+        }
         Self {
             error: ModelError::ProviderStatus {
                 code: status.as_u16(),
@@ -142,6 +151,53 @@ impl AttemptError {
             retry_after,
         }
     }
+}
+
+/// True when a non-success chat-completions response is a prompt that does
+/// not fit the model window. Status is 400/413/422; the body names a
+/// context-length / prompt-too-long refusal, not an output `max_tokens` stop.
+fn context_length_refusal(status: u16, body: &str) -> bool {
+    if !matches!(status, 400 | 413 | 422) {
+        return false;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        let error = value.get("error").unwrap_or(&value);
+        let message = error
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if field_is_context_length(error.get("code"))
+            || field_is_context_length(error.get("type"))
+            || text_is_context_length(message)
+        {
+            return true;
+        }
+    }
+    text_is_context_length(body)
+}
+
+fn field_is_context_length(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(|value| value.as_str())
+        .is_some_and(text_is_context_length)
+}
+
+fn text_is_context_length(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "context_length",
+        "context-length",
+        "context length",
+        "context window",
+        "maximum context",
+        "prompt is too long",
+        "prompt too long",
+        "too many tokens",
+        "token count exceeds",
+        "input is too long",
+        "input token count exceeds",
+    ];
+    NEEDLES.iter().any(|needle| text.contains(needle))
 }
 
 /// A streamed chat completion folded back into the whole-response shape.
@@ -339,7 +395,7 @@ impl HttpModel {
         }
         let mut response = request.send().await.map_err(AttemptError::from_send)?;
         if !response.status().is_success() {
-            return Err(AttemptError::from_status(&response));
+            return Err(AttemptError::from_error_response(response).await);
         }
         let event_stream = response
             .headers()
@@ -1131,6 +1187,46 @@ mod tests {
         assert!(error.to_string().contains("401"), "{error}");
         assert_eq!(server.join().unwrap().len(), 1);
         assert!(notes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_length_refusal_is_typed_and_not_retried() {
+        const RESPONSE: &str = concat!(
+            "400 Bad Request\n",
+            r#"{"error":{"code":"context_length_exceeded","message":"This model's maximum context length is 8192 tokens."}}"#
+        );
+        let (base, server) = scripted_provider(vec![RESPONSE]);
+        let model = provider_model(&base, "SHIKIGAMI_HTTP_CONTEXT_LENGTH_KEY");
+
+        let (turn, notes) = collect_retry_notes(model.next_turn("system", &[], &[])).await;
+
+        assert!(matches!(turn, Err(ModelError::ContextLength)), "{turn:?}");
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn context_length_refusal_reads_provider_bodies_and_ignores_other_400s() {
+        let openai = r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#;
+        assert!(context_length_refusal(400, openai));
+        let anthropic = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200000 tokens > 190000 maximum"}}"#;
+        assert!(context_length_refusal(400, anthropic));
+        assert!(context_length_refusal(
+            413,
+            "input token count exceeds the limit"
+        ));
+        assert!(!context_length_refusal(
+            400,
+            r#"{"error":{"code":"invalid_request","message":"missing messages"}}"#
+        ));
+        assert!(!context_length_refusal(
+            503,
+            r#"{"error":{"code":"context_length_exceeded"}}"#
+        ));
+        assert!(!context_length_refusal(
+            400,
+            r#"{"error":{"message":"max_tokens too high"}}"#
+        ));
     }
 
     #[tokio::test]

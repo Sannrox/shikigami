@@ -756,6 +756,130 @@ async fn count_compact_still_runs_when_fill_window_is_set_but_usage_is_low() {
     );
 }
 
+async fn overflow_compact_run(
+    script: serde_json::Value,
+    compact_on_context_length: bool,
+) -> (
+    Result<shikigami::RunResult, shikigami::HarnessError>,
+    Vec<shikigami::HarnessEvent>,
+    Option<Vec<shikigami::model::ChatMessage>>,
+) {
+    use shikigami::ChannelSink;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(script.to_string());
+    config.events.adapter = "none".into();
+    config.run.compact_on_context_length = compact_on_context_length;
+    config.run.compact_keep_tail = 2;
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let runs = harness.state.runs_dir();
+    let (sink, rx) = ChannelSink::pair();
+    let outcome = harness
+        .run_with_events(RunRequest::new("write two files"), Some(Arc::new(sink)))
+        .await;
+    let messages = outcome.as_ref().ok().and_then(|result| {
+        shikigami::checkpoint::Checkpoint::load(&runs, &result.run_id)
+            .ok()
+            .map(|checkpoint| checkpoint.messages)
+    });
+    (
+        outcome,
+        std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+        messages,
+    )
+}
+
+fn overflow_report_requiring_compact() -> serde_json::Value {
+    let mut report = report_turn();
+    report["requires_context"] = serde_json::json!(["[context compacted"]);
+    report
+}
+
+#[tokio::test]
+async fn overflow_compact_retries_the_turn_after_a_context_length_refusal() {
+    let (outcome, events, messages) = overflow_compact_run(
+        serde_json::json!([
+            write_turn("a.txt"),
+            write_turn("b.txt"),
+            {"fail": "context_length"},
+            overflow_report_requiring_compact(),
+        ]),
+        true,
+    )
+    .await;
+    let result = outcome.expect("run should complete after compact");
+    assert!(result.success, "run failed: {result:?}");
+    assert!(
+        compacted_history_event(&events),
+        "missing compact event: {events:?}"
+    );
+    let messages = messages.expect("successful run should leave a checkpoint");
+    assert_eq!(messages[0].content, "write two files");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content.contains("[context compacted")),
+        "checkpoint prompt was not compacted: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn overflow_compact_fails_closed_on_a_second_context_length_refusal() {
+    let (outcome, events, _) = overflow_compact_run(
+        serde_json::json!([
+            write_turn("a.txt"),
+            write_turn("b.txt"),
+            {"fail": "context_length"},
+            {"fail": "context_length"},
+        ]),
+        true,
+    )
+    .await;
+    let error = outcome.expect_err("second refusal should fail the run");
+    assert!(
+        error.to_string().contains("context length"),
+        "error should name context length: {error}"
+    );
+    assert!(
+        !error.to_string().contains("400"),
+        "error should not be a generic HTTP 400: {error}"
+    );
+    assert!(
+        compacted_history_event(&events),
+        "first refusal should compact: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn overflow_compact_stays_idle_when_the_setting_is_off() {
+    let (outcome, events, _) = overflow_compact_run(
+        serde_json::json!([
+            write_turn("a.txt"),
+            write_turn("b.txt"),
+            {"fail": "context_length"},
+            overflow_report_requiring_compact(),
+        ]),
+        false,
+    )
+    .await;
+    let error = outcome.expect_err("refusal should fail when compact is off");
+    assert!(
+        error.to_string().contains("context length"),
+        "error should name context length: {error}"
+    );
+    assert!(
+        !compacted_history_event(&events),
+        "compacted with the setting off: {events:?}"
+    );
+}
+
 /// A `stop` hook that passes once the workspace's value.txt says `fixed`.
 /// It lives outside the workspace, as a real check script would.
 fn verify_hook(dir: &std::path::Path) -> serde_json::Value {

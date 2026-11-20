@@ -229,6 +229,9 @@ pub enum ModelError {
     /// `402 Payment Required`).
     #[error("http: model provider returned {text}")]
     ProviderStatus { code: u16, text: String },
+    /// The provider refused the prompt as larger than the model context window.
+    #[error("model: prompt exceeds context length")]
+    ContextLength,
     /// The request never reached the provider: refused connection or timeout.
     #[error("http: {0}")]
     Unreachable(String),
@@ -401,6 +404,7 @@ impl ScriptedModel {
                 chunks: t.chunks.clone(),
                 chunk_delay_ms: t.chunk_delay_ms,
                 requires_context: std::mem::take(&mut t.requires_context),
+                fail: std::mem::take(&mut t.fail),
             })
             .collect();
         let turns = wire
@@ -490,6 +494,11 @@ struct ScriptedTurn {
     /// fails. Lets a fixture prove a fact survived compaction.
     #[serde(default)]
     requires_context: Vec<String>,
+    /// Fail this entry instead of returning a turn. `context_length` is the
+    /// provider-window refusal; the cursor still advances so the next entry
+    /// is the retry.
+    #[serde(default)]
+    fail: Option<String>,
 }
 
 /// Scripted behavior before a turn returns.
@@ -498,6 +507,7 @@ struct TurnPrelude {
     chunks: Vec<String>,
     chunk_delay_ms: u64,
     requires_context: Vec<String>,
+    fail: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -559,6 +569,12 @@ impl ModelPort for ScriptedModel {
             index
         };
         if let Some(prelude) = self.preludes.get(index) {
+            if let Some(fail) = prelude.fail.as_deref() {
+                return Err(match fail {
+                    "context_length" => ModelError::ContextLength,
+                    other => ModelError::Message(format!("unknown scripted fail `{other}`")),
+                });
+            }
             if let Some(missing) = prelude.requires_context.iter().find(|needle| {
                 !messages
                     .iter()
@@ -716,6 +732,20 @@ mod cost_tests {
         assert_eq!(parent_second.content, "two");
         let child_second = child.next_turn("", &[], &[]).await.unwrap();
         assert_eq!(child_second.content, "two");
+    }
+
+    #[tokio::test]
+    async fn scripted_context_length_fail_advances_the_cursor() {
+        let mut config = Config::default();
+        config.model.script_json =
+            Some(r#"[{"fail":"context_length"},{"content":"after compact"}]"#.into());
+        let model = ScriptedModel::from_config(&config).unwrap();
+        assert!(matches!(
+            model.next_turn("", &[], &[]).await,
+            Err(ModelError::ContextLength)
+        ));
+        let turn = model.next_turn("", &[], &[]).await.unwrap();
+        assert_eq!(turn.content, "after compact");
     }
 
     #[test]

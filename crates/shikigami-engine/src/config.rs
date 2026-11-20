@@ -618,6 +618,11 @@ pub struct RunSettings {
     /// When message count exceeds this, compact middle history (None = disabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_after_messages: Option<u32>,
+    /// Compact with the same cut as `compact_after_messages` after the model
+    /// refuses the prompt as too large, then retry that turn once. On by
+    /// default: it only runs after a context-length failure.
+    #[serde(default = "default_true")]
+    pub compact_on_context_length: bool,
     /// Messages to retain after the initial user task when compacting (default 8).
     #[serde(default = "default_compact_keep_tail")]
     pub compact_keep_tail: u32,
@@ -744,6 +749,7 @@ impl Default for RunSettings {
             tool_concurrency: default_tool_concurrency(),
             timeout_secs: None,
             compact_after_messages: None,
+            compact_on_context_length: default_true(),
             compact_keep_tail: default_compact_keep_tail(),
             context_window_tokens: None,
             compact_at_usage_percent: default_compact_at_usage_percent(),
@@ -2299,6 +2305,28 @@ prompt = "be thorough"
             err.to_string().contains("compact_at_usage_percent"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn overflow_compact_setting_defaults_on_and_loads_from_toml() {
+        let config = Config::default();
+        assert!(config.run.compact_on_context_length);
+        config.validate().unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[run]
+compact_on_context_length = false
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::resolve(&path).unwrap();
+        config.validate().unwrap();
+        assert!(!config.run.compact_on_context_length);
     }
 
     #[test]

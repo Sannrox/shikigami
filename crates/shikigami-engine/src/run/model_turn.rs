@@ -11,7 +11,7 @@ use crate::content::{
 };
 use crate::events::HarnessEvent;
 use crate::governance::RunHandle;
-use crate::model::{ChatMessage, ModelTurn, TokenUsage};
+use crate::model::{ChatMessage, ModelError, ModelTurn, TokenUsage};
 use crate::tools::{ToolDef, ToolRegistry};
 
 use super::session::RunSession;
@@ -485,44 +485,7 @@ impl<'a> DurableModelTurn<'a> {
             session.save(self.tools.as_ref())?;
             turn
         } else {
-            // The model call of this turn carries the turn span.
-            let plan = Outbound::scope(
-                session.spans.turn_outbound(),
-                crate::model::collect_retry_notes(self.engine.model.next_turn(
-                    self.system_prompt,
-                    &session.messages,
-                    self.tool_defs,
-                )),
-            );
-            let (planned, retries) = if self.engine.events.wants_text_deltas() {
-                // A streamed turn shows text early, so it can also be cancelled
-                // early. Dropping it leaves the checkpoint at the last durable
-                // turn, which a resume plans again.
-                let events = std::sync::Arc::clone(&self.engine.events);
-                let turn = session.turns + 1;
-                let run_id = session.run_id.clone();
-                let sink = std::sync::Arc::new(move |text: &str| {
-                    events.emit(HarnessEvent::AssistantDelta {
-                        run_id: run_id.clone(),
-                        turn,
-                        text: text.to_owned(),
-                    });
-                });
-                super::supervision::run_until_cancelled(
-                    self.engine,
-                    &session.run_id,
-                    self.request,
-                    self.started,
-                    self.timeout,
-                    &session.parent_run_id,
-                    crate::model::stream_text_deltas(sink, plan),
-                )
-                .await?
-            } else {
-                plan.await
-            };
-            self.emit_model_retries(&session.run_id, retries);
-            let turn = planned?;
+            let turn = self.plan_live_text_turn(session).await?;
             session.turns += 1;
             if let Some(usage) = turn.usage {
                 self.usage = self.usage.saturating_add(usage);
@@ -574,6 +537,80 @@ impl<'a> DurableModelTurn<'a> {
 
     pub(super) fn usage(&self) -> TokenUsage {
         self.usage
+    }
+
+    /// One live text model call, compacting once if the provider refuses the
+    /// prompt as too large. A second context-length error on that turn, or a
+    /// history that cannot shrink, fails closed.
+    async fn plan_live_text_turn(
+        &mut self,
+        session: &mut RunSession,
+    ) -> Result<ModelTurn, RunError> {
+        let mut overflow_retried = false;
+        loop {
+            let (planned, retries) = self.call_text_model(session).await?;
+            self.emit_model_retries(&session.run_id, retries);
+            match planned {
+                Ok(turn) => return Ok(turn),
+                Err(error) if self.should_retry_context_length(&error, overflow_retried) => {
+                    overflow_retried = true;
+                    let keep = self.engine.config.run.compact_keep_tail.max(2) as usize;
+                    let Some(tail_start) = compaction_tail_start(&session.messages, 0, keep) else {
+                        return Err(error.into());
+                    };
+                    self.compact(session, tail_start).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn call_text_model(
+        &self,
+        session: &RunSession,
+    ) -> Result<(Result<ModelTurn, ModelError>, Vec<String>), RunError> {
+        // The model call of this turn carries the turn span.
+        let plan = Outbound::scope(
+            session.spans.turn_outbound(),
+            crate::model::collect_retry_notes(self.engine.model.next_turn(
+                self.system_prompt,
+                &session.messages,
+                self.tool_defs,
+            )),
+        );
+        if self.engine.events.wants_text_deltas() {
+            // A streamed turn shows text early, so it can also be cancelled
+            // early. Dropping it leaves the checkpoint at the last durable
+            // turn, which a resume plans again.
+            let events = std::sync::Arc::clone(&self.engine.events);
+            let turn = session.turns + 1;
+            let run_id = session.run_id.clone();
+            let sink = std::sync::Arc::new(move |text: &str| {
+                events.emit(HarnessEvent::AssistantDelta {
+                    run_id: run_id.clone(),
+                    turn,
+                    text: text.to_owned(),
+                });
+            });
+            super::supervision::run_until_cancelled(
+                self.engine,
+                &session.run_id,
+                self.request,
+                self.started,
+                self.timeout,
+                &session.parent_run_id,
+                crate::model::stream_text_deltas(sink, plan),
+            )
+            .await
+        } else {
+            Ok(plan.await)
+        }
+    }
+
+    fn should_retry_context_length(&self, error: &ModelError, already: bool) -> bool {
+        !already
+            && self.engine.config.run.compact_on_context_length
+            && matches!(error, ModelError::ContextLength)
     }
 
     /// Message-count threshold for the next compact, if either host trigger
