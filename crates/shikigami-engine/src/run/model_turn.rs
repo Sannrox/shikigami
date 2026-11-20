@@ -10,7 +10,7 @@ use crate::content::{
     tool_arguments_part_id,
 };
 use crate::events::HarnessEvent;
-use crate::governance::{ContentTurnContext, RunHandle};
+use crate::governance::RunHandle;
 use crate::model::{ChatMessage, ModelTurn, TokenUsage};
 use crate::tools::{ToolDef, ToolRegistry};
 
@@ -306,16 +306,14 @@ impl<'a> DurableModelTurn<'a> {
     }
 
     /// Ask the local model to summarize `span`. `None` means compact without
-    /// a summary: the governance adapter plans remotely, recent summaries kept
-    /// failing, or this one failed. A cancelled or timed-out run still stops.
+    /// a summary: recent summaries kept failing, or this one failed. A
+    /// cancelled or timed-out run still stops.
     async fn summarize_span(
         &mut self,
         session: &RunSession,
         span: &[ChatMessage],
     ) -> Result<Option<String>, RunError> {
-        if !self.engine.governance.plans_with_local_model()
-            || self.summary_misses >= SUMMARY_MISS_LIMIT
-        {
+        if self.summary_misses >= SUMMARY_MISS_LIMIT {
             return Ok(None);
         }
         let transcript = render_transcript(span);
@@ -417,16 +415,13 @@ impl<'a> DurableModelTurn<'a> {
                 .ok_or_else(|| RunError::Message("content session is unavailable".into()))?;
             let (planned, retries) = Outbound::scope(
                 session.spans.turn_outbound(),
-                crate::model::collect_retry_notes(self.engine.governance.plan_content_turn(
-                    self.handle,
+                crate::model::collect_retry_notes(crate::governance::plan_local_content_turn(
+                    self.engine.model.as_ref(),
                     self.system_prompt,
-                    ContentTurnContext {
-                        messages: &messages,
-                        tools: self.tool_defs,
-                        capabilities: &capabilities,
-                        resolver: resolver.as_ref(),
-                        local_model: self.engine.model.as_ref(),
-                    },
+                    &messages,
+                    self.tool_defs,
+                    &capabilities,
+                    resolver.as_ref(),
                 )),
             )
             .await;
@@ -488,15 +483,13 @@ impl<'a> DurableModelTurn<'a> {
             session.save(self.tools.as_ref())?;
             turn
         } else {
-            // The model and plane calls of this turn carry the turn span.
+            // The model call of this turn carries the turn span.
             let plan = Outbound::scope(
                 session.spans.turn_outbound(),
-                crate::model::collect_retry_notes(self.engine.governance.plan_turn(
-                    self.handle,
+                crate::model::collect_retry_notes(self.engine.model.next_turn(
                     self.system_prompt,
                     &session.messages,
                     self.tool_defs,
-                    self.engine.model.as_ref(),
                 )),
             );
             let (planned, retries) = if self.engine.events.wants_text_deltas() {

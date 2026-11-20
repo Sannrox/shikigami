@@ -1,6 +1,6 @@
 # shikigami (式神)
 
-**A local-first headless agent harness: autonomous agent work as countable, governable runs.**
+**A local-first headless agent harness: autonomous agent work as countable runs.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Sannrox/shikigami/ci.yml?branch=main&label=ci)](https://github.com/Sannrox/shikigami/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sannrox/shikigami)](https://github.com/Sannrox/shikigami/releases)
@@ -12,13 +12,15 @@
 > offline OSS paths follow semver under
 > [ADR 0004](docs/decisions/0004-v1-contract.md). Additive evolution remains
 > allowed on documented evolving/host-only surfaces (e.g. MCP). Offline
-> `cargo test` is the supported baseline; live plane tests are ignored by default.
+> `cargo test` is the supported baseline.
 
 Shikigami (式神, the conjured familiar that carries out tasks for its
 summoner) runs autonomous agent work as countable **runs**: materialize a
 workspace, call a model, execute jailed tools, emit progress, and finish with
-a structured result — without a desktop UI. Use it offline for demos and CI,
-or wire it to a governance control plane for production.
+a structured result — without a desktop UI. It is a local guest. When a
+governance plane is required, the caller is
+[rusui](https://github.com/Sannrox/rusui)
+([ADR 0024](docs/decisions/0024-local-guest-rusui-plane-caller.md)).
 
 - **Headless by default.** The same runs execute unattended in CI, on fleet
   hosts, or under an operator; a desktop shell is a client, never the runtime.
@@ -29,25 +31,24 @@ or wire it to a governance control plane for production.
   workspace, and event adapters are picked by versioned TOML, so different
   use cases do not require forking the core
   ([ADR 0001](docs/decisions/0001-ports-and-settings.md)).
-- **Fail closed when governed.** With a governed profile, a missing or
-  unhealthy control plane fails `doctor` and `run` instead of silently
-  degrading.
+- **Fail closed on trust.** Jail, sandbox, and session `ask=park` do not
+  silently degrade. Settings that name the retired plane client fail at
+  resolve.
 - **Jailed tools.** Tools operate inside the run workspace; Bash and other
   high-risk tools are opt-in, with settings-selected OS sandbox backends
   ([ADR 0013](docs/decisions/0013-os-sandbox-adapter.md)).
 - **Offline deterministic baseline.** `cargo test` and the quickstart below
   pass with no control plane and no API keys.
 
-Library upgrades from 2.x: see the [3.0 upgrade notes](CHANGELOG.md#300--2026-10-30)
-for worker credentials, claim runtime tokens, fail-closed remote governance,
-and the explicit namespace. 1.x to 2.0: see the
-[2.0 upgrade notes](CHANGELOG.md#200--2026-10-08) for the shared binary
-resolver payload and public enum changes.
+Library upgrades from 2.x: see the [3.0 upgrade notes](CHANGELOG.md#300--2026-10-30).
+1.x to 2.0: see the
+[2.0 upgrade notes](CHANGELOG.md#200--2026-10-08). Removing the in-tree plane
+client is [ADR 0024](docs/decisions/0024-local-guest-rusui-plane-caller.md).
 
 | Path | What you get |
 | --- | --- |
-| **Local / OSS** | No external plane. Scripted or HTTP models. Deterministic tests. |
-| **Governed** | First-party adapter for [sekai-chisei](https://github.com/Sannrox/sekai-chisei): policy, budget, PlanExecution, audit-oriented events. |
+| **Local / OSS** | Scripted or HTTP models. Deterministic tests. Session hosts ask before mutating tools. |
+| **Plane (caller)** | [rusui](https://github.com/Sannrox/rusui) speaks [sekai-chisei](https://github.com/Sannrox/sekai-chisei) and spawns this guest over ACP. |
 | **Delivery** | Optional packaging via [tenkai](https://github.com/Sannrox/tenkai). Delivery is not a runtime dependency. |
 
 ## Try it
@@ -119,11 +120,7 @@ shikigami --config model.toml tui
 
 - [Rust](https://rustup.rs/) toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml) (Rust 2024)
 - macOS or Linux (primary targets today)
-- Optional: a running [sekai-chisei](https://github.com/Sannrox/sekai-chisei) for the governed path
-- Optional: OpenAI-compatible HTTP endpoint for ungoverned `http` model turns
-
-The governed adapter uses the pinned upstream `sekai-client` Rust facade and
-canonical `sekai-proto` dependency; no local `protoc` installation is needed.
+- Optional: OpenAI-compatible HTTP endpoint for `http` model turns
 
 ### Prebuilt binaries
 
@@ -144,36 +141,30 @@ you need a custom feature set.
 
 ```mermaid
 flowchart LR
-  O[operator / CI / embedder] --> H[Harness]
+  O[operator / CI / rusui / embedder] --> H[Harness]
   H --> W[materialize workspace]
   W --> T[turn loop]
-  T --> M[model adapter<br>scripted / http / plane-owned]
+  T --> M[model adapter<br>scripted / http]
   T --> X[jailed tools]
   T --> E[progress events]
   T --> R[structured outcome]
-  G[governance adapter<br>none / local / http-callback / sekai-chisei] -. authorizes runs and tools,<br>fails closed when required .-> T
+  G[governance adapter<br>none / local / http-callback] -. allow-list and host authz,<br>fails closed when required .-> T
 ```
 
 A **run** is one countable unit of work: a materialized **workspace**, a
 model turn loop, jailed tool calls, and a structured outcome. Every external
 dependency sits behind a **port**; settings select the **adapter** for each
-port, so the same binary covers offline tests and governed production
+port
 ([ADR 0001](docs/decisions/0001-ports-and-settings.md)).
 
 - **Core owns** run lifecycle, workspace materialization, tool jail, event
-  emission.
-- **Adapters own** governance, model source (when not plane-owned), workspace
-  kind, and event sinks.
-- **sekai-chisei** (when selected) owns policy, budget, governed model
-  execution, and durable operational truth.
+  emission. The engine always calls `ModelPort`.
+- **Adapters own** local governance (`none` / `local` / `http-callback`),
+  model source, workspace kind, and event sinks.
+- **rusui** (when used) owns plane policy, model proxying, and receipts, and
+  spawns this process over ACP.
 - **tenkai** (when used) owns shipping the binary — never process config.
 
-**Why not a chat window or a one-off CLI?** Most coding agents stop there:
-governance is missing or bolted on after the fact, the same execution core
-cannot run unattended in CI or on a fleet host, and desktop shells
-reimplement the loop instead of sharing a testable library. Shikigami is the
-**execution plane**: built on one shared library core, headless by default,
-fail-closed when governance is required, and pluggable when it is not.
 Details: [VISION.md](VISION.md), [DESIGN.md](DESIGN.md),
 [docs/adapters.md](docs/adapters.md).
 
@@ -182,7 +173,7 @@ Details: [VISION.md](VISION.md), [DESIGN.md](DESIGN.md),
 Choose a process host for the common integration paths:
 
 - CLI: one-shot operator and CI use (`doctor` / `run`) — [CLI reference](docs/cli.md)
-- `serve`: long-running filesystem or plane-claim intake — [serve guide](docs/serve.md)
+- `serve`: long-running filesystem queue — [serve guide](docs/serve.md)
 - MCP stdio: IDE and tool clients — [MCP guide](docs/mcp.md)
 - ACP / TUI: session guest and interactive terminal host — [ACP](docs/acp.md), [TUI](docs/tui.md)
 - Library: advanced in-process integrations that need direct results,
@@ -197,8 +188,7 @@ profiles. New configurations should specify adapters and
 Examples:
 
 - [`examples/local-run.toml`](examples/local-run.toml) — offline
-- [`examples/cliproxy-http.toml`](examples/cliproxy-http.toml) — ungoverned `http` model through a local OpenAI-compatible gateway (CLIProxyAPI)
-- [`examples/governed-sekai-chisei.toml`](examples/governed-sekai-chisei.toml) — plane-backed; follow the [governed guide](docs/governed-path.md)
+- [`examples/cliproxy-http.toml`](examples/cliproxy-http.toml) — `http` model through a local OpenAI-compatible gateway
 - [`examples/tenkai-product.toml`](examples/tenkai-product.toml) — binary delivery only
 
 ## Contributing
@@ -215,7 +205,7 @@ Agent/repo operating rules: [AGENTS.md](AGENTS.md).
 | [DESIGN.md](DESIGN.md) | Architecture and boundaries |
 | [docs/README.md](docs/README.md) | Full documentation index |
 | [docs/cli.md](docs/cli.md) | CLI command and option reference |
-| [docs/governed-path.md](docs/governed-path.md) | Governed setup and doctor checks |
+| [docs/decisions/0024-local-guest-rusui-plane-caller.md](docs/decisions/0024-local-guest-rusui-plane-caller.md) | Local guest; rusui is the plane caller |
 | [CONTEXT.md](CONTEXT.md) | Domain glossary and naming |
 | [docs/settings.md](docs/settings.md) | Configuration reference |
 | [docs/adapters.md](docs/adapters.md) | Ports and built-in adapters |

@@ -279,17 +279,13 @@ async fn unsupported_model_adapter_denies_content_without_text_fallback() {
     let messages = mixed_messages(resolver.as_ref());
     let mut config = local_config(&directory, r#"[{"content":"must-not-run"}]"#);
     config.model.adapter = "plane".into();
-    let harness = Harness::from_config(config, state).unwrap();
-
-    let error = harness
-        .run_content(ContentRunRequestV1::new("unsupported", messages, resolver))
-        .await
-        .unwrap_err();
-
+    let error = match Harness::from_config(config, state) {
+        Ok(_) => panic!("plane adapter must fail at harness construction"),
+        Err(error) => error.to_string(),
+    };
+    let _ = (messages, resolver);
     assert!(
-        error
-            .to_string()
-            .contains("does not support bounded content"),
+        error.contains("unknown model adapter `plane`") || error.contains("ADR 0024"),
         "{error}"
     );
 }

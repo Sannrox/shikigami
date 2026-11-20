@@ -12,8 +12,7 @@ name = "shikigami"
 path = "src/main.rs"
 
 [features]
-default = ["governance-sekai-chisei", "model-http"]
-governance-sekai-chisei = ["shikigami/governance-sekai-chisei"]
+default = ["model-http"]
 model-http = ["shikigami/model-http"]
 
 [dependencies]

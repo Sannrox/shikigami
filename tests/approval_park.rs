@@ -7,16 +7,13 @@ use shikigami::checkpoint::{
     ApprovalPark, Checkpoint, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
 use shikigami::config::Config;
-use shikigami::content::ContentModelTurnV1;
 use shikigami::governance::{
-    ApprovalState, ContentTurnContext, GovernanceError, GovernancePort, LocalGovernance, RunHandle,
-    RunOutcome, now_unix_ms, resolve_approval_wait,
+    ApprovalState, GovernanceError, GovernancePort, LocalGovernance, RunHandle, RunOutcome,
+    now_unix_ms, resolve_approval_wait,
 };
-use shikigami::model::{ChatMessage, ModelTurn};
 use shikigami::registry::RunRegistry;
 use shikigami::run::{Engine, ParkKind, RunRequest, RunTermination};
 use shikigami::state::StateRoot;
-use shikigami::tools::ToolDef;
 use shikigami::{events, export_replay_inputs, model, workspace};
 use tempfile::tempdir;
 
@@ -230,28 +227,6 @@ impl GovernancePort for ScriptedApprovalGovernance {
 
     async fn replay_staged_tool_reports(&self, handle: &RunHandle) -> Result<(), GovernanceError> {
         self.inner.replay_staged_tool_reports(handle).await
-    }
-
-    async fn plan_turn(
-        &self,
-        handle: &RunHandle,
-        system: &str,
-        messages: &[ChatMessage],
-        tools: &[ToolDef],
-        local_model: &dyn shikigami::model::ModelPort,
-    ) -> Result<ModelTurn, GovernanceError> {
-        self.inner
-            .plan_turn(handle, system, messages, tools, local_model)
-            .await
-    }
-
-    async fn plan_content_turn(
-        &self,
-        handle: &RunHandle,
-        system: &str,
-        context: ContentTurnContext<'_>,
-    ) -> Result<ContentModelTurnV1, GovernanceError> {
-        self.inner.plan_content_turn(handle, system, context).await
     }
 
     async fn authorize_tool(

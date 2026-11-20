@@ -145,7 +145,7 @@ async fn linux_native_child_sees_job_token_not_worker_secret_and_needs_socket_gr
     }
     let mut config = isolation_config(dir.path());
     config.workspace.root = workspace.to_string_lossy().into();
-    config.governance.client_secret_env = Some(secret_name.into());
+    config.governance.token_env = Some(secret_name.into());
     let job = JobCredentialHandle::from_live("job-scoped-token", i64::MAX, "tenant-a", "ns-a", 0)
         .unwrap();
     let denied = ToolRegistry::from_config_enabled_with_job(

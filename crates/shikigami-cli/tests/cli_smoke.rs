@@ -314,18 +314,20 @@ fn doctor_model_flag_overrides_configured_model() {
 }
 
 #[test]
-fn doctor_fails_governed_without_endpoint() {
+fn doctor_fails_http_callback_when_unreachable() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
-    let config = dir.path().join("governed.toml");
+    let config = dir.path().join("http-callback.toml");
     fs::write(
         &config,
         r#"
 version = 1
-[profile]
-name = "governed"
 [governance]
+adapter = "http-callback"
+endpoint = "http://127.0.0.1:1/authz"
 namespace = "team-a"
+[model]
+adapter = "scripted"
 "#,
     )
     .expect("write config");
@@ -344,18 +346,21 @@ namespace = "team-a"
 }
 
 #[test]
-fn doctor_models_preserves_report_when_catalog_unavailable() {
+fn doctor_models_json_lists_local_models_when_callback_unreachable() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
-    let config = dir.path().join("governed.toml");
+    let config = dir.path().join("http-callback.toml");
     fs::write(
         &config,
         r#"
 version = 1
-[profile]
-name = "governed"
 [governance]
+adapter = "http-callback"
+endpoint = "http://127.0.0.1:1/authz"
 namespace = "team-a"
+[model]
+adapter = "scripted"
+model = "local-selected-model"
 "#,
     )
     .expect("write config");
@@ -373,8 +378,8 @@ namespace = "team-a"
         .assert()
         .failure()
         .stdout(predicate::str::contains("\"ok\": false"))
-        .stdout(predicate::str::contains("\"available_models\": []"))
-        .stdout(predicate::str::contains("model_catalog_error"));
+        .stdout(predicate::str::contains("local-selected-model"))
+        .stdout(predicate::str::contains("\"available_models\""));
 }
 
 #[test]
@@ -493,7 +498,7 @@ adapter = "none"
 }
 
 #[test]
-fn plane_intake_rejects_ungoverned_host() {
+fn serve_rejects_retired_plane_intake_flag() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");
 
@@ -509,9 +514,7 @@ fn plane_intake_rejects_ungoverned_host() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "plane intake requires governance.adapter = \"sekai-chisei\"",
-        ));
+        .stderr(predicate::str::contains("unexpected argument '--intake'"));
 }
 
 fn replay_fixture(dir: &std::path::Path) -> (Config, PathBuf, PathBuf, PathBuf) {

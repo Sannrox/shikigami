@@ -209,12 +209,8 @@ impl Harness {
 
     /// Return the effective model catalog for this harness.
     ///
-    /// Sekai-Chisei is authoritative for governed availability. Ungoverned
-    /// adapters expose their configured model, then `[model].alternates`.
+    /// Adapters expose their configured model, then `[model].alternates`.
     pub async fn available_models(&self) -> Result<Vec<AvailableModel>, HarnessError> {
-        if self.config.governance.adapter == "sekai-chisei" {
-            return Ok(with_auto_route(self.governance.available_models().await?));
-        }
         let mut names = vec![self.effective_model_name()];
         for name in &self.config.model.alternates {
             if !names.contains(name) {
@@ -258,7 +254,7 @@ impl Harness {
         )
     }
 
-    /// Async doctor that live-probes sekai-chisei when configured.
+    /// Async doctor that live-probes `http-callback` when configured.
     pub async fn doctor_async(&self) -> DoctorReport {
         diagnosis::doctor_async(self).await
     }
@@ -406,15 +402,6 @@ impl Harness {
         }
     }
 
-    pub(crate) async fn run_with_checkpoint_digest(
-        &self,
-        request: RunRequest,
-        expected_checkpoint_digest: &str,
-    ) -> Result<RunResult, HarnessError> {
-        self.run_with_events_and_checkpoint_digest(request, None, Some(expected_checkpoint_digest))
-            .await
-    }
-
     async fn run_with_events_and_checkpoint_digest(
         &self,
         request: RunRequest,
@@ -468,21 +455,6 @@ impl Harness {
     }
 }
 
-fn with_auto_route(mut models: Vec<AvailableModel>) -> Vec<AvailableModel> {
-    if !models.iter().any(|model| model.canonical_model == "auto") {
-        models.insert(
-            0,
-            AvailableModel {
-                provider: "sekai-chisei".into(),
-                upstream_model: "auto".into(),
-                canonical_model: "auto".into(),
-                lifecycle: "routing".into(),
-            },
-        );
-    }
-    models
-}
-
 fn display_tools(tools: &[String]) -> String {
     if tools.is_empty() {
         "(none)".into()
@@ -493,19 +465,12 @@ fn display_tools(tools: &[String]) -> String {
 
 /// Summarize credential *sources* without values (for doctor).
 pub fn credential_summary(config: &Config) -> String {
-    let plane = match (
-        &config.governance.client_secret_env,
-        &config.governance.token_env,
-    ) {
-        (Some(name), _) if !name.is_empty() => {
+    let host_authz = match &config.governance.token_env {
+        Some(name) if !name.is_empty() => {
             let state = if env_nonempty(name) { "set" } else { "unset" };
-            format!("plane_client_secret_env={name} ({state})")
+            format!("host_token_env={name} ({state})")
         }
-        (_, Some(name)) if !name.is_empty() => {
-            let state = if env_nonempty(name) { "set" } else { "unset" };
-            format!("plane_token_env={name} ({state})")
-        }
-        _ => "plane_credential=(none)".into(),
+        _ => "host_token_env=(none)".into(),
     };
     let model_env = &config.model.api_key_env;
     let model_state = if env_nonempty(model_env) {
@@ -513,7 +478,7 @@ pub fn credential_summary(config: &Config) -> String {
     } else {
         "unset"
     };
-    format!("{plane}, model_api_key_env={model_env} ({model_state})")
+    format!("{host_authz}, model_api_key_env={model_env} ({model_state})")
 }
 
 fn env_nonempty(name: &str) -> bool {
@@ -526,83 +491,7 @@ pub use crate::config::redact_secrets_in_line;
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::governance::{RunHandle, RunOutcome};
-    use crate::model::{ChatMessage, ModelPort, ModelTurn};
-    use crate::tools::ToolDef;
     use tempfile::tempdir;
-
-    struct CatalogGovernance;
-
-    #[async_trait::async_trait]
-    impl GovernancePort for CatalogGovernance {
-        fn id(&self) -> &'static str {
-            "catalog-test"
-        }
-
-        fn health_detail(&self) -> String {
-            "ok".into()
-        }
-
-        fn health_ok(&self) -> bool {
-            true
-        }
-
-        async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
-            Ok(vec![AvailableModel {
-                provider: "openai".into(),
-                upstream_model: "gpt-5.5".into(),
-                canonical_model: "openai/gpt-5.5".into(),
-                lifecycle: "active".into(),
-            }])
-        }
-
-        async fn begin_run(
-            &self,
-            _run_id: &str,
-            _task: &str,
-            _logical_operation_id: Option<&str>,
-        ) -> Result<RunHandle, GovernanceError> {
-            unreachable!()
-        }
-
-        async fn plan_turn(
-            &self,
-            _handle: &RunHandle,
-            _system: &str,
-            _messages: &[ChatMessage],
-            _tools: &[ToolDef],
-            _local_model: &dyn ModelPort,
-        ) -> Result<ModelTurn, GovernanceError> {
-            unreachable!()
-        }
-
-        async fn authorize_tool(
-            &self,
-            _handle: &RunHandle,
-            _name: &str,
-            _args_json: &str,
-        ) -> Result<(), GovernanceError> {
-            unreachable!()
-        }
-
-        async fn report_tool(
-            &self,
-            _handle: &RunHandle,
-            _name: &str,
-            _ok: bool,
-            _detail: &str,
-        ) -> Result<(), GovernanceError> {
-            unreachable!()
-        }
-
-        async fn complete_run(
-            &self,
-            _handle: &RunHandle,
-            _outcome: RunOutcome,
-        ) -> Result<(), GovernanceError> {
-            unreachable!()
-        }
-    }
 
     #[test]
     fn doctor_json_schema_keys_stable() {
@@ -684,27 +573,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn governed_available_models_include_auto_route() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
-        let mut harness = Harness::from_config(Config::default(), state).unwrap();
-        harness.config.governance.adapter = "sekai-chisei".into();
-        harness.governance = Arc::new(CatalogGovernance);
-
-        let catalog = harness.available_models().await.unwrap();
-        assert_eq!(catalog[0].canonical_model, "auto");
-        assert_eq!(catalog[0].lifecycle, "routing");
-        assert_eq!(
-            catalog
-                .iter()
-                .filter(|model| model.canonical_model == "auto")
-                .count(),
-            1
-        );
-        assert_eq!(catalog[1].canonical_model, "openai/gpt-5.5");
-    }
-
     #[test]
     fn doctor_warns_on_sandbox_none_and_refuses_unavailable_linux_native() {
         let dir = tempdir().unwrap();
@@ -764,100 +632,24 @@ mod tests {
     }
 
     #[test]
-    fn doctor_fail_closed_governed_without_endpoint() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
-        let mut config = Config::default();
-        config.profile.name = "governed".into();
-        config.governance.adapter = "sekai-chisei".into();
-        config.governance.fail_closed = true;
-        config.governance.endpoint = None;
-        let harness = Harness::from_config(config, state).unwrap();
-        let report = harness.doctor();
-        assert!(!report.ok);
-        assert_eq!(report.schema_version, 1);
-        assert_eq!(report.governance, "sekai-chisei");
-    }
-
-    #[test]
-    fn doctor_rejects_remote_plaintext_without_insecure_opt_in() {
-        let dir = tempdir().unwrap();
-        let state = StateRoot::new(dir.path().join("state"));
+    fn doctor_reports_retired_plane_adapter_as_config_error() {
         let mut config = Config::default();
         config.governance.adapter = "sekai-chisei".into();
-        config.governance.endpoint = Some("http://192.0.2.1:50051".into());
-        let harness = Harness::from_config(config, state).unwrap();
-        let report = harness.doctor();
-        assert!(!report.ok);
-        assert!(
-            report
-                .lines
-                .iter()
-                .any(|line| { line.contains(crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT) }),
-            "{:?}",
-            report.lines
-        );
-    }
-
-    #[test]
-    fn doctor_omits_plaintext_hint_for_loopback_and_remote_opt_in() {
-        let dir = tempdir().unwrap();
-        let mut config = Config::default();
-        config.governance.adapter = "sekai-chisei".into();
-        config.governance.endpoint = Some("http://127.0.0.1:50051".into());
-        config.governance.namespace = "team-a".into();
-        let harness =
-            Harness::from_config(config.clone(), StateRoot::new(dir.path().join("loopback")))
-                .unwrap();
-        let report = harness.doctor();
-        assert!(
-            report
-                .lines
-                .iter()
-                .all(|line| { !line.contains(crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT) }),
-            "{:?}",
-            report.lines
-        );
-
-        config.governance.endpoint = Some("http://192.0.2.1:50051".into());
-        config.governance.allow_insecure_remote = true;
-        let harness =
-            Harness::from_config(config, StateRoot::new(dir.path().join("opt-in"))).unwrap();
-        let report = harness.doctor();
-        assert!(
-            report
-                .lines
-                .iter()
-                .all(|line| { !line.contains(crate::config::REMOTE_PLAINTEXT_GOVERNANCE_HINT) }),
-            "{:?}",
-            report.lines
-        );
-        assert!(
-            report
-                .governance_detail
-                .contains("allow_insecure_remote=true"),
-            "{}",
-            report.governance_detail
-        );
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("ADR 0024"), "{error}");
     }
 
     #[tokio::test]
-    async fn doctor_refuses_unreachable_remote_governance_by_default() {
-        for (adapter, endpoint) in [
-            ("sekai-chisei", "http://127.0.0.1:1"),
-            ("http-callback", "http://127.0.0.1:1/authz"),
-        ] {
-            let dir = tempdir().unwrap();
-            let mut config = Config::default();
-            config.governance.adapter = adapter.into();
-            config.governance.endpoint = Some(endpoint.into());
-            config.governance.namespace = "team-a".into();
-            assert!(!config.governance.fail_closed);
-            let harness =
-                Harness::from_config(config, StateRoot::new(dir.path().join("s"))).unwrap();
-            let report = harness.doctor_async().await;
-            assert!(!report.ok, "{adapter}: {:?}", report.lines);
-        }
+    async fn doctor_refuses_unreachable_http_callback_by_default() {
+        let dir = tempdir().unwrap();
+        let mut config = Config::default();
+        config.governance.adapter = "http-callback".into();
+        config.governance.endpoint = Some("http://127.0.0.1:1/authz".into());
+        config.governance.namespace = "team-a".into();
+        assert!(!config.governance.fail_closed);
+        let harness = Harness::from_config(config, StateRoot::new(dir.path().join("s"))).unwrap();
+        let report = harness.doctor_async().await;
+        assert!(!report.ok, "{:?}", report.lines);
     }
 
     #[test]
@@ -942,7 +734,7 @@ mod tests {
             report
                 .lines
                 .iter()
-                .any(|l| l.contains("plane_token_env=SHIKIGAMI_TEST_TOKEN")),
+                .any(|l| l.contains("host_token_env=SHIKIGAMI_TEST_TOKEN")),
             "expected credential summary: {:?}",
             report.lines
         );
@@ -1003,7 +795,6 @@ mod tests {
         let examples = [
             include_str!("../examples/local-run.toml"),
             include_str!("../examples/cliproxy-http.toml"),
-            include_str!("../examples/governed-sekai-chisei.toml"),
         ];
         for body in examples {
             for line in body.lines() {

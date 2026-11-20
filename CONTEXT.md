@@ -12,10 +12,8 @@ This glossary complements the architecture and product definitions in
 ## Approval park
 
 When authority answers a tool authorization with `require_approval`, the
-harness checkpoints and returns instead of executing. The plane owns
-approve, deny, cancel, revoke, permit, and expiry. The host parks at the
-effect boundary, records the approval identity as local scratch, and
-re-validates current authority on the next wake. CLI `run` does not block
+harness checkpoints and returns instead of executing. Session hosts use
+`ask=park` and ACP `session/request_permission`. CLI `run` does not block
 waiting for a human. A criteria or policy deny is not a park.
 
 ## Identity-only span export
@@ -23,7 +21,7 @@ waiting for a human. A criteria or policy deny is not a park.
 Optional, default-off OpenTelemetry export of one run as a trace. Policy
 gates whether anything leaves the process; a fixed attribute allowlist is
 enforced at the emission boundary. Spans carry run, attempt, inbound
-operation, plane decision, and tool-call identities only. They are not
+operation, and tool-call identities only. They are not
 receipts and not a tracing backend.
 
 ## Delayed evidence queue
@@ -33,13 +31,13 @@ reach receipt authority during an outage. Duplicate identities are
 idempotent; conflicting payloads stay conflicted; capacity and retention
 fail closed without silent eviction. The queue never admits new work.
 
-## Governed local-model fallback
+## Local-model fallback
 
-Fail-closed admission for one authorized disconnected model interval. Governance
-issues the grant, lease, fence, and receipt; Shikigami verifies identities and
-digests then executes; delivery placing bytes is not a grant. The connected
-plane path is unchanged. Selection scratch lives on the governance checkpoint
-and is never a receipt.
+Fail-closed admission for one authorized disconnected model interval
+([ADR 0007](docs/decisions/0007-governed-local-fallback.md), amended by
+[ADR 0024](docs/decisions/0024-local-guest-rusui-plane-caller.md)). A host may
+inject a grant; this crate does not call a plane to mint one. Selection
+scratch lives on the governance checkpoint and is never a receipt.
 
 ## Effective settings resolution
 
@@ -101,105 +99,10 @@ compatibility remain in the public artifacts module.
 ## Durable model turn
 
 One run-loop iteration's model-side protocol, including staged resume replay,
-turn limits, context compaction, governed planning, usage accounting, assistant
-checkpointing, model-report acknowledgement, and post-turn cancellation. The
-Run transaction delegates this protocol to a private deep module; it is not a
-new public port or adapter seam.
-
-## Worker lifecycle HTTP probe
-
-The fleet probe protocol over the worker lifecycle snapshot, including
-connection caps, bounded header reads, `/readyz` and `/livez` mapping, and
-loopback-only `/lifecycle` detail. `serve_lifecycle_http` stays the public
-interface over this private deep module; snapshot publishing remains on
-`WorkerLifecycle`. It is not a new public port or adapter seam.
-
-## Claimed run transaction
-
-One plane-acquired claim's fenced execution protocol, including continuation
-preparation, claim events, heartbeat and shutdown races, harness execution,
-one lease-safe fenced RPC retry protocol for both acknowledgement and claim
-events (renewing the live fence between attempts and never sleeping past half
-the remaining lease), fail-closed drain after in-run fence loss, and worker
-lifecycle publication. Plane intake delegates this protocol to a private deep
-module; it does not add a public port or adapter seam.
-
-## Plane session
-
-Shared sekai-chisei plane-connection protocol, including endpoint connect,
-token and auth-source metadata, CallOptions correlation, SdkError mapping, and
-the live probe. Governed RPC modules and the claim client delegate this
-protocol to a private deep module; it is not a new public port or adapter seam.
-
-## Plane claim acquisition
-
-One fenced claim's plane protocol, including claimable listing, claim RPC,
-continuation and park snapshot validation, action-instance parameter lookup,
-pre-run fence renew, and in-run heartbeat, ack, and claim-event RPCs with
-contention → `FenceLost` mapping. After Claim/Heartbeat success the adapter
-binds `effect_id`, `claim_owner == requested runtime_id`, fencing token, and
-generation (same or +1), and sets `valid_until` from granted remaining TTL
-capped by the requested TTL. The sekai-chisei claim client reuses one
-connected plane client for those RPCs and reconnects only after a transport
-error. It delegates this protocol to a private deep module behind the existing
-`PlaneIntakePort` seam; it does not move admission into the harness.
-
-## Plane serve loop
-
-The plane intake host's poll-and-admit protocol, including option validation at
-the public entry, lifecycle accepting/draining gates, shutdown races around
-claim acquisition, idle poll sleep, max_jobs limits, claim-error observation,
-and delegation to the claimed run transaction. Plane intake keeps a thin
-`run_plane_serve` interface over this private deep module.
-
-## Governed tool authorization
-
-One stable tool call's sekai-chisei external-action protocol, including risk
-classification, request construction, decision interpretation, signed permit
-redemption, execution identity, and fail-closed security checks. The
-sekai-chisei adapter delegates this protocol to a private deep module behind
-the existing governance port seam.
-
-## Governed harvest transaction
-
-One governed run's durable plane-reporting protocol, including local checkpoint
-projection and restoration, causal event staging and retry, model and tool
-report recovery, and in-doubt tool-execution detection. The sekai-chisei
-adapter delegates this protocol to a private deep module; plane receipts remain
-authoritative and the existing governance port seam is unchanged.
-
-## Governed harvest event reporting
-
-One governed run's plane RPC reporting protocol, including pending-event send
-and retry, stage → ReportOperationEvent → commit, model and tool event-id
-digests, receipt lookup, and abort-before-model finalization. The sekai-chisei
-adapter delegates this protocol to a private deep module that pairs with the
-local harvest transaction state module; the existing governance port seam is
-unchanged.
-
-## Governed model turn
-
-One sekai-chisei model-side protocol, including request projection,
-PlanExecution, budget and executability decisions, model-operation correlation,
-ExecutePlanStream consumption, durable failure reporting, and response
-projection. The sekai-chisei adapter delegates this protocol to a private deep
-module behind the existing governance port seam.
-
-## Governed run completion
-
-One governed run's authoritative receipt-finalization protocol, including
-pending-event retry, required-surface reconciliation, incomplete model-call
-abortion, outcome reporting, completeness enforcement, and local harvest-state
-release. The sekai-chisei adapter delegates this protocol to a private deep
-module behind the existing governance port seam.
-
-## Governed Run admission
-
-One governed Run's pre-turn plane protocol, including lineage validation,
-checkpoint restoration, authoritative receipt reconciliation, pending-event
-replay, host-receipt creation, attempt establishment, and fail-closed error
-policy. The sekai-chisei adapter delegates this protocol to a private deep
-module behind the existing governance port seam.
+turn limits, context compaction, `ModelPort` planning, usage accounting,
+assistant checkpointing, model-report acknowledgement, and post-turn
+cancellation. The Run transaction delegates this protocol to a private deep
+module; it is not a new public port or adapter seam.
 
 ## MCP tool attachment protocol
 

@@ -4,7 +4,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use shikigami::{
     Config, ContentProcessRequestV1, ControlOptions, Harness, MAX_CONTENT_PROCESS_REQUEST_BYTES,
     MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, ReplayEvidenceBundle,
@@ -25,13 +25,6 @@ macro_rules! human_eprintln {
     };
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ServeIntake {
-    Filesystem,
-    Plane,
-    AgentTurn,
-}
-
 #[derive(Debug, Parser)]
 #[command(
     name = "shikigami",
@@ -48,7 +41,7 @@ struct Cli {
     #[arg(long, global = true, env = "SHIKIGAMI_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Override the configured model; use `auto` for plane routing.
+    /// Override the configured model.
     #[arg(long, global = true, env = "SHIKIGAMI_MODEL")]
     model: Option<String>,
 
@@ -67,7 +60,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check effective settings, adapters, and plane reachability.
+    /// Check effective settings and adapter health.
     Doctor {
         #[arg(long)]
         json: bool,
@@ -154,12 +147,9 @@ enum Command {
         #[arg(long, conflicts_with = "json")]
         prometheus: bool,
     },
-    /// Long-running filesystem-queue, plane-claim, or agent-turn host (see docs/serve.md).
+    /// Long-running filesystem-queue host (see docs/serve.md).
     Serve {
-        /// Work intake source. Filesystem remains the offline default.
-        #[arg(long, value_enum, default_value_t = ServeIntake::Filesystem)]
-        intake: ServeIntake,
-        /// Poll interval in milliseconds (filesystem inbox idle, or plane claim idle).
+        /// Poll interval in milliseconds for filesystem inbox idle.
         #[arg(long, default_value_t = 200)]
         poll_ms: u64,
         /// Exit after processing this many jobs (tests / oneshot drain).
@@ -174,29 +164,12 @@ enum Command {
         /// Retry harness failures this many times for filesystem jobs.
         #[arg(long, default_value_t = 0)]
         retry_limit: u32,
-        /// Optional authenticated HTTP intake/control bind (filesystem only).
+        /// Optional authenticated HTTP intake/control bind.
         #[arg(long, env = "SHIKIGAMI_SERVE_LISTEN")]
         listen: Option<String>,
         /// Name of the environment variable containing the HTTP bearer token.
         #[arg(long, env = "SHIKIGAMI_SERVE_AUTH_TOKEN_ENV")]
         auth_token_env: Option<String>,
-        /// Stable runtime id used to filter and hold plane claims.
-        #[arg(long, default_value = "shikigami")]
-        runtime_id: String,
-        /// Plane claim lease TTL. Heartbeats run at one third of this duration.
-        #[arg(long, default_value_t = 60)]
-        claim_ttl_secs: u64,
-        /// Plane-allowlisted logical checkpoint store id for local run checkpoints.
-        #[arg(long)]
-        checkpoint_store_id: Option<String>,
-        /// Opaque worker identity written into the plane lifecycle snapshot.
-        /// Defaults to hostname or `shikigami-worker`.
-        #[arg(long, env = "SHIKIGAMI_WORKER_ID")]
-        worker_id: Option<String>,
-        /// Optional loopback HTTP bind for lifecycle probes (e.g. `127.0.0.1:8080`).
-        /// Serves GET /lifecycle, /readyz, /livez. Plane intake only.
-        #[arg(long, env = "SHIKIGAMI_LIFECYCLE_LISTEN")]
-        lifecycle_listen: Option<String>,
     },
     /// MCP server over stdio (`doctor`, `run`, `run_start`, `run_status`, `run_wait`). See docs/mcp.md.
     ///
@@ -620,7 +593,6 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Command::Serve {
-            intake,
             poll_ms,
             max_jobs,
             concurrency,
@@ -628,11 +600,6 @@ async fn run() -> anyhow::Result<()> {
             retry_limit,
             listen,
             auth_token_env,
-            runtime_id,
-            claim_ttl_secs,
-            checkpoint_store_id,
-            worker_id,
-            lifecycle_listen,
         } => {
             let harness = Harness::resolve_with_preset(
                 cli.config.as_deref(),
@@ -663,231 +630,72 @@ async fn run() -> anyhow::Result<()> {
                 });
             }
 
-            let n = match intake {
-                ServeIntake::Filesystem => {
-                    if lifecycle_listen.is_some() {
-                        anyhow::bail!(
-                            "--lifecycle-listen applies only to plane intake (managed fleet contract)"
-                        );
-                    }
-                    let layout = QueueLayout::under_state(state.path());
-                    layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
-                    human_println!(
-                        "serve intake=filesystem inbox={} health={}",
-                        layout.inbox.display(),
-                        layout.health.display()
-                    );
-                    let options = ServeOptions {
-                        poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
-                        max_jobs,
-                    };
-                    if concurrency == 0 {
-                        anyhow::bail!("--concurrency must be greater than zero");
-                    }
-                    if queue_capacity == 0 {
-                        anyhow::bail!("--queue-capacity must be greater than zero");
-                    }
-                    if listen.is_none() && auth_token_env.is_some() {
-                        anyhow::bail!("--auth-token-env requires --listen");
-                    }
-                    let control = if let Some(bind) = listen {
-                        let addr: std::net::SocketAddr = bind
-                            .parse()
-                            .map_err(|error| anyhow::anyhow!("invalid --listen: {error}"))?;
-                        let token = auth_token_env
-                            .as_deref()
-                            .map(std::env::var)
-                            .transpose()
-                            .map_err(|error| {
-                                anyhow::anyhow!("cannot read HTTP auth token: {error}")
-                            })?;
-                        if token
-                            .as_deref()
-                            .is_some_and(|value| value.trim().is_empty())
-                        {
-                            anyhow::bail!("--auth-token-env resolved to an empty token");
-                        }
-                        if token.is_none() {
-                            anyhow::bail!("--listen requires --auth-token-env");
-                        }
-                        human_println!(
-                            "serve control http={} authenticated={}",
-                            addr,
-                            token.is_some()
-                        );
-                        Some(ControlOptions {
-                            bind: addr,
-                            auth_token: token,
-                            queue_capacity,
-                            ..ControlOptions::default()
-                        })
-                    } else {
-                        None
-                    };
-                    shikigami::serve::run_serve_with_options(
-                        &harness,
-                        &layout,
-                        options,
-                        ServeRuntimeOptions {
-                            concurrency,
-                            queue_capacity,
-                            retry_limit,
-                        },
-                        control,
-                        rx,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?
-                }
-                ServeIntake::Plane => {
-                    if listen.is_some()
-                        || auth_token_env.is_some()
-                        || concurrency != 1
-                        || retry_limit != 0
-                    {
-                        anyhow::bail!(
-                            "--listen/--auth-token-env/--concurrency/--retry-limit apply only to filesystem intake"
-                        );
-                    }
-                    // Drop any prior process snapshot immediately so a failed
-                    // restart cannot leave fleet-ready state on disk.
-                    let _ = std::fs::remove_file(shikigami::lifecycle_path(state.path()));
-                    if harness.config.governance.adapter != "sekai-chisei" {
-                        anyhow::bail!(
-                            "plane intake requires governance.adapter = \"sekai-chisei\""
-                        );
-                    }
-                    if runtime_id.trim().is_empty() {
-                        anyhow::bail!("--runtime-id must not be empty");
-                    }
-                    if claim_ttl_secs == 0 {
-                        anyhow::bail!("--claim-ttl-secs must be greater than zero");
-                    }
-                    if checkpoint_store_id
-                        .as_deref()
-                        .is_some_and(|store_id| store_id.trim().is_empty())
-                    {
-                        anyhow::bail!("--checkpoint-store-id must not be empty");
-                    }
-                    #[cfg(feature = "governance-sekai-chisei")]
-                    {
-                        let prepared = shikigami::prepare_plane_host(
-                            &harness,
-                            shikigami::PlaneHostOptions {
-                                runtime_id: runtime_id.clone(),
-                                worker_id,
-                                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
-                                max_jobs,
-                                claim_ttl: std::time::Duration::from_secs(claim_ttl_secs),
-                                checkpoint_store_id,
-                                lifecycle_listen,
-                            },
-                            rx,
-                        )
-                        .await?;
-                        let info = prepared.info();
-                        if let Some(addr) = info.lifecycle_addr {
-                            human_println!(
-                                "serve lifecycle http={} file={}",
-                                addr,
-                                info.lifecycle_path.display()
-                            );
-                        } else {
-                            human_println!(
-                                "serve lifecycle file={}",
-                                info.lifecycle_path.display()
-                            );
-                        }
-                        human_println!(
-                            "serve intake=plane runtime={} namespace={} ttl_secs={} worker={}",
-                            info.runtime_id,
-                            info.namespace,
-                            claim_ttl_secs,
-                            info.worker_id
-                        );
-                        prepared.run().await?
-                    }
-                    #[cfg(not(feature = "governance-sekai-chisei"))]
-                    {
-                        let _ = (worker_id, lifecycle_listen);
-                        anyhow::bail!("plane intake requires the governance-sekai-chisei feature");
-                    }
-                }
-                ServeIntake::AgentTurn => {
-                    if listen.is_some()
-                        || auth_token_env.is_some()
-                        || concurrency != 1
-                        || retry_limit != 0
-                    {
-                        anyhow::bail!(
-                            "--listen/--auth-token-env/--concurrency/--retry-limit apply only to filesystem intake"
-                        );
-                    }
-                    let _ = std::fs::remove_file(shikigami::lifecycle_path(state.path()));
-                    if harness.config.governance.adapter != "sekai-chisei" {
-                        anyhow::bail!(
-                            "agent-turn intake requires governance.adapter = \"sekai-chisei\""
-                        );
-                    }
-                    if !shikigami::config::is_site_agent_profile(&harness.config.profile.name) {
-                        anyhow::bail!(
-                            "agent-turn intake requires profile.name = \"site-agent\" or \"security-triage\""
-                        );
-                    }
-                    if runtime_id.trim().is_empty() {
-                        anyhow::bail!("--runtime-id must not be empty");
-                    }
-                    if claim_ttl_secs == 0 {
-                        anyhow::bail!("--claim-ttl-secs must be greater than zero");
-                    }
-                    let _ = checkpoint_store_id;
-                    #[cfg(feature = "governance-sekai-chisei")]
-                    {
-                        let prepared = shikigami::prepare_agent_turn_host(
-                            &harness,
-                            shikigami::PlaneHostOptions {
-                                runtime_id: runtime_id.clone(),
-                                worker_id,
-                                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
-                                max_jobs,
-                                claim_ttl: std::time::Duration::from_secs(claim_ttl_secs),
-                                checkpoint_store_id: None,
-                                lifecycle_listen,
-                            },
-                            rx,
-                        )
-                        .await?;
-                        let info = prepared.info();
-                        if let Some(addr) = info.lifecycle_addr {
-                            human_println!(
-                                "serve lifecycle http={} file={}",
-                                addr,
-                                info.lifecycle_path.display()
-                            );
-                        } else {
-                            human_println!(
-                                "serve lifecycle file={}",
-                                info.lifecycle_path.display()
-                            );
-                        }
-                        human_println!(
-                            "serve intake=agent-turn runtime={} namespace={} ttl_secs={} worker={}",
-                            info.runtime_id,
-                            info.namespace,
-                            claim_ttl_secs,
-                            info.worker_id
-                        );
-                        prepared.run().await?
-                    }
-                    #[cfg(not(feature = "governance-sekai-chisei"))]
-                    {
-                        let _ = (worker_id, lifecycle_listen);
-                        anyhow::bail!(
-                            "agent-turn intake requires the governance-sekai-chisei feature"
-                        );
-                    }
-                }
+            let layout = QueueLayout::under_state(state.path());
+            layout.ensure().map_err(|e| anyhow::anyhow!(e))?;
+            human_println!(
+                "serve intake=filesystem inbox={} health={}",
+                layout.inbox.display(),
+                layout.health.display()
+            );
+            let options = ServeOptions {
+                poll_interval: std::time::Duration::from_millis(poll_ms.max(10)),
+                max_jobs,
             };
+            if concurrency == 0 {
+                anyhow::bail!("--concurrency must be greater than zero");
+            }
+            if queue_capacity == 0 {
+                anyhow::bail!("--queue-capacity must be greater than zero");
+            }
+            if listen.is_none() && auth_token_env.is_some() {
+                anyhow::bail!("--auth-token-env requires --listen");
+            }
+            let control = if let Some(bind) = listen {
+                let addr: std::net::SocketAddr = bind
+                    .parse()
+                    .map_err(|error| anyhow::anyhow!("invalid --listen: {error}"))?;
+                let token = auth_token_env
+                    .as_deref()
+                    .map(std::env::var)
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!("cannot read HTTP auth token: {error}"))?;
+                if token
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    anyhow::bail!("--auth-token-env resolved to an empty token");
+                }
+                if token.is_none() {
+                    anyhow::bail!("--listen requires --auth-token-env");
+                }
+                human_println!(
+                    "serve control http={} authenticated={}",
+                    addr,
+                    token.is_some()
+                );
+                Some(ControlOptions {
+                    bind: addr,
+                    auth_token: token,
+                    queue_capacity,
+                    ..ControlOptions::default()
+                })
+            } else {
+                None
+            };
+            let n = shikigami::serve::run_serve_with_options(
+                &harness,
+                &layout,
+                options,
+                ServeRuntimeOptions {
+                    concurrency,
+                    queue_capacity,
+                    retry_limit,
+                },
+                control,
+                rx,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
             human_println!("serve stopped after {n} job(s)");
             drop(tx);
         }

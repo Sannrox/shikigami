@@ -1,6 +1,7 @@
 # ADR 0002: Run identity and plane operation lineage
 
-- Status: Accepted
+- Status: Accepted; plane operation lineage is rusui's when a plane is used
+  ([0024](0024-local-guest-rusui-plane-caller.md))
 - Date: 2026-07-25
 - Supersedes: —
 

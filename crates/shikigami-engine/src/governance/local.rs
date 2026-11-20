@@ -4,13 +4,8 @@ use crate::checkpoint::{
     ApprovalPark, GovernanceCheckpoint, StagedToolExecution, StagedToolReport, ToolExecutionStatus,
 };
 use crate::config::Config;
-use crate::content::ContentModelTurnV1;
-use crate::model::{ChatMessage, ModelTurn};
-use crate::tools::ToolDef;
 
-use super::{
-    ContentTurnContext, GovernanceError, GovernancePort, LocalDurability, RunHandle, RunOutcome,
-};
+use super::{GovernanceError, GovernancePort, LocalDurability, RunHandle, RunOutcome};
 
 /// In-process policy: tool allow-list only (deterministic tests).
 pub struct LocalGovernance {
@@ -33,10 +28,6 @@ impl LocalGovernance {
 impl GovernancePort for LocalGovernance {
     fn id(&self) -> &'static str {
         "local"
-    }
-
-    fn plans_with_local_model(&self) -> bool {
-        true
     }
 
     fn health_detail(&self) -> String {
@@ -169,37 +160,6 @@ impl GovernancePort for LocalGovernance {
     ) -> Result<(), GovernanceError> {
         self.durability.commit_report(&handle.run_id, call_id)?;
         self.report_tool(handle, name, ok, detail).await
-    }
-
-    async fn plan_turn(
-        &self,
-        _handle: &RunHandle,
-        system: &str,
-        messages: &[ChatMessage],
-        tools: &[ToolDef],
-        local_model: &dyn crate::model::ModelPort,
-    ) -> Result<ModelTurn, GovernanceError> {
-        local_model
-            .next_turn(system, messages, tools)
-            .await
-            .map_err(GovernanceError::Model)
-    }
-
-    async fn plan_content_turn(
-        &self,
-        _handle: &RunHandle,
-        system: &str,
-        context: ContentTurnContext<'_>,
-    ) -> Result<ContentModelTurnV1, GovernanceError> {
-        super::plan_local_content_turn(
-            context.local_model,
-            system,
-            context.messages,
-            context.tools,
-            context.capabilities,
-            context.resolver,
-        )
-        .await
     }
 
     async fn authorize_tool(

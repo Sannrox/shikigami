@@ -2,8 +2,8 @@
 //!
 //! Hosts inject `Arc<dyn *Port>` through [`run::Engine`]. Composition
 //! (`Harness::from_config`) and the HTTP-callback adapter live in the
-//! `shikigami` crate. The HTTP model adapter is `shikigami-http`; production
-//! governance is `shikigami-governance-sekai`.
+//! `shikigami` crate. The HTTP model adapter is `shikigami-http`. Rusui is
+//! the plane caller ([ADR 0024](../../docs/decisions/0024-local-guest-rusui-plane-caller.md)).
 
 pub mod artifacts;
 pub mod atomic;
@@ -33,5 +33,4 @@ pub mod tools;
 pub mod tracing_export;
 pub mod transcript;
 mod typed_report;
-pub mod worker_lifecycle;
 pub mod workspace;

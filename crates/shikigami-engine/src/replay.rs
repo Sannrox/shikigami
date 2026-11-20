@@ -1337,7 +1337,6 @@ fn model_digest(config: &Config) -> Result<String, ReplayError> {
                 .map(text_digest)
                 .unwrap_or_else(|| "builtin-default-script-v1".into())
         ),
-        "plane" => format!("governance:{}", config.governance.adapter),
         other => format!("adapter:{other}"),
     };
     canonical_digest(&(

@@ -1,97 +1,30 @@
 # Run identity model
 
-How shikigami identifiers map to sekai-chisei plane fields. Authority:
-[ADR 0002](decisions/0002-run-identity.md).
+How shikigami identifiers name a local attempt. Authority:
+[ADR 0002](decisions/0002-run-identity.md), amended by
+[ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md).
+
+When a plane is used, rusui maps these ids onto plane fields. This crate does
+not call PlanExecution or harvest.
 
 ## Field map
 
-| Shikigami | Plane / stack field | Default |
+| Shikigami | Role | Default |
 | --- | --- | --- |
-| `RunResult.run_id` | `attempt_id`, checkpoint dir name | New UUID per attempt |
-| `RunHandle.operation_id` | `ExecutionInput.logical_operation_id` | Same as `run_id` unless overridden |
-| `RunRequest.logical_operation_id` | seeds logical lineage | Optional; host-supplied |
-| host `PlanExecution.plan_id` | aggregate receipt `operation_id` | Plane-generated host lifecycle receipt; created once per run |
-| model `PlanExecution.plan_id` | per-turn model receipt | Plane-generated receipt executed for each governed model call |
-| resume `resume_run_id` | continues same attempt | Loads checkpoint for that `run_id` |
-| replay `source_run_id` | retained comparison evidence | Never reused as the replay attempt id |
-| `ReplayResult.run.run_id` | replay attempt id | New UUID, or the same replay id when restarting that attempt |
-| `HarnessEvent` `call_id` | durable tool-call identity | `tool-{turn}-{index}[-{model_id}]`; same string as staged executions/reports |
-| OTLP span attributes | harvest / plane correlation | `run_id`, `attempt_id`, `logical_operation_id`, `plan_operation_id`, tool `call_id` — see [tracing.md](tracing.md) |
-
-### Governed path population
-
-| Surface | Fields set |
-| --- | --- |
-| `PlanExecution` / `ExecutionInput` | `logical_operation_id = RunHandle.operation_id`, `attempt_id = run_id` |
-| Host receipt | `PlanExecution` records intent, policy, routing, and budget; authenticated events add attempt, model, tool, and outcome facts |
-| Model receipt | `PlanExecution` + `ExecutePlanStream` records one governed model call and its terminal outcome |
-| External-action request | `operation_id = host PlanExecution.plan_id`, `attempt_id = run_id` |
-| Host event links | `model_called.plan_operation_id` points to the model receipt; `action_performed` carries tool result attributes |
-| Receipts | `GetOperationReceipt(host_plan_id)`; follow model receipt ids from `model_called` |
+| `RunResult.run_id` | Attempt id, checkpoint dir name | New UUID per attempt |
+| `RunHandle.operation_id` | Logical lineage id | Same as `run_id` unless overridden |
+| `RunRequest.logical_operation_id` | Seeds logical lineage | Optional; host-supplied |
+| resume `resume_run_id` | Continues same attempt | Loads checkpoint for that `run_id` |
+| replay `source_run_id` | Retained comparison evidence | Never reused as the replay attempt id |
+| `ReplayResult.run.run_id` | Replay attempt id | New UUID, or the same replay id when restarting that attempt |
+| `HarnessEvent` `call_id` | Durable tool-call identity | `tool-{turn}-{index}[-{model_id}]` |
+| OTLP span attributes | Local correlation | `run_id`, `attempt_id`, `logical_operation_id`, tool `call_id` — see [tracing.md](tracing.md) |
 
 Offline adapters do not write plane fields; local handles still set
 `operation_id` for in-process consistency (`local-` prefix when no override).
 
 ## Work units
 
-Shikigami does **not** create sekai work units. If onmyoji or another host
-admits a work unit, pass that correlation id as
-`RunRequest.logical_operation_id` (or map your host’s operation id into that
-field) so harvest and PlanExecution attach to the same logical operation.
-
-## Example: correlate logs and receipts
-
-```text
-# 1) CLI / library emits run id
-run_id=3fa8…   # also attempt_id
-operation_id=3fa8…   # unless logical_operation_id was set
-
-# 2) Host logs (stderr events / jsonl)
-HarnessEvent / doctor: run_id=3fa8…
-
-# 3) Plane
-host_plan_id=plane-generated-host-plan-id
-GetOperationReceipt { operation_id: host_plan_id }
-# → host planning spine + attempt_started + model_called + action_performed*
-#   + outcome_recorded
-# model_called.plan_operation_id identifies the per-turn model receipt.
-
-# 4) Parent-owned operation (embedder)
-RunRequest {
-  task: "...",
-  logical_operation_id: Some(parent_op.to_string()), // plane key
-  ..
-}
-# run_id is still a new attempt UUID; host and model receipt ids are generated
-# by PlanExecution and the logical id remains in their intent lineage.
-```
-
-```rust
-use shikigami::{Config, Harness, RunRequest, StateRoot};
-
-async fn under_parent_op(parent_op: &str) -> shikigami::RunResult {
-    let harness = Harness::from_config(Config::default(), StateRoot::default_in(".")).unwrap();
-    let mut req = RunRequest::new("continue workflow");
-    req.logical_operation_id = Some(parent_op.into());
-    harness.run(req).await.unwrap()
-}
-```
-
-## Resume
-
-Resume reuses the same `run_id` (attempt). The governance checkpoint preserves
-the original logical lineage, host/model receipt ids, and any pending report;
-an explicit `RunRequest.logical_operation_id` still takes precedence when a
-host intentionally changes the correlation.
-
-## Replay
-
-Replay creates a new attempt. The source run id identifies retained evidence;
-it is not a resume key and does not authorize reuse of the source workspace or
-governance receipt. A source logical-operation id may be carried into the new
-attempt for lineage.
-
-Restart uses `ReplayRequest.resume_run_id` with the replay attempt id and the
-same manifest digest. Ordinary `RunRequest.resume_run_id` rejects replay
-checkpoints so a host cannot accidentally continue replay under normal run
-semantics.
+Shikigami does **not** create plane work units. If a caller already owns a
+logical operation, pass that correlation id as
+`RunRequest.logical_operation_id`.

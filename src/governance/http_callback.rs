@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::model::{ChatMessage, ModelTurn};
-use crate::tools::{ToolDef, builtin_is_authorized};
+use crate::tools::builtin_is_authorized;
 
 use super::{GovernanceError, GovernancePort, RunHandle, RunOutcome};
 
@@ -231,20 +230,6 @@ impl GovernancePort for HttpCallbackGovernance {
                 .unwrap_or_else(|| format!("host-{run_id}")),
             namespace: "host-authz".into(),
         })
-    }
-
-    async fn plan_turn(
-        &self,
-        _handle: &RunHandle,
-        system: &str,
-        messages: &[ChatMessage],
-        tools: &[ToolDef],
-        local_model: &dyn crate::model::ModelPort,
-    ) -> Result<ModelTurn, GovernanceError> {
-        local_model
-            .next_turn(system, messages, tools)
-            .await
-            .map_err(GovernanceError::Model)
     }
 
     async fn authorize_tool(

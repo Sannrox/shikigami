@@ -94,7 +94,7 @@ not in its environment. With tracing off, nothing is added.
 
 ## Attribute allowlist
 
-Correlation attributes use the same names as harvest / plane identity
+Correlation attributes use the same names as run identity
 ([identity.md](identity.md), [ADR 0009](decisions/0009-tool-call-correlation.md)).
 Metadata attributes follow the OpenTelemetry generative-AI semantic
 conventions where one exists, and use a `shikigami.` prefix where none does:
@@ -104,7 +104,7 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `run_id` | Harness attempt id |
 | `attempt_id` | Same as `run_id` (plane attempt field) |
 | `logical_operation_id` | Inbound operation correlation (`RunRequest.logical_operation_id`, else the attempt) |
-| `plan_operation_id` | Plane decision / host `PlanExecution` id when a governance checkpoint recorded one; empty on ungoverned runs |
+| `plan_operation_id` | Governance checkpoint operation id when one was recorded; empty otherwise |
 | `call_id` | Durable tool-call id `tool-{turn}-{index}[-{model_id}]` (tool spans only) |
 | `gen_ai.tool.name` | Tool name, including `mcp.<server>.<tool>` (tool spans) |
 | `gen_ai.operation.name` | `chat` on turn spans, `execute_tool` on tool spans |

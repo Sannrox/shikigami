@@ -47,7 +47,6 @@ Requirements: the pinned Rust toolchain from [`rust-toolchain.toml`](rust-toolch
 | Suite | Command | Needs |
 | --- | --- | --- |
 | Default | `cargo test` | Nothing external |
-| Live plane | `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored --nocapture` | Local sekai-chisei |
 
 ### Supply chain
 
@@ -77,10 +76,12 @@ Read [DESIGN.md](DESIGN.md) and
 [docs/decisions/0001-ports-and-settings.md](docs/decisions/0001-ports-and-settings.md)
 before changing boundaries.
 
-1. **Ports + settings** — do not hard-wire sekai-chisei into the turn loop.
+1. **Ports + settings** — adapters are selected by configuration; rusui is the
+   plane caller ([ADR 0024](docs/decisions/0024-local-guest-rusui-plane-caller.md)).
 2. **No second policy brain** — do not reimplement budgets/policy in-core.
 3. **No tenkai runtime config** — delivery is packaging, not process settings.
-4. **Fail closed when required** — governed profiles must not silently degrade.
+4. **Fail closed when required** — `fail_closed` and `http-callback` must not
+   silently degrade. Retired plane-client names fail at resolve.
 5. **Library-first** — keep `crates/shikigami-cli` thin; put logic in the library.
 6. **Runs, not “a shikigami”** — naming for units of work.
 

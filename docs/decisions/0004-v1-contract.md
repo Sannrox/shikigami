@@ -1,6 +1,7 @@
 # ADR 0004: v1.0 contract and bright-future sequencing
 
-- Status: Accepted
+- Status: Accepted; governed-path freeze row superseded by
+  [0024](0024-local-guest-rusui-plane-caller.md)
 - Date: 2026-07-25
 - Supersedes: —
 - Resolves: research #29
@@ -30,7 +31,7 @@ less than “proven multi-host production everywhere.”
 | Events | `HarnessEvent` additive evolution; channel sink for embedders |
 | CLI | `version`, `doctor`, `run`, `serve` subcommands |
 | Offline OSS | `cargo test` without plane remains first-class |
-| Governed path | PlanExecution + external-action tool authz + harvest events |
+| Governed path | Superseded by [ADR 0024](0024-local-guest-rusui-plane-caller.md): rusui is the plane caller; this crate does not call sekai-chisei |
 | Doctor JSON | `schema_version` discipline |
 
 ### Explicit won't-haves for 1.0
@@ -57,13 +58,8 @@ Ordered epics — **not** 1.0 blockers:
 
 This decision recorded richer plane work-unit intake as future work at the
 time it was accepted. Issues #129–#132 and PRs #135–#138 subsequently shipped
-the plane-claim path: `shikigami serve --intake plane` claims already-admitted,
-fenced runtime work and executes it through the existing `Harness`. Filesystem
-queue intake remains the default.
-
-This does not revise the original 1.0 decision or make Shikigami an admission
-or control plane. Sekai-chisei still owns admission, claim state, fencing,
-governance, and durable operational truth.
+the plane-claim path. [ADR 0024](0024-local-guest-rusui-plane-caller.md)
+removed it: rusui is the plane caller. Filesystem queue intake remains.
 
 ### Subsequent guest-host work
 

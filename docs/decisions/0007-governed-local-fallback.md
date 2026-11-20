@@ -1,6 +1,7 @@
 # ADR 0007: Governed local-model fallback
 
-- Status: Accepted
+- Status: Accepted; superseded by
+  [0024](0024-local-guest-rusui-plane-caller.md) (no plane-issued fallback grants)
 - Date: 2026-08-25
 - Supersedes: —
 - Resolves: [#233](https://github.com/Sannrox/shikigami/issues/233)

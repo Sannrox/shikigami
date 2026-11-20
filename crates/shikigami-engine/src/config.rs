@@ -158,7 +158,7 @@ pub struct GovernanceSettings {
     #[serde(default = "default_principal")]
     pub principal: String,
     /// Fail closed for the `local` adapter. Remote adapters
-    /// (`sekai-chisei`, `http-callback`, `host-authz`) always fail closed; see
+    /// (`http-callback`, `host-authz`) always fail closed; see
     /// [`Config::requires_governance`].
     #[serde(default)]
     pub fail_closed: bool,
@@ -167,19 +167,9 @@ pub struct GovernanceSettings {
     #[serde(default)]
     pub namespace: String,
     /// Env var holding the Bearer token for the `http-callback` / `host-authz`
-    /// host. Refused for `sekai-chisei`, which uses [`Self::client_secret_env`].
+    /// host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
-    /// Env var holding the client secret of the worker's registered service
-    /// principal (`principal`). `sekai-chisei` exchanges it for short-lived
-    /// service tokens and refreshes them before expiry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_secret_env: Option<String>,
-    /// Opt-in for plaintext `http://` governance endpoints whose host is not
-    /// loopback. Default false; required for private-network compose names.
-    /// `sekai-client` keeps rejecting remote plaintext until this is true.
-    #[serde(default)]
-    pub allow_insecure_remote: bool,
     #[serde(default)]
     pub delayed_evidence: DelayedEvidenceSettings,
 }
@@ -233,41 +223,9 @@ impl Default for GovernanceSettings {
             fail_closed: false,
             namespace: String::new(),
             token_env: None,
-            client_secret_env: None,
-            allow_insecure_remote: false,
             delayed_evidence: DelayedEvidenceSettings::default(),
         }
     }
-}
-
-/// Operator-facing hint when a sekai-chisei endpoint is remote plaintext HTTP
-/// and `governance.allow_insecure_remote` is still false.
-pub const REMOTE_PLAINTEXT_GOVERNANCE_HINT: &str = "governance.endpoint uses plaintext http on a non-loopback host; set governance.allow_insecure_remote=true only for private-network compose, or use https";
-
-fn is_loopback_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    let ip = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
-    ip.parse::<std::net::IpAddr>()
-        .map(|address| address.is_loopback())
-        .unwrap_or(false)
-}
-
-/// True when `endpoint` is `http://` and the host is not loopback.
-/// Matches `sekai-client` URI policy so doctor/connect can fail closed
-/// before the SDK returns an opaque invalid-argument error.
-pub fn is_remote_plaintext_http_endpoint(endpoint: &str) -> bool {
-    let Ok(url) = url::Url::parse(endpoint.trim()) else {
-        return false;
-    };
-    if url.scheme() != "http" {
-        return false;
-    }
-    !is_loopback_host(url.host_str().unwrap_or_default())
 }
 
 fn parse_env_flag(value: &str) -> Option<bool> {
@@ -854,14 +812,12 @@ impl TracingSettings {
     }
 }
 
-/// Model source for turns when governance does not own planning (none/local).
+/// Model source for turns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ModelSettings {
-    /// `scripted` | `http` | `plane`. Plane planning is used when governance
-    /// is `sekai-chisei` or this adapter is `plane`; it does not rewrite the
-    /// governance adapter.
+    /// `scripted` | `http`.
     #[serde(default = "default_model_adapter")]
     pub adapter: String,
     /// OpenAI-compatible base URL (http adapter).
@@ -886,12 +842,11 @@ pub struct ModelSettings {
     /// Optional cost rate: USD microdollars per million output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_usd_micros_per_mtok: Option<u64>,
-    /// Opt-in governed local-model fallback. Denied by default.
+    /// Opt-in local-model fallback. Denied by default.
     #[serde(default)]
     pub fallback: ModelFallbackSettings,
     /// More model names a session may switch to (ACP `session/set_model`,
-    /// TUI `/model`) on the same adapter, endpoint, and key. Ungoverned only;
-    /// a governed catalog comes from the plane.
+    /// TUI `/model`) on the same adapter, endpoint, and key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternates: Vec<String>,
 }
@@ -1164,10 +1119,14 @@ pub enum ConfigError {
     UnknownEventsAdapter(String),
     #[error("unknown model adapter `{0}`")]
     UnknownModelAdapter(String),
-    #[error("governance adapter `sekai-chisei` requires an endpoint")]
-    MissingGovernanceEndpoint,
     #[error("{0}")]
     Invalid(String),
+}
+
+fn retired_plane_client(what: &str) -> ConfigError {
+    ConfigError::Invalid(format!(
+        "{what} was removed; rusui is the plane caller (ADR 0024)"
+    ))
 }
 
 pub enum ConfigResolutionError {
@@ -1182,8 +1141,6 @@ impl Config {
     pub const CONTROL_PLANE_ENV: &'static str = "SHIKIGAMI_CONTROL_PLANE";
     pub const GOVERNANCE_ADAPTER_ENV: &'static str = "SHIKIGAMI_GOVERNANCE_ADAPTER";
     pub const GOVERNANCE_NAMESPACE_ENV: &'static str = "SHIKIGAMI_GOVERNANCE_NAMESPACE";
-    pub const GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV: &'static str =
-        "SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE";
     pub const PROFILE_ENV: &'static str = "SHIKIGAMI_PROFILE";
     pub const MODEL_ADAPTER_ENV: &'static str = "SHIKIGAMI_MODEL_ADAPTER";
     pub const MODEL_SCRIPT_ENV: &'static str = "SHIKIGAMI_MODEL_SCRIPT";
@@ -1295,19 +1252,7 @@ impl Config {
         })
     }
 
-    fn apply_profile_presets(&mut self) {
-        // A site-agent turn runs governed, as the `governed` profile does
-        // (#487).
-        if self.profile.name == "governed" || is_site_agent_profile(&self.profile.name) {
-            if self.governance.adapter == "none" {
-                self.governance.adapter = "sekai-chisei".into();
-            }
-            self.governance.fail_closed = true;
-            if self.model.adapter == "scripted" {
-                self.model.adapter = "plane".into();
-            }
-        }
-    }
+    fn apply_profile_presets(&mut self) {}
 
     fn apply_env(&mut self) {
         if let Ok(value) = env::var(Self::PROFILE_ENV)
@@ -1330,11 +1275,6 @@ impl Config {
             && !value.is_empty()
         {
             self.governance.namespace = value;
-        }
-        if let Ok(value) = env::var(Self::GOVERNANCE_ALLOW_INSECURE_REMOTE_ENV)
-            && let Some(flag) = parse_env_flag(&value)
-        {
-            self.governance.allow_insecure_remote = flag;
         }
         if let Ok(value) = env::var(Self::MODEL_ADAPTER_ENV)
             && !value.is_empty()
@@ -1359,11 +1299,11 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if is_site_agent_profile(&self.profile.name) {
-            self.validate_site_agent()?;
-        }
-        if self.profile.name == SECURITY_TRIAGE_PROFILE {
-            self.validate_security_triage()?;
+        if self.profile.name == "governed" || is_site_agent_profile(&self.profile.name) {
+            return Err(retired_plane_client(&format!(
+                "profile `{}`",
+                self.profile.name
+            )));
         }
         if self.profile.name == SECURITY_FINDER_PROFILE {
             self.validate_security_finder()?;
@@ -1373,7 +1313,10 @@ impl Config {
             ));
         }
         match self.governance.adapter.as_str() {
-            "none" | "local" | "sekai-chisei" | "http-callback" | "host-authz" => {}
+            "sekai-chisei" => {
+                return Err(retired_plane_client("governance adapter `sekai-chisei`"));
+            }
+            "none" | "local" | "http-callback" | "host-authz" => {}
             other => return Err(ConfigError::UnknownGovernanceAdapter(other.into())),
         }
         if matches!(
@@ -1388,11 +1331,6 @@ impl Config {
         {
             return Err(ConfigError::Invalid(
                 "governance adapter `http-callback` requires governance.endpoint".into(),
-            ));
-        }
-        if self.governance.adapter == "sekai-chisei" && self.governance.token_env.is_some() {
-            return Err(ConfigError::Invalid(
-                "governance.token_env (static bearer) is no longer supported for `sekai-chisei`; register the worker as a service principal and set governance.client_secret_env".into(),
             ));
         }
         if self.remote_governance_configured() && self.governance.namespace.trim().is_empty() {
@@ -1431,7 +1369,10 @@ impl Config {
             ));
         }
         match self.model.adapter.as_str() {
-            "scripted" | "http" | "plane" => {}
+            "plane" => {
+                return Err(retired_plane_client("model adapter `plane`"));
+            }
+            "scripted" | "http" => {}
             other => return Err(ConfigError::UnknownModelAdapter(other.into())),
         }
         for (i, name) in self.model.alternates.iter().enumerate() {
@@ -1616,72 +1557,9 @@ impl Config {
     }
 
     /// Whether a run must refuse to start without healthy governance. True for
-    /// profiles `governed` and `site-agent`, `governance.fail_closed`, and
-    /// every remote adapter.
+    /// `governance.fail_closed` and every remote adapter.
     pub fn requires_governance(&self) -> bool {
-        self.governance.fail_closed
-            || self.profile.name == "governed"
-            || is_site_agent_profile(&self.profile.name)
-            || self.remote_governance_configured()
-    }
-
-    /// The `site-agent` profile fails closed (#487): it runs governed by
-    /// sekai-chisei, calls tools only through the governed MCP gateway, and
-    /// holds no direct MCP server, shell, write or filesystem tool, and starts
-    /// no child run. Only the gateway's tools and `report`/`escalate` may be
-    /// enabled, by name; a request-level nested flag is ignored too.
-    fn validate_site_agent(&self) -> Result<(), ConfigError> {
-        let profile = self.profile.name.as_str();
-        let refuse = |why: &str| Err(ConfigError::Invalid(format!("profile `{profile}`: {why}")));
-        if self.governance.adapter != "sekai-chisei" || !self.governance.fail_closed {
-            return refuse("requires governance adapter `sekai-chisei` with fail_closed");
-        }
-        if self.tools.mcp_gateway.is_none() {
-            return refuse("requires tools.mcp_gateway; tools reach the site only through it");
-        }
-        if self.run.nested {
-            return refuse("refuses run.nested; a child run would reach past the gateway");
-        }
-        if !self.tools.mcp_servers.is_empty() {
-            return refuse("refuses tools.mcp_servers; use the governed gateway");
-        }
-        if !matches!(self.tools.mode, PermissionMode::Custom) {
-            return refuse("requires tools.mode = \"custom\" with an explicit tools.enabled list");
-        }
-        if self.tools.enabled.is_empty() {
-            return refuse("requires an explicit tools.enabled list");
-        }
-        if let Some(tool) = self.tools.enabled.iter().find(|tool| {
-            !(matches!(tool.as_str(), "report" | "escalate")
-                || tool.starts_with(&format!("mcp.{MCP_GATEWAY_NAME}.")))
-        }) {
-            return refuse(&format!(
-                "tool `{tool}` is not allowed; enable only mcp.{MCP_GATEWAY_NAME}.* tools, report and escalate"
-            ));
-        }
-        Ok(())
-    }
-
-    /// Extra bounds for `security-triage` (#465): a typed verdict and the
-    /// triage skill on top of the site-agent family checks.
-    fn validate_security_triage(&self) -> Result<(), ConfigError> {
-        let refuse = |why: &str| {
-            Err(ConfigError::Invalid(format!(
-                "profile `security-triage`: {why}"
-            )))
-        };
-        if !self.tools.enabled.iter().any(|tool| tool == "report") {
-            return refuse("requires `report` in tools.enabled");
-        }
-        if !self
-            .context
-            .skills
-            .iter()
-            .any(|skill| skill == "security-triage")
-        {
-            return refuse("requires context.skills to include `security-triage`");
-        }
-        Ok(())
+        self.governance.fail_closed || self.remote_governance_configured()
     }
 
     /// The `security-finder` profile is a specialised read-only reviewer (#464):
@@ -1760,39 +1638,8 @@ impl Config {
     pub fn remote_governance_configured(&self) -> bool {
         matches!(
             self.governance.adapter.as_str(),
-            "sekai-chisei" | "http-callback" | "host-authz"
+            "http-callback" | "host-authz"
         )
-    }
-
-    pub fn uses_plane_model(&self) -> bool {
-        self.governance.adapter == "sekai-chisei" || self.model.adapter == "plane"
-    }
-
-    pub fn governance_endpoint_required(&self) -> Result<(), ConfigError> {
-        if self.governance.adapter == "sekai-chisei"
-            && self
-                .governance
-                .endpoint
-                .as_ref()
-                .map(|s| s.trim().is_empty())
-                .unwrap_or(true)
-        {
-            return Err(ConfigError::MissingGovernanceEndpoint);
-        }
-        Ok(())
-    }
-
-    /// Remote plaintext `http://` on `sekai-chisei` is unusable unless the
-    /// operator opt-in is set. Doctor and connect use this instead of the
-    /// SDK's opaque invalid-argument error.
-    pub fn governance_blocks_remote_plaintext(&self) -> bool {
-        self.governance.adapter == "sekai-chisei"
-            && !self.governance.allow_insecure_remote
-            && self
-                .governance
-                .endpoint
-                .as_deref()
-                .is_some_and(is_remote_plaintext_http_endpoint)
     }
 
     /// Credential environment names consumed by the harness and never exposed
@@ -1800,7 +1647,6 @@ impl Config {
     pub fn protected_tool_environment_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         names.extend(self.governance.token_env.clone());
-        names.extend(self.governance.client_secret_env.clone());
         if self.model.adapter == "http" {
             names.push(self.model.api_key_env.clone());
         }
@@ -1849,12 +1695,6 @@ pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
         }
         secrets.push(v);
     }
-    if let Some(name) = &config.governance.client_secret_env
-        && let Ok(v) = std::env::var(name)
-        && !v.is_empty()
-    {
-        secrets.push(v);
-    }
     if let Ok(v) = std::env::var(&config.model.api_key_env)
         && !v.is_empty()
     {
@@ -1876,156 +1716,51 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn governed_profile_selects_sekai_and_plane_model() {
+    fn retired_plane_client_settings_fail_at_resolve() {
         let dir = tempdir().unwrap();
-        let path = Config::path_in(dir.path());
-        fs::write(
-            &path,
+        let refused = |body: &str| {
+            let path = Config::path_in(dir.path());
+            fs::write(&path, body).unwrap();
+            Config::resolve(&path).unwrap_err().to_string()
+        };
+
+        let governed = refused(
             r#"
 version = 1
 [profile]
 name = "governed"
-[governance]
-namespace = "team-a"
 "#,
-        )
-        .unwrap();
-        let (c, _) = Config::resolve(&path).unwrap();
-        assert_eq!(c.governance.adapter, "sekai-chisei");
-        assert!(c.governance.fail_closed);
-        assert_eq!(c.model.adapter, "plane");
-        assert_eq!(c.model.model, "auto");
-    }
+        );
+        assert!(
+            governed.contains("profile `governed`") && governed.contains("ADR 0024"),
+            "{governed}"
+        );
 
-    /// The shipped site-agent example loads, governed and gateway-only.
-    #[test]
-    fn site_agent_example_loads_governed_and_gateway_only() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("site-agent-turn.toml");
-        fs::write(
-            &path,
-            include_str!("../../../examples/site-agent-turn.toml"),
-        )
-        .unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.profile.name, SITE_AGENT_PROFILE);
-        assert_eq!(config.governance.adapter, "sekai-chisei");
-        assert!(config.governance.fail_closed);
-        assert!(config.requires_governance());
-        assert!(config.tools.mcp_gateway.is_some());
-    }
+        let mut config = Config::default();
+        config.governance.adapter = "sekai-chisei".into();
+        let sekai = config.validate().unwrap_err().to_string();
+        assert!(
+            sekai.contains("governance adapter `sekai-chisei`") && sekai.contains("ADR 0024"),
+            "{sekai}"
+        );
 
-    /// Each way out of the gateway is refused with a named reason (#487).
-    #[test]
-    fn site_agent_profile_refuses_every_way_around_the_gateway() {
-        let base = || {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("site-agent-turn.toml");
-            fs::write(
-                &path,
-                include_str!("../../../examples/site-agent-turn.toml"),
-            )
-            .unwrap();
-            Config::load(&path).unwrap()
-        };
-        let refused = |config: Config| match config.validate() {
-            Err(ConfigError::Invalid(why)) => why,
-            other => panic!("expected a refusal, got {other:?}"),
-        };
+        config = Config::default();
+        config.model.adapter = "plane".into();
+        let plane = config.validate().unwrap_err().to_string();
+        assert!(
+            plane.contains("model adapter `plane`") && plane.contains("ADR 0024"),
+            "{plane}"
+        );
 
-        let mut no_gateway = base();
-        no_gateway.tools.mcp_gateway = None;
-        assert!(refused(no_gateway).contains("requires tools.mcp_gateway"));
-
-        let mut direct = base();
-        direct
-            .tools
-            .mcp_servers
-            .push(toml::from_str("name = \"site\"\ncommand = \"mock\"").unwrap());
-        assert!(refused(direct).contains("refuses tools.mcp_servers"));
-
-        for tool in ["bash", "write_file", "read_file"] {
-            let mut shell = base();
-            shell.tools.enabled.push(tool.into());
-            assert!(refused(shell).contains(&format!("tool `{tool}` is not allowed")));
+        for profile in [SITE_AGENT_PROFILE, SECURITY_TRIAGE_PROFILE] {
+            config = Config::default();
+            config.profile.name = profile.into();
+            let err = config.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("profile `{profile}`")) && err.contains("ADR 0024"),
+                "{err}"
+            );
         }
-
-        let mut workspace = base();
-        workspace.tools.mode = PermissionMode::WorkspaceExec;
-        assert!(refused(workspace).contains("tools.mode"));
-
-        let mut bearer = base();
-        bearer.governance.token_env = Some("SHIKIGAMI_TOKEN".into());
-        assert!(
-            matches!(bearer.validate(), Err(ConfigError::Invalid(why)) if why.contains("static bearer"))
-        );
-
-        let mut nested = base();
-        nested.run.nested = true;
-        assert!(refused(nested).contains("refuses run.nested"));
-
-        let mut ungoverned = base();
-        ungoverned.governance.adapter = "local".into();
-        assert!(refused(ungoverned).contains("requires governance adapter"));
-    }
-
-    /// The shipped security-triage example loads as a site-agent overlay (#465).
-    #[test]
-    fn security_triage_example_loads_governed_and_gateway_only() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("security-triage.toml");
-        fs::write(
-            &path,
-            include_str!("../../../examples/security-triage.toml"),
-        )
-        .unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.profile.name, SECURITY_TRIAGE_PROFILE);
-        assert!(is_site_agent_profile(&config.profile.name));
-        assert_eq!(config.governance.adapter, "sekai-chisei");
-        assert!(config.governance.fail_closed);
-        assert!(config.requires_governance());
-        assert!(config.tools.mcp_gateway.is_some());
-        assert!(
-            config
-                .context
-                .skills
-                .iter()
-                .any(|skill| skill == "security-triage")
-        );
-        config.validate().unwrap();
-    }
-
-    /// Security-triage keeps the site-agent gateway bounds and requires the
-    /// typed-report skill (#465).
-    #[test]
-    fn security_triage_profile_refuses_ways_around_the_gateway() {
-        let base = || {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("security-triage.toml");
-            fs::write(
-                &path,
-                include_str!("../../../examples/security-triage.toml"),
-            )
-            .unwrap();
-            Config::load(&path).unwrap()
-        };
-        let refused = |config: Config| match config.validate() {
-            Err(ConfigError::Invalid(why)) => why,
-            other => panic!("expected a refusal, got {other:?}"),
-        };
-
-        let mut no_report = base();
-        no_report.tools.enabled.retain(|tool| tool != "report");
-        assert!(refused(no_report).contains("requires `report`"));
-
-        let mut no_skill = base();
-        no_skill.context.skills.clear();
-        assert!(refused(no_skill).contains("security-triage"));
-
-        let mut shell = base();
-        shell.tools.enabled.push("bash".into());
-        assert!(refused(shell).contains("tool `bash` is not allowed"));
     }
 
     /// The shipped security-finder example loads as a read-only reviewer (#464).
@@ -2159,44 +1894,6 @@ script_json = "[]"
         let (c, _) = Config::resolve(&path).unwrap();
         assert_eq!(c.governance.adapter, "local");
         assert_eq!(c.model.adapter, "scripted");
-        assert!(!c.governance.allow_insecure_remote);
-    }
-
-    #[test]
-    fn allow_insecure_remote_defaults_false_and_parses_true() {
-        assert!(!Config::default().governance.allow_insecure_remote);
-        let dir = tempdir().unwrap();
-        let path = Config::path_in(dir.path());
-        fs::write(
-            &path,
-            r#"
-version = 1
-[governance]
-adapter = "sekai-chisei"
-endpoint = "http://chisei:50051"
-namespace = "team-a"
-allow_insecure_remote = true
-"#,
-        )
-        .unwrap();
-        let (c, _) = Config::resolve(&path).unwrap();
-        assert!(c.governance.allow_insecure_remote);
-        assert!(!c.governance_blocks_remote_plaintext());
-        let mut blocked = c;
-        blocked.governance.allow_insecure_remote = false;
-        assert!(blocked.governance_blocks_remote_plaintext());
-    }
-
-    #[test]
-    fn remote_plaintext_http_matches_sdk_loopback_policy() {
-        assert!(!is_remote_plaintext_http_endpoint("http://127.0.0.1:50051"));
-        assert!(!is_remote_plaintext_http_endpoint("http://localhost:50051"));
-        assert!(!is_remote_plaintext_http_endpoint("http://[::1]:50051"));
-        assert!(!is_remote_plaintext_http_endpoint(
-            "https://plane.example:443"
-        ));
-        assert!(is_remote_plaintext_http_endpoint("http://chisei:50051"));
-        assert!(is_remote_plaintext_http_endpoint("http://192.0.2.1:50051"));
     }
 
     #[test]
@@ -2362,10 +2059,7 @@ unknown_thing = true
     fn property_unknown_adapters_fail_validate() {
         use proptest::prelude::*;
         proptest!(|(name in "[a-z]{3,12}")| {
-            let known = matches!(
-                name.as_str(),
-                "none" | "local" | "sekai-chisei"
-            );
+            let known = matches!(name.as_str(), "none" | "local");
             let mut c = Config::default();
             c.governance.adapter = name.clone();
             let result = c.validate();
@@ -2562,13 +2256,10 @@ prompt = "be thorough"
     }
 
     #[test]
-    fn governed_bash_refuses_sandbox_none_and_unrestricted_egress() {
+    fn fail_closed_bash_refuses_sandbox_none_and_unrestricted_egress() {
         let mut c = Config::default();
-        c.profile.name = "governed".into();
-        c.apply_profile_presets();
+        c.governance.fail_closed = true;
         c.tools.enabled = vec!["bash".into(), "report".into()];
-        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
-        c.governance.namespace = "team-a".into();
 
         let err = c.validate().unwrap_err();
         assert!(
@@ -2655,7 +2346,7 @@ read_only_paths = ["{}"]
 
     #[test]
     fn remote_governance_fails_closed_and_needs_explicit_namespace() {
-        for adapter in ["sekai-chisei", "http-callback", "host-authz"] {
+        for adapter in ["http-callback", "host-authz"] {
             let mut c = Config::default();
             c.governance.adapter = adapter.into();
             c.governance.endpoint = Some("http://127.0.0.1:50051".into());
@@ -2671,32 +2362,10 @@ read_only_paths = ["{}"]
     }
 
     #[test]
-    fn sekai_chisei_refuses_static_bearer_and_protects_client_secret() {
+    fn fail_closed_without_bash_allows_sandbox_none() {
         let mut c = Config::default();
-        c.governance.adapter = "sekai-chisei".into();
-        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
-        c.governance.namespace = "team-a".into();
-        c.governance.token_env = Some("PLANE_TOKEN".into());
-        let err = c.validate().unwrap_err();
-        assert!(err.to_string().contains("client_secret_env"), "{err}");
-
-        c.governance.token_env = None;
-        c.governance.client_secret_env = Some("WORKER_CLIENT_SECRET".into());
-        c.validate().unwrap();
-        assert!(
-            c.protected_tool_environment_names()
-                .contains(&"WORKER_CLIENT_SECRET".to_string())
-        );
-    }
-
-    #[test]
-    fn governed_without_bash_allows_sandbox_none() {
-        let mut c = Config::default();
-        c.profile.name = "governed".into();
-        c.apply_profile_presets();
+        c.governance.fail_closed = true;
         c.tools.enabled = vec!["read_file".into(), "report".into()];
-        c.governance.endpoint = Some("http://127.0.0.1:50051".into());
-        c.governance.namespace = "team-a".into();
         c.validate().unwrap();
         assert!(!c.bash_enabled());
     }

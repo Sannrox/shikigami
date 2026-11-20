@@ -8,16 +8,16 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | --- | --- | --- |
 | Library contract proof | [`embed_smoke.rs`](embed_smoke.rs) | Advanced in-process host (`Harness` + events + export). Gated on PR/`main` CI. |
 | Operator CLI | [`local-run.toml`](local-run.toml) | Offline profile for `doctor` / `run` demos |
-| Local HTTP model | [`cliproxy-http.toml`](cliproxy-http.toml) | Ungoverned `http` adapter through a loopback OpenAI-compatible gateway (CLIProxyAPI) |
+| Local HTTP model | [`cliproxy-http.toml`](cliproxy-http.toml) | `http` adapter through a loopback OpenAI-compatible gateway (CLIProxyAPI) |
 | Optional MCP host | [`mcp-host.example.json`](mcp-host.example.json) | Cursor/Claude Desktop-style stdio config for `shikigami mcp` |
-| Governed wiring | [`governed-sekai-chisei.toml`](governed-sekai-chisei.toml) | Plane profile (needs reachable sekai-chisei) |
-| Governed ontology read → Action → receipt over MCP | [`governed-mcp-action.toml`](governed-mcp-action.toml) | Scripted run against `sekai-mcp`; local recipe in [docs/mcp.md](../docs/mcp.md) |
 | Red-team probe author | [`red-team.toml`](red-team.toml) | Read-only run that turns RPC surface diffs into probe specs; see [docs/red-team.md](../docs/red-team.md) |
 | Security finder | [`security-finder.toml`](security-finder.toml) | Read-only specialised reviewers that emit typed findings; see [docs/security-finder.md](../docs/security-finder.md) |
-| Security triage | [`security-triage.toml`](security-triage.toml) | Site-agent overlay that turns findings into exposure verdicts; see [docs/security-triage.md](../docs/security-triage.md) |
 | Linux OS sandbox | [`linux-native-sandbox.toml`](linux-native-sandbox.toml) | `linux_native` (Landlock + seccomp) on Bash children; Linux only |
 | Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
-| Plane worker fleet sketch | [`k8s-worker-lifecycle.yaml`](k8s-worker-lifecycle.yaml) | Readiness/liveness/SIGTERM drain for managed plane workers |
+
+Plane-backed examples (`governed-sekai-chisei.toml`, `governed-mcp-action.toml`,
+`site-agent-turn.toml`, `security-triage.toml`) were removed with the in-tree
+plane client. See [ADR 0024](../docs/decisions/0024-local-guest-rusui-plane-caller.md).
 
 See [docs/embedding.md](../docs/embedding.md) (host selection + freeze list) and
 [docs/mcp.md](../docs/mcp.md) (MCP tools including `run_start` / `run_status` / `run_wait`).
@@ -29,16 +29,6 @@ cargo run --bin shikigami -- --config examples/local-run.toml doctor
 cargo run --bin shikigami -- --config examples/local-run.toml run "demo" --keep-workspace
 cargo run --locked --example embed_smoke
 ```
-
-## Governed doctor
-
-```bash
-export SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051
-cargo run --bin shikigami -- --config examples/governed-sekai-chisei.toml doctor
-```
-
-`run` on the governed profile requires a healthy plane and whatever model
-providers that plane is configured to use.
 
 ## Local HTTP gateway (CLIProxyAPI)
 

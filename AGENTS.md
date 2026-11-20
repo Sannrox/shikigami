@@ -7,31 +7,29 @@ Source code lives in `src/`: `src/lib.rs` exports the public API,
 `crates/shikigami-cli` is a thin CLI host, `crates/shikigami-engine` owns the
 turn loop, ports, workspace jail, and in-process adapters,
 `crates/shikigami-http` owns the OpenAI-compatible HTTP model adapter,
-`crates/shikigami-governance-sekai` owns the sekai-chisei governance adapter,
-`crates/shikigami-plane-intake` owns the plane-claim port, `src/harness.rs`
-wires settings to ports, `src/governance/` holds the host `http-callback` /
-`host-authz` adapter and wires `sekai-chisei`. Serve, MCP, plane intake, and
-eval live in the matching `src/` modules; see [DESIGN.md](DESIGN.md) for the
-module map. The sekai-chisei
-adapter consumes the versioned upstream `sekai-client` Rust facade and its
-canonical `sekai-proto` dependency; Shikigami does not carry a second protocol
-snapshot. Integration tests live in `tests/`. Optional host state defaults to
+`src/harness.rs` wires settings to ports, `src/governance/` holds the host
+`http-callback` / `host-authz` adapter. Serve, MCP, ACP, and eval live in the
+matching `src/` modules; see [DESIGN.md](DESIGN.md) for the module map.
+Rusui is the plane caller
+([ADR 0024](docs/decisions/0024-local-guest-rusui-plane-caller.md)).
+Integration tests live in `tests/`. Optional host state defaults to
 `~/.shikigami/projects/<encoded-cwd>` (or `.shikigami-state/` when
 `--state` points there); do not commit local state, run workspaces, or
 generated runtime artifacts.
 
 Architecture is **ports + settings**
 ([ADR 0001](docs/decisions/0001-ports-and-settings.md)): the turn loop depends
-on ports; adapters are selected by configuration. Production governance is
-sekai-chisei; offline paths use `none`/`local` plus scripted or HTTP models.
-Delivery tools (e.g. tenkai) may install the binary; they are not runtime ports.
+on ports; adapters are selected by configuration. The engine always calls
+`ModelPort`. Remaining governance adapters are `none`, `local`, and
+`http-callback` / `host-authz`. Delivery tools (e.g. tenkai) may install the
+binary; they are not runtime ports.
 
 Human documentation index: [docs/README.md](docs/README.md).
 
 ## Build, Test, and Development Commands
 
 - `cargo fmt` formats Rust code before review.
-- `cargo test` runs the normal unit and integration test suite (no plane required).
+- `cargo test` runs the normal unit and integration test suite.
 - `cargo clippy --all-targets --locked -- -D warnings` is required for
   ship-level local gates (matches CI / `make validate`).
 - `cargo run --bin shikigami -- doctor` prints effective settings and adapter health.
@@ -52,13 +50,11 @@ Human documentation index: [docs/README.md](docs/README.md).
   once, then `python3 -m unittest discover -s scripts/tests -t .` runs the
   release tests (CI job `Release tests`).
   See [docs/project-verification.md](docs/project-verification.md).
-- `SEKAI_LIVE=1 SHIKIGAMI_CONTROL_PLANE=http://127.0.0.1:50051 cargo test --test plane_live -- --ignored`
-  runs the ignored live plane probe when a local sekai-chisei is available.
 
 Settings resolve from defaults → optional `shikigami.toml` → environment → CLI.
 Important variables include `SHIKIGAMI_STATE`, `SHIKIGAMI_CONFIG`,
 `SHIKIGAMI_PROFILE`, `SHIKIGAMI_GOVERNANCE_ADAPTER`, `SHIKIGAMI_CONTROL_PLANE`,
-`SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE`, and `SHIKIGAMI_MODEL_ADAPTER`.
+and `SHIKIGAMI_MODEL_ADAPTER`.
 See [docs/settings.md](docs/settings.md) and [examples/](examples/).
 
 GitHub Issues are the planning source of truth. The workflow Skills under
@@ -187,11 +183,11 @@ implementation Pull Requests plus claim branches without one. Assigned or
 planned work with neither is not a running lane.
 
 Parallel lanes must not collide. Collision surfaces in this repository are
-ports and settings, governance adapters, the workspace jail, the
-sekai-client proto pin, the kekkai pin, and the release path
-(`.github/workflows/`, `scripts/release/`, `scripts/tests/release/`,
-`scripts/check-workflows.sh`, `RELEASING.md`). Lanes that would both change one of these surfaces run
-in sequence, not in parallel.
+ports and settings, governance adapters, the workspace jail, the kekkai pin,
+and the release path (`.github/workflows/`, `scripts/release/`,
+`scripts/tests/release/`, `scripts/check-workflows.sh`, `RELEASING.md`).
+Lanes that would both change one of these surfaces run in sequence, not in
+parallel.
 
 A lane publishes its first Verified commit to the claim branch as a draft Pull
 Request that closes the Issue. Public GitHub lane fields may list only: claim
@@ -248,10 +244,9 @@ library so hosts can embed `Harness` without shelling out.
 
 Add focused tests for changes touching the turn loop, tools, workspace
 materialization, settings resolution, or governance adapters. Prefer
-deterministic tests that do not require external services. Mark plane- or
-provider-dependent tests ignored, following `tests/plane_live.rs`, and document
-required local services in the test or related docs. Offline `cargo test` must
-stay green without sekai-chisei.
+deterministic tests that do not require external services. Mark
+provider-dependent tests ignored and document required local services in the
+test or related docs. Offline `cargo test` must stay green.
 
 Release scripts live in `scripts/release/`, one `unittest` file per script in
 `scripts/tests/release/` (the root `tests/` belongs to Cargo). Workflow YAML
@@ -264,7 +259,7 @@ temp paths that include the process id, so parallel runs do not collide.
 
 Use short imperative subjects, often Conventional Commit style:
 `feat(run): jail bash to workspace`, `docs: document settings resolution`,
-`fix(governance): fail closed without plane endpoint`. Keep commits narrow and
+`fix(governance): fail closed without host-authz endpoint`. Keep commits narrow and
 describe the affected subsystem when useful. Pull requests should include a
 concise behavior summary, **tests run**, **autoreview result** (for non-trivial
 code), linked issue or context, and any configuration or security implications.
@@ -302,8 +297,10 @@ correction.
 
 Never commit secrets, tokens, provider credentials, logs, or local harness
 state (`.shikigami-state/`). Do not treat delivery systems as runtime control
-dependencies. When profile `governed` or `governance.fail_closed` is set, missing or
-unhealthy governance must fail doctor and run. Never put hostnames, FQDNs,
+dependencies. When `governance.fail_closed` is set, missing or unhealthy governance must
+fail doctor and run. Settings that name adapter `sekai-chisei` or profile
+`governed` / `site-agent` / `security-triage` fail at resolve (ADR 0024).
+Never put hostnames, FQDNs,
 home directories, absolute worktree paths, LAN or employer network names, or
 other private environment inventory on public Issues, Pull Requests, comments,
 or commit messages. Report vulnerabilities through [SECURITY.md](SECURITY.md).
@@ -339,24 +336,24 @@ Facts the shared agent-kit skills read that the sections above do not already
 state. Frame work against `VISION.md`, `DESIGN.md`, and the ADRs, and name the
 affected area (run, governance, workspace, settings, embed, ops, security). The
 local gates are the Make targets in `## Agent delivery closeout`; they run
-offline with no plane required.
+offline.
 
 Feature: a new observable operator, embedding-host, or integration outcome.
 
 ### Compatibility and failure obligations
 
-The upstream `sekai-client` / `sekai-proto` version pin and the kekkai pin;
-settings resolution order and existing `shikigami.toml` files; fail-closed
-governance under profile `governed` or `governance.fail_closed`; the public
-library API that hosts embed (`Harness`); offline `cargo test` stays green
-without sekai-chisei.
+The kekkai pin; settings resolution order and existing `shikigami.toml`
+files; fail-closed governance under `governance.fail_closed` or
+`http-callback`; retired plane-client settings fail at resolve (ADR 0024);
+the public library API that hosts embed (`Harness`); offline `cargo test`
+stays green.
 
 ### Additional impact boundaries
 
 - ports + settings ([ADR 0001](docs/decisions/0001-ports-and-settings.md)):
   adapters are selected by configuration; delivery tools such as tenkai are
   never runtime ports;
-- governance adapters (`none`, `local`, host callback, sekai-chisei) and their
+- governance adapters (`none`, `local`, host callback) and their
   fail-closed behavior;
 - the workspace jail and tool execution sandbox tiers.
 
@@ -367,7 +364,6 @@ Rows beyond `## Testing Guidelines`:
 | Surface | Required evidence |
 | --- | --- |
 | host proof or public embedding path | `make test-e2e` |
-| sekai-chisei governance adapter | ignored `tests/plane_live.rs` probe when a local plane is available; otherwise report skipped |
 | docs, ADRs | `make validate` (Markdown links, changelog version) |
 | Skills / `AGENTS.md` | `bash scripts/validate-workflow-skills.sh` |
 | packaging | `cargo build --locked`; `scripts/oci-image-smoke.sh` for the image |
@@ -382,7 +378,7 @@ Rows beyond `## Testing Guidelines`:
   committed with the version bump on a release branch; the `v<version>` tag
   makes `.github/workflows/release-dispatch.yml` run `release.yml` from
   `main` for that tag;
-- `sekai-client` and kekkai pins and their upgrade notes;
+- kekkai pin and its upgrade notes;
 - OCI image publication needs a stable version;
 - tagging: [RELEASING.md](RELEASING.md). Agents never push `v*` tags.
 

@@ -15,7 +15,6 @@ use crate::config::Config;
 use crate::content::{
     ContentCapabilitiesV1, ContentMessageV1, ContentModelTurnV1, ContentResolver, resolve_accepted,
 };
-use crate::model::{ChatMessage, ModelTurn};
 use crate::tools::ToolDef;
 
 pub use local::LocalGovernance;
@@ -38,10 +37,7 @@ fn in_process_enabled_tools(config: &Config) -> Vec<String> {
     enabled
 }
 
-/// A model exposed by the configured governance/model source.
-///
-/// Governed model availability is authoritative in sekai-chisei. Local
-/// adapters may report only their configured model.
+/// A model exposed by the configured model source.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AvailableModel {
     pub provider: String,
@@ -50,17 +46,17 @@ pub struct AvailableModel {
     pub lifecycle: String,
 }
 
-/// Lineage for one harness attempt correlated to plane operations.
+/// Lineage for one harness attempt.
 ///
 /// See [docs/identity.md](../../../../docs/identity.md) and ADR 0002.
 #[derive(Debug, Clone)]
 pub struct RunHandle {
-    /// Harness attempt id (UUID). Equals plane `attempt_id`.
+    /// Harness attempt id (UUID).
     pub run_id: String,
-    /// Logical operation id for plane receipts / PlanExecution.
-    /// Defaults to `run_id` when the caller does not supply a parent op.
+    /// Logical operation id. Defaults to `run_id` when the caller does not
+    /// supply a parent op.
     pub operation_id: String,
-    /// Plane namespace for policy and harvest.
+    /// Namespace for policy correlation.
     pub namespace: String,
 }
 
@@ -74,7 +70,7 @@ pub struct RunOutcome {
     pub turns: u32,
     /// Termination kind: completed | cancelled | timed_out | max_turns | failed
     pub termination: String,
-    /// Host workspace path (non-authoritative; plane truth is events/receipts).
+    /// Host workspace path.
     pub workspace: String,
     /// Model the run used. Empty when the run ended before a model was chosen.
     pub model: String,
@@ -84,15 +80,6 @@ pub struct RunOutcome {
     pub preset_id: Option<String>,
     /// External resources tool results named, attributed to their calls.
     pub artifacts: Vec<crate::tools::ArtifactReference>,
-}
-
-/// Borrowed inputs for one bounded-content planning call.
-pub struct ContentTurnContext<'a> {
-    pub messages: &'a [ContentMessageV1],
-    pub tools: &'a [ToolDef],
-    pub capabilities: &'a ContentCapabilitiesV1,
-    pub resolver: &'a dyn ContentResolver,
-    pub local_model: &'a dyn crate::model::ModelPort,
 }
 
 #[derive(Default)]
@@ -356,19 +343,7 @@ pub trait GovernancePort: Send + Sync {
     fn health_detail(&self) -> String;
     fn health_ok(&self) -> bool;
 
-    /// Return the models currently available to this governance adapter.
-    ///
-    /// The default is intentionally unsupported: model catalogs are an
-    /// adapter capability, not part of the turn-loop contract.
-    async fn available_models(&self) -> Result<Vec<AvailableModel>, GovernanceError> {
-        Err(GovernanceError::Message(format!(
-            "available model catalog is not supported by governance adapter `{}`",
-            self.id()
-        )))
-    }
-
-    /// Start a run. `logical_operation_id` maps to plane `operation_id` /
-    /// `logical_operation_id` (defaults to `run_id` when `None`).
+    /// Start a run. `logical_operation_id` defaults to `run_id` when `None`.
     async fn begin_run(
         &self,
         run_id: &str,
@@ -389,7 +364,7 @@ pub trait GovernancePort: Send + Sync {
     }
 
     /// Return adapter-owned correlation/retry state for the next local
-    /// checkpoint. The plane remains authoritative for the receipt itself.
+    /// checkpoint.
     fn checkpoint_state(&self, _run_id: &str) -> Option<GovernanceCheckpoint> {
         None
     }
@@ -401,42 +376,10 @@ pub trait GovernancePort: Send + Sync {
         true
     }
 
-    /// Session hosts ask before ungoverned mutating tools. Brokered adapters
-    /// (`http-callback`, `sekai-chisei`) keep authorization on the plane/host.
+    /// Session hosts ask before mutating tools. Brokered adapters
+    /// (`http-callback` / `host-authz`) keep authorization on the host.
     fn session_asks_mutating_tools(&self) -> bool {
         false
-    }
-
-    /// Whether [`Self::plan_turn`] only calls the local model port. Context
-    /// compaction asks the local model for a summary only then; a brokered
-    /// adapter would see an ungoverned model call, so it keeps drop-middle.
-    fn plans_with_local_model(&self) -> bool {
-        false
-    }
-
-    /// Produce the next model turn. Local adapters use the provided model port
-    /// callback; sekai-chisei uses PlanExecution on the plane.
-    async fn plan_turn(
-        &self,
-        handle: &RunHandle,
-        system: &str,
-        messages: &[ChatMessage],
-        tools: &[ToolDef],
-        local_model: &dyn crate::model::ModelPort,
-    ) -> Result<ModelTurn, GovernanceError>;
-
-    /// Produce a bounded content turn. The default is fail-closed; adapters
-    /// must opt into the content-specific model or governance path.
-    async fn plan_content_turn(
-        &self,
-        _handle: &RunHandle,
-        _system: &str,
-        _context: ContentTurnContext<'_>,
-    ) -> Result<ContentModelTurnV1, GovernanceError> {
-        Err(GovernanceError::Denied(format!(
-            "governance adapter `{}` does not support bounded content",
-            self.id()
-        )))
     }
 
     /// Report the model result after the engine has durably staged it in the
@@ -534,15 +477,6 @@ pub trait GovernancePort: Send + Sync {
 
     /// Poll current approval authority. Adapters that cannot observe
     /// approvals leave the default unsupported.
-    ///
-    /// `sekai-chisei` leaves this on the default and nothing calls it for
-    /// resume: the plane has no approval-stable read, so resume re-sends
-    /// `AuthorizeExternalAction` and remaps the decision instead. When that
-    /// replay returns `PermissionDenied` (Existing permit, current policy
-    /// still `RequireApproval`), the adapter fails closed without executing
-    /// and does not claim approve-then-resume execute-once. See
-    /// `governance::sekai_chisei::tool_authorization::approval_state_from_decision`
-    /// and [`docs/governed-path.md`](../../../../docs/governed-path.md).
     async fn approval_state(&self, approval_id: &str) -> Result<ApprovalState, GovernanceError> {
         let _ = approval_id;
         Err(GovernanceError::Message(format!(

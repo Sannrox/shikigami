@@ -5,26 +5,29 @@ below. Out-of-tree adapters can implement the same traits (dynamic plugins are
 out of scope for 1.x; use a library dependency or fork of the adapter module).
 
 Architectural decision: [decisions/0001-ports-and-settings.md](decisions/0001-ports-and-settings.md).
+The engine always calls `ModelPort`. Rusui is the plane caller
+([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 
 ## Governance (`GovernancePort`)
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `none` | stable for 1.x | No external plane; local model path; tool allow-list only |
-| `local` | stable for 1.x | In-process tool allow-list for deterministic tests |
+| `none` | stable | No external broker; local model path; tool allow-list only |
+| `local` | stable | In-process tool allow-list for deterministic tests |
 | `http-callback` (alias `host-authz`) | stable for host brokers | POSTs tool authz to a host URL; allow/deny with timeout |
-| `sekai-chisei` | primary production path | gRPC: probe, `PlanExecution`, `ExecutePlanStream`, operation events; parks on `require_approval` and re-authorizes the same request on resume (execute-once only when that replay returns a permit; see [governed-path.md](governed-path.md)) |
+
+Adapter `sekai-chisei` and profile `governed` were removed. Settings that still
+name them fail at resolve.
 
 ### HTTP host callback (`http-callback`)
 
-For interactive hosts (for example Aldunis Code PermissionBroker) that cannot
-embed the harness library:
+For interactive hosts that cannot embed the harness library:
 
 ```toml
 [governance]
 adapter = "http-callback"
 endpoint = "http://127.0.0.1:9/host-authz"   # host-supplied loopback URL
-token_env = "ALDUNIS_PROVIDER_RUN_TOKEN"    # optional Bearer token env
+token_env = "HOST_RUN_TOKEN"                 # optional Bearer token env
 namespace = "default"                        # required for remote adapters
 ```
 
@@ -52,66 +55,43 @@ for `decision`). Timeout, HTTP failure, or unexpected decisions always deny
 Read/search/report/todo tools skip the host callback after the local allow-list
 check. Requires the `model-http` feature (default) for the HTTP client.
 
-Feature flag: `governance-sekai-chisei` (default **on**) enables the pinned
-`sekai-client` Rust facade. It owns typed core-loop helpers, streaming,
-operation events, and receipts; the adapter uses its bounded raw escape hatch
-for supported RPCs without a typed helper yet. A private plane-session module
-applies connection setup, authentication metadata, deadlines, and SDK error
-mapping. The plane claim client reuses one connected Channel for
-list/claim/lease RPCs and reconnects only after a transport error. The facade
-consumes the canonical upstream `sekai-proto`
-crate, so Shikigami does not carry a second protocol snapshot. The supported
-boundary is `sekai-client` 1.x with `sekai-proto` 3.x, pinned by the sekai-chisei
-release tag in `Cargo.toml`/`Cargo.lock`. Agent-turn intake does not accept
-continuations yet, so the plane neither lists nor grants it parked turns. The SDK permits plain HTTP for loopback development
-endpoints. Non-loopback planes should use HTTPS. Private-network compose that
-can reach Chisei only as a Docker DNS name over plaintext gRPC may set
-`governance.allow_insecure_remote = true` (default `false`); that maps to
-`ClientConfig.allow_insecure_remote`. The SDK default remains reject until the
-flag is set. `doctor` fails with a remediation line when the endpoint is
-remote `http://` and the flag is off.
+ACP session hosts use `session/request_permission` instead of this callback
+([acp.md](acp.md)).
 
 ### Fail-closed behavior
 
-When `fail_closed` or profile `governed` is set:
+When `fail_closed` is set, or a remote adapter (`http-callback` / `host-authz`)
+is selected:
 
 - missing endpoint → doctor fail, run fail
-- unreachable plane (async probe) → doctor fail; run fails at begin/plan
-  unless a current signed fallback grant is already checkpointed and
-  `[model.fallback].enabled` is true (see [ADR 0007](decisions/0007-governed-local-fallback.md))
+- unreachable `http-callback` (async probe) → doctor fail; run fails at
+  authorization rather than silently allowing
 
-When not fail-closed, some reporting steps may best-effort skip if the plane is
-down (see implementation of `complete_run` / `report_tool`). Delayed-evidence
-queueing is opt-in and never replaces receipt authority: disabled
-`complete_run` preserves `Unavailable`, and reconnect submits the original
-queued envelope instead of minting `accepted`.
+`doctor` never probes a control plane. Delayed-evidence queueing is opt-in and
+never replaces local receipts: disabled `complete_run` preserves `Unavailable`.
 
 ### Credentials
 
-Do not put secrets in TOML. Set `governance.client_secret_env` to an
-environment variable name (for example `SEKAI_CLIENT_SECRET`) that holds the
-client secret of the worker's registered service principal. The adapter
-exchanges it for short-lived service tokens and refreshes them before expiry.
-`governance.token_env` (a static bearer) is refused for `sekai-chisei`.
+Do not put secrets in TOML. Set `governance.token_env` to an environment
+variable name that holds the host Bearer token for `http-callback`.
 
 ## Model (`ModelPort`)
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `scripted` | stable for 1.x | Deterministic multi-turn JSON script (default offline) |
-| `http` | stable for 1.x | OpenAI-compatible Chat Completions (`model-http` feature). Any Chat Completions gateway works, including a local CLIProxyAPI listen; see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml). |
-| `plane` | with sekai-chisei | Placeholder id; actual turns are owned by governance |
+| `scripted` | stable | Deterministic multi-turn JSON script (default offline) |
+| `http` | stable | OpenAI-compatible Chat Completions (`model-http` feature). Any Chat Completions gateway works, including a local CLIProxyAPI listen; see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml). |
 
-When governance is `sekai-chisei`, the engine uses the plane for planning even if
-a local model adapter is configured for other profiles.
+Adapter `plane` was removed. Settings that still name it fail at resolve.
+A plane-routed model is an HTTP endpoint the host injects.
 
 ## Workspace (`WorkspacePort`)
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `directory` | stable for 1.x | Sandbox directory under state runs or configured root |
+| `directory` | stable | Sandbox directory under state runs or configured root |
 | `inplace` (alias `directory-inplace`) | stable for host-selected workspaces | Uses `workspace.root` directly; no per-run directory or automatic cleanup |
-| `git-worktree` | stable for 1.x | `git worktree add` + branch; cleaned after successful runs |
+| `git-worktree` | stable | `git worktree add` + branch; cleaned after successful runs |
 
 `inplace` requires an existing directory, does not support snapshots, and
 requires the harness state root to be outside the workspace. The CLI default
@@ -124,11 +104,12 @@ the same in-place root.
 
 | Id | Status | Role |
 | --- | --- | --- |
-| `stderr` | stable for 1.x | JSON lines on stderr |
-| `jsonl` | stable for 1.x | Append-only file under the state runs directory |
-| `none` | stable for 1.x | Discard events |
+| `stderr` | stable | JSON lines on stderr |
+| `jsonl` | stable | Append-only file under the state runs directory |
+| `none` | stable | Discard events |
 
-Harness events are **not** a substitute for plane audit records.
+Harness events are local progress. Durable operational truth, when a plane is
+used, lives in the caller.
 
 ## Tools (`ToolRegistry`)
 
@@ -140,8 +121,8 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 | --- | --- |
 | `read_file` / `write_file` / `edit` / `multi_edit` / `apply_patch` | Workspace-jailed file ops. `read_file` takes optional 1-indexed `start_line`/`end_line`; an unranged read of a large file returns a 400-line / 32 KiB slice plus the total line count |
 | `glob` / `grep` | Workspace-jailed search (capped matches / output) |
-| `todo_write` | Run-scoped checklist (not a plane work-unit API) |
-| `handoff` | Brief event for a fresh session (`task` required); does not start a session, child run, or plane session |
+| `todo_write` | Run-scoped checklist |
+| `handoff` | Brief event for a fresh session (`task` required); does not start a session or child run |
 | `web_fetch` | Opt-in HTTP(S) GET; not in the coding default |
 | `bash` | Opt-in shell in workspace (timeout-bounded) |
 | `bash_background` / `bash_job_status` / `bash_job_logs` | Implicit when `bash` is enabled. `bash_job_status` polls once, or waits with optional `timeout_ms` (same cap as foreground bash) |
@@ -156,8 +137,9 @@ available for focused adapters and tests. Dynamic native plugins remain out of
 scope. Configured MCP servers register as `mcp.<name>.<tool>` into the same
 registry without changing the turn loop; skills load as prompt context.
 
-Governed runs still call `authorize_tool` before `execute` for consequential
-tools.
+Runs still call `authorize_tool` before `execute` for consequential tools.
+Session hosts park on ask (`ask=park`) for mutating tools
+([acp.md](acp.md)).
 
 MCP: optional `tools.mcp_servers` — see [mcp.md](mcp.md).
 
@@ -165,6 +147,7 @@ MCP: optional `tools.mcp_servers` — see [mcp.md](mcp.md).
 
 | Name | Why |
 | --- | --- |
+| **rusui** | Plane caller. Spawns this guest over ACP. Not loaded by the process. |
 | **tenkai** | Installs/upgrades the `shikigami` binary. Not loaded by the process. |
 | **metrics / tracing export** | Settings-gated process telemetry, not ports. Counters stay local; optional OTLP spans are identity-only ([tracing.md](tracing.md)). |
 | Third-party agent CLIs | Not the long-term core; native loop first. |
@@ -173,7 +156,7 @@ MCP: optional `tools.mcp_servers` — see [mcp.md](mcp.md).
 
 1. Implement `shikigami::governance::GovernancePort`.
 2. Wire it in a host binary or extend `governance::from_config` in a fork/PR.
-3. Keep operational mutations and policy decisions in your plane, not in the
+3. Keep operational mutations and policy decisions in the caller, not in the
    turn loop.
 4. Honor fail-closed semantics when the host profile requires governance.
 

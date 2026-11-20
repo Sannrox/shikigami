@@ -66,35 +66,26 @@ Earlier defaults keep working:
 
 ## Profiles
 
-Behavioral profiles are retained unchanged for settings version 1
-compatibility, but are deprecated for **new configuration authoring**. Prefer
-explicit governance/model adapters and `governance.fail_closed`, as shown in
-the repository examples. A future schema direction is proposed in
+Behavioral profiles are labels for settings version 1. Prefer explicit
+governance/model adapters and `governance.fail_closed`, as shown in the
+repository examples. A future schema direction is proposed in
 [Discussion #146](https://github.com/Sannrox/shikigami/discussions/146).
 
 | Name | Effect |
 | --- | --- |
-| `local` | Default. Offline-friendly. Does not force a plane. |
-| `governed` | Sets governance to `sekai-chisei` if still `none`, forces `fail_closed = true`, prefers model adapter `plane`. |
-| `site-agent` | The `governed` preset, plus fail-closed checks for site-agent turns: requires `tools.mcp_gateway`, refuses `tools.mcp_servers`, and allows only `mcp.gateway.*` tools, `report` and `escalate` in an explicit `tools.enabled` list. See [site-agent.md](site-agent.md). |
-| `security-triage` | The `site-agent` preset, plus a typed exposure verdict (`pkg:security.exposure-verdict/v1`) and the `security-triage` skill. Agent-turn intake accepts it. See [security-triage.md](security-triage.md). |
+| `local` | Default. Offline-friendly. |
 | `security-finder` | Specialised read-only reviewer roles (`[security_finder] role`) that emit typed findings matching `pkg:security.finding-exposure/v1`. Does not force a governance or model adapter. See [security-finder.md](security-finder.md). |
+| `governed` / `site-agent` / `security-triage` | Retired. Fail at resolve with an ADR 0024 upgrade error. |
 
-Custom profile names are allowed as labels; only `governed`, `site-agent`, and
-`security-triage` apply the governance presets above today. `security-finder` applies the
-read-only role checks. Version 1 expands a file profile before applying environment
-overrides. Changing `SHIKIGAMI_PROFILE` later does not reverse values already
-expanded from the file:
+Custom profile names are allowed as labels. `security-finder` applies the
+read-only role checks. Version 1 expands a file profile before applying
+environment overrides.
 
 | File settings | Environment | Effective result |
 | --- | --- | --- |
 | none | none | profile `local`; governance `none`; model `scripted`; fail-open |
-| profile `governed` only | none | profile `governed`; governance `sekai-chisei`; model `plane`; fail-closed |
-| explicit governed example | `SHIKIGAMI_PROFILE=local` | profile label `local`; explicit plane adapters and fail-closed remain |
-| explicit local example | `SHIKIGAMI_PROFILE=governed`, adapters overridden back to `local` / `scripted` | profile `governed`; local/scripted adapters; fail-closed remains |
 
-These combinations are documented compatibility behavior, not recommended
-recipes. Always inspect the complete effective wiring with `doctor`.
+Always inspect the complete effective wiring with `doctor`.
 
 ## Schema (`version = 1`)
 
@@ -118,33 +109,22 @@ Used by profile `security-finder`. Empty on other profiles.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `adapter` | `"none"` | `none` \| `local` \| `http-callback` (`host-authz`) \| `sekai-chisei` |
-| `endpoint` | unset | Plane base URL for `sekai-chisei`, or authorization URL for `http-callback`; required by fail-closed plane use and all callback use |
-| `principal` | `"shikigami"` | Identity presented to the plane (not a secret) |
-| `namespace` | unset | Governance namespace. Required for `sekai-chisei`, `http-callback`, and `host-authz`; there is no implicit default |
-| `fail_closed` | `false` | Fail doctor/run when governance is unhealthy. Always on for `sekai-chisei`, `http-callback`, and `host-authz` |
-| `client_secret_env` | unset | `sekai-chisei`: env var name holding the client secret of the worker's registered service principal (`principal`). See [service-principal tokens](#service-principal-tokens) |
-| `token_env` | unset | `http-callback` / `host-authz`: env var name holding the host Bearer token. Refused for `sekai-chisei` |
-| `allow_insecure_remote` | `false` | Opt-in for plaintext `http://` `sekai-chisei` endpoints whose host is not loopback (private-network compose). Default stays reject. HTTPS remote and loopback `http://` do not need this flag. |
+| `adapter` | `"none"` | `none` \| `local` \| `http-callback` (`host-authz`). `sekai-chisei` fails at resolve (ADR 0024). |
+| `endpoint` | unset | Authorization URL for `http-callback`; required for callback use |
+| `principal` | `"shikigami"` | Identity presented to a host broker (not a secret) |
+| `namespace` | unset | Governance namespace. Required for `http-callback` and `host-authz`; there is no implicit default |
+| `fail_closed` | `false` | Fail doctor/run when governance is unhealthy. Always on for `http-callback` and `host-authz` |
+| `token_env` | unset | `http-callback` / `host-authz`: env var name holding the host Bearer token |
 
-`sekai-client` still rejects remote plaintext unless this flag is true. Keep it
-false on any path that can reach the public internet. Set it only when the
-plane is a private Docker/compose service name over plaintext gRPC and there
-is no internal TLS edge. `doctor` prints a clear error when the endpoint is
-remote `http://` and the flag is off.
-
-For plane intake, `principal` and `namespace` must name an active,
-plane-authorized runtime identity. The default strings do not provision that
-identity or grant access. When restoring a worker after a producing application
-is retired, use an administrator-approved runtime identity independent of that
-application; see [runtime identity prerequisites](plane-action-run.md#runtime-identity-prerequisites).
+Dropped fields such as `client_secret_env` and `allow_insecure_remote` fail
+parse (`deny_unknown_fields`).
 
 #### `[governance.delayed_evidence]`
 
 Bounded spool for signed already-executed outcomes. Disabled by default.
 Unresolved entries are never silently discarded. Queueing copies lease, fence,
 and policy identities from a current grant; Shikigami never mints those fields
-or an `accepted` disposition. When `enabled` is false, plane `Unavailable` on
+or an `accepted` disposition. When `enabled` is false, `Unavailable` on
 `complete_run` is preserved and nothing is written.
 
 | Field | Default | Description |
@@ -156,20 +136,20 @@ or an `accepted` disposition. When `enabled` is false, plane `Unavailable` on
 
 ### `[model]`
 
-Used for ungoverned planning (`none` / `local` governance). When governance is
-`sekai-chisei`, turns use the plane regardless of local HTTP settings.
+The engine always calls `ModelPort`. Adapter `plane` fails at resolve
+([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `adapter` | `"scripted"` | `scripted` \| `http` \| `plane` |
+| `adapter` | `"scripted"` | `scripted` \| `http` |
 | `script_json` | built-in demo script | JSON array of turns for `scripted`. An entry `{"summary": "..."}` is not a turn; it answers compaction summaries. A turn with `requires_context: ["..."]` fails unless each text appears in a message it sees. |
 | `base_url` | OpenAI-compatible default | Base URL for `http` (Chat Completions). A local gateway such as CLIProxyAPI is typically `http://127.0.0.1:8317/v1`. |
-| `model` | `"auto"` | Plane routing preference; `auto` lets sekai-chisei select from its available catalog. Direct HTTP treats `auto` as `gpt-4.1-mini`. Set an explicit id for a gateway catalog (see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)). |
+| `model` | `"auto"` | Direct HTTP treats `auto` as `gpt-4.1-mini`. Set an explicit id for a gateway catalog (see [`examples/cliproxy-http.toml`](../examples/cliproxy-http.toml)). |
 | `api_key_env` | `"OPENAI_API_KEY"` | Env var for the HTTP API key. For a local gateway this is the gateway access key (for CLIProxyAPI, `CLIPROXY_API_KEY`), not an upstream provider token. |
 | `input_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **input** tokens (1_000_000 = $1/MTok). Both rates required for `RunResult.cost`. |
 | `output_usd_micros_per_mtok` | unset | Optional cost rate: USD microdollars per million **output** tokens |
 | `effort` | unset | Optional reasoning effort; adapters that do not speak it ignore it |
-| `alternates` | `[]` | More model ids a session may switch to with ACP `session/set_model` or TUI `/model`, on the same adapter, endpoint, and key. Ungoverned only: a governed session lists the plane catalog. Entries must be distinct and non-empty. |
+| `alternates` | `[]` | More model ids a session may switch to with ACP `session/set_model` or TUI `/model`, on the same adapter, endpoint, and key. Entries must be distinct and non-empty. |
 
 When either cost rate is unset, `RunResult.cost` is **absent** (not zero). Never invents provider prices.
 
@@ -194,9 +174,9 @@ Denied by default. Presence of a model artifact is not authorization.
 | `script_json` | unset | Optional scripted turns for the fallback adapter |
 | `allow_test_signatures` | `false` | Accept fixture `test-hmac-sha256` envelopes; production unknown algorithms stay unverifiable |
 
-No delivery-system keys. Unknown fields deny at parse time. Existing governed
-and local profiles are unchanged. Production enablement still requires a
-verifiable governance-issued envelope whose model digest matches.
+No delivery-system keys. Unknown fields deny at parse time. Production
+enablement still requires a verifiable host-issued envelope whose model digest
+matches. This crate does not call a plane to mint a grant.
 
 #### Scripted turn JSON
 
@@ -276,9 +256,9 @@ stay denied even when `[network]` is an allowlist unless `sandbox.tool_sockets
 [ADR 0013](decisions/0013-os-sandbox-adapter.md), and
 [ADR 0020](decisions/0020-kekkai-sandbox-pin.md).
 
-Under `profile = governed`, `governance.fail_closed = true`, or a remote
-governance adapter (`sekai-chisei`, `http-callback`, `host-authz`), enabling Bash
-(explicitly or via `tools.mode = workspace_exec`) **refuses** configuration when
+Under `governance.fail_closed = true` or a remote governance adapter
+(`http-callback`, `host-authz`), enabling Bash (explicitly or via
+`tools.mode = workspace_exec`) **refuses** configuration when
 `sandbox.backend = none` or `network.egress = unrestricted`. Operators must set
 `sandbox.backend = rlimit` or `linux_native`, and `network.egress = deny` or
 `allowlist`.
@@ -325,7 +305,7 @@ capped at 256KiB and stored in host scratch, not the workspace.
 
 Foreground and background Bash share one explicitly reconstructed child
 environment. For 1.x compatibility, ordinary parent variables remain
-available, while active `governance.token_env`, `governance.client_secret_env`, HTTP `model.api_key_env`, MCP
+available, while active `governance.token_env`, HTTP `model.api_key_env`, MCP
 bearer-token env names, and shell-startup controls are removed. Bash startup
 files are disabled so they cannot repopulate the child environment. MCP stdio
 server children use the same reconstructed environment (credentials are not
@@ -603,20 +583,16 @@ field changes meaning or goes away; new fields may appear in the same version.
 | `SHIKIGAMI_CONFIG` | Path to settings file |
 | `SHIKIGAMI_PROFILE` | Profile name |
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
-| `SHIKIGAMI_CONTROL_PLANE` | sekai-chisei endpoint |
+| `SHIKIGAMI_CONTROL_PLANE` | Maps to `governance.endpoint` (http-callback URL) |
 | `SHIKIGAMI_GOVERNANCE_NAMESPACE` | Override `governance.namespace` |
-| `SHIKIGAMI_GOVERNANCE_ALLOW_INSECURE_REMOTE` | Override `governance.allow_insecure_remote` (`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`) |
 | `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
-| `SHIKIGAMI_MODEL` | Override the configured model name; `auto` for plane routing |
+| `SHIKIGAMI_MODEL` | Override the configured model name; HTTP `auto` maps to `gpt-4.1-mini` |
 | `SHIKIGAMI_MODEL_SCRIPT` | Scripted JSON (inline) |
 | `SHIKIGAMI_PRESET` | Preset name or file; see [presets.md](presets.md) |
 | `SHIKIGAMI_RUN_TIMEOUT_SECS` | Overall run wall-clock limit |
 | `SHIKIGAMI_SERVE_LISTEN` | Filesystem-serve HTTP control bind |
 | `SHIKIGAMI_SERVE_AUTH_TOKEN_ENV` | Env var name holding the serve HTTP bearer token |
-| `SHIKIGAMI_WORKER_ID` | Worker identity written into the plane lifecycle snapshot |
-| `SHIKIGAMI_LIFECYCLE_LISTEN` | Plane-intake lifecycle probe bind |
 | `OPENAI_API_KEY` | Default HTTP model key |
-| *(value of `client_secret_env`)* | Plane service-principal client secret when configured |
 | *(value of `token_env`)* | Callback host bearer token when configured |
 
 Credential ergonomics, anti-patterns, and doctor redaction:
@@ -645,65 +621,49 @@ only installs or upgrades the binary; see
 
 Doctor and `run` fail when:
 
-- `fail_closed` is true, profile is `governed`, or a remote governance adapter
-  (`sekai-chisei`, `http-callback`, `host-authz`) is selected, **and**
-- governance is unhealthy (e.g. `sekai-chisei` without endpoint, or live probe
-  failure for required plane connectivity).
+- `fail_closed` is true or a remote governance adapter (`http-callback`,
+  `host-authz`) is selected, **and**
+- governance is unhealthy (e.g. `http-callback` without endpoint, or live
+  probe failure for the host broker).
 
-Offline defaults never require a plane.
+Settings that name adapter `sekai-chisei`, model `plane`, or profile
+`governed` / `site-agent` / `security-triage` fail at resolve
+([ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 
-### Service-principal tokens
-
-With `governance.client_secret_env` set, `sekai-chisei` exchanges the client
-secret of the registered service principal `governance.principal` for a
-short-lived service token (`IssueServicePrincipalToken`), uses it as the
-bearer for plane calls, and fetches a new one after four fifths of its
-lifetime. The secret is sent only in that exchange. A refused exchange
-(unregistered principal, wrong secret, plane without an identity extension) is
-a governance refusal, so doctor and runs fail closed. Calls for claimed work
-use the per-claim runtime token instead (see
-[plane-action-run.md](plane-action-run.md#runtime-tokens-for-claimed-work)).
-Without `client_secret_env` the adapter sends no bearer, which only an
-unauthenticated local plane accepts.
-
-To migrate a worker from the static bearer: ask the plane administrator to
-register the worker's principal as a service principal (scopes and namespaces
-are enforced by the plane), store its client secret in an env var, replace
-`token_env` with `client_secret_env`, and run `shikigami doctor`. A config
-that still sets `token_env` with `sekai-chisei` fails at startup.
+Offline defaults never require a host broker.
 
 ### Upgrading remote-governance configs
 
-Remote governance adapters now fail closed and need an explicit namespace.
-For each worker or host that selects `sekai-chisei`, `http-callback`, or
-`host-authz` (directly or through `profile = governed`):
+Remote governance adapters fail closed and need an explicit namespace.
+For each host that selects `http-callback` or `host-authz`:
 
 1. Set `governance.namespace` (or `SHIKIGAMI_GOVERNANCE_NAMESPACE`). Configs
    that relied on the old implicit value use `namespace = "default"`.
    Without it, settings resolution fails at startup.
-2. Expect doctor, `run`, and `serve` to refuse when governance is unreachable
-   or refuses, even without `fail_closed = true`. `fail_closed = false` no
-   longer relaxes a remote adapter.
+2. Expect doctor, `run`, and `serve` to refuse when the host broker is
+   unreachable or refuses, even without `fail_closed = true`. `fail_closed =
+   false` no longer relaxes a remote adapter.
 3. If Bash is enabled, set `sandbox.backend = rlimit` or `linux_native` and
-   `network.egress = deny` or `allowlist`; the governed Bash rule now applies.
-4. Run `shikigami doctor` with the new settings before starting the worker.
+   `network.egress = deny` or `allowlist`; the fail-closed Bash rule now
+   applies.
+4. Run `shikigami doctor` with the new settings before starting the host.
+
+A config that still sets `governance.adapter = "sekai-chisei"` or
+`client_secret_env` fails at resolve or parse.
 
 ## Examples
 
 - [../examples/local-run.toml](../examples/local-run.toml)
 - [../examples/cliproxy-http.toml](../examples/cliproxy-http.toml)
-- [../examples/governed-sekai-chisei.toml](../examples/governed-sekai-chisei.toml)
 
 Adapter semantics: [adapters.md](adapters.md).
 
 ## Doctor JSON (`schema_version` = 1)
 
 `shikigami doctor --json` emits a `DoctorReport` object. Add `--models` to
-include `available_models` and `default_model`; governed runs read the catalog
-from sekai-chisei and prepend the synthetic `auto` routing option.
+include `available_models` and `default_model` from the local model adapter.
 Use the global `--model MODEL` flag (or `SHIKIGAMI_MODEL`) for a final
-operator override; it is applied before adapter construction, so governed
-requests and model discovery use the same selection.
+operator override; it is applied before adapter construction.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
