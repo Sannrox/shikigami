@@ -408,15 +408,15 @@ credential, and HTTP `[[tools.mcp_servers]]` entries fail validation. See
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `load_project_rules` | `true` | Load listed rules files from the **workspace** root |
-| `rules_filenames` | `["AGENTS.md","shikigami.rules.md"]` | Every existing name is attached in list order, each under its own heading. Missing names are skipped. Flat names only (`..`, `/`, and `\\` are ignored). |
-| `max_rules_bytes` | `32768` | Shared cap across all loaded files. The file that would cross the cap is truncated with a marker; later files are omitted. |
+| `load_project_rules` | `true` | Load listed rules files from the workspace and each ancestor up to the git root (directory containing `.git`, file or directory). Without a git root, only the workspace directory. Files above the git root are not loaded. |
+| `rules_filenames` | `["AGENTS.md","shikigami.rules.md"]` | Every existing name is attached in list order at each directory, git-root first then nearer directories, each under its own heading. Headings name the path relative to the git root. Missing names are skipped. Flat names only (`..`, `/`, and `\\` are ignored). |
+| `max_rules_bytes` | `32768` | Shared cap across all loaded files (every directory). The file that would cross the cap is truncated with a marker; later files are omitted. |
 | `skills_root` | unset → `.shikigami/skills` under workspace | Root for skill packs. The TUI offers each pack as `/name` (or `/skill:name`; built-ins win a collision) and also searches `.agents/skills`. |
 | `skills` | `[]` | Skill directory names (`<root>/<id>/SKILL.md`). The prompt lists them; the agent loads a body with `load_skill`. Without that tool, bodies go into the system prompt. |
 | `eager_skills` | `[]` | Ids from `skills` whose bodies go into the system prompt at run start |
 | `max_skill_bytes` | `32768` | Per-skill size cap |
 
-Rules and skills are **untrusted text** given to the model (not executed). Disable rules with `load_project_rules = false`. Leave `skills` empty for no packs.
+Rules and skills are **untrusted text** given to the model (not executed). Ancestor rules files are prompt-only: tools stay jailed to the workspace. Disable rules with `load_project_rules = false`. Leave `skills` empty for no packs.
 
 ### `[run]`
 

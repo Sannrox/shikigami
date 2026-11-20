@@ -21,12 +21,16 @@ impl ProjectRules {
     }
 }
 
-/// Load every existing listed rules file under the workspace root.
+/// Load every existing listed rules file from the workspace up to the git root.
 ///
-/// Names are attached in `rules_filenames` order. Missing names are skipped.
-/// `..`, `/`, and `\\` are ignored (flat workspace-root names only). A shared
-/// `max_rules_bytes` budget covers all files: the file that would cross the
-/// cap is truncated with the existing marker and later files are omitted.
+/// Directories are visited git-root first, then down to the workspace, so
+/// nearer files sit after repo files. At each directory, names are attached in
+/// `rules_filenames` order. Missing names are skipped. `..`, `/`, and `\\` are
+/// ignored (flat names only). Without a `.git` ancestor (file or directory),
+/// only the workspace directory is read. Files above the git root are never
+/// loaded. A shared `max_rules_bytes` budget covers every file: the file that
+/// would cross the cap is truncated with the existing marker and later files
+/// are omitted. Headings and attribution use the path relative to the git root.
 pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Vec<ProjectRules> {
     if !settings.load_project_rules {
         return Vec::new();
@@ -34,35 +38,71 @@ pub fn load_project_rules(workspace: &Path, settings: &ContextSettings) -> Vec<P
     let max = settings.max_rules_bytes.clamp(1, MAX_DEFAULT * 4);
     let mut remaining = max;
     let mut loaded = Vec::new();
-    for name in &settings.rules_filenames {
+    let dirs = rules_search_dirs(workspace);
+    let git_root = dirs.first().filter(|dir| dir.join(".git").exists());
+    for dir in &dirs {
         if remaining == 0 {
             break;
         }
-        if name.contains("..") || name.contains('/') || name.contains('\\') {
-            continue; // only flat workspace-root names
+        for name in &settings.rules_filenames {
+            if remaining == 0 {
+                break;
+            }
+            if name.contains("..") || name.contains('/') || name.contains('\\') {
+                continue; // only flat names in each directory
+            }
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let Some((body, digest, truncated)) =
+                load_truncated_text(&path, remaining, "\n\n… [project rules truncated]\n")
+            else {
+                continue;
+            };
+            if truncated {
+                remaining = 0;
+            } else {
+                remaining = remaining.saturating_sub(body.len());
+            }
+            loaded.push(ProjectRules {
+                filename: rules_filename(dir, git_root.map(PathBuf::as_path), name),
+                body,
+                digest,
+                truncated,
+            });
         }
-        let path = workspace.join(name);
-        if !path.is_file() {
-            continue;
-        }
-        let Some((body, digest, truncated)) =
-            load_truncated_text(&path, remaining, "\n\n… [project rules truncated]\n")
-        else {
-            continue;
-        };
-        if truncated {
-            remaining = 0;
-        } else {
-            remaining = remaining.saturating_sub(body.len());
-        }
-        loaded.push(ProjectRules {
-            filename: name.clone(),
-            body,
-            digest,
-            truncated,
-        });
     }
     loaded
+}
+
+/// Directories to load from, git-root first then down to `workspace`.
+/// Without a `.git` ancestor, only `workspace` (never the filesystem root).
+fn rules_search_dirs(workspace: &Path) -> Vec<PathBuf> {
+    let mut chain = Vec::new();
+    let mut cur = workspace;
+    loop {
+        chain.push(cur.to_path_buf());
+        if cur.join(".git").exists() {
+            chain.reverse();
+            return chain;
+        }
+        match cur.parent() {
+            Some(parent) => cur = parent,
+            None => return vec![workspace.to_path_buf()],
+        }
+    }
+}
+
+fn rules_filename(dir: &Path, git_root: Option<&Path>, name: &str) -> String {
+    let Some(root) = git_root else {
+        return name.to_string();
+    };
+    match dir.strip_prefix(root) {
+        Ok(rel) if rel.as_os_str().is_empty() => name.to_string(),
+        Ok(rel) => format!("{}/{name}", rel.to_string_lossy().replace('\\', "/")),
+        Err(_) => name.to_string(),
+    }
 }
 
 /// A loaded skill pack (SKILL.md text + digest).
@@ -421,6 +461,120 @@ mod tests {
         assert!(rules[1].truncated);
         assert!(rules[1].body.starts_with("BB"));
         assert!(rules[1].body.contains("… [project rules truncated]"));
+    }
+
+    fn write_dummy_git(root: &Path) {
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn loads_git_ancestors_root_first_nearest_last() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let pkg = repo.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        write_dummy_git(&repo);
+        std::fs::write(repo.join("AGENTS.md"), "root rules\n").unwrap();
+        std::fs::write(repo.join("shikigami.rules.md"), "root harness\n").unwrap();
+        std::fs::write(pkg.join("AGENTS.md"), "pkg rules\n").unwrap();
+        let rules = load_project_rules(&pkg, &ContextSettings::default());
+        assert_eq!(
+            rules
+                .iter()
+                .map(|r| r.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["AGENTS.md", "shikigami.rules.md", "pkg/AGENTS.md"]
+        );
+        assert!(rules[0].body.contains("root rules"));
+        assert!(rules[1].body.contains("root harness"));
+        assert!(rules[2].body.contains("pkg rules"));
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        let root_at = prompt.find("# Project rules (`AGENTS.md`)").unwrap();
+        let harness_at = prompt
+            .find("# Project rules (`shikigami.rules.md`)")
+            .unwrap();
+        let pkg_at = prompt.find("# Project rules (`pkg/AGENTS.md`)").unwrap();
+        assert!(root_at < harness_at && harness_at < pkg_at, "{prompt}");
+    }
+
+    #[test]
+    fn git_file_counts_as_root() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let pkg = repo.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "root rules\n").unwrap();
+        std::fs::write(pkg.join("AGENTS.md"), "pkg rules\n").unwrap();
+        let rules = load_project_rules(&pkg, &ContextSettings::default());
+        assert_eq!(
+            rules
+                .iter()
+                .map(|r| r.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["AGENTS.md", "pkg/AGENTS.md"]
+        );
+    }
+
+    #[test]
+    fn without_git_loads_only_workspace() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path().join("outer");
+        let ws = parent.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(parent.join("AGENTS.md"), "parent must not load\n").unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "workspace rules\n").unwrap();
+        let rules = load_project_rules(&ws, &ContextSettings::default());
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].filename, "AGENTS.md");
+        assert!(rules[0].body.contains("workspace rules"));
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        assert!(!prompt.contains("parent must not load"));
+    }
+
+    #[test]
+    fn rules_above_git_root_are_not_loaded() {
+        let dir = tempdir().unwrap();
+        let outer = dir.path().join("outer");
+        let repo = outer.join("repo");
+        let pkg = repo.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        write_dummy_git(&repo);
+        std::fs::write(outer.join("AGENTS.md"), "above git root\n").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "root rules\n").unwrap();
+        std::fs::write(pkg.join("AGENTS.md"), "pkg rules\n").unwrap();
+        let rules = load_project_rules(&pkg, &ContextSettings::default());
+        assert_eq!(
+            rules
+                .iter()
+                .map(|r| r.filename.as_str())
+                .collect::<Vec<_>>(),
+            ["AGENTS.md", "pkg/AGENTS.md"]
+        );
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        assert!(!prompt.contains("above git root"));
+    }
+
+    #[test]
+    fn shared_byte_budget_spans_git_levels() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let pkg = repo.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        write_dummy_git(&repo);
+        std::fs::write(repo.join("AGENTS.md"), "AAAA").unwrap();
+        std::fs::write(pkg.join("AGENTS.md"), "BBBB").unwrap();
+        let s = ContextSettings {
+            max_rules_bytes: 3,
+            ..Default::default()
+        };
+        let rules = load_project_rules(&pkg, &s);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].filename, "AGENTS.md");
+        assert!(rules[0].truncated);
+        let prompt = compose_system_prompt("BASE", &rules, &[]);
+        assert!(!prompt.contains("BBBB"));
+        assert!(!prompt.contains("pkg/AGENTS.md"));
     }
 
     fn write_pack(workspace: &Path, id: &str, body: &str) {

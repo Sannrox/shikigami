@@ -931,10 +931,12 @@ impl Default for ModelSettings {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ContextSettings {
-    /// Discover and load every listed project rules file from the workspace.
+    /// Discover and load every listed project rules file from the workspace
+    /// and each ancestor up to the git root.
     #[serde(default = "default_true")]
     pub load_project_rules: bool,
-    /// Filenames loaded in order under the workspace root when present.
+    /// Filenames loaded in list order at each directory from the git root
+    /// down to the workspace when present.
     #[serde(default = "default_rules_filenames")]
     pub rules_filenames: Vec<String>,
     /// Max bytes of rules text injected into the system prompt.

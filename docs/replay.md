@@ -114,8 +114,9 @@ The live workspace, transcript export, and reconstructed files are not
 original-input proof. Content runs, compacted history, non-terminal runs, and unmatched
 prompt ids are incomplete. The prompt digest is the current
 `SYSTEM_PROMPT` composed with project rules and skills loaded from
-`snapshots/initial`. Configured skill packs that live outside that snapshot
-make the prompt binding incomplete. Snapshot copies skip symbolic-link
+`snapshots/initial`. Configured skill packs that live outside that snapshot,
+and ancestor rules files above the workspace tree, make the prompt binding
+incomplete. Snapshot copies skip symbolic-link
 directory entries, open directories with `O_NOFOLLOW`, and open remaining
 files without following a swapped symlink. `workspace_digest` opens directories
 and files with `O_NOFOLLOW` and rejects symbolic links, so exported inputs
