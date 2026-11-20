@@ -1,15 +1,17 @@
 //! `shikigami` — thin CLI host over the embeddable harness core.
 
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use shikigami::{
-    Config, ContentProcessRequestV1, ControlOptions, Harness, MAX_CONTENT_PROCESS_REQUEST_BYTES,
-    MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION, QueueLayout, ReplayEvidenceBundle,
-    ReplayManifest, ReplayRequest, RunRequest, ServeOptions, ServeRuntimeOptions, StateRoot,
-    VERSION, diagnose_run, export_replay_inputs,
+    Config, ContentProcessRequestV1, ControlOptions, EventSink, Harness, HarnessEvent,
+    MAX_CONTENT_PROCESS_REQUEST_BYTES, MAX_REPLAY_BUNDLE_BYTES, PRODUCT, PRODUCT_DESCRIPTION,
+    QueueLayout, ReplayEvidenceBundle, ReplayManifest, ReplayRequest, RunRequest, ServeOptions,
+    ServeRuntimeOptions, StateRoot, VERSION, diagnose_run, export_replay_inputs,
 };
 
 // Sanitize the complete human-readable message at its terminal boundary.
@@ -105,8 +107,12 @@ enum Command {
         plan_reject: bool,
         /// Print the run result as JSON on stdout, including the report's
         /// structured `data`. Exit status is unchanged.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "events_stdout")]
         json: bool,
+        /// Stream live `HarnessEvent` JSON lines on stdout for the life of the
+        /// run. No `[shikigami]` prefix. The configured event sink still runs.
+        #[arg(long, conflicts_with = "json")]
+        events_stdout: bool,
     },
     /// List or inspect durable local run records.
     Runs {
@@ -355,6 +361,7 @@ async fn run() -> anyhow::Result<()> {
             plan_accept,
             plan_reject,
             json,
+            events_stdout,
         } => {
             let task = match (task.is_empty(), task_file) {
                 (false, Some(_)) => {
@@ -402,10 +409,18 @@ async fn run() -> anyhow::Result<()> {
                 (false, true) => Some(shikigami::PlanDecision::Reject),
                 _ => None,
             };
-            let result = harness.run(request).await?;
+            let result = if events_stdout {
+                harness
+                    .run_with_events(request, Some(Arc::new(StdoutEventSink)))
+                    .await?
+            } else {
+                harness.run(request).await?
+            };
             if json {
                 let summary = shikigami::McpRunSummary::from(&result);
                 println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            if json || events_stdout {
                 if result.park.is_some() {
                     anyhow::bail!(
                         "run parked; resume with: shikigami run --resume {}",
@@ -907,6 +922,28 @@ async fn run() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Live JSON-line copy of `HarnessEvent` on process stdout. Same serde shape as
+/// the stderr sink, without the `[shikigami]` prefix.
+struct StdoutEventSink;
+
+impl EventSink for StdoutEventSink {
+    fn id(&self) -> &'static str {
+        "stdout"
+    }
+
+    fn emit(&self, event: HarnessEvent) {
+        if let Ok(line) = serde_json::to_string(&event) {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{line}");
+            let _ = out.flush();
+        }
+    }
+
+    fn health_detail(&self) -> String {
+        "write progress to stdout".into()
+    }
 }
 
 fn read_bounded_json<T: serde::de::DeserializeOwned>(
