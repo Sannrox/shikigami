@@ -422,6 +422,140 @@ adapter = "none"
 }
 
 #[test]
+fn run_events_stdout_streams_harness_events_as_json_lines() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join(format!("state-{}", std::process::id()));
+    let config = dir.path().join("local.toml");
+    fs::write(
+        &config,
+        r#"
+version = 1
+[profile]
+name = "local"
+[governance]
+adapter = "local"
+[model]
+adapter = "scripted"
+[workspace]
+adapter = "directory"
+root = "."
+[events]
+adapter = "none"
+"#,
+    )
+    .expect("write");
+
+    let out = cargo_bin_cmd!("shikigami")
+        .current_dir(dir.path())
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "run",
+            "scripted demo",
+            "--events-stdout",
+            "--keep-workspace",
+        ])
+        .output()
+        .expect("run");
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("[shikigami]"),
+        "stdout must not carry the stderr prefix: {stdout}"
+    );
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "tool_start" && event["name"] == "write_file"),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "tool_end" && event["name"] == "write_file"),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn run_events_stdout_on_failure_still_emits_events() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join(format!("state-{}", std::process::id()));
+    let mut config = Config::default();
+    config.governance.adapter = "none".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"x.txt\",\"content\":\"x\"}"}]},{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"failed\",\"success\":false}"}]}]"#
+            .into(),
+    );
+    config.workspace.adapter = "directory".into();
+    config.workspace.root = ".".into();
+    config.events.adapter = "none".into();
+    let config_path = dir.path().join("fail.toml");
+    config.save(&config_path).expect("save config");
+
+    let out = cargo_bin_cmd!("shikigami")
+        .current_dir(dir.path())
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "run",
+            "fail",
+            "--events-stdout",
+            "--keep-workspace",
+        ])
+        .output()
+        .expect("run");
+    assert!(!out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "tool_start" && event["name"] == "write_file"),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "tool_end" && event["name"] == "write_file"),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn run_events_stdout_conflicts_with_json() {
+    let dir = tempdir().expect("tempdir");
+    let state = dir.path().join(format!("state-{}", std::process::id()));
+    cargo_bin_cmd!("shikigami")
+        .args([
+            "--state",
+            state.to_str().unwrap(),
+            "run",
+            "demo",
+            "--events-stdout",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
 fn runs_diagnose_json_matches_library_terminal_class() {
     let dir = tempdir().expect("tempdir");
     let state = dir.path().join("state");

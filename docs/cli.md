@@ -41,6 +41,7 @@ the same ask path; ACP uses `session/request_permission` ([acp.md](acp.md)).
 | `--preset` / `SHIKIGAMI_PRESET` | Narrow tools and add a procedure: a built-in name or a preset `.toml` file; `code` means none. See [presets.md](presets.md) |
 | `run --keep-workspace` | Keep the workspace after a successful run |
 | `run --json` | Print the run result as JSON on stdout (same shape as the MCP `run` result, including report `data`); exit status unchanged |
+| `run --events-stdout` | Stream live `HarnessEvent` JSON lines on stdout (no `[shikigami]` prefix). Cannot combine with `--json`. The configured `[events]` sink still runs. |
 | `run --plan-jail` / `SHIKIGAMI_RUN_PLAN_JAIL` | Restrict mutating tools to `.shikigami/plan.md` until `--plan-accept` |
 | `run --plan-accept` / `--plan-reject` | Resume a parked plan: Accept restores execute authority on the same run; Reject completes failed and keeps the jail so a later `--resume` stays write-jailed |
 | `TRACEPARENT` / `TRACESTATE` | W3C trace context: with span export on, `run` continues the caller's trace. See [tracing.md](tracing.md#caller-trace-context) |
