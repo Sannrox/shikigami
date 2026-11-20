@@ -591,6 +591,70 @@ fn write_turn(path: &str) -> serde_json::Value {
     serde_json::json!({"tool_calls": [{"name": "write_file", "args_json": args}]})
 }
 
+fn write_turn_with_usage(path: &str, input_tokens: Option<u64>) -> serde_json::Value {
+    let mut turn = write_turn(path);
+    if let Some(tokens) = input_tokens {
+        turn["usage"] = serde_json::json!({"input_tokens": tokens, "output_tokens": 1});
+    }
+    turn
+}
+
+fn compacted_history_event(events: &[shikigami::HarnessEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            shikigami::HarnessEvent::ContextCompacted { .. }
+                | shikigami::HarnessEvent::ContextSummarized { .. }
+        )
+    })
+}
+
+/// Two writes so `compact_keep_tail = 2` can cut, then a final turn.
+async fn usage_compact_run(
+    input_tokens: Option<u64>,
+    window: Option<u64>,
+    compact_after_messages: Option<u32>,
+    require_compacted: bool,
+) -> (bool, Vec<shikigami::HarnessEvent>) {
+    use shikigami::ChannelSink;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    let mut report = report_turn();
+    if require_compacted {
+        report["requires_context"] = serde_json::json!(["[context compacted"]);
+    }
+    config.model.script_json = Some(
+        serde_json::json!([
+            write_turn_with_usage("a.txt", input_tokens),
+            write_turn_with_usage("b.txt", input_tokens),
+            report,
+        ])
+        .to_string(),
+    );
+    config.events.adapter = "none".into();
+    config.run.context_window_tokens = window;
+    config.run.compact_at_usage_percent = 80;
+    config.run.compact_after_messages = compact_after_messages;
+    config.run.compact_keep_tail = 2;
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let result = harness
+        .run_with_events(RunRequest::new("write two files"), Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    (
+        result.success,
+        std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+    )
+}
+
 fn report_turn() -> serde_json::Value {
     serde_json::json!({"tool_calls": [{"name": "report", "args_json": "{\"summary\":\"done\",\"success\":true}"}]})
 }
@@ -653,6 +717,42 @@ async fn compaction_without_a_summary_drops_and_says_why() {
             .iter()
             .any(|e| matches!(e, HarnessEvent::ContextSummarized { .. })),
         "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn fill_compact_runs_when_last_turn_input_tokens_cross_the_window() {
+    let (ok, events) = usage_compact_run(Some(800), Some(1000), None, true).await;
+    assert!(ok, "run failed: {events:?}");
+    assert!(
+        compacted_history_event(&events),
+        "missing compact event: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn fill_compact_skips_without_a_due_last_turn() {
+    for (tokens, window, why) in [
+        (Some(100), Some(1000), "below the fill percent"),
+        (Some(800), None, "without a window"),
+        (None, Some(1000), "from missing usage"),
+    ] {
+        let (ok, events) = usage_compact_run(tokens, window, None, false).await;
+        assert!(ok, "{why}: run failed: {events:?}");
+        assert!(
+            !compacted_history_event(&events),
+            "compacted {why}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn count_compact_still_runs_when_fill_window_is_set_but_usage_is_low() {
+    let (ok, events) = usage_compact_run(Some(100), Some(1000), Some(4), true).await;
+    assert!(ok, "run failed: {events:?}");
+    assert!(
+        compacted_history_event(&events),
+        "count compact did not run: {events:?}"
     );
 }
 

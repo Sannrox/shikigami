@@ -57,6 +57,12 @@ pub(super) fn doctor(harness: &Harness) -> DoctorReport {
         }
     }
     lines.push(format!("max_turns: {}", harness.config.run.max_turns));
+    if let Some(window) = harness.config.run.context_window_tokens {
+        lines.push(format!(
+            "context_window: {window} tokens (compact at {}%)",
+            harness.config.run.compact_at_usage_percent
+        ));
+    }
     if harness.config.run.plan_jail {
         lines.push(format!("plan_jail:  on ({})", crate::tools::PLAN_JAIL_PATH));
     }

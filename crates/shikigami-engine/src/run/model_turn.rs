@@ -196,6 +196,9 @@ pub(super) struct DurableModelTurn<'a> {
     /// restart resets it, which costs at most [`SUMMARY_MISS_LIMIT`] more
     /// summary attempts.
     summary_misses: u32,
+    /// Last completed turn's reported prompt tokens. `None` until a turn
+    /// reports usage; missing usage does not invent a count.
+    last_turn_input_tokens: Option<u64>,
 }
 
 impl<'a> DurableModelTurn<'a> {
@@ -251,6 +254,7 @@ impl<'a> DurableModelTurn<'a> {
                 0
             },
             summary_misses: 0,
+            last_turn_input_tokens: None,
         }
     }
 
@@ -380,12 +384,10 @@ impl<'a> DurableModelTurn<'a> {
         if self.staged_turn.is_none()
             && self.staged_content_turn.is_none()
             && !session.is_content()
-            && let Some(threshold) = self.engine.config.run.compact_after_messages
+            && let Some(threshold) = self.compact_threshold()
         {
             let keep = self.engine.config.run.compact_keep_tail.max(2) as usize;
-            if let Some(tail_start) =
-                compaction_tail_start(&session.messages, threshold as usize, keep)
-            {
+            if let Some(tail_start) = compaction_tail_start(&session.messages, threshold, keep) {
                 self.compact(session, tail_start).await?;
             }
         }
@@ -564,12 +566,43 @@ impl<'a> DurableModelTurn<'a> {
             turn.usage,
             turn.finish_reason,
         );
+        if !session.is_content() {
+            self.last_turn_input_tokens = turn.usage.map(|usage| usage.input_tokens);
+        }
         Ok(turn)
     }
 
     pub(super) fn usage(&self) -> TokenUsage {
         self.usage
     }
+
+    /// Message-count threshold for the next compact, if either host trigger
+    /// is due. Fill-based compact uses `0` (same cut as `/compact`) when the
+    /// last turn's reported prompt tokens crossed the configured window.
+    fn compact_threshold(&self) -> Option<usize> {
+        let fill_due = fill_compact_due(
+            self.engine.config.run.context_window_tokens,
+            self.engine.config.run.compact_at_usage_percent,
+            self.last_turn_input_tokens,
+        );
+        if fill_due {
+            return Some(0);
+        }
+        self.engine
+            .config
+            .run
+            .compact_after_messages
+            .map(|threshold| threshold as usize)
+    }
+}
+
+/// Whether last-turn `input_tokens` is at or above `percent` of `window`.
+/// Missing window or missing usage never triggers.
+fn fill_compact_due(window: Option<u64>, percent: u32, last_input_tokens: Option<u64>) -> bool {
+    let (Some(window), Some(input)) = (window, last_input_tokens) else {
+        return false;
+    };
+    u128::from(input).saturating_mul(100) >= u128::from(window).saturating_mul(u128::from(percent))
 }
 
 async fn content_to_model_turn(
@@ -921,6 +954,17 @@ mod tests {
         }];
 
         assert!(staged_model_turn(true, &messages, 1).is_none());
+    }
+
+    #[test]
+    fn fill_compact_due_uses_last_turn_input_against_the_window_percent() {
+        assert!(fill_compact_due(Some(1000), 80, Some(800)));
+        assert!(!fill_compact_due(Some(1000), 80, Some(799)));
+        assert!(!fill_compact_due(Some(1000), 80, Some(100)));
+        assert!(!fill_compact_due(None, 80, Some(800)));
+        assert!(!fill_compact_due(Some(1000), 80, None));
+        assert!(fill_compact_due(Some(1), 80, Some(1)));
+        assert!(!fill_compact_due(Some(1), 80, Some(0)));
     }
 
     #[test]
