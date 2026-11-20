@@ -13,7 +13,7 @@ use super::catalog::builtin_catalog;
 use super::environment::ToolEnvironment;
 use super::fs::{
     ApplyPatchArgs, EditArgs, GlobArgs, GrepArgs, MAX_APPLY_PATCH_BYTES, MAX_SEARCH_MATCHES,
-    MultiEditArgs, PathArgs, WriteArgs,
+    MultiEditArgs, ReadFileArgs, WriteArgs,
 };
 use super::job_credential::JobCredentialHandle;
 use super::path::load_ignore_patterns;
@@ -105,8 +105,12 @@ impl ToolExecutor {
         let mut edit_outcome = None;
         let output = match name {
             "read_file" => {
-                let args: PathArgs = parse(name, args_json)?;
-                Ok(ToolOutput::Text(self.read_file(&args.path)?))
+                let args: ReadFileArgs = parse(name, args_json)?;
+                Ok(ToolOutput::Text(self.read_file_slice(
+                    &args.path,
+                    args.start_line,
+                    args.end_line,
+                )?))
             }
             "write_file" => {
                 let args: WriteArgs = parse(name, args_json)?;

@@ -304,8 +304,9 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
     vec![
         def(
             "read_file",
-            "Read a UTF-8 text file relative to the workspace root.",
-            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+            // Keep 400 / 32 KiB in step with fs::DEFAULT_READ_LINES / DEFAULT_READ_BYTES.
+            "Read a UTF-8 text file relative to the workspace root. Optional 1-indexed start_line and end_line select an inclusive range. Without a range, files larger than 400 lines or 32 KiB return the first slice, the total line count, and how to read further.",
+            r#"{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"]}"#,
         ),
         def(
             "write_file",

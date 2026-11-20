@@ -1,6 +1,7 @@
 //! Filesystem tools: read/write/edit/patch/glob/grep and path resolve.
 
 use std::borrow::Cow;
+use std::io::{BufRead, BufReader};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,9 @@ use super::executor::ToolExecutor;
 use super::path::{glob_match, is_unsafe_relative_path, load_ignore_patterns, path_is_ignored};
 
 pub(crate) const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Unranged `read_file` bound: one call stays well under a typical model context.
+pub(crate) const DEFAULT_READ_LINES: usize = 400;
+pub(crate) const DEFAULT_READ_BYTES: usize = 32 * 1024;
 pub(crate) const MAX_SEARCH_MATCHES: usize = 200;
 pub(crate) const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_WALK_FILES: usize = 5_000;
@@ -19,8 +23,12 @@ pub(crate) const MAX_APPLY_PATCH_HUNKS: usize = 32;
 pub(crate) const MAX_APPLY_PATCH_FILES: usize = 16;
 
 #[derive(Deserialize)]
-pub(crate) struct PathArgs {
+pub(crate) struct ReadFileArgs {
     pub(crate) path: PathBuf,
+    #[serde(default)]
+    pub(crate) start_line: Option<u64>,
+    #[serde(default)]
+    pub(crate) end_line: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -266,6 +274,65 @@ fn restore_line_endings(text: String, crlf: bool) -> String {
     }
 }
 
+fn parse_line_range(
+    start_line: Option<u64>,
+    end_line: Option<u64>,
+) -> Result<(usize, Option<usize>), ToolError> {
+    let start = match start_line {
+        None => 1,
+        Some(0) => return Err(ToolError::Message("start_line must be >= 1".into())),
+        Some(n) => {
+            usize::try_from(n).map_err(|_| ToolError::Message("start_line is too large".into()))?
+        }
+    };
+    let end = match end_line {
+        None => None,
+        Some(0) => return Err(ToolError::Message("end_line must be >= 1".into())),
+        Some(n) => Some(
+            usize::try_from(n).map_err(|_| ToolError::Message("end_line is too large".into()))?,
+        ),
+    };
+    if let Some(end) = end
+        && end < start
+    {
+        return Err(ToolError::Message("end_line must be >= start_line".into()));
+    }
+    Ok((start, end))
+}
+
+fn continuation_note(shown: usize, total: usize, next_line: usize) -> String {
+    let next_end = next_line.saturating_add(DEFAULT_READ_LINES.saturating_sub(1));
+    format!(
+        "\n… {shown}/{total} lines; read_file start_line={next_line} end_line={next_end} to continue"
+    )
+}
+
+fn take_prefix_lines(text: &str, line_budget: usize, byte_budget: usize) -> (String, usize, bool) {
+    let mut selected = String::new();
+    let mut shown = 0usize;
+    let mut bytes = 0usize;
+    for line in text.lines() {
+        if shown >= line_budget {
+            return (selected, shown, true);
+        }
+        let extra = if selected.is_empty() {
+            line.len()
+        } else {
+            line.len() + 1
+        };
+        if bytes + extra > byte_budget {
+            return (selected, shown, true);
+        }
+        if !selected.is_empty() {
+            selected.push('\n');
+        }
+        selected.push_str(line);
+        bytes += extra;
+        shown += 1;
+    }
+    (selected, shown, false)
+}
+
 impl ToolExecutor {
     pub(crate) fn resolve(&self, relative: &Path) -> Result<PathBuf, ToolError> {
         self.resolve_path(relative, false)
@@ -319,6 +386,96 @@ impl ToolExecutor {
             return Err(ToolError::FileTooLarge(path));
         }
         Ok(std::fs::read_to_string(path)?)
+    }
+
+    /// Tool-facing read: optional 1-indexed inclusive range, default bound on
+    /// unranged large files. Whole-file [`Self::read_file`] stays for edits.
+    pub(crate) fn read_file_slice(
+        &self,
+        path: &Path,
+        start_line: Option<u64>,
+        end_line: Option<u64>,
+    ) -> Result<String, ToolError> {
+        let path = self.resolve(path)?;
+        let meta = std::fs::metadata(&path)?;
+        if !meta.is_file() {
+            return Err(ToolError::NotRegular(path));
+        }
+        let (start, end) = parse_line_range(start_line, end_line)?;
+        let exact_range = end.is_some();
+        if start_line.is_none() && end_line.is_none() && meta.len() <= DEFAULT_READ_BYTES as u64 {
+            let text = std::fs::read_to_string(&path)?;
+            let total = text.lines().count();
+            if total <= DEFAULT_READ_LINES {
+                return Ok(text);
+            }
+            let (mut slice, shown, _) =
+                take_prefix_lines(&text, DEFAULT_READ_LINES, DEFAULT_READ_BYTES);
+            slice.push_str(&continuation_note(shown, total, shown.saturating_add(1)));
+            return Ok(slice);
+        }
+
+        let reader = BufReader::new(std::fs::File::open(&path)?);
+        let byte_budget = if exact_range {
+            MAX_FILE_BYTES as usize
+        } else {
+            DEFAULT_READ_BYTES
+        };
+        let mut selected = String::new();
+        let mut shown = 0usize;
+        let mut bytes = 0usize;
+        let mut total = 0usize;
+        let mut truncated = false;
+        for line in reader.lines() {
+            let line = line?;
+            total += 1;
+            if total < start {
+                continue;
+            }
+            if let Some(last) = end
+                && total > last
+            {
+                break;
+            }
+            if truncated {
+                continue;
+            }
+            if !exact_range && shown >= DEFAULT_READ_LINES {
+                truncated = true;
+                continue;
+            }
+            let extra = if selected.is_empty() {
+                line.len()
+            } else {
+                line.len() + 1
+            };
+            if bytes + extra > byte_budget {
+                if exact_range {
+                    return Err(ToolError::FileTooLarge(path));
+                }
+                truncated = true;
+                continue;
+            }
+            if !selected.is_empty() {
+                selected.push('\n');
+            }
+            selected.push_str(&line);
+            bytes += extra;
+            shown += 1;
+        }
+        if start > total {
+            return Ok(format!(
+                "(file has {total} lines; start_line {start} is past the end)"
+            ));
+        }
+        if !exact_range && truncated {
+            selected.push_str(&continuation_note(
+                shown,
+                total,
+                start.saturating_add(shown),
+            ));
+        }
+        Ok(selected)
     }
 
     pub(crate) fn write_file(&self, path: &Path, content: &str) -> Result<(), ToolError> {

@@ -859,6 +859,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_small_file_returns_exact_bytes() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["read_file"]);
+        let body = "alpha\r\nbeta\r\n";
+        std::fs::write(dir.path().join("small.txt"), body).unwrap();
+        let out = tools
+            .execute("read_file", r#"{"path":"small.txt"}"#)
+            .await
+            .unwrap();
+        assert_eq!(out, ToolOutput::Text(body.into()));
+    }
+
+    #[tokio::test]
+    async fn read_file_unranged_large_file_returns_bound_and_total() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["read_file"]);
+        let body: String = (1..=500).map(|i| format!("line-{i}\n")).collect();
+        std::fs::write(dir.path().join("big.txt"), &body).unwrap();
+        let out = tools
+            .execute("read_file", r#"{"path":"big.txt"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("expected text");
+        };
+        let content_lines = text
+            .lines()
+            .filter(|line| line.starts_with("line-"))
+            .count();
+        assert!(content_lines <= super::fs::DEFAULT_READ_LINES, "{text}");
+        assert!(!text.contains("line-401"), "{text}");
+        assert!(text.contains("500"), "{text}");
+        assert!(text.contains("start_line=401"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn read_file_range_returns_exactly_those_lines() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["read_file"]);
+        let body: String = (1..=20).map(|i| format!("line-{i}\n")).collect();
+        std::fs::write(dir.path().join("n.txt"), body).unwrap();
+        let out = tools
+            .execute(
+                "read_file",
+                r#"{"path":"n.txt","start_line":5,"end_line":7}"#,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, ToolOutput::Text("line-5\nline-6\nline-7".into()));
+    }
+
+    #[tokio::test]
+    async fn read_file_unranged_over_byte_bound_returns_slice_and_total() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["read_file"]);
+        let line = "x".repeat(20 * 1024);
+        std::fs::write(
+            dir.path().join("wide.txt"),
+            format!("{line}\n{line}\n{line}\n"),
+        )
+        .unwrap();
+        let out = tools
+            .execute("read_file", r#"{"path":"wide.txt"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("expected text");
+        };
+        assert!(
+            text.len() <= super::fs::DEFAULT_READ_BYTES + 80,
+            "{}",
+            text.len()
+        );
+        assert!(text.contains("3"), "{text}");
+        assert!(text.contains("start_line="), "{text}");
+        assert_eq!(text.lines().next(), Some(line.as_str()));
+    }
+
+    #[tokio::test]
     async fn rejects_absolute_path() {
         let dir = tempdir().unwrap();
         let tools = registry(&dir, &["read_file"]);
