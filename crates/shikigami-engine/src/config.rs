@@ -51,7 +51,8 @@ pub struct Config {
     pub network: NetworkSettings,
     /// OS-level limits and isolation for child processes. The default keeps
     /// the historical no-op; `rlimit` is Unix-only limits, `linux_native` is
-    /// the Linux production tier (Landlock + seccomp).
+    /// the Linux production tier (Landlock + seccomp), `seatbelt` is the
+    /// macOS development profile.
     #[serde(default)]
     pub sandbox: SandboxSettings,
     /// Operator-trusted lifecycle hooks (disabled when empty). See docs/hooks.md.
@@ -671,12 +672,13 @@ pub struct SandboxSettings {
     /// Maximum number of open file descriptors (RLIMIT_NOFILE).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_files: Option<u64>,
-    /// Extra absolute paths granted read and execute under `linux_native`.
+    /// Extra absolute paths granted read and execute under `linux_native`
+    /// and `seatbelt`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_paths: Vec<String>,
-    /// Tool-child sockets under `linux_native`. Default `deny` (kekkai
-    /// `Network::Deny`). `host` is an explicit job/operator grant that lifts
-    /// the seccomp socket gate (ADR 0013).
+    /// Tool-child sockets under `linux_native` and `seatbelt`. Default `deny`
+    /// (kekkai `Network::Deny`). `host` is an explicit job/operator grant
+    /// that lifts the socket gate (ADR 0013).
     #[serde(default)]
     pub tool_sockets: ToolSockets,
 }
@@ -689,6 +691,7 @@ pub enum SandboxBackend {
     None,
     Rlimit,
     LinuxNative,
+    Seatbelt,
 }
 
 /// Whether sandboxed tool children may open host sockets.
@@ -1467,6 +1470,11 @@ impl Config {
                 "sandbox.backend=linux_native is supported only on Linux".into(),
             ));
         }
+        if matches!(self.sandbox.backend, SandboxBackend::Seatbelt) && !cfg!(target_os = "macos") {
+            return Err(ConfigError::Invalid(
+                "sandbox.backend=seatbelt is supported only on macOS".into(),
+            ));
+        }
         for path in &self.sandbox.read_only_paths {
             if !Path::new(path).is_absolute() {
                 return Err(ConfigError::Invalid(format!(
@@ -1475,10 +1483,13 @@ impl Config {
             }
         }
         if !self.sandbox.read_only_paths.is_empty()
-            && !matches!(self.sandbox.backend, SandboxBackend::LinuxNative)
+            && !matches!(
+                self.sandbox.backend,
+                SandboxBackend::LinuxNative | SandboxBackend::Seatbelt
+            )
         {
             return Err(ConfigError::Invalid(
-                "sandbox.read_only_paths is only applied by sandbox.backend=linux_native".into(),
+                "sandbox.read_only_paths is only applied by sandbox.backend=linux_native or seatbelt".into(),
             ));
         }
         self.validate_governed_bash_controls()?;
@@ -1563,15 +1574,15 @@ impl Config {
 
     /// Governed / fail-closed profiles that enable Bash must not run with the
     /// historical no-op sandbox or unrestricted harness egress. Bash is only
-    /// cwd-jailed; without rlimit or linux_native plus egress policy the host
-    /// blast radius is unbounded relative to the FS tool jail.
+    /// cwd-jailed; without rlimit, linux_native, or seatbelt plus egress
+    /// policy the host blast radius is unbounded relative to the FS tool jail.
     fn validate_governed_bash_controls(&self) -> Result<(), ConfigError> {
         if !self.requires_governance() || !self.bash_enabled() {
             return Ok(());
         }
         if matches!(self.sandbox.backend, SandboxBackend::None) {
             return Err(ConfigError::Invalid(
-                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires sandbox.backend=rlimit or linux_native; sandbox.backend=none refuses bash".into(),
+                "governed/fail-closed profile with bash (or tools.mode=workspace_exec) requires sandbox.backend=rlimit, linux_native, or seatbelt; sandbox.backend=none refuses bash".into(),
             ));
         }
         if matches!(self.network.egress, EgressMode::Unrestricted) {
@@ -2336,7 +2347,7 @@ compact_at_usage_percent = 75
 
         let err = c.validate().unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid(message) if message.contains("sandbox.backend=rlimit or linux_native")),
+            matches!(&err, ConfigError::Invalid(message) if message.contains("sandbox.backend=rlimit, linux_native, or seatbelt")),
             "{err}"
         );
 
@@ -2365,6 +2376,17 @@ compact_at_usage_percent = 75
             let err = c.validate().unwrap_err();
             assert!(
                 matches!(&err, ConfigError::Invalid(message) if message.contains("linux_native")),
+                "{err}"
+            );
+        }
+
+        c.sandbox.backend = SandboxBackend::Seatbelt;
+        if cfg!(target_os = "macos") {
+            c.validate().unwrap();
+        } else {
+            let err = c.validate().unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid(message) if message.contains("seatbelt")),
                 "{err}"
             );
         }
@@ -2406,6 +2428,39 @@ read_only_paths = ["{}"]
         c.sandbox.read_only_paths = vec!["relative/path".into()];
         let err = c.validate().unwrap_err();
         assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn seatbelt_and_read_only_paths_parse_and_validate() {
+        let dir = tempdir().unwrap();
+        let extra = dir.path().join("toolchain");
+        fs::create_dir_all(&extra).unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            format!(
+                r#"
+version = 1
+[sandbox]
+backend = "seatbelt"
+read_only_paths = ["{}"]
+"#,
+                extra.display()
+            ),
+        )
+        .unwrap();
+        let result = Config::resolve(&path);
+        if cfg!(target_os = "macos") {
+            let (c, _) = result.unwrap();
+            assert_eq!(c.sandbox.backend, SandboxBackend::Seatbelt);
+            assert_eq!(
+                c.sandbox.read_only_paths,
+                vec![extra.to_string_lossy().into_owned()]
+            );
+        } else {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("seatbelt"), "{err}");
+        }
     }
 
     #[test]

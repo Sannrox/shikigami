@@ -6,6 +6,8 @@
 //! - `rlimit`: Unix resource limits and a process group (doctor: `limits`).
 //! - `linux_native`: Landlock filesystem rules plus a seccomp socket gate
 //!   applied in `pre_exec` (ADR 0013).
+//! - `seatbelt`: macOS development profile mapped onto kekkai `Backend::Macos`
+//!   (ADR 0013). Settings keep the name `seatbelt`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,12 +84,7 @@ impl Sandbox {
     ) -> Result<Self, SandboxError> {
         match health(&settings) {
             SandboxHealth::Error(message) => {
-                let unsupported = matches!(
-                    settings.backend,
-                    SandboxBackend::LinuxNative | SandboxBackend::Rlimit
-                ) && !cfg!(target_os = "linux")
-                    && !(cfg!(unix) && matches!(settings.backend, SandboxBackend::Rlimit));
-                return Err(if unsupported {
+                return Err(if platform_unsupported(settings.backend) {
                     SandboxError::Unsupported(settings.backend)
                 } else {
                     SandboxError::Unavailable(message)
@@ -95,37 +92,32 @@ impl Sandbox {
             }
             SandboxHealth::Ok(_) | SandboxHealth::Warning(_) => {}
         }
-        if matches!(settings.backend, SandboxBackend::LinuxNative) && workspace.is_none() {
-            return Err(SandboxError::Invalid(
-                "linux_native requires a workspace root to build Landlock rules".into(),
-            ));
-        }
         let host = match settings.backend {
             SandboxBackend::None => None,
-            SandboxBackend::Rlimit | SandboxBackend::LinuxNative => Some(kekkai::Host::probe()),
+            SandboxBackend::Rlimit | SandboxBackend::LinuxNative | SandboxBackend::Seatbelt => {
+                Some(kekkai::Host::probe())
+            }
         };
-        let (workspace, frozen_read_only, scratch) =
-            if matches!(settings.backend, SandboxBackend::LinuxNative) {
-                let workspace = workspace.ok_or_else(|| {
-                    SandboxError::Invalid(
-                        "linux_native requires a workspace root to build Landlock rules".into(),
-                    )
-                })?;
-                let workspace = fs::canonicalize(workspace).map_err(|error| {
-                    SandboxError::Invalid(format!(
-                        "linux_native workspace {}: {error}",
-                        workspace.display()
-                    ))
-                })?;
-                let frozen_read_only = freeze_read_only_paths(&settings.read_only_paths)?;
-                (
-                    Some(workspace),
-                    frozen_read_only,
-                    Some(Arc::new(create_run_scratch()?)),
-                )
-            } else {
-                (workspace.map(Path::to_path_buf), Vec::new(), None)
-            };
+        let (workspace, frozen_read_only, scratch) = if isolation_backend(settings.backend) {
+            let workspace = workspace.ok_or_else(|| {
+                SandboxError::Invalid(isolation_workspace_required(settings.backend))
+            })?;
+            let workspace = fs::canonicalize(workspace).map_err(|error| {
+                SandboxError::Invalid(format!(
+                    "{} workspace {}: {error}",
+                    isolation_backend_name(settings.backend),
+                    workspace.display()
+                ))
+            })?;
+            let frozen_read_only = freeze_read_only_paths(&settings.read_only_paths)?;
+            (
+                Some(workspace),
+                frozen_read_only,
+                Some(Arc::new(create_run_scratch()?)),
+            )
+        } else {
+            (workspace.map(Path::to_path_buf), Vec::new(), None)
+        };
         Ok(Self {
             settings,
             workspace,
@@ -138,7 +130,7 @@ impl Sandbox {
     pub fn apply(&self, command: &mut Command) -> Result<AppliedSandbox, SandboxError> {
         match self.settings.backend {
             SandboxBackend::None => Ok(AppliedSandbox { inner: None }),
-            SandboxBackend::Rlimit | SandboxBackend::LinuxNative => {
+            SandboxBackend::Rlimit | SandboxBackend::LinuxNative | SandboxBackend::Seatbelt => {
                 let root = self.workspace.as_deref().unwrap_or_else(|| Path::new("."));
                 let scratch = self.scratch.as_ref().map(|s| s.0.as_path());
                 let mapped = mapped_settings(
@@ -180,12 +172,16 @@ impl Sandbox {
     pub(crate) fn starts_process_group(&self) -> bool {
         matches!(
             self.settings.backend,
-            SandboxBackend::Rlimit | SandboxBackend::LinuxNative
+            SandboxBackend::Rlimit | SandboxBackend::LinuxNative | SandboxBackend::Seatbelt
         )
     }
 
     pub fn scratch_dir(&self) -> Option<&Path> {
         self.scratch.as_ref().map(|scratch| scratch.0.as_path())
+    }
+
+    pub(crate) fn backend(&self) -> SandboxBackend {
+        self.settings.backend
     }
 }
 
@@ -206,6 +202,46 @@ pub fn health(settings: &SandboxSettings) -> SandboxHealth {
             }
         }
         SandboxBackend::LinuxNative => linux_native_health(settings),
+        SandboxBackend::Seatbelt => seatbelt_health(settings),
+    }
+}
+
+fn isolation_backend(backend: SandboxBackend) -> bool {
+    matches!(
+        backend,
+        SandboxBackend::LinuxNative | SandboxBackend::Seatbelt
+    )
+}
+
+fn isolation_backend_name(backend: SandboxBackend) -> &'static str {
+    match backend {
+        SandboxBackend::LinuxNative => "linux_native",
+        SandboxBackend::Seatbelt => "seatbelt",
+        SandboxBackend::None => "none",
+        SandboxBackend::Rlimit => "rlimit",
+    }
+}
+
+fn isolation_workspace_required(backend: SandboxBackend) -> String {
+    match backend {
+        SandboxBackend::LinuxNative => {
+            "linux_native requires a workspace root to build Landlock rules".into()
+        }
+        SandboxBackend::Seatbelt => {
+            "seatbelt requires a workspace root to build Seatbelt rules".into()
+        }
+        SandboxBackend::None | SandboxBackend::Rlimit => {
+            unreachable!("workspace rules are only built for isolation backends")
+        }
+    }
+}
+
+fn platform_unsupported(backend: SandboxBackend) -> bool {
+    match backend {
+        SandboxBackend::None => false,
+        SandboxBackend::Rlimit => !cfg!(unix),
+        SandboxBackend::LinuxNative => !cfg!(target_os = "linux"),
+        SandboxBackend::Seatbelt => !cfg!(target_os = "macos"),
     }
 }
 
@@ -238,6 +274,31 @@ fn linux_native_health(settings: &SandboxSettings) -> SandboxHealth {
     }
 }
 
+fn seatbelt_health(settings: &SandboxSettings) -> SandboxHealth {
+    if !cfg!(target_os = "macos") {
+        return SandboxHealth::Error("sandbox.backend=seatbelt is supported only on macOS".into());
+    }
+    match kekkai::health(&mapped_settings(settings, None, &[])) {
+        kekkai::Health::Ok(_) => {
+            let sockets = match settings.tool_sockets {
+                ToolSockets::Deny => "deny",
+                ToolSockets::Host => "host",
+            };
+            SandboxHealth::Ok(format!(
+                "sandbox:   backend=seatbelt tool_sockets={sockets} writable=workspace+scratch cpu={:?} memory_mb={:?} user_processes={:?} read_only_paths={}",
+                settings.cpu_time_secs,
+                settings.memory_mb,
+                settings.user_processes,
+                settings.read_only_paths.len()
+            ))
+        }
+        kekkai::Health::Warning(message) | kekkai::Health::Error(message) => {
+            SandboxHealth::Error(message)
+        }
+        _ => SandboxHealth::Error("sandbox backend seatbelt is unavailable".into()),
+    }
+}
+
 fn linux_native_abi(health_ok: &str) -> u32 {
     health_ok
         .split_once("abi=")
@@ -255,6 +316,7 @@ fn mapped_settings(
         SandboxBackend::None => kekkai::Backend::None,
         SandboxBackend::Rlimit => kekkai::Backend::Rlimit,
         SandboxBackend::LinuxNative => kekkai::Backend::LinuxNative,
+        SandboxBackend::Seatbelt => kekkai::Backend::Macos,
     };
     let mut builder = kekkai::Settings::builder()
         .backend(backend)
@@ -269,7 +331,7 @@ fn mapped_settings(
             ToolSockets::Deny => kekkai::Network::Deny,
             ToolSockets::Host => kekkai::Network::Allow,
         });
-    if matches!(settings.backend, SandboxBackend::LinuxNative) {
+    if isolation_backend(settings.backend) {
         builder = builder.readable_roots(frozen_read_only.to_vec());
         if let Some(scratch) = run_scratch {
             builder = builder.writable_roots(vec![scratch.to_path_buf()]);
@@ -346,6 +408,7 @@ fn map_backend_back(backend: kekkai::Backend) -> SandboxBackend {
     match backend {
         kekkai::Backend::Rlimit => SandboxBackend::Rlimit,
         kekkai::Backend::LinuxNative => SandboxBackend::LinuxNative,
+        kekkai::Backend::Macos => SandboxBackend::Seatbelt,
         _ => SandboxBackend::None,
     }
 }
@@ -424,6 +487,16 @@ mod tests {
                 )
             );
         }
+        let seatbelt = SandboxSettings {
+            backend: SandboxBackend::Seatbelt,
+            ..SandboxSettings::default()
+        };
+        if !cfg!(target_os = "macos") {
+            assert_eq!(
+                health(&seatbelt),
+                SandboxHealth::Error("sandbox.backend=seatbelt is supported only on macOS".into())
+            );
+        }
     }
 
     #[test]
@@ -461,6 +534,31 @@ mod tests {
         } else {
             assert!(
                 matches!(report, SandboxHealth::Error(ref message) if message.contains("Linux")),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn seatbelt_health_matches_the_host() {
+        let settings = SandboxSettings {
+            backend: SandboxBackend::Seatbelt,
+            ..SandboxSettings::default()
+        };
+        let report = health(&settings);
+        if cfg!(target_os = "macos") {
+            assert!(
+                matches!(
+                    report,
+                    SandboxHealth::Ok(ref message) if message.contains("backend=seatbelt")
+                        && message.contains("tool_sockets=deny")
+                        && message.contains("writable=workspace+scratch")
+                ) || matches!(report, SandboxHealth::Error(_)),
+                "{report:?}"
+            );
+        } else {
+            assert!(
+                matches!(report, SandboxHealth::Error(ref message) if message.contains("macOS")),
                 "{report:?}"
             );
         }
@@ -534,6 +632,29 @@ mod tests {
                     error,
                     SandboxError::Unsupported(SandboxBackend::LinuxNative)
                 ),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn seatbelt_construction_without_workspace_fails() {
+        let settings = SandboxSettings {
+            backend: SandboxBackend::Seatbelt,
+            ..SandboxSettings::default()
+        };
+        if cfg!(target_os = "macos") {
+            let error = Sandbox::new(settings).unwrap_err();
+            assert!(
+                error.to_string().contains("workspace")
+                    || error.to_string().contains("unavailable")
+                    || error.to_string().contains("Seatbelt"),
+                "{error}"
+            );
+        } else {
+            let error = Sandbox::new(settings).unwrap_err();
+            assert!(
+                matches!(error, SandboxError::Unsupported(SandboxBackend::Seatbelt)),
                 "{error}"
             );
         }

@@ -18,7 +18,7 @@ use super::fs::{
 use super::job_credential::JobCredentialHandle;
 use super::path::load_ignore_patterns;
 use super::{EditOutcome, ExecutedTool, ParkRequest, Report, ToolError, ToolOutput, parse};
-use crate::config::SandboxSettings;
+use crate::config::{SandboxBackend, SandboxSettings};
 use crate::sandbox::Sandbox;
 
 /// Private workspace-jailed builtin dispatch used by [`super::ToolRegistry`].
@@ -73,7 +73,14 @@ impl ToolExecutor {
         &self,
         script: &str,
     ) -> Result<(Command, crate::sandbox::AppliedSandbox), ToolError> {
-        let mut command = Command::new("bash");
+        // Seatbelt's system allowlist includes `/bin/bash`. PATH `bash` is
+        // often Homebrew or Nix and is unreadable without read_only_paths.
+        let bash = if matches!(self.sandbox.backend(), SandboxBackend::Seatbelt) {
+            "/bin/bash"
+        } else {
+            "bash"
+        };
+        let mut command = Command::new(bash);
         command
             .arg("--noprofile")
             .arg("--norc")

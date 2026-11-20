@@ -13,6 +13,7 @@ Sample settings and packaging manifests. Copy and edit; do not commit secrets.
 | Red-team probe author | [`red-team.toml`](red-team.toml) | Read-only run that turns RPC surface diffs into probe specs; see [docs/red-team.md](../docs/red-team.md) |
 | Security finder | [`security-finder.toml`](security-finder.toml) | Read-only specialised reviewers that emit typed findings; see [docs/security-finder.md](../docs/security-finder.md) |
 | Linux OS sandbox | [`linux-native-sandbox.toml`](linux-native-sandbox.toml) | `linux_native` (Landlock + seccomp) on Bash children; Linux only |
+| macOS OS sandbox | [`seatbelt-sandbox.toml`](seatbelt-sandbox.toml) | `seatbelt` (Seatbelt via kekkai `macos`) on Bash children; macOS only |
 | Delivery only | [`tenkai-product.toml`](tenkai-product.toml) | Packaging manifest; **not** loaded by the harness |
 
 Plane-backed examples (`governed-sekai-chisei.toml`, `governed-mcp-action.toml`,

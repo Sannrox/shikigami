@@ -96,10 +96,12 @@ Operators and integrators should understand:
 - Fail-closed doctor/run when `fail_closed` or `http-callback` is unhealthy
 - Secrets via env / `token_env`, not TOML
 - Retired plane-client names fail at resolve rather than running locally
+- OS sandbox backends `linux_native` (Linux Landlock + seccomp) and
+  `seatbelt` (macOS development Seatbelt profile) for spawned Bash children
 
 ### Non-goals (v0)
 
-- Full OS sandboxing (containers, seccomp, macOS seatbelt profiles)
+- Container or micro-VM isolation as a runtime port
 - Protecting against a fully compromised host process
 - Multi-tenant isolation inside one process
 

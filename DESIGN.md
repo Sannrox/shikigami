@@ -62,8 +62,8 @@ plane caller.
                git-worktree none
 ```
 
-Sandbox backends (`none` / `rlimit` / `linux_native`) are settings-selected
-isolation for spawned children, not a `*Port` trait.
+Sandbox backends (`none` / `rlimit` / `linux_native` / `seatbelt`) are
+settings-selected isolation for spawned children, not a `*Port` trait.
 
 The engine always calls `ModelPort`. Session `ask=park` and `http-callback`
 authorize tools. Org policy and harvest live in rusui.
