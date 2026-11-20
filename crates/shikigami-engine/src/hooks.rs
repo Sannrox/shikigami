@@ -415,6 +415,8 @@ mod tests {
     }
 
     /// #638: a command that times out takes the processes it started with it.
+    /// #661: wait until the fixture child is running before the timeout can
+    /// fire, so an empty pid file is not a false failure under load.
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_the_commands_children() {
@@ -423,23 +425,38 @@ mod tests {
             "#!/bin/sh\nsleep 30 &\necho $! > {}\nsleep 30\n",
             pid_file.path().display()
         ));
-        let err = run_operator_command(
+        let run = run_operator_command(
             script.to_str().unwrap(),
             &[],
             &[],
             "{}",
-            Duration::from_millis(300),
+            Duration::from_secs(2),
             false,
-        )
-        .await
-        .unwrap_err();
+        );
+        tokio::pin!(run);
+
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(pid_file.path())
+                .unwrap_or_default()
+                .trim()
+                .parse::<libc::pid_t>()
+                && pid > 1
+                && unsafe { libc::kill(pid, 0) } == 0
+            {
+                break pid;
+            }
+            tokio::select! {
+                biased;
+                result = &mut run => {
+                    panic!("command ended before the fixture child pid was written: {result:?}");
+                }
+                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            }
+        };
+
+        let err = run.await.unwrap_err();
         assert!(err.starts_with("timed out"), "{err}");
 
-        let pid: libc::pid_t = std::fs::read_to_string(pid_file.path())
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
         let started = std::time::Instant::now();
         // The orphan is reaped by init shortly after the kill.
         while unsafe { libc::kill(pid, 0) } == 0 {
