@@ -1074,6 +1074,12 @@ impl<'a> DurableToolBatch<'a> {
                     if call.name == "load_skill" {
                         emit_skill_loads(self.engine, &session.run_id, tools.as_ref());
                     }
+                    note_background_job_spans(
+                        &mut session.spans,
+                        &report_call_id,
+                        &call.name,
+                        &text,
+                    );
                     session.spans.end_tool(&report_call_id, true, None);
                     self.engine.emit(
                         &session.run_id,
@@ -1585,6 +1591,9 @@ impl<'a> DurableToolBatch<'a> {
             if name == "load_skill" {
                 emit_skill_loads(self.engine, &session.run_id, self.tools.as_ref());
             }
+            if ok {
+                note_background_job_spans(&mut session.spans, &prefix_call_id, &name, &detail);
+            }
             session.spans.end_tool(
                 &prefix_call_id,
                 ok,
@@ -1613,6 +1622,48 @@ impl<'a> DurableToolBatch<'a> {
             .await;
         }
         Ok(())
+    }
+}
+
+/// Start or end a background-job span from bash helper output. Command
+/// text and log paths stay out of the span.
+fn note_background_job_spans(
+    spans: &mut crate::tracing_export::RunSpanTrace,
+    call_id: &str,
+    name: &str,
+    text: &str,
+) {
+    match name {
+        "bash_background" => {
+            if let Some(job_id) = text.lines().find_map(|line| line.strip_prefix("job_id=")) {
+                spans.start_job(job_id, call_id);
+            }
+        }
+        "bash_job_status" => {
+            if let Some((job_id, code)) = exited_job_status(text) {
+                spans.end_job(job_id, Some(code));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn exited_job_status(text: &str) -> Option<(&str, i32)> {
+    let mut job_id = None;
+    let mut exited = false;
+    let mut code = None;
+    for part in text.split_whitespace() {
+        if let Some(id) = part.strip_prefix("job_id=") {
+            job_id = Some(id);
+        } else if part == "status=exited" {
+            exited = true;
+        } else if let Some(raw) = part.strip_prefix("code=") {
+            code = raw.parse().ok();
+        }
+    }
+    match (job_id, exited, code) {
+        (Some(id), true, Some(code)) => Some((id, code)),
+        _ => None,
     }
 }
 

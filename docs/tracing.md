@@ -49,8 +49,11 @@ Each attempt adds its own `run` span to it.
 | Span | Parent | When |
 | --- | --- | --- |
 | `run` | (root), or the caller's span | Begin after admission; end at the durable run outcome |
-| `turn` | `run` | One model turn |
-| `tool` | `turn` | One tool call, keyed by the durable call id |
+| `chat <model>` | `run` | One model turn (`gen_ai.operation.name=chat`) |
+| `execute_tool <tool>` | `chat <model>` | One tool call, keyed by the durable call id (`gen_ai.operation.name=execute_tool`) |
+| `job <job_id>` | the `execute_tool bash_background` span that started it | A background job, from start until observed exit (or run end if still running) |
+
+Filtering on the literal names `turn` or `tool` no longer matches. Job spans may end after the run span when a job outlives a park.
 
 ## Caller trace context
 
@@ -79,11 +82,11 @@ what it calls, so their own spans join the run's trace:
 
 | Callee | Carrier | Span |
 | --- | --- | --- |
-| `bash`, `bash_background`, and other sandboxed processes | `TRACEPARENT` / `TRACESTATE` environment | `tool` |
-| MCP servers, stdio and HTTP | `params._meta.traceparent` / `tracestate` on `tools/call` | `tool` |
-| HTTP MCP servers | `traceparent` / `tracestate` headers | `tool` |
-| HTTP model endpoint | `traceparent` / `tracestate` headers | `turn` |
-| Plane calls | `traceparent` / `tracestate` request metadata | `turn` for planning, `tool` for tool authorization |
+| `bash`, `bash_background`, and other sandboxed processes | `TRACEPARENT` / `TRACESTATE` environment | `execute_tool <tool>` |
+| MCP servers, stdio and HTTP | `params._meta.traceparent` / `tracestate` on `tools/call` | `execute_tool <tool>` |
+| HTTP MCP servers | `traceparent` / `tracestate` headers | `execute_tool <tool>` |
+| HTTP model endpoint | `traceparent` / `tracestate` headers | `chat <model>` |
+| Plane calls | `traceparent` / `tracestate` request metadata | `chat <model>` for planning, `execute_tool <tool>` for tool authorization |
 
 `tracestate` is the caller's, passed on unchanged; one that is not at most 512 printable ASCII characters is dropped. A stdio MCP server starts
 before the run span exists, so it receives the context per call in `_meta`,
@@ -104,6 +107,7 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `plan_operation_id` | Plane decision / host `PlanExecution` id when a governance checkpoint recorded one; empty on ungoverned runs |
 | `call_id` | Durable tool-call id `tool-{turn}-{index}[-{model_id}]` (tool spans only) |
 | `gen_ai.tool.name` | Tool name, including `mcp.<server>.<tool>` (tool spans) |
+| `gen_ai.operation.name` | `chat` on turn spans, `execute_tool` on tool spans |
 | `error.type` | Closed-set tool failure: `not_enabled`, `denied`, `invalid_arguments`, `timeout`, `nonzero_exit`, `error` (failed tool spans). Tool output and error text are never exported |
 | `gen_ai.request.model` | Model the turn used (turn spans) |
 | `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Token counts, when the model reported usage (turn spans) |
@@ -112,6 +116,8 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `shikigami.prompt_id` | Versioned prompt id (run span) |
 | `shikigami.preset_id` | Narrowing preset id, when the run has one (run span) |
 | `shikigami.termination` | How the run ended: `completed`, `failed`, `parked`, … (run span) |
+| `shikigami.job.id` | Background job id (`job-<n>`) (job spans) |
+| `process.exit.code` | Process exit code when the job was observed to exit (job spans). Omitted if the job was still running when the run ended |
 | `parent.source` | Where the caller trace context came from: `request`, `env`, `header`, or `none` (run span) |
 
 Resource attributes are `service.name=shikigami` and `service.version`.
