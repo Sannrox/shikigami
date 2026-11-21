@@ -416,6 +416,12 @@ impl<'a> DurableModelTurn<'a> {
         session: &mut RunSession,
         tail_start: usize,
     ) -> Result<(), RunError> {
+        self.engine.emit(
+            &session.run_id,
+            HarnessEvent::Status {
+                status: "compacting".into(),
+            },
+        );
         let span = &session.messages[1..tail_start];
         let skill_ids = dropped_load_skill_ids(span);
         let summary = self.summarize_span(session, span).await?;

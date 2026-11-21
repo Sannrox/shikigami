@@ -28,7 +28,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/set_model` | client → agent | Experimental: the session model selection in the protocol is not stable yet, and only the TUI depends on it. Later prompts of the session use `modelId`; a running prompt keeps its model. The id must be one the session offers: ungoverned, `[model].model` plus `[model].alternates`; governed, the plane catalog. A plane that does not answer refuses with `-32000` and `data.shikigami.kind = "modelCatalog"`, and the model stays (fail closed); an id not offered is `-32602`. The choice is kept with the session across a host restart. Result `{}`. |
 | `session/mcp` | client → agent | Experimental: TUI `/mcp`. `action` is `list` (default), `disable`, or `enable`. List returns `{servers:[{name, tools, disabled}]}` from settings plus this process's overlay. Disable/enable require `name`, refuse `gateway` and a name that is not attached (`-32602`), and return `{}`. Disable hides that server on later `session/prompt` of this host; it is not written to settings or the session record. A restarted host follows settings again. |
 | `session/plan` | client → agent | Experimental: TUI `/plan`. Flags the next first `session/prompt` of this host session for plan write-jail. Result `{planJail: true}`; `{planJail: true, already: true}` when the session is already jailed. A run that already started without the jail is `-32602`. Idle only (`-32000` while a prompt is in flight). The flag is in memory until that first prompt; it is not written to settings or the session record. A jailed run's checkpoint carries the jail after that. Settings `run.plan_jail` stay unchanged. |
-| `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. |
+| `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. Before the cut, a `session/update` with `_meta.shikigami.compacting = true`. |
 | `session/update` | agent → client | After `session/new` and `session/load`, a replacement `available_commands_update` lists invocable slash names (`compact`, `model`, and skill pack ids; a pack whose id is a TUI built-in is `skill:<id>`). TUI-only names (`help`, `copy`, `attach`, `exit`, `quit`, `new`, `resume`, `run`, `usage`) stay off the list. `[]` clears. Assistant text streams as `agent_message_chunk` updates while the model produces it, when the adapter streams (`http` does); each chunk carries the turn's `messageId`. Other adapters send one chunk per completed turn. `session/cancel` during a streamed turn stops the request; the turn is not recorded and the next prompt plans it again. Tool-call arguments do not stream. |
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |
@@ -116,7 +116,10 @@ is unchanged. Attachment sessions inherit content v1: no escalate parking.
 `session/load` replays each stored prompt as one `user_message_chunk` with its
 own `messageId` (`user-<n>`). A compaction marker replays as a
 `user_message_chunk` with `_meta.shikigami.compacted = true`; clients show it
-as a note, not as something the user typed. A `report` result replays as its
+as a note, not as something the user typed. Auto-compact during `session/prompt`
+sends the same compacted chunk when `ContextCompacted` or `ContextSummarized`
+fires, and a compacting `_meta` update before that cut so a client can show
+progress. Clients that ignore `_meta` keep today's chunks. A `report` result replays as its
 summary, as it was shown live.
 
 When a restored session's last host went away mid-step, the `session/load`

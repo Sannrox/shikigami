@@ -226,6 +226,70 @@ fn replayed_compaction_marker_is_a_note_not_a_prompt() {
     );
 }
 
+/// #701: a compacting update sets the slot word; compacted restores running
+/// while the prompt is still in flight, and end_turn does not leave compacting.
+#[test]
+fn compacting_update_sets_slot_then_compacted_clears_it() {
+    let mut shared = Shared::new();
+    shared.busy = true;
+    shared.status = "running".into();
+    apply_update(
+        &mut shared,
+        &json!({"update": {"_meta": {"shikigami": {"compacting": true}}}}),
+    );
+    assert_eq!(shared.status, crate::protocol::COMPACTING_STATUS);
+    apply_update(
+        &mut shared,
+        &json!({"update": {"sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": ""},
+            "_meta": {"shikigami": {"compacted": true}}}}),
+    );
+    assert_eq!(shared.status, "running");
+    assert!(
+        shared
+            .transcript
+            .iter()
+            .any(|line| matches!(line, TranscriptLine::System(text) if text == COMPACTED))
+    );
+    apply_prompt_result(
+        &mut shared,
+        Some(&json!({"result": {"stopReason": "end_turn"}})),
+    );
+    assert_ne!(shared.status, crate::protocol::COMPACTING_STATUS);
+    assert_eq!(shared.status, "done");
+}
+
+/// #701: a prompt that auto-compacts shows the compacted note and does not
+/// stick on compacting after the turn ends.
+#[tokio::test]
+async fn prompt_auto_compact_shows_compacted_note_then_ready() {
+    let dir = tempdir().unwrap();
+    let session = start_session_with(
+        &dir,
+        r#"[{"content":"a"},{"content":"b"},{"content":"c"},{"content":"d"},{"content":"e"}]"#,
+        |config| {
+            config.run.compact_after_messages = Some(4);
+            config.run.compact_keep_tail = 2;
+        },
+    )
+    .await;
+    for prompt in ["one", "two", "three", "four", "five"] {
+        session.spawn_prompt(prompt.into()).await.unwrap();
+        let stop = session.wait_prompt().await;
+        apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+    }
+    assert!(
+        session.transcript_text().contains(COMPACTED),
+        "{}",
+        session.transcript_text()
+    );
+    assert_ne!(
+        session.lock_shared().status,
+        crate::protocol::COMPACTING_STATUS
+    );
+    assert!(!session.lock_shared().busy);
+}
+
 /// #616: a failed prompt followed by an answered one replays as two prompts.
 #[tokio::test]
 async fn relaunch_keeps_a_failed_prompt_apart_from_the_next() {

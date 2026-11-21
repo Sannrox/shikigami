@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
-use shikigami::acp::AcpHost;
+use shikigami::acp::{AcpClient, AcpHost};
 use shikigami::config::{
     Config, MCP_GATEWAY_NAME, McpGatewaySettings, McpServerSettings, ToolsSettings,
 };
@@ -164,6 +164,48 @@ async fn slash_context_reports_compact_after_compact() {
     assert!(
         text.contains("compact  ") && !text.contains("compact  none"),
         "{text}"
+    );
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+}
+
+/// #701: the running slot says `compacting` while compact runs.
+#[tokio::test]
+async fn slash_compact_shows_compacting_in_the_running_slot() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    session.lock_shared().busy = true;
+    session
+        .client
+        .notify(
+            "session/update",
+            json!({
+                "sessionId": session.session_id(),
+                "update": { "_meta": { "shikigami": { "compacting": true } } }
+            }),
+        )
+        .await
+        .unwrap();
+    let (row, dim) = slot_above_composer_rule(&session);
+    assert!(row.contains(crate::protocol::COMPACTING_STATUS), "{row:?}");
+    assert!(dim, "compacting marker must be dim: {row:?}");
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+    assert_screen_rules(&drawn_rows(&session, 40, 12), 40);
+}
+
+/// #701: `/compact` with nothing to cut says so and does not stick on compacting.
+#[tokio::test]
+async fn slash_compact_nothing_to_cut_is_ready() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    prompt_once(&session, "hello").await;
+    session.compact().await.unwrap();
+    assert_eq!(last_system(&session), "nothing to compact");
+    assert_eq!(session.lock_shared().status, "ready");
+    assert!(!session.lock_shared().busy);
+    let (row, _) = slot_above_composer_rule(&session);
+    assert!(
+        !row.contains(crate::protocol::COMPACTING_STATUS),
+        "nothing to compact must not stick: {row:?}"
     );
     assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
 }

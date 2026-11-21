@@ -460,7 +460,7 @@ impl AcpHost {
             "session/list" => self.session_list(&params),
             "session/load" => Box::pin(self.session_load(&params, client)).await,
             "session/prompt" => Box::pin(self.session_prompt(&params, client)).await,
-            "session/compact" => Box::pin(self.session_compact(&params)).await,
+            "session/compact" => Box::pin(self.session_compact(&params, client)).await,
             "session/set_model" => Box::pin(self.session_set_model(&params)).await,
             "session/mcp" => Box::pin(self.session_mcp(&params)).await,
             "session/plan" => Box::pin(self.session_plan(&params)).await,
@@ -707,9 +707,13 @@ impl AcpHost {
     }
 
     /// `/compact` on `session/prompt`: same cut as `session/compact`, no model turn.
-    async fn session_prompt_compact(&self, session_id: &str) -> Result<Value, Value> {
+    async fn session_prompt_compact(
+        &self,
+        session_id: &str,
+        client: &dyn AcpClient,
+    ) -> Result<Value, Value> {
         let compact = self
-            .session_compact(&json!({ "sessionId": session_id }))
+            .session_compact(&json!({ "sessionId": session_id }), client)
             .await?;
         let mut result = json!({ "stopReason": "end_turn" });
         if let Some(before) = compact.get("before") {
@@ -940,7 +944,11 @@ impl AcpHost {
         Ok(json!({ "planJail": true }))
     }
 
-    async fn session_compact(&self, params: &Value) -> Result<Value, Value> {
+    async fn session_compact(
+        &self,
+        params: &Value,
+        client: &dyn AcpClient,
+    ) -> Result<Value, Value> {
         self.require_init()?;
         let session_id = params
             .get("sessionId")
@@ -961,6 +969,7 @@ impl AcpHost {
                 live.model.clone(),
             )
         };
+        send_updates(client, vec![compacting_update(session_id)]).await?;
         let Some(run_id) = run_id else {
             return Ok(json!({ "before": 0, "after": 0 }));
         };
@@ -1051,7 +1060,7 @@ impl AcpHost {
             first.and_then(|text| slash_invocation(text, &advertised))
         } {
             match name.as_str() {
-                "compact" => return self.session_prompt_compact(&session_id).await,
+                "compact" => return self.session_prompt_compact(&session_id, client).await,
                 "model" => return self.session_prompt_model(&session_id, &args).await,
                 other => {
                     let id = other
@@ -3176,6 +3185,13 @@ fn consume_event(
                 "_meta": { "shikigami": { "context": context } }
             }
         }),
+        HarnessEvent::Status { status } if status == "compacting" => compacting_update(session_id),
+        HarnessEvent::ContextCompacted { before, after } => {
+            compacted_update(session_id, before, after)
+        }
+        HarnessEvent::ContextSummarized { before, after, .. } => {
+            compacted_update(session_id, before, after)
+        }
         _ => return,
     };
     updates.push(update);
@@ -3389,6 +3405,26 @@ fn spawn_child_idle_watch(
         });
         let _ = client.notify("session/update", update).await;
     });
+}
+
+fn compacting_update(session_id: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "_meta": { "shikigami": { "compacting": true } }
+        }
+    })
+}
+
+fn compacted_update(session_id: &str, before: usize, after: usize) -> Value {
+    json!({
+        "sessionId": session_id,
+        "update": {
+            "sessionUpdate": "user_message_chunk",
+            "content": { "type": "text", "text": "" },
+            "_meta": { "shikigami": { "compacted": true, "before": before, "after": after } }
+        }
+    })
 }
 
 async fn send_updates(client: &dyn AcpClient, updates: Vec<Value>) -> Result<(), Value> {
@@ -7143,6 +7179,72 @@ mod tests {
         let loaded = Checkpoint::load(&runs, &run_id).unwrap();
         assert_eq!(loaded.messages.len() as u64, after);
         assert!(loaded.messages[1].content.contains("compacted"));
+        let updates = client.updates.lock().await;
+        assert!(
+            updates
+                .iter()
+                .any(|update| { update["update"]["_meta"]["shikigami"]["compacting"] == true }),
+            "session/compact must send compacting before the cut: {updates:?}"
+        );
+    }
+
+    /// #701: auto-compact during a prompt is a compacting update, then compacted.
+    #[tokio::test]
+    async fn prompt_compact_events_are_session_updates() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host_with(
+            dir.path(),
+            r#"[{"content":"a"},{"content":"b"},{"content":"c"},{"content":"d"},{"content":"e"}]"#,
+            |config| {
+                config.run.compact_after_messages = Some(4);
+                config.run.compact_keep_tail = 2;
+            },
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        for (id, text) in [
+            (3, "one"),
+            (4, "two"),
+            (5, "three"),
+            (6, "four"),
+            (7, "five"),
+        ] {
+            let prompt = host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "session/prompt",
+                        "params": {
+                            "sessionId": session_id,
+                            "prompt": [{"type":"text","text": text}]
+                        }
+                    }),
+                    &client,
+                )
+                .await
+                .unwrap();
+            assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt}");
+        }
+        let updates = client.updates.lock().await;
+        assert!(
+            updates
+                .iter()
+                .any(|update| { update["update"]["_meta"]["shikigami"]["compacting"] == true }),
+            "auto-compact must send compacting: {updates:?}"
+        );
+        assert!(
+            updates.iter().any(|update| {
+                update["update"]["sessionUpdate"] == "user_message_chunk"
+                    && update["update"]["_meta"]["shikigami"]["compacted"] == true
+            }),
+            "auto-compact must send compacted: {updates:?}"
+        );
     }
 
     fn advertised_names(update: &Value) -> Vec<String> {
