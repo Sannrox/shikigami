@@ -14,7 +14,7 @@ shikigami [--state DIR] [--config FILE] [--model MODEL] [--preset PRESET] <COMMA
 | Command | Purpose |
 | --- | --- |
 | `version [--json]` | Product identity |
-| `doctor [--json] [--models]` | Effective profile, adapters, health, and optionally available models |
+| `doctor [--json] [--models]` | Effective profile, adapters, health, standing prompt bytes, and optionally available models |
 | `run <task> [--keep-workspace] [--resume ID] [--answer TEXT] [--plan-jail] [--plan-accept\|--plan-reject] [--nested]` | Execute or resume a run; `escalate` parks need an operator answer; plan write-jail parks need accept or reject; `--nested` enables child-run tools |
 | `runs [ID] [--diagnose], cancel ID, logs ID, cleanup ID` | Inspect and control durable local run state ([runs.md](runs.md)) |
 | `artifacts ID [--patch]` | Export retained artifact metadata or a captured patch |

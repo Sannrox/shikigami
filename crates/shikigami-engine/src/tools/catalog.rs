@@ -419,7 +419,7 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
 
 /// `load_skill` is not in [`builtin_catalog`]: the registry offers it only
 /// when the run has lazy skill packs, not through `tools.enabled`.
-pub(crate) fn load_skill_definition() -> ToolDef {
+pub fn load_skill_definition() -> ToolDef {
     def(
         "load_skill",
         "Load a skill pack's procedure by id from the Skills list in the system prompt.",
@@ -429,7 +429,7 @@ pub(crate) fn load_skill_definition() -> ToolDef {
 
 /// `load_mcp_tool` is not in [`builtin_catalog`]: the registry offers it only
 /// when `[tools] mcp_lazy_schemas` is on, not through `tools.enabled`.
-pub(crate) fn load_mcp_tool_definition() -> ToolDef {
+pub fn load_mcp_tool_definition() -> ToolDef {
     def(
         "load_mcp_tool",
         "Load an attached MCP tool's schema by name from the MCP tools list in the system prompt.",

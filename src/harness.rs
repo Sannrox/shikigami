@@ -70,6 +70,7 @@ pub struct Harness {
 /// Stable doctor JSON contract (`schema_version` = 1).
 ///
 /// Breaking field renames/removals require a schema_version bump and a breaking release note.
+/// Additive keys such as `standing` / `standing_bytes` may appear without a bump.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DoctorReport {
     /// Doctor JSON schema version (currently `1`).
@@ -230,6 +231,11 @@ impl Harness {
 
     pub fn doctor(&self) -> DoctorReport {
         diagnosis::doctor(self)
+    }
+
+    /// Doctor JSON including additive `standing` / `standing_bytes` keys.
+    pub fn doctor_json(&self, report: &DoctorReport) -> serde_json::Value {
+        diagnosis::doctor_json(self, report)
     }
 
     /// Reconstruct a replay package from retained artifacts without executing.
@@ -502,7 +508,7 @@ mod tests {
         let report = harness.doctor();
         assert_eq!(report.schema_version, 1);
         assert!(report.ok);
-        let v = report.to_json_value();
+        let v = harness.doctor_json(&report);
         for key in [
             "schema_version",
             "ok",
@@ -515,9 +521,18 @@ mod tests {
             "events_detail",
             "model",
             "lines",
+            "standing",
+            "standing_bytes",
         ] {
             assert!(v.get(key).is_some(), "missing key {key}");
         }
+        assert!(v.get("standing").unwrap().get("bytes").is_some());
+        assert!(
+            v.get("standing")
+                .unwrap()
+                .get("tool_schema_bytes")
+                .is_some()
+        );
     }
 
     #[test]
@@ -809,6 +824,59 @@ mod tests {
             report.to_json_value().get("context_window").is_none(),
             "context_window must stay in lines, not the JSON schema"
         );
+    }
+
+    #[test]
+    fn doctor_json_names_standing_rules_and_eager_bytes() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("AGENTS.md"), "a".repeat(100)).unwrap();
+        let skill = workspace.join(".shikigami/skills/demo");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "b".repeat(200)).unwrap();
+        let state = StateRoot::new(dir.path().join("state"));
+        let mut config = Config::default();
+        config.workspace.root = workspace.to_string_lossy().into();
+        config.tools.enabled = vec!["report".into()];
+        config.context.skills = vec!["demo".into()];
+        config.context.eager_skills = vec!["demo".into()];
+        let harness = Harness::from_config(config, state).unwrap();
+        let report = harness.doctor();
+        let json = harness.doctor_json(&report);
+        let standing_bytes = json
+            .get("standing_bytes")
+            .and_then(|value| value.as_u64())
+            .expect("standing_bytes");
+        assert!(standing_bytes > 300, "{json}");
+        let standing = json.get("standing").expect("standing");
+        let rules = standing.get("rules").and_then(|value| value.as_array());
+        let rules = rules.expect("rules");
+        assert!(
+            rules.iter().any(|rule| {
+                rule.get("filename").and_then(|value| value.as_str()) == Some("AGENTS.md")
+                    && rule.get("bytes").and_then(|value| value.as_u64()) == Some(100)
+            }),
+            "{json}"
+        );
+        let eager = standing.get("eager").and_then(|value| value.as_array());
+        let eager = eager.expect("eager");
+        assert!(
+            eager.iter().any(|pack| {
+                pack.get("id").and_then(|value| value.as_str()) == Some("demo")
+                    && pack.get("bytes").and_then(|value| value.as_u64()) == Some(200)
+            }),
+            "{json}"
+        );
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|line| line.contains("standing:") && line.contains("bytes")),
+            "{:?}",
+            report.lines
+        );
+        assert!(report.ok, "{:?}", report.lines);
     }
 
     #[test]

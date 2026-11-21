@@ -21,6 +21,7 @@ skills_root = ".shikigami/skills"   # optional
 skills = ["rust-style", "pr-checklist"]
 eager_skills = ["pr-checklist"]     # optional
 max_skill_bytes = 32768
+standing_max_percent = 25           # of run.context_window_tokens; 4 chars ≈ 1 token
 ```
 
 `skills` is the allow-list. The run prompt lists each pack's id and one-line
@@ -32,6 +33,9 @@ to call `load_skill` again. Only ids in `skills` load.
 
 Packs also listed in `eager_skills` go into the system prompt whole, from
 the first turn. Use it for a procedure that must always be present.
+`doctor` reports those eager bytes as standing context. When
+`run.context_window_tokens` is set, a standing prompt above
+`standing_max_percent` of the window refuses the run.
 
 `load_skill` is in the default tool sets. When `tools.enabled` leaves it out,
 every listed pack goes into the system prompt, as before.

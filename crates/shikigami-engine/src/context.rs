@@ -405,6 +405,184 @@ fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String,
     Some((body, digest, truncated))
 }
 
+/// Conservative standing-token estimate: 4 characters ≈ 1 token.
+pub const STANDING_CHARS_PER_TOKEN: u64 = 4;
+
+/// One eager or catalog pack as standing bytes (no body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingPack {
+    pub id: String,
+    pub bytes: u64,
+}
+
+/// Standing prompt the next turn will send before the user message.
+///
+/// Rules and eager bodies, lazy catalog lines, and JSON of offered tool
+/// definitions. Session messages are not included.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingContext {
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<AttachedRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eager: Vec<StandingPack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catalog: Vec<StandingPack>,
+    pub tool_schema_bytes: u64,
+}
+
+impl StandingContext {
+    /// `bytes` rounded up at [`STANDING_CHARS_PER_TOKEN`].
+    pub fn tokens_est(&self) -> u64 {
+        standing_tokens(self.bytes)
+    }
+
+    /// Largest named contributor, for fail-closed messages.
+    pub fn largest_source(&self) -> Option<(u64, String)> {
+        let mut items: Vec<(u64, String)> = self
+            .rules
+            .iter()
+            .map(|rule| (rule.bytes, format!("project rules `{}`", rule.filename)))
+            .chain(
+                self.eager
+                    .iter()
+                    .map(|pack| (pack.bytes, format!("eager skill `{}`", pack.id))),
+            )
+            .chain(
+                self.catalog
+                    .iter()
+                    .map(|pack| (pack.bytes, format!("skill catalog `{}`", pack.id))),
+            )
+            .collect();
+        if self.tool_schema_bytes > 0 {
+            items.push((self.tool_schema_bytes, "offered tool schemas".to_string()));
+        }
+        items.into_iter().max_by_key(|(bytes, _)| *bytes)
+    }
+}
+
+/// Token estimate for this gate only: 4 characters ≈ 1 token, rounded up.
+pub fn standing_tokens(bytes: u64) -> u64 {
+    bytes.div_ceil(STANDING_CHARS_PER_TOKEN)
+}
+
+/// JSON byte length of offered tool definitions (name, description, parameters).
+pub fn offered_tool_schema_bytes<'a, I>(tools: I) -> u64
+where
+    I: IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+{
+    let items: Vec<serde_json::Value> = tools
+        .into_iter()
+        .map(|(name, description, schema)| {
+            let parameters: serde_json::Value =
+                serde_json::from_str(schema).unwrap_or_else(|_| serde_json::json!({}));
+            serde_json::json!({
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            })
+        })
+        .collect();
+    serde_json::to_vec(&items)
+        .map(|raw| raw.len() as u64)
+        .unwrap_or(0)
+}
+
+/// Whether a run with this tool list will keep listed packs lazy.
+pub fn offers_lazy_skills(enabled: &[String], settings: &ContextSettings) -> bool {
+    enabled.iter().any(|tool| tool == "load_skill")
+        && settings
+            .skills
+            .iter()
+            .any(|id| !settings.eager_skills.contains(id))
+}
+
+/// Measure standing context the compose path would attach.
+///
+/// `tool_schema_bytes` is JSON of `definitions()` offered on turn one.
+/// `mcp_catalog` is the lazy MCP name/description list (empty when schemas
+/// are offered immediately or no MCP is attached).
+pub fn measure_standing(
+    workspace: &Path,
+    settings: &ContextSettings,
+    lazy_skills: bool,
+    tool_schema_bytes: u64,
+    mcp_catalog: &[(String, String)],
+) -> StandingContext {
+    let rules = load_project_rules(workspace, settings);
+    let skills = skill_context(workspace, settings, lazy_skills);
+    let mut catalog = Vec::new();
+    let mut catalog_bytes = 0_u64;
+    if !skills.catalog.is_empty() {
+        let mut prompt = String::new();
+        append_skill_catalog(&mut prompt, &skills.catalog);
+        catalog_bytes += prompt.len() as u64;
+        catalog.extend(skills.catalog.iter().map(|skill| StandingPack {
+            id: skill.id.clone(),
+            bytes: format!("\n- `{}`: {}", skill.id, skill.description).len() as u64,
+        }));
+    }
+    if !mcp_catalog.is_empty() {
+        let mut prompt = String::new();
+        append_mcp_tool_catalog(&mut prompt, mcp_catalog);
+        catalog_bytes += prompt.len() as u64;
+        catalog.extend(mcp_catalog.iter().map(|(name, description)| {
+            let description: String = description.chars().take(MAX_DESCRIPTION_CHARS).collect();
+            StandingPack {
+                id: name.clone(),
+                bytes: format!("\n- `{name}`: {description}").len() as u64,
+            }
+        }));
+    }
+    let eager: Vec<StandingPack> = skills
+        .eager
+        .iter()
+        .map(|pack| StandingPack {
+            id: pack.id.clone(),
+            bytes: pack.body.len() as u64,
+        })
+        .collect();
+    let attached_rules = AttachedContext::from_parts(&rules, &skills, false, None, "").rules;
+    let rules_bytes: u64 = attached_rules.iter().map(|rule| rule.bytes).sum();
+    let eager_bytes: u64 = eager.iter().map(|pack| pack.bytes).sum();
+    StandingContext {
+        bytes: rules_bytes
+            .saturating_add(eager_bytes)
+            .saturating_add(catalog_bytes)
+            .saturating_add(tool_schema_bytes),
+        rules: attached_rules,
+        eager,
+        catalog,
+        tool_schema_bytes,
+    }
+}
+
+/// Fail-closed message when standing tokens exceed `percent` of `window_tokens`.
+///
+/// `None` when the window is unset or standing fits. Names the largest source
+/// and the cap.
+pub fn standing_overflow(
+    standing: &StandingContext,
+    window_tokens: Option<u64>,
+    percent: u32,
+) -> Option<String> {
+    let window = window_tokens?;
+    let cap_tokens = window.saturating_mul(u64::from(percent)) / 100;
+    let tokens = standing.tokens_est();
+    if tokens <= cap_tokens {
+        return None;
+    }
+    let cap_bytes = cap_tokens.saturating_mul(STANDING_CHARS_PER_TOKEN);
+    let source = standing
+        .largest_source()
+        .map(|(bytes, name)| format!("; {name} is {bytes} bytes"))
+        .unwrap_or_default();
+    Some(format!(
+        "standing context {} bytes (~{tokens} tokens) exceeds context.standing_max_percent={percent}% of run.context_window_tokens={window} (cap {cap_tokens} tokens / {cap_bytes} bytes){source}",
+        standing.bytes
+    ))
+}
+
 /// Compose system prompt with project rules and skill packs.
 pub fn compose_system_prompt(base: &str, rules: &[ProjectRules], skills: &[SkillPack]) -> String {
     let mut out = base.to_string();
@@ -858,5 +1036,62 @@ mod tests {
         let mut empty = String::from("BASE");
         append_mcp_tool_catalog(&mut empty, &[]);
         assert_eq!(empty, "BASE");
+    }
+
+    #[test]
+    fn standing_names_rules_eager_and_sum() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "a".repeat(100)).unwrap();
+        write_pack(dir.path(), "demo", &"b".repeat(200));
+        let s = ContextSettings {
+            skills: vec!["demo".into()],
+            eager_skills: vec!["demo".into()],
+            ..Default::default()
+        };
+        let standing = measure_standing(dir.path(), &s, true, 50, &[]);
+        assert_eq!(standing.rules[0].filename, "AGENTS.md");
+        assert_eq!(standing.rules[0].bytes, 100);
+        assert_eq!(standing.eager[0].id, "demo");
+        assert_eq!(standing.eager[0].bytes, 200);
+        assert_eq!(standing.tool_schema_bytes, 50);
+        assert_eq!(standing.bytes, 350);
+        assert!(standing_overflow(&standing, None, 25).is_none());
+        assert!(standing_overflow(&standing, Some(1000), 25).is_none());
+    }
+
+    #[test]
+    fn standing_overflow_names_the_eager_skill_and_cap() {
+        let dir = tempdir().unwrap();
+        write_pack(dir.path(), "huge", &"x".repeat(2000));
+        let s = ContextSettings {
+            skills: vec!["huge".into()],
+            eager_skills: vec!["huge".into()],
+            ..Default::default()
+        };
+        let standing = measure_standing(dir.path(), &s, true, 0, &[]);
+        assert_eq!(standing.bytes, 2000);
+        let error = standing_overflow(&standing, Some(1000), 25).unwrap();
+        assert!(error.contains("eager skill `huge`"), "{error}");
+        assert!(error.contains("2000 bytes"), "{error}");
+        assert!(error.contains("standing_max_percent=25"), "{error}");
+        assert!(error.contains("context_window_tokens=1000"), "{error}");
+        assert!(error.contains("cap 250 tokens"), "{error}");
+    }
+
+    #[test]
+    fn standing_without_load_skill_counts_listed_packs_as_eager() {
+        let dir = tempdir().unwrap();
+        write_pack(dir.path(), "listed", "BODY of listed\n");
+        let s = ContextSettings {
+            skills: vec!["listed".into()],
+            ..Default::default()
+        };
+        let lazy = measure_standing(dir.path(), &s, true, 0, &[]);
+        assert!(lazy.eager.is_empty(), "{lazy:?}");
+        assert_eq!(lazy.catalog[0].id, "listed");
+        let eager = measure_standing(dir.path(), &s, false, 0, &[]);
+        assert_eq!(eager.eager[0].id, "listed");
+        assert_eq!(eager.eager[0].bytes, "BODY of listed\n".len() as u64);
+        assert!(eager.catalog.is_empty(), "{eager:?}");
     }
 }

@@ -294,6 +294,33 @@ pub(super) async fn prepare(
             );
         }
     }
+    let mcp_catalog = tools.attached_mcp_catalog();
+    let tool_schema_bytes =
+        crate::context::offered_tool_schema_bytes(tools.definitions().iter().map(|def| {
+            (
+                def.name.as_str(),
+                def.description.as_str(),
+                def.schema.as_str(),
+            )
+        }));
+    let standing = crate::context::measure_standing(
+        &workspace.path,
+        &engine.config.context,
+        lazy_skills,
+        tool_schema_bytes,
+        if engine.config.tools.mcp_lazy_schemas {
+            mcp_catalog.as_slice()
+        } else {
+            &[]
+        },
+    );
+    if let Some(error) = crate::context::standing_overflow(
+        &standing,
+        engine.config.run.context_window_tokens,
+        engine.config.context.standing_max_percent,
+    ) {
+        return Err(RunError::Message(error));
+    }
     let tools = Arc::new(tools);
     if let Some(replay) = replay {
         crate::replay::validate_runtime_bindings(
