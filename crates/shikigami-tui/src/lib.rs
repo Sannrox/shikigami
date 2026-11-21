@@ -16,7 +16,7 @@ mod render;
 mod session;
 mod slash;
 
-pub use host::{run, run_continuing};
+pub use host::{run, run_continuing, run_opts};
 
 #[cfg(test)]
 mod tests;

@@ -28,15 +28,24 @@ use crate::slash::osc_write_stdout;
 use crate::statusline::{self, StatusLine};
 
 pub async fn run(harness: Harness) -> Result<(), String> {
-    run_terminal_host(harness, false).await
+    run_opts(harness, false, false).await
 }
 
 /// `run`, but reopening the latest session in this folder (`--continue`).
 pub async fn run_continuing(harness: Harness) -> Result<(), String> {
-    run_terminal_host(harness, true).await
+    run_opts(harness, true, false).await
 }
 
-pub(crate) async fn run_terminal_host(harness: Harness, continue_last: bool) -> Result<(), String> {
+/// TUI host with `--continue` and `--worktree`.
+pub async fn run_opts(harness: Harness, continue_last: bool, worktree: bool) -> Result<(), String> {
+    run_terminal_host(harness, continue_last, worktree).await
+}
+
+pub(crate) async fn run_terminal_host(
+    harness: Harness,
+    continue_last: bool,
+    worktree: bool,
+) -> Result<(), String> {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let look = Look::from_settings(&harness.config.tui, no_color)?;
     let statusline = harness.config.tui.statusline.clone().map(StatusLine::new);
@@ -51,7 +60,7 @@ pub(crate) async fn run_terminal_host(harness: Harness, continue_last: bool) -> 
     let model_port = harness.model_handle();
     let host = Arc::new(AcpHost::new(harness));
     let demo = host.demo_workspace();
-    let mut session = TuiSession::start(host, &cwd, continue_last).await?;
+    let mut session = TuiSession::start_opts(host, &cwd, continue_last, worktree).await?;
     session.model = model;
     session.look = look;
     session.statusline = statusline;
@@ -380,6 +389,8 @@ pub(crate) async fn run_terminal(
             KeyResult::Mcp { action, name } => session.mcp(&action, name.as_deref()).await,
             KeyResult::Plan => session.plan().await,
             KeyResult::ResumePicker => session.open_resume_picker().await,
+            KeyResult::Worktree => session.worktree().await,
+            KeyResult::WorktreeRemove => session.worktree_remove().await,
             KeyResult::Continue => {}
         }
     }

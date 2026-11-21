@@ -223,6 +223,11 @@ The process-host default (`~/.shikigami/projects/<encoded-cwd>`) already
 does. `--state` / `SHIKIGAMI_STATE` still win; a root inside the workspace fails
 closed. Hosts must serialize concurrent runs against the same inplace root.
 
+ACP/TUI guests may select `git-worktree` per session (`session/new`
+`_meta.shikigami.worktree`, TUI `--worktree` / `/worktree`) without changing
+this table. The host materializes one tree for that session and then jails
+tools in place at that path. Unattended `run` still follows `adapter`.
+
 ### [sandbox]
 
 | Field | Default | Description |

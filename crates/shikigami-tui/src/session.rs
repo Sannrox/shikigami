@@ -742,13 +742,25 @@ pub(crate) struct TuiSession {
     pub(crate) look: Look,
     /// `[tui.statusline]` command, when configured.
     pub(crate) statusline: Option<StatusLine>,
+    /// Launch asked for a session worktree (`--worktree` / later `/worktree`).
+    pub(crate) worktree: bool,
 }
 
 impl TuiSession {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn start(
         host: Arc<AcpHost>,
         cwd: &Path,
         continue_last: bool,
+    ) -> Result<Self, String> {
+        Self::start_opts(host, cwd, continue_last, false).await
+    }
+
+    pub(crate) async fn start_opts(
+        host: Arc<AcpHost>,
+        cwd: &Path,
+        continue_last: bool,
+        worktree: bool,
     ) -> Result<Self, String> {
         let cwd = if cwd.is_absolute() {
             cwd.to_path_buf()
@@ -776,6 +788,7 @@ impl TuiSession {
             default_model_id,
             look: Look::default(),
             statusline: None,
+            worktree,
         };
         session
             .call(
@@ -792,7 +805,12 @@ impl TuiSession {
         } else {
             session.create_session(&cwd).await?
         };
-        *session.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id;
+        *session.session_id.lock().unwrap_or_else(|e| e.into_inner()) = session_id.clone();
+        if let Some(branch) = session.host.session_worktree_branch(&session_id).await {
+            session.push_system(&format!(
+                "Isolated on branch {branch}. Writes stay in this session's tree."
+            ));
+        }
         session.lock_shared().dirty = true;
         Ok(session)
     }
@@ -872,15 +890,14 @@ impl TuiSession {
     }
 
     pub(crate) async fn create_session(&self, cwd: &Path) -> Result<String, String> {
-        let result = self
-            .call(
-                "session/new",
-                json!({
-                    "cwd": cwd.display().to_string(),
-                    "mcpServers": []
-                }),
-            )
-            .await?;
+        let mut params = json!({
+            "cwd": cwd.display().to_string(),
+            "mcpServers": []
+        });
+        if self.worktree {
+            params["_meta"]["shikigami"]["worktree"] = json!(true);
+        }
+        let result = self.call("session/new", params).await?;
         self.lock_shared().models = SessionModels::of(&result);
         result
             .get("sessionId")
@@ -1127,4 +1144,8 @@ pub(crate) enum KeyResult {
     Plan,
     /// `/resume`: list this cwd's sessions via `session/list`, then pick.
     ResumePicker,
+    /// `/worktree`: isolate this session or print the current tree.
+    Worktree,
+    /// `/worktree remove`: drop the session tree.
+    WorktreeRemove,
 }

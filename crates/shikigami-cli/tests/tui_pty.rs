@@ -528,6 +528,52 @@ fn demo_write_stays_out_of_the_project() {
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "ok\n");
 }
 
+fn init_git_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success(),
+            "{args:?}"
+        );
+    };
+    git(&["init", "--quiet", "-b", "main"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(path.join("README"), "ok\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "init"]);
+}
+
+/// #704: `--worktree` isolates on a git checkout and names the branch.
+#[test]
+fn worktree_flag_prints_isolated_on_branch() {
+    let dir = temp_dir();
+    let project = dir.path().join("project");
+    init_git_repo(&project);
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/local-run.toml");
+    let mut config = std::fs::read_to_string(example).unwrap();
+    config.push_str("script_json = '[{\"content\":\"ok\"}]'\n");
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
+    let mut tui = launch_tui(&dir, &[], &["--worktree"]);
+    tui.wait_for("the isolated line", |t| {
+        screen(t).contains("Isolated on branch")
+    });
+    let shown = screen(&tui);
+    assert!(shown.contains("session's tree"), "{shown}");
+    let before = tui.output().len();
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+    assert_restored(&tui, before, "^c after --worktree");
+}
+
 /// Session-allow (`a`) lets later calls of the same mutating tool through
 /// without a second dock; a different tool still asks.
 #[test]

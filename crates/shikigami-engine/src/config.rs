@@ -250,6 +250,11 @@ pub struct WorkspaceSettings {
     /// Copy workspace to state after materialize for later restore.
     #[serde(default)]
     pub snapshot: bool,
+    /// Strip shared compile caches (`CARGO_TARGET_DIR`) from tool children.
+    /// Host-internal: session worktrees set this so two trees do not share one
+    /// artifact dir. Not a settings file field.
+    #[serde(skip)]
+    pub isolate_artifacts: bool,
 }
 
 fn default_workspace_adapter() -> String {
@@ -269,6 +274,7 @@ impl Default for WorkspaceSettings {
             root: default_workspace_root(),
             branch_prefix: default_branch_prefix(),
             snapshot: false,
+            isolate_artifacts: false,
         }
     }
 }
@@ -1791,6 +1797,9 @@ impl Config {
             "SHIKIGAMI_JOB_TENANT".into(),
             "SHIKIGAMI_JOB_NAMESPACE".into(),
         ]);
+        if self.workspace.isolate_artifacts {
+            names.push("CARGO_TARGET_DIR".into());
+        }
         names.sort_by_key(|name| name.to_ascii_uppercase());
         names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         names
@@ -2081,6 +2090,13 @@ script_json = "[]"
             !config
                 .protected_tool_environment_names()
                 .contains(&"MODEL_KEY".into())
+        );
+
+        config.workspace.isolate_artifacts = true;
+        assert!(
+            config
+                .protected_tool_environment_names()
+                .contains(&"CARGO_TARGET_DIR".into())
         );
     }
 

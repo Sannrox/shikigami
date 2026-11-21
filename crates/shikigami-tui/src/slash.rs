@@ -208,6 +208,7 @@ impl TuiSession {
                 let root = self
                     .host
                     .demo_workspace()
+                    .or_else(|| self.host.session_workspace(&self.session_id()))
                     .unwrap_or_else(|| self.cwd.clone());
                 let state = Arc::clone(&self.client.shared);
                 std::thread::spawn(move || {
@@ -397,6 +398,16 @@ impl TuiSession {
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
             "resume" => KeyResult::ResumePicker,
+            "worktree" if args.trim() == "remove" => KeyResult::WorktreeRemove,
+            "worktree" if args.trim().is_empty() => KeyResult::Worktree,
+            "worktree" => {
+                let mut shared = self.lock_shared();
+                shared.transcript.push(TranscriptLine::System(
+                    "/worktree isolates this session; /worktree remove drops the tree.".into(),
+                ));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             other => {
                 // A catalog skill is `/<id>`; `/skill:<id>` is the alias.
                 let id = other.strip_prefix(SKILL_PREFIX).unwrap_or(other);
@@ -476,28 +487,69 @@ impl TuiSession {
 
     pub(crate) async fn new_session(&self) -> Result<(), String> {
         let id = self.create_session(&self.cwd).await?;
-        *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = id;
-        let mut shared = self.lock_shared();
-        shared.transcript.clear();
-        shared.plan = None;
-        shared.show_plan = false;
-        let _ = shared.clear_permission();
-        shared.queued = None;
-        shared.steering = None;
-        shared.pending_parts.clear();
-        shared.run_id = None;
-        shared.usage = Usage::default();
-        shared.selected_tool = None;
-        shared.text_selection = None;
-        shared.visible_rows.clear();
-        shared.nested_children.clear();
-        shared.context = None;
-        shared.last_compact = None;
-        shared.status = "ready".into();
-        shared.scroll_back = 0;
-        shared.dock_scroll = 0;
-        shared.dirty = true;
+        *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = id.clone();
+        {
+            let mut shared = self.lock_shared();
+            shared.transcript.clear();
+            shared.plan = None;
+            shared.show_plan = false;
+            let _ = shared.clear_permission();
+            shared.queued = None;
+            shared.steering = None;
+            shared.pending_parts.clear();
+            shared.run_id = None;
+            shared.usage = Usage::default();
+            shared.selected_tool = None;
+            shared.text_selection = None;
+            shared.visible_rows.clear();
+            shared.nested_children.clear();
+            shared.context = None;
+            shared.last_compact = None;
+            shared.status = "ready".into();
+            shared.scroll_back = 0;
+            shared.dock_scroll = 0;
+            shared.dirty = true;
+        }
+        if let Some(branch) = self.host.session_worktree_branch(&id).await {
+            self.push_system(&format!(
+                "Isolated on branch {branch}. Writes stay in this session's tree."
+            ));
+        }
         Ok(())
+    }
+
+    /// `/worktree`: isolate this session, or print the current tree.
+    pub(crate) async fn worktree(&self) {
+        match self.host.ensure_session_worktree(&self.session_id()).await {
+            Ok(branch) => {
+                self.push_system(&format!(
+                    "Isolated on branch {branch}. Writes stay in this session's tree."
+                ));
+            }
+            Err(err) => {
+                let mut shared = self.lock_shared();
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
+        }
+    }
+
+    /// `/worktree remove`: drop the tree; later prompts fail closed.
+    pub(crate) async fn worktree_remove(&self) {
+        match self.host.remove_session_worktree(&self.session_id()).await {
+            Ok(()) => {
+                self.push_system(
+                    "Removed the session worktree. Start a new session to keep working.",
+                );
+            }
+            Err(err) => {
+                let mut shared = self.lock_shared();
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
+        }
     }
 
     /// `/mcp`, `/mcp disable <name>`, `/mcp enable <name>`.
@@ -677,6 +729,7 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("model", "list or switch models"),
     ("mcp", "list or disable MCP servers"),
     ("resume", "load a persisted session"),
+    ("worktree", "isolate this session"),
 ];
 
 /// `/skill:<id>` reaches a pack by id even when a built-in has that name.
@@ -689,7 +742,7 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} steer  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /paste  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} steer  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /worktree  /run  /usage  /model  /mcp  /copy  /attach  /paste  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Steer),
         keys.label(Action::Interrupt)
     )
