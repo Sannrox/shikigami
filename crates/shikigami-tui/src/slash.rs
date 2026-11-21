@@ -483,6 +483,7 @@ impl TuiSession {
         shared.show_plan = false;
         let _ = shared.clear_permission();
         shared.queued = None;
+        shared.steering = None;
         shared.pending_parts.clear();
         shared.run_id = None;
         shared.usage = Usage::default();
@@ -688,7 +689,8 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /paste  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} steer  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /paste  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
+        keys.label(Action::Steer),
         keys.label(Action::Interrupt)
     )
 }

@@ -178,6 +178,16 @@ pub(crate) fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             }
             return KeyResult::Quit;
         }
+        Some(Action::Steer) => {
+            let (busy, blocked) = {
+                let shared = session.lock_shared();
+                (shared.busy, shared.permission.is_some() || shared.show_plan)
+            };
+            if busy && !blocked {
+                session.steer();
+                return KeyResult::Continue;
+            }
+        }
         Some(Action::Quit) => {
             return if session.lock_shared().busy {
                 KeyResult::Continue

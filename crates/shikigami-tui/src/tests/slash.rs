@@ -651,6 +651,7 @@ async fn slash_help_writes_system_block_and_stays_idle() {
     assert!(text.contains("Enter"), "{text}");
     assert!(text.contains("Shift+Enter"), "{text}");
     assert!(text.contains("^c cancel/quit"), "{text}");
+    assert!(text.contains("alt+enter steer"), "{text}");
     assert!(text.contains("/compact"), "{text}");
     assert!(text.contains("/context"), "{text}");
     assert!(text.contains("/plan"), "{text}");

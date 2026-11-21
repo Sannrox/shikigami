@@ -537,7 +537,7 @@ Key bindings, colors, and a status line command for `shikigami tui`
 come only from the settings file you chose. A `shikigami.toml` in the project
 is never loaded implicitly, so a cloned repository cannot rebind keys or run a
 status line command. An
-unknown action or role, a key that is not `ctrl+<letter>` or `alt+<letter>`,
+unknown action or role, a key that is not `ctrl+<letter>`, `alt+<letter>`, or `alt+enter`,
 an invalid color, or two actions on one key stops launch with the entry named.
 
 ```toml
@@ -557,6 +557,7 @@ Enter, Tab, and Backspace.
 | Action | Default | Does |
 | --- | --- | --- |
 | `interrupt` | `ctrl+c` | Cancel the running prompt, or quit when idle |
+| `steer` | `alt+enter` | While busy, cancel the in-flight model request and continue the same run with the draft (or the queued follow-up) |
 | `quit` | `ctrl+d` | Quit when idle |
 | `toggle_plan` | `ctrl+p` | Show or hide the plan |
 | `toggle_tool` | `ctrl+o` | Expand or collapse the selected tool line |

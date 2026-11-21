@@ -29,7 +29,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/mcp` | client → agent | Experimental: TUI `/mcp`. `action` is `list` (default), `disable`, or `enable`. List returns `{servers:[{name, tools, disabled}]}` from settings plus this process's overlay. Disable/enable require `name`, refuse `gateway` and a name that is not attached (`-32602`), and return `{}`. Disable hides that server on later `session/prompt` of this host; it is not written to settings or the session record. A restarted host follows settings again. |
 | `session/plan` | client → agent | Experimental: TUI `/plan`. Flags the next first `session/prompt` of this host session for plan write-jail. Result `{planJail: true}`; `{planJail: true, already: true}` when the session is already jailed. A run that already started without the jail is `-32602`. Idle only (`-32000` while a prompt is in flight). The flag is in memory until that first prompt; it is not written to settings or the session record. A jailed run's checkpoint carries the jail after that. Settings `run.plan_jail` stay unchanged. |
 | `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. Before the cut, a `session/update` with `_meta.shikigami.compacting = true`. |
-| `session/update` | agent → client | After `session/new` and `session/load`, a replacement `available_commands_update` lists invocable slash names (`compact`, `model`, and skill pack ids; a pack whose id is a TUI built-in is `skill:<id>`). TUI-only names (`help`, `copy`, `attach`, `paste`, `exit`, `quit`, `new`, `resume`, `run`, `usage`) stay off the list. `[]` clears. Assistant text streams as `agent_message_chunk` updates while the model produces it, when the adapter streams (`http` does); each chunk carries the turn's `messageId`. Other adapters send one chunk per completed turn. `session/cancel` during a streamed turn stops the request; the turn is not recorded and the next prompt plans it again. Tool-call arguments do not stream. |
+| `session/update` | agent → client | After `session/new` and `session/load`, a replacement `available_commands_update` lists invocable slash names (`compact`, `model`, and skill pack ids; a pack whose id is a TUI built-in is `skill:<id>`). TUI-only names (`help`, `copy`, `attach`, `paste`, `exit`, `quit`, `new`, `resume`, `run`, `usage`) stay off the list. `[]` clears. Assistant text streams as `agent_message_chunk` updates while the model produces it, when the adapter streams (`http` does); each chunk carries the turn's `messageId`. Other adapters send one chunk per completed turn. `session/cancel` during a streamed turn stops the request; the turn is not recorded and the next prompt plans it again unless the follow-up sets `_meta.shikigami.steer`. Tool-call arguments do not stream. |
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |
 
@@ -164,6 +164,15 @@ loads that pack as `load_skill` before the model turn: the user prompt stays
 the text parts; the pack body is a tool result with `skill <id> digest=…`
 attribution. Unknown or unlisted ids fail closed (`-32603`). Clients that
 omit `_meta` are unchanged. The TUI slash sets this field.
+
+`session/prompt` may carry `_meta.shikigami.steer` (`true`). After
+`session/cancel`, that flag continues the same run: tools that already
+completed stay in the history the follow-up model sees, and
+`_meta.shikigami.runId` is unchanged. A missing or null field keeps today's
+cancel follow-up (a cancelled streamed turn is not recorded; the next prompt
+plans it again). A non-boolean value is `-32602`. Steer without a session run
+is `-32602`. Clients that omit `_meta` are unchanged. The TUI `steer` action
+sets this field.
 
 The `session/new` and `session/load` results carry `models`
 (experimental): `{"currentModelId": "...", "availableModels": [{"modelId":

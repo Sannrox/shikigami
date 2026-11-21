@@ -1050,6 +1050,7 @@ impl AcpHost {
             .to_string();
         let mut parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
         let mut load_skill = prompt_load_skill(params)?;
+        let steer = prompt_steer(params)?;
         if let Some((name, args)) = {
             let sessions = self.sessions.lock().await;
             let live = sessions
@@ -1136,6 +1137,12 @@ impl AcpHost {
                     rx
                 }
             };
+            if steer && live.run_id.is_none() {
+                return Err(rpc_error(
+                    -32602,
+                    "session/prompt _meta.shikigami.steer needs a session that already has a run",
+                ));
+            }
             (
                 live.cwd.clone(),
                 live.run_id.clone(),
@@ -3675,6 +3682,24 @@ fn skill_prompt_text(id: &str, args: &str) -> String {
     }
 }
 
+/// Evolving ACP `_meta.shikigami.steer`: continue the same run after cancel,
+/// keeping tools that already completed. Absent or JSON null is today's
+/// cancel follow-up.
+fn prompt_steer(params: &Value) -> Result<bool, Value> {
+    let Some(value) = params.pointer("/_meta/shikigami/steer") else {
+        return Ok(false);
+    };
+    if value.is_null() {
+        return Ok(false);
+    }
+    value.as_bool().ok_or_else(|| {
+        rpc_error(
+            -32602,
+            "session/prompt _meta.shikigami.steer must be a boolean",
+        )
+    })
+}
+
 /// Evolving ACP `_meta.shikigami.loadSkill`: a skill id the host loads as
 /// `load_skill` before the model turn. Absent or JSON null is no load.
 fn prompt_load_skill(params: &Value) -> Result<Option<String>, Value> {
@@ -4478,6 +4503,17 @@ struct CancelOnChunkClient {
     updates: Mutex<Vec<Value>>,
 }
 
+/// Allows the ask, then cancels on the first non-empty stream chunk after a
+/// tool has completed (the empty `agent_message_chunk` of a tool-call turn
+/// must not cancel before the write).
+#[cfg(test)]
+struct CancelOnChunkAllowClient {
+    host: Arc<AcpHost>,
+    session_id: String,
+    updates: Mutex<Vec<Value>>,
+    wrote: AtomicBool,
+}
+
 #[cfg(test)]
 #[async_trait]
 impl AcpClient for CancelOnChunkClient {
@@ -4501,6 +4537,41 @@ impl AcpClient for CancelOnChunkClient {
 
     async fn request(&self, method: &str, _params: Value) -> Result<Value, String> {
         Err(format!("unexpected agent request {method}"))
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl AcpClient for CancelOnChunkAllowClient {
+    async fn notify(&self, _method: &str, params: Value) -> Result<(), String> {
+        let update = &params["update"];
+        if update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed" {
+            self.wrote.store(true, Ordering::SeqCst);
+        }
+        let chunk = update["sessionUpdate"] == "agent_message_chunk";
+        let text = update["content"]["text"].as_str().unwrap_or("");
+        let cancel = chunk && !text.is_empty() && self.wrote.load(Ordering::SeqCst);
+        self.updates.lock().await.push(params);
+        if cancel {
+            self.host
+                .handle(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/cancel",
+                        "params": { "sessionId": self.session_id }
+                    }),
+                    self,
+                )
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn request(&self, method: &str, _params: Value) -> Result<Value, String> {
+        if method != "session/request_permission" {
+            return Err(format!("unexpected agent request {method}"));
+        }
+        Ok(permission_result(PermissionOutcome::Allow))
     }
 }
 
@@ -8284,6 +8355,136 @@ mod tests {
             chunk_texts(&setup.updates.lock().await).concat(),
             "abcdefgh"
         );
+    }
+
+    #[tokio::test]
+    async fn steer_after_cancel_keeps_completed_tools_and_run() {
+        let dir = tempdir().unwrap();
+        let host = Arc::new(scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+              {"chunks":["aaaa","bbbb","cccc","dddd"],"chunk_delay_ms":40,"content":"long reply"}
+            ]"#,
+        ));
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let setup = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &setup, &cwd).await;
+        let client = CancelOnChunkAllowClient {
+            host: Arc::clone(&host),
+            session_id: session_id.clone(),
+            updates: Mutex::new(Vec::new()),
+            wrote: AtomicBool::new(false),
+        };
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "cancelled");
+        assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
+        let run_id = rpc_ok(&prompt)["_meta"]["shikigami"]["runId"].clone();
+        let follow = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"use a different name"}],
+                        "_meta": { "shikigami": { "steer": true } }
+                    }
+                }),
+                &setup,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&follow)["stopReason"], "end_turn", "{follow}");
+        assert_eq!(rpc_ok(&follow)["_meta"]["shikigami"]["runId"], run_id);
+        assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
+        let checkpoint = Checkpoint::load(
+            &host.harness.state.runs_dir(),
+            run_id.as_str().expect("run id"),
+        )
+        .unwrap();
+        assert!(
+            checkpoint
+                .messages
+                .iter()
+                .any(|m| m.role == "tool" && !m.content.contains("cancelled")),
+            "{:?}",
+            checkpoint.messages
+        );
+        assert!(
+            checkpoint
+                .messages
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("use a different name")),
+            "{:?}",
+            checkpoint.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_without_a_run_fails_closed() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let reply = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"go"}],
+                        "_meta": { "shikigami": { "steer": true } }
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        let bad = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"go"}],
+                        "_meta": { "shikigami": { "steer": "yes" } }
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad["error"]["code"], -32602, "{bad}");
     }
 
     #[tokio::test]

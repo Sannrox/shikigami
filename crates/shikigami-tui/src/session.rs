@@ -124,6 +124,8 @@ pub(crate) struct Shared {
     pub(crate) busy: bool,
     /// One follow-up to send after the in-flight prompt finishes.
     pub(crate) queued: Option<QueuedPrompt>,
+    /// Cancel the in-flight request and send this as the next prompt.
+    pub(crate) steering: Option<QueuedPrompt>,
     pub(crate) input: String,
     pub(crate) cursor: usize,
     pub(crate) history: Vec<String>,
@@ -213,6 +215,7 @@ impl Shared {
             status: "ready".into(),
             busy: false,
             queued: None,
+            steering: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -400,17 +403,23 @@ impl Shared {
 
     /// Store or replace the one-slot follow-up from the current draft.
     pub(crate) fn queue_follow_up(&mut self) {
+        if let Some(queued) = self.take_draft_prompt() {
+            self.queued = Some(queued);
+        }
+    }
+
+    fn take_draft_prompt(&mut self) -> Option<QueuedPrompt> {
         let text = self.take_input();
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return;
+            return None;
         }
         let parts = prompt_parts(trimmed, std::mem::take(&mut self.pending_parts));
-        self.queued = Some(QueuedPrompt {
+        Some(QueuedPrompt {
             display: prompt_display(trimmed, &parts),
             send: trimmed.to_string(),
             parts,
-        });
+        })
     }
 
     pub(crate) fn drop_queue(&mut self) {
@@ -915,6 +924,18 @@ impl TuiSession {
         parts: Vec<Value>,
         load_skill: Option<String>,
     ) -> Result<(), String> {
+        self.spawn_prompt_parts(display, send, parts, load_skill, false)
+            .await
+    }
+
+    async fn spawn_prompt_parts(
+        &self,
+        display: String,
+        send: String,
+        parts: Vec<Value>,
+        load_skill: Option<String>,
+        steer: bool,
+    ) -> Result<(), String> {
         {
             let mut shared = self.lock_shared();
             if shared.busy {
@@ -943,6 +964,9 @@ impl TuiSession {
         });
         if let Some(skill) = load_skill {
             params["_meta"]["shikigami"]["loadSkill"] = json!(skill);
+        }
+        if steer {
+            params["_meta"]["shikigami"]["steer"] = json!(true);
         }
         let msg = json!({
             "jsonrpc": "2.0",
@@ -977,17 +1001,29 @@ impl TuiSession {
         resp
     }
 
-    /// Send the queued follow-up after `wait_prompt` unless that turn was cancelled.
+    /// Send a steered prompt, or the after-turn queue once `wait_prompt` returns.
     pub(crate) async fn drain_queued_prompt(&self, last: Option<&Value>) -> Result<(), String> {
-        let queued = {
+        let (steering, queued) = {
             let mut shared = self.lock_shared();
-            if prompt_cancelled(last) {
+            let steering = shared.steering.take();
+            let queued = if prompt_cancelled(last) {
                 shared.drop_queue();
                 None
             } else {
                 shared.queued.take()
-            }
+            };
+            (steering, queued)
         };
+        if let Some(QueuedPrompt {
+            display,
+            send,
+            parts,
+        }) = steering
+        {
+            return self
+                .spawn_prompt_parts(display, send, parts, None, true)
+                .await;
+        }
         match queued {
             Some(QueuedPrompt {
                 display,
@@ -998,7 +1034,27 @@ impl TuiSession {
         }
     }
 
+    /// Cancel the in-flight model request and continue with the draft (or queue).
+    pub(crate) fn steer(&self) {
+        {
+            let mut shared = self.lock_shared();
+            if !shared.busy || shared.permission.is_some() || shared.show_plan {
+                return;
+            }
+            let Some(payload) = shared.take_draft_prompt().or_else(|| shared.queued.take()) else {
+                return;
+            };
+            shared.steering = Some(payload);
+            shared.dirty = true;
+        }
+        self.signal_cancel(false);
+    }
+
     pub(crate) fn cancel(&self) {
+        self.signal_cancel(true);
+    }
+
+    fn signal_cancel(&self, drop_steering: bool) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({
             "jsonrpc": "2.0",
@@ -1013,6 +1069,9 @@ impl TuiSession {
         });
         let mut shared = self.lock_shared();
         shared.drop_queue();
+        if drop_steering {
+            shared.steering = None;
+        }
         if let Some(pending) = shared.clear_permission() {
             let _ = pending.tx.send(json!({
                 "outcome": { "outcome": "cancelled" }
