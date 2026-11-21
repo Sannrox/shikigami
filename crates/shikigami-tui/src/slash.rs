@@ -1,4 +1,4 @@
-//! Slash commands, `/resume`, `/attach`, and `/copy`.
+//! Slash commands, `/resume`, `/attach`, `/paste`, and `/copy`.
 
 use std::io::{self, Write, stdout};
 use std::sync::Arc;
@@ -7,6 +7,9 @@ use serde_json::{Value, json};
 
 use shikigami::acp::SessionSummary;
 
+use crate::clipboard::{
+    ClipboardPayload, MAX_ATTACH_BYTES, clipboard_refuse_line, image_filename, read_clipboard,
+};
 use crate::look::{Action, KeyMap};
 use crate::mention;
 use crate::protocol::apply_load_result;
@@ -76,16 +79,11 @@ impl TuiSession {
         };
         match acp_part_for_path(&path) {
             Ok(part) => {
-                let label = part_label(&part).unwrap_or_else(|| "attachment".into());
-                shared.pending_parts.push(part);
-                shared.transcript.push(TranscriptLine::System(format!(
-                    "attached {} ({label})",
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("file")
-                )));
-                shared.status = "ready".into();
-                shared.dirty = true;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file");
+                stage_named_part(&mut shared, part, name);
             }
             Err(err) => {
                 shared.transcript.push(TranscriptLine::System(err));
@@ -94,6 +92,48 @@ impl TuiSession {
             }
         }
         KeyResult::Continue
+    }
+
+    /// `/paste`: clipboard image stages like `/attach`; clipboard text inserts.
+    pub(crate) fn paste_clipboard(&self) -> KeyResult {
+        if self.lock_shared().permission.is_some() {
+            self.lock_shared().note_input();
+            return KeyResult::Continue;
+        }
+        let payload = {
+            let source = self.clipboard.lock().unwrap_or_else(|e| e.into_inner());
+            read_clipboard(&source)
+        };
+        self.apply_clipboard(payload);
+        KeyResult::Continue
+    }
+
+    pub(crate) fn apply_clipboard(&self, payload: ClipboardPayload) {
+        match payload {
+            ClipboardPayload::Image(bytes) => match acp_image_part(&bytes) {
+                Ok((part, mime)) => {
+                    let mut shared = self.lock_shared();
+                    stage_named_part(&mut shared, part, image_filename(mime));
+                }
+                Err(err) => {
+                    let mut shared = self.lock_shared();
+                    shared.transcript.push(TranscriptLine::System(err));
+                    shared.status = "error".into();
+                    shared.dirty = true;
+                }
+            },
+            ClipboardPayload::Text(text) => {
+                self.lock_shared().insert_str(&text);
+            }
+            other => {
+                let line = clipboard_refuse_line(&other)
+                    .unwrap_or("clipboard is not an image; use /attach for a file");
+                let mut shared = self.lock_shared();
+                shared.transcript.push(TranscriptLine::System(line.into()));
+                shared.status = "error".into();
+                shared.dirty = true;
+            }
+        }
     }
 
     pub(crate) fn copy_last_assistant(&self) {
@@ -351,6 +391,7 @@ impl TuiSession {
                 KeyResult::Continue
             }
             "attach" => self.stage_attach(args),
+            "paste" => self.paste_clipboard(),
             "compact" => KeyResult::Compact,
             "plan" => KeyResult::Plan,
             "exit" | "quit" => KeyResult::Quit,
@@ -629,6 +670,7 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("quit", "quit"),
     ("new", "start a new session"),
     ("plan", "plan write-jail for this session"),
+    ("paste", "clipboard image or text"),
     ("run", "show the run id for runs and export"),
     ("usage", "token use per turn"),
     ("model", "list or switch models"),
@@ -646,7 +688,7 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /paste  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Interrupt)
     )
 }
@@ -827,11 +869,30 @@ pub(crate) fn acp_part_for_path(path: &std::path::Path) -> Result<Value, String>
         _ => return Err(format!("unsupported attach type `{ext}`")),
     };
     // ADR 0006 part bound; check metadata before allocating the payload.
-    const MAX_ATTACH_BYTES: u64 = 8 * 1024 * 1024;
     if metadata.len() > MAX_ATTACH_BYTES {
         return Err("attach exceeds 8MiB".into());
     }
     let bytes = std::fs::read(path).map_err(|error| format!("attach failed  {error}"))?;
+    acp_part_from_bytes(kind, mime, &bytes, Some(path))
+}
+
+/// Clipboard image bytes: same ACP image part `/attach` builds, 8MiB bound.
+pub(crate) fn acp_image_part(bytes: &[u8]) -> Result<(Value, &'static str), String> {
+    if bytes.len() as u64 > MAX_ATTACH_BYTES {
+        return Err("clipboard exceeds 8MiB; use /attach for a file".into());
+    }
+    let Some(mime) = crate::clipboard::image_mime(bytes) else {
+        return Err("clipboard is not an image; use /attach for a file".into());
+    };
+    Ok((acp_part_from_bytes("image", mime, bytes, None)?, mime))
+}
+
+fn acp_part_from_bytes(
+    kind: &str,
+    mime: &str,
+    bytes: &[u8],
+    path: Option<&std::path::Path>,
+) -> Result<Value, String> {
     if bytes.len() as u64 > MAX_ATTACH_BYTES {
         return Err("attach exceeds 8MiB".into());
     }
@@ -839,17 +900,27 @@ pub(crate) fn acp_part_for_path(path: &std::path::Path) -> Result<Value, String>
         "resource" => Ok(json!({
             "type": "resource",
             "resource": {
-                "uri": path.display().to_string(),
+                "uri": path.map(|path| path.display().to_string()).unwrap_or_default(),
                 "mimeType": mime,
-                "blob": base64_encode(&bytes)
+                "blob": base64_encode(bytes)
             }
         })),
         _ => Ok(json!({
             "type": kind,
             "mimeType": mime,
-            "data": base64_encode(&bytes)
+            "data": base64_encode(bytes)
         })),
     }
+}
+
+pub(crate) fn stage_named_part(shared: &mut Shared, part: Value, name: &str) {
+    let label = part_label(&part).unwrap_or_else(|| "attachment".into());
+    shared.pending_parts.push(part);
+    shared
+        .transcript
+        .push(TranscriptLine::System(format!("attached {name} ({label})")));
+    shared.status = "ready".into();
+    shared.dirty = true;
 }
 
 pub(crate) fn base64_encode(input: &[u8]) -> String {

@@ -1,5 +1,6 @@
 use super::support::*;
-use crate::input::handle_key;
+use crate::clipboard::{ClipboardPayload, ClipboardSource};
+use crate::input::{handle_event, handle_key};
 use crate::protocol::apply_prompt_result;
 use crate::render::status_line;
 use crate::session::*;
@@ -7,7 +8,7 @@ use crate::slash::*;
 
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use shikigami::acp::{AcpClient, AcpHost};
 use shikigami::config::{
@@ -658,6 +659,7 @@ async fn slash_help_writes_system_block_and_stays_idle() {
     assert!(text.contains("/run"), "{text}");
     assert!(text.contains("/copy"), "{text}");
     assert!(text.contains("/attach"), "{text}");
+    assert!(text.contains("/paste"), "{text}");
     assert!(text.contains("/exit"), "{text}");
     assert!(text.contains("/quit"), "{text}");
     assert!(
@@ -765,6 +767,186 @@ async fn slash_attach_rejects_oversize_file_before_staging() {
         system.iter().any(|text| text.contains("8MiB")),
         "{system:?}"
     );
+}
+
+const PASTE_PNG: &[u8] = b"\x89PNG\r\n\x1a\n UNIQUE-TUI-702-IMAGE";
+
+fn pin_clipboard(session: &TuiSession, payload: ClipboardPayload) {
+    *session.clipboard.lock().unwrap_or_else(|e| e.into_inner()) = ClipboardSource::Fixed(payload);
+}
+
+fn workspace_has_bytes(cwd: &std::path::Path, needle: &[u8]) -> bool {
+    std::fs::read_dir(cwd)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .any(|entry| {
+            std::fs::read(entry.path())
+                .ok()
+                .is_some_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+        })
+}
+
+#[tokio::test]
+async fn paste_png_payload_stages_image_part() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    assert!(
+        session
+            .slash_catalog()
+            .iter()
+            .any(|cmd| cmd.name == "paste")
+    );
+    pin_clipboard(&session, ClipboardPayload::Image(PASTE_PNG.to_vec()));
+    type_text(&session, "/paste");
+    assert!(matches!(
+        handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        KeyResult::Continue
+    ));
+    let staged = session.lock_shared().pending_parts.clone();
+    assert_eq!(staged.len(), 1, "{staged:?}");
+    assert_eq!(staged[0]["type"], "image");
+    assert_eq!(staged[0]["mimeType"], "image/png");
+    assert!(
+        last_system(&session).contains("attached clipboard.png"),
+        "{}",
+        last_system(&session)
+    );
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    assert!(rows.iter().any(|row| row.contains("attached")), "{rows:#?}");
+    type_text(&session, "inspect");
+    match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+        KeyResult::Prompt {
+            display,
+            send,
+            parts,
+            load_skill,
+        } => {
+            assert_eq!(send, "inspect");
+            assert!(load_skill.is_none());
+            assert!(display.contains("image/png"), "{display}");
+            assert!(!display.contains("UNIQUE-TUI-702-IMAGE"), "{display}");
+            assert_eq!(parts[0]["type"], "text");
+            assert_eq!(parts[1]["type"], "image");
+            session
+                .spawn_prompt_with(display, send, parts, load_skill)
+                .await
+                .unwrap();
+            let stop = session.wait_prompt().await;
+            assert_eq!(
+                stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+                Some(&json!("end_turn"))
+            );
+        }
+        other => panic!("expected prompt, got {other:?}"),
+    }
+    assert!(
+        !workspace_has_bytes(&cwd, PASTE_PNG),
+        "attachment bytes copied into the workspace"
+    );
+}
+
+#[tokio::test]
+async fn paste_oversize_or_plain_text_does_not_stage() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"unused"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+
+    let mut huge = b"\x89PNG\r\n\x1a\n".to_vec();
+    huge.resize(8 * 1024 * 1024 + 1, 0);
+    session.apply_clipboard(ClipboardPayload::Image(huge));
+    assert!(
+        session.lock_shared().pending_parts.is_empty(),
+        "{:?}",
+        session.lock_shared().pending_parts
+    );
+    assert!(
+        last_system(&session).contains("8MiB") && last_system(&session).contains("/attach"),
+        "{}",
+        last_system(&session)
+    );
+
+    session.apply_clipboard(ClipboardPayload::Text("hello from clipboard".into()));
+    assert!(
+        session.lock_shared().pending_parts.is_empty(),
+        "{:?}",
+        session.lock_shared().pending_parts
+    );
+    assert_eq!(session.lock_shared().input, "hello from clipboard");
+
+    session.lock_shared().input.clear();
+    session.apply_clipboard(ClipboardPayload::Empty);
+    assert!(session.lock_shared().pending_parts.is_empty());
+    assert!(
+        last_system(&session).contains("/attach"),
+        "{}",
+        last_system(&session)
+    );
+}
+
+#[tokio::test]
+async fn bracketed_paste_of_image_path_stages_like_attach() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join("shot.png"), PASTE_PNG).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    handle_event(&session, Event::Paste("shot.png".into()));
+    let staged = session.lock_shared().pending_parts.clone();
+    assert_eq!(staged.len(), 1, "{staged:?}");
+    assert_eq!(staged[0]["type"], "image");
+    assert!(last_system(&session).contains("attached shot.png"));
+    assert!(session.lock_shared().input.is_empty());
+
+    handle_event(&session, Event::Paste("plain note".into()));
+    assert_eq!(session.lock_shared().input, "plain note");
+    assert_eq!(session.lock_shared().pending_parts.len(), 1);
+}
+
+#[tokio::test]
+async fn text_session_image_paste_fails_closed() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"first"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("hello".into()).await.unwrap();
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+
+    type_text(&session, "inspect");
+    session.apply_clipboard(ClipboardPayload::Image(PASTE_PNG.to_vec()));
+    assert_eq!(session.lock_shared().input, "inspect", "draft stays");
+    assert_eq!(session.lock_shared().pending_parts.len(), 1);
+
+    match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+        KeyResult::Prompt {
+            display,
+            send,
+            parts,
+            load_skill,
+        } => {
+            assert_eq!(send, "inspect");
+            assert_eq!(parts[1]["type"], "image");
+            session
+                .spawn_prompt_with(display, send, parts, load_skill)
+                .await
+                .unwrap();
+            let _ = session.wait_prompt().await;
+            let err = last_system(&session);
+            assert!(
+                err.contains("attachments") || err.contains("new session"),
+                "{err}"
+            );
+        }
+        other => panic!("expected prompt, got {other:?}"),
+    }
 }
 
 #[tokio::test]

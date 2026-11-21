@@ -3,6 +3,7 @@
 //! Evolving surface, same rank as `shikigami acp`. Not freeze-core.
 //! See [ADR 0014](../../../docs/decisions/0014-usable-guest-hosts.md).
 
+mod clipboard;
 mod look;
 mod mention;
 mod statusline;

@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use shikigami::acp::{AcpHost, SessionSummary};
 use shikigami::identity::{PRODUCT, VERSION};
 
+use crate::clipboard::ClipboardSource;
 use crate::look::Look;
 use crate::mention;
 use crate::protocol::{apply_load_result, apply_prompt_result, prompt_cancelled};
@@ -151,7 +152,7 @@ pub(crate) struct Shared {
     pub(crate) resume: Option<Vec<SessionSummary>>,
     /// Last OSC 52 clipboard payload written by `/copy` or Ctrl+Y.
     pub(crate) last_osc52: Option<String>,
-    /// Staged ACP prompt parts from `/attach` (bytes stay in the prompt, not the workspace).
+    /// Staged ACP prompt parts from `/attach` or `/paste` (bytes stay in the prompt, not the workspace).
     pub(crate) pending_parts: Vec<Value>,
     /// The session's run as the host last reported it; `/run` shows it.
     pub(crate) run_id: Option<String>,
@@ -721,6 +722,8 @@ pub(crate) struct TuiSession {
     pub(crate) next_id: AtomicU64,
     pub(crate) prompt: Mutex<Option<JoinHandle<Option<Value>>>>,
     pub(crate) osc_write: Mutex<OscWrite>,
+    /// OS clipboard, or a pinned payload in tests.
+    pub(crate) clipboard: Mutex<ClipboardSource>,
     /// Model name for the footer; empty hides it.
     pub(crate) model: String,
     /// The configured model id; a session on another one (`/model`) shows
@@ -759,6 +762,7 @@ impl TuiSession {
             next_id: AtomicU64::new(1),
             prompt: Mutex::new(None),
             osc_write: Mutex::new(osc_write_noop),
+            clipboard: Mutex::new(ClipboardSource::Os),
             model: String::new(),
             default_model_id,
             look: Look::default(),
