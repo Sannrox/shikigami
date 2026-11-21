@@ -886,6 +886,126 @@ async fn tool_rows_show_outcome_and_selected_expand() {
 }
 
 #[tokio::test]
+async fn mouse_drag_selects_visible_rows_for_copy() {
+    let dir = tempdir().unwrap();
+    let session = session_with_assistant(&dir, "alpha-select-line").await;
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    let y1 = tool_row_y(&rows, "you  hi");
+    let y2 = tool_row_y(&rows, "alpha-select-line");
+    assert!(y2 > y1, "{rows:?}");
+    assert!(matches!(
+        handle_event(&session, click(2, y1)),
+        KeyResult::Continue
+    ));
+    assert!(matches!(
+        handle_event(&session, drag(2, y2)),
+        KeyResult::Continue
+    ));
+    assert!(matches!(
+        handle_event(&session, release(2, y2)),
+        KeyResult::Continue
+    ));
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::render::draw(frame, &session))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    assert!(row_is_reversed(buf, y1), "start row should highlight");
+    assert!(row_is_reversed(buf, y2), "end row should highlight");
+    run_copy(&session);
+    let payload = session
+        .lock_shared()
+        .last_osc52
+        .clone()
+        .expect("selection payload");
+    assert!(
+        payload.contains("you  hi") && payload.contains("alpha-select-line"),
+        "{payload}"
+    );
+    assert_eq!(session.lock_shared().status, "copied");
+    let narrow = drawn_rows(&session, 40, 12);
+    assert_screen_rules(&narrow, 40);
+    session.lock_shared().last_osc52 = None;
+    let _ = drawn_rows(&session, 80, 24);
+    assert!(matches!(
+        handle_key(&session, ctrl_y()),
+        KeyResult::Continue
+    ));
+    assert_eq!(
+        session.lock_shared().last_osc52.as_deref(),
+        Some(payload.as_str())
+    );
+}
+
+#[tokio::test]
+async fn shift_click_extends_selection_for_copy() {
+    let dir = tempdir().unwrap();
+    let session = session_with_assistant(&dir, "shift-select-line").await;
+    let rows = drawn_rows(&session, 80, 24);
+    let y1 = tool_row_y(&rows, "you  hi");
+    let y2 = tool_row_y(&rows, "shift-select-line");
+    assert!(matches!(
+        handle_event(&session, click(2, y1)),
+        KeyResult::Continue
+    ));
+    assert!(matches!(
+        handle_event(&session, shift_click(2, y2)),
+        KeyResult::Continue
+    ));
+    run_copy(&session);
+    let payload = session
+        .lock_shared()
+        .last_osc52
+        .clone()
+        .expect("extended selection");
+    assert!(
+        payload.contains("you  hi") && payload.contains("shift-select-line"),
+        "{payload}"
+    );
+}
+
+#[tokio::test]
+async fn wheel_and_esc_clear_selection_copy_falls_back() {
+    let dir = tempdir().unwrap();
+    let session = session_with_assistant(&dir, "fallback-assistant").await;
+    let rows = drawn_rows(&session, 80, 24);
+    let y = tool_row_y(&rows, "you  hi");
+    assert!(matches!(
+        handle_event(&session, click(2, y)),
+        KeyResult::Continue
+    ));
+    assert!(session.lock_shared().text_selection.is_some());
+    session.lock_shared().transcript_h = 10;
+    let back = session.lock_shared().scroll_back;
+    assert!(matches!(
+        handle_event(&session, wheel(MouseEventKind::ScrollUp, 2, y)),
+        KeyResult::Continue
+    ));
+    assert!(session.lock_shared().text_selection.is_none());
+    assert!(session.lock_shared().scroll_back > back);
+
+    let rows = drawn_rows(&session, 80, 24);
+    let y = tool_row_y(&rows, "you  hi");
+    assert!(matches!(
+        handle_event(&session, click(2, y)),
+        KeyResult::Continue
+    ));
+    assert!(matches!(
+        handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        KeyResult::Continue
+    ));
+    assert!(session.lock_shared().text_selection.is_none());
+    run_copy(&session);
+    assert_eq!(
+        session.lock_shared().last_osc52.as_deref(),
+        Some("fallback-assistant")
+    );
+    assert_eq!(session.lock_shared().status, "copied");
+}
+
+#[tokio::test]
 async fn asking_still_pages_transcript() {
     let dir = tempdir().unwrap();
     let cwd = dir.path().join("project");

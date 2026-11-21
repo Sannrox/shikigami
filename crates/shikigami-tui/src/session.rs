@@ -177,6 +177,27 @@ pub(crate) struct Shared {
     pub(crate) selected_tool: Option<String>,
     /// Last drawn transcript pane; mouse clicks hit-test against it.
     pub(crate) transcript_area: Rect,
+    /// Inclusive visible-row range in `transcript_area`, set by click-drag.
+    pub(crate) text_selection: Option<TextSelection>,
+    /// Last drawn transcript pane rows, one string per visible row.
+    pub(crate) visible_rows: Vec<String>,
+}
+
+/// Click-drag range of visible transcript rows (`start`/`end` are view-relative).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TextSelection {
+    pub(crate) start: u16,
+    pub(crate) end: u16,
+}
+
+impl TextSelection {
+    pub(crate) fn range(self) -> (u16, u16) {
+        if self.start <= self.end {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
 }
 
 impl Shared {
@@ -221,6 +242,8 @@ impl Shared {
             overlay_h: 0,
             selected_tool: None,
             transcript_area: Rect::default(),
+            text_selection: None,
+            visible_rows: Vec::new(),
         }
     }
 
@@ -474,12 +497,36 @@ impl Shared {
     }
 
     pub(crate) fn scroll_transcript(&mut self, rows: u16, up: bool) {
+        self.clear_text_selection();
         self.scroll_back = if up {
             self.scroll_back.saturating_add(rows)
         } else {
             self.scroll_back.saturating_sub(rows)
         };
         self.dirty = true;
+    }
+
+    pub(crate) fn clear_text_selection(&mut self) -> bool {
+        if self.text_selection.take().is_some() {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Selected visible rows, if that range has any text.
+    pub(crate) fn selected_visible_text(&self) -> Option<String> {
+        let sel = self.text_selection?;
+        if self.visible_rows.is_empty() {
+            return None;
+        }
+        let last = self.visible_rows.len().saturating_sub(1) as u16;
+        let (lo, hi) = sel.range();
+        let lo = lo.min(last) as usize;
+        let hi = hi.min(last) as usize;
+        let text = self.visible_rows[lo..=hi].join("\n");
+        if text.is_empty() { None } else { Some(text) }
     }
 
     pub(crate) fn page_transcript_up(&mut self) {
