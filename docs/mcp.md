@@ -77,11 +77,13 @@ Attach MCP stdio servers so their tools join the run-loop registry as
 ```toml
 [[tools.mcp_servers]]
 name = "demo"
-command = "mock"          # offline mock: registers mcp.demo.echo
+command = "mock"          # offline mock: registers mcp.demo.echo and mcp.demo.wide
 args = []
 ```
 
 The TUI `/mcp` command (ACP `session/mcp`) lists attached servers for the current session and can disable one until the host exits. The overlay is not persisted; `--continue` attaches from settings again. The MCP gateway cannot be disabled from the TUI.
+
+Set `tools.mcp_lazy_schemas = true` to keep attached MCP schemas out of the model tool list until the run calls `load_mcp_tool` with `{"name":"mcp.<server>.<tool>"}`. The system prompt lists each attached name with a one-line description (200-character cap). After a load, later turns of that run include the full schema and calls work as today. A call before load fails and names `load_mcp_tool`. Names in a preset's `mcp_tools` (or a site-agent allow-list) stay fully offered. Off by default: every attached schema is sent each turn. Attach still happens at run start and fails closed.
 
 For a real stdio server (the MCP stdio specification frames one JSON-RPC
 message per line, so set `framing = "newline"`; the default `content-length`

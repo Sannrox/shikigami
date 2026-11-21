@@ -13,7 +13,7 @@ use crate::config::{Config, ContextSettings, NetworkSettings, SandboxSettings, W
 use super::JobCredentialHandle;
 use super::bash::{BackgroundJobs, BgJob, MAX_BG_JOBS, MAX_BG_LOG_BYTES, create_job_log};
 use super::catalog::{
-    BASH_HELPER_TOOLS, builtin_is_authorized, load_skill_definition,
+    BASH_HELPER_TOOLS, builtin_is_authorized, load_mcp_tool_definition, load_skill_definition,
     model_visible_builtin_definitions,
 };
 use super::executor::{BashArgs, ToolExecutor};
@@ -51,6 +51,8 @@ pub struct ToolRegistry {
     bg_jobs: Arc<Mutex<BackgroundJobs>>,
     /// Set when the run lists lazy skill packs; enables `load_skill`.
     skills: Option<SkillLoader>,
+    /// Set when `[tools] mcp_lazy_schemas` is on; enables `load_mcp_tool`.
+    mcp_lazy: Option<McpLazy>,
 }
 
 /// `load_skill` state: the allow-list plus which packs this run has loaded.
@@ -64,6 +66,12 @@ struct LoadedSkills {
     seen: HashSet<String>,
     /// `skill <id> digest=<sha256>` lines not yet emitted as events.
     pending: Vec<String>,
+}
+
+/// Lazy MCP schemas: always-offered names plus tools this run has loaded.
+struct McpLazy {
+    always: HashSet<String>,
+    loaded: Mutex<HashSet<String>>,
 }
 
 impl ToolRegistry {
@@ -194,6 +202,7 @@ impl ToolRegistry {
             web_search: WebSearchSettings::default(),
             bg_jobs: Arc::new(Mutex::new(BackgroundJobs::new())),
             skills: None,
+            mcp_lazy: None,
         })
     }
 
@@ -271,6 +280,25 @@ impl ToolRegistry {
         });
     }
 
+    /// Offer `load_mcp_tool` and hide attached MCP schemas except `always`.
+    pub fn enable_mcp_lazy_schemas(&mut self, always: impl IntoIterator<Item = String>) {
+        self.mcp_lazy = Some(McpLazy {
+            always: always.into_iter().collect(),
+            loaded: Mutex::default(),
+        });
+    }
+
+    /// Attached MCP names and descriptions for the lazy catalog prompt.
+    pub fn attached_mcp_catalog(&self) -> Vec<(String, String)> {
+        self.external
+            .iter()
+            .map(|tool| {
+                let definition = tool.definition();
+                (definition.name, definition.description)
+            })
+            .collect()
+    }
+
     /// Drain attribution lines for packs loaded since the last call. Each
     /// pack yields one line, at its first load in this run.
     pub fn take_skill_loads(&self) -> Vec<String> {
@@ -305,6 +333,50 @@ impl ToolRegistry {
         Ok(format!("# Skill `{}`\n\n{}", pack.id, pack.body))
     }
 
+    fn load_mcp_tool(&self, args_json: &str) -> Result<String, ToolError> {
+        #[derive(Deserialize)]
+        struct LoadMcpToolArgs {
+            name: String,
+        }
+        let Some(lazy) = &self.mcp_lazy else {
+            return Err(ToolError::Disabled("load_mcp_tool".into()));
+        };
+        let args: LoadMcpToolArgs = parse("load_mcp_tool", args_json)?;
+        let definition = self
+            .external
+            .iter()
+            .map(|tool| tool.definition())
+            .find(|definition| definition.name == args.name)
+            .ok_or_else(|| {
+                ToolError::Message(format!(
+                    "load_mcp_tool: no attached MCP tool `{}`",
+                    args.name
+                ))
+            })?;
+        let mut loaded = lazy
+            .loaded
+            .lock()
+            .map_err(|_| ToolError::Message("mcp loads lock poisoned".into()))?;
+        loaded.insert(definition.name.clone());
+        Ok(format!(
+            "# MCP tool `{}`\n\n{}\n\n{}",
+            definition.name, definition.description, definition.schema
+        ))
+    }
+
+    fn mcp_schema_is_offered(&self, name: &str) -> bool {
+        let Some(lazy) = &self.mcp_lazy else {
+            return true;
+        };
+        if lazy.always.contains(name) {
+            return true;
+        }
+        lazy.loaded
+            .lock()
+            .map(|loaded| loaded.contains(name))
+            .unwrap_or(false)
+    }
+
     /// Model-facing tool definitions for enabled builtins + external tools.
     pub fn definitions(&self) -> Vec<ToolDef> {
         let mut defs = model_visible_builtin_definitions(&self.executor.enabled);
@@ -314,8 +386,14 @@ impl ToolRegistry {
         if self.skills.is_some() {
             defs.push(load_skill_definition());
         }
+        if self.mcp_lazy.is_some() {
+            defs.push(load_mcp_tool_definition());
+        }
         for t in &self.external {
-            defs.push(t.definition());
+            let definition = t.definition();
+            if self.mcp_schema_is_offered(&definition.name) {
+                defs.push(definition);
+            }
         }
         defs
     }
@@ -330,6 +408,7 @@ impl ToolRegistry {
         }
         builtin_is_authorized(&self.executor.enabled, name)
             || (name == "load_skill" && self.skills.is_some())
+            || (name == "load_mcp_tool" && self.mcp_lazy.is_some())
             || self.external.iter().any(|t| t.definition().name == name)
     }
 
@@ -344,7 +423,19 @@ impl ToolRegistry {
         name: &str,
         args_json: &str,
     ) -> Result<ExecutedTool, ToolError> {
+        if name == "load_mcp_tool" {
+            return Ok(ExecutedTool {
+                output: ToolOutput::Text(self.load_mcp_tool(args_json)?),
+                edit_outcome: None,
+                resource_uris: Vec::new(),
+            });
+        }
         if let Some(t) = self.external.iter().find(|t| t.definition().name == name) {
+            if !self.mcp_schema_is_offered(name) {
+                return Err(ToolError::Message(format!(
+                    "MCP tool `{name}` is not loaded; call `load_mcp_tool` first"
+                )));
+            }
             let (text, resource_uris) = t.call_linked(args_json).await?;
             return Ok(ExecutedTool {
                 output: ToolOutput::Text(text),

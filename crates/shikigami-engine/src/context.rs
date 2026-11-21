@@ -379,6 +379,20 @@ pub fn append_skill_catalog(prompt: &mut String, catalog: &[SkillSummary]) {
     }
 }
 
+/// Append attached MCP names and truncated descriptions for lazy schemas.
+pub fn append_mcp_tool_catalog(prompt: &mut String, catalog: &[(String, String)]) {
+    if catalog.is_empty() {
+        return;
+    }
+    prompt.push_str(
+        "\n\n# MCP tools\n\nCall `load_mcp_tool` with a name to offer that tool's schema before you call it.\n",
+    );
+    for (name, description) in catalog {
+        let description: String = description.chars().take(MAX_DESCRIPTION_CHARS).collect();
+        prompt.push_str(&format!("\n- `{name}`: {description}"));
+    }
+}
+
 fn load_truncated_text(path: &Path, max: usize, marker: &str) -> Option<(String, String, bool)> {
     let raw = std::fs::read(path).ok()?;
     let truncated = raw.len() > max;
@@ -818,5 +832,31 @@ mod tests {
             list_skill_ids(dir.path(), &ContextSettings::default()),
             vec!["demo"]
         );
+    }
+
+    #[test]
+    fn mcp_tool_catalog_lists_names_and_caps_descriptions() {
+        let long = "x".repeat(250);
+        let catalog = vec![
+            ("mcp.demo.echo".into(), "echo one line".into()),
+            ("mcp.demo.wide".into(), long),
+        ];
+        let mut prompt = String::from("BASE");
+        append_mcp_tool_catalog(&mut prompt, &catalog);
+        assert!(prompt.contains("`load_mcp_tool`"), "{prompt}");
+        assert!(
+            prompt.contains("- `mcp.demo.echo`: echo one line"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("- `mcp.demo.wide`: "), "{prompt}");
+        let wide_line = prompt
+            .lines()
+            .find(|line| line.contains("`mcp.demo.wide`"))
+            .unwrap();
+        let description = wide_line.rsplit(": ").next().unwrap();
+        assert_eq!(description.chars().count(), MAX_DESCRIPTION_CHARS);
+        let mut empty = String::from("BASE");
+        append_mcp_tool_catalog(&mut empty, &[]);
+        assert_eq!(empty, "BASE");
     }
 }

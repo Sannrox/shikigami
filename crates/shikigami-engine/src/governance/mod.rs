@@ -29,6 +29,9 @@ fn in_process_enabled_tools(config: &Config) -> Vec<String> {
     if enabled.iter().any(|tool| tool == "bash") {
         implicit.extend_from_slice(crate::tools::BASH_HELPER_TOOLS);
     }
+    if config.tools.mcp_lazy_schemas {
+        implicit.push("load_mcp_tool");
+    }
     for name in implicit {
         if !enabled.iter().any(|tool| tool == name) {
             enabled.push(name.into());

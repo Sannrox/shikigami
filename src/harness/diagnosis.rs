@@ -181,6 +181,12 @@ fn append_tool_authority(harness: &Harness, lines: &mut Vec<String>) {
     {
         visible.push("load_skill".into());
     }
+    if harness.config.tools.mcp_lazy_schemas
+        && (!harness.config.tools.mcp_servers.is_empty()
+            || harness.config.tools.mcp_gateway.is_some())
+    {
+        visible.push("load_mcp_tool".into());
+    }
     let implicit = visible
         .iter()
         .filter(|tool| !authority.effective_enabled.contains(tool))

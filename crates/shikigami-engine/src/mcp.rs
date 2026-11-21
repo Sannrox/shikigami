@@ -87,17 +87,9 @@ pub async fn attach_mcp_servers(
         if !lists_server(&server.name) {
             continue;
         }
-        // Special offline mock: command "mock" registers a fixed tool.
+        // Special offline mock: command "mock" registers echo and wide.
         if server.command == "mock" {
-            let name = format!("mcp.{}.echo", server.name);
-            if preset_tools.is_some_and(|names| !names.contains(&name)) {
-                continue;
-            }
-            registry.register_external(Arc::new(MockEchoTool {
-                name,
-                server: server.name.clone(),
-            }));
-            n += 1;
+            n += register_mock_tools(registry, &server.name, preset_tools);
             continue;
         }
         if server.is_http() {
@@ -151,19 +143,64 @@ pub async fn attach_mcp_servers(
     Ok(n)
 }
 
-struct MockEchoTool {
+fn register_mock_tools(
+    registry: &mut ToolRegistry,
+    server: &str,
+    preset_tools: Option<&[String]>,
+) -> usize {
+    let mut n = 0;
+    for kind in [MockKind::Echo, MockKind::Wide] {
+        let name = format!("mcp.{server}.{}", kind.tool_name());
+        if preset_tools.is_some_and(|names| !names.contains(&name)) {
+            continue;
+        }
+        registry.register_external(Arc::new(MockMcpTool {
+            name,
+            server: server.to_string(),
+            kind,
+        }));
+        n += 1;
+    }
+    n
+}
+
+#[derive(Clone, Copy)]
+enum MockKind {
+    Echo,
+    Wide,
+}
+
+impl MockKind {
+    fn tool_name(self) -> &'static str {
+        match self {
+            Self::Echo => "echo",
+            Self::Wide => "wide",
+        }
+    }
+}
+
+struct MockMcpTool {
     name: String,
     server: String,
+    kind: MockKind,
 }
 
 #[async_trait]
-impl ExternalTool for MockEchoTool {
+impl ExternalTool for MockMcpTool {
     fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: self.name.clone(),
-            description: format!("Mock MCP echo tool from server {}", self.server),
-            schema: r#"{"type":"object","properties":{"text":{"type":"string"},"link":{"type":"string"}},"required":["text"]}"#
-                .into(),
+        match self.kind {
+            MockKind::Echo => ToolDef {
+                name: self.name.clone(),
+                description: format!("Mock MCP echo tool from server {}", self.server),
+                schema: r#"{"type":"object","properties":{"text":{"type":"string"},"link":{"type":"string"}},"required":["text"]}"#
+                    .into(),
+            },
+            MockKind::Wide => ToolDef {
+                name: self.name.clone(),
+                description: format!("Mock MCP wide tool from server {}", self.server),
+                schema: r#"{"type":"object","properties":{"text":{"type":"string"},"extra":{"type":"string"},"pad":{"type":"string"}},"required":["text"]}"#
+                    .into(),
+            },
         }
     }
 
@@ -182,7 +219,11 @@ impl ExternalTool for MockEchoTool {
             .map(str::to_owned)
             .into_iter()
             .collect();
-        Ok((format!("echo:{text}"), links))
+        let prefix = match self.kind {
+            MockKind::Echo => "echo",
+            MockKind::Wide => "wide",
+        };
+        Ok((format!("{prefix}:{text}"), links))
     }
 }
 
@@ -856,9 +897,10 @@ done
         )
         .unwrap();
         let n = attach_mcp_servers(&mut reg, &config, None).await.unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
         let defs = reg.definitions();
         assert!(defs.iter().any(|d| d.name == "mcp.demo.echo"));
+        assert!(defs.iter().any(|d| d.name == "mcp.demo.wide"));
         let out = reg
             .execute("mcp.demo.echo", r#"{"text":"hi"}"#)
             .await

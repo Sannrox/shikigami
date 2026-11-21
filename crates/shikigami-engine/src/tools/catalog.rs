@@ -58,7 +58,7 @@ pub fn plan_jail_allows(name: &str, args_json: &str) -> bool {
     match name {
         "read_file" | "glob" | "grep" | "web_fetch" | "web_search" | "todo_write" | "handoff"
         | "report" | "escalate" | "bash_job_status" | "bash_job_logs" | "child_status"
-        | "load_skill" => true,
+        | "load_skill" | "load_mcp_tool" => true,
         "child_run" => child_run_plan_jail_ok(args_json),
         "write_file" | "edit" | "multi_edit" => json_path_is_plan(args_json, "path"),
         "apply_patch" => apply_patch_is_plan(args_json),
@@ -427,6 +427,16 @@ pub(crate) fn load_skill_definition() -> ToolDef {
     )
 }
 
+/// `load_mcp_tool` is not in [`builtin_catalog`]: the registry offers it only
+/// when `[tools] mcp_lazy_schemas` is on, not through `tools.enabled`.
+pub(crate) fn load_mcp_tool_definition() -> ToolDef {
+    def(
+        "load_mcp_tool",
+        "Load an attached MCP tool's schema by name from the MCP tools list in the system prompt.",
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
+    )
+}
+
 /// Whether this tool must be the only call in a model batch.
 pub fn must_be_exclusive_batch(name: &str) -> bool {
     matches!(name, "report" | "escalate")
@@ -449,7 +459,9 @@ pub fn is_parallel_safe_tool(name: &str) -> bool {
 /// Conservative replay classification. Unknown and external tools are denied.
 pub(crate) fn replay_tool_authority(name: &str) -> ReplayToolAuthority {
     match name {
-        "read_file" | "glob" | "grep" | "load_skill" => ReplayToolAuthority::Observation,
+        "read_file" | "glob" | "grep" | "load_skill" | "load_mcp_tool" => {
+            ReplayToolAuthority::Observation
+        }
         "report" => ReplayToolAuthority::Terminal,
         _ => ReplayToolAuthority::Denied,
     }
@@ -524,6 +536,10 @@ mod tests {
         ));
         assert!(!plan_jail_allows("delete_file", r#"{"path":"ok.txt"}"#));
         assert!(plan_jail_allows("read_file", r#"{"path":"ok.txt"}"#));
+        assert!(plan_jail_allows(
+            "load_mcp_tool",
+            r#"{"name":"mcp.demo.echo"}"#
+        ));
         assert!(plan_jail_allows(
             "apply_patch",
             &format!(r#"{{"patches":[{{"path":"{PLAN_JAIL_PATH}","hunks":[]}}]}}"#)
@@ -888,7 +904,9 @@ mod tests {
     fn replay_authority_allows_only_observation_and_terminal_tools() {
         for definition in builtin_catalog() {
             let expected = match definition.name.as_str() {
-                "read_file" | "glob" | "grep" | "load_skill" => ReplayToolAuthority::Observation,
+                "read_file" | "glob" | "grep" | "load_skill" | "load_mcp_tool" => {
+                    ReplayToolAuthority::Observation
+                }
                 "report" => ReplayToolAuthority::Terminal,
                 _ => ReplayToolAuthority::Denied,
             };
