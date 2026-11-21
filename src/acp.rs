@@ -3581,8 +3581,8 @@ impl ParsedPrompt {
 }
 
 /// Host-advertised slash names. TUI-only chrome (`help`, `copy`, `attach`,
-/// `exit`, `quit`, `new`, `resume`, `run`, `usage`, plus `context` / `plan` /
-/// `mcp`) stays off the wire.
+/// `paste`, `exit`, `quit`, `new`, `resume`, `run`, `usage`, plus `context` /
+/// `plan` / `mcp`) stays off the wire.
 const ADVERTISED_SLASH: &[(&str, &str, Option<&str>)] = &[
     ("compact", "shrink conversation history", None),
     ("model", "list or switch models", Some("model id")),
@@ -3591,8 +3591,8 @@ const ADVERTISED_SLASH: &[(&str, &str, Option<&str>)] = &[
 /// TUI built-in names: a skill pack with one of these ids is advertised as
 /// `skill:<id>`, matching TUI `BUILTIN_COMMANDS`.
 const SLASH_COLLISION_NAMES: &[&str] = &[
-    "help", "compact", "context", "copy", "attach", "exit", "quit", "new", "plan", "run", "usage",
-    "model", "mcp", "resume",
+    "help", "compact", "context", "copy", "attach", "exit", "quit", "new", "plan", "paste", "run",
+    "usage", "model", "mcp", "resume",
 ];
 
 const SKILL_SLASH_PREFIX: &str = "skill:";
@@ -7308,7 +7308,7 @@ mod tests {
         assert!(names.contains(&"model".into()), "{names:?}");
         assert!(names.contains(&"demo".into()), "{names:?}");
         for tui_only in [
-            "help", "copy", "attach", "exit", "quit", "new", "resume", "run", "usage",
+            "help", "copy", "attach", "paste", "exit", "quit", "new", "resume", "run", "usage",
         ] {
             assert!(!names.iter().any(|name| name == tui_only), "{names:?}");
         }

@@ -8,11 +8,12 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
+use crate::clipboard::pasted_image_path;
 use crate::look::Action;
 use crate::session::{KeyResult, SESSION_IN_USE, TranscriptLine, TuiSession};
 use crate::slash::{
-    SlashLine, SlashOutcome, mention_visible, prompt_display, prompt_parts, slash_name_args,
-    slash_visible, slash_waits_for_turn,
+    SlashLine, SlashOutcome, acp_part_for_path, mention_visible, prompt_display, prompt_parts,
+    slash_name_args, slash_visible, slash_waits_for_turn, stage_named_part,
 };
 
 pub(crate) fn handle_event(session: &TuiSession, ev: Event) -> KeyResult {
@@ -416,6 +417,18 @@ pub(crate) fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
 pub(crate) fn handle_paste(session: &TuiSession, text: &str) {
     if session.lock_shared().permission.is_some() {
         session.lock_shared().note_input();
+        return;
+    }
+    if let Some(path) = pasted_image_path(text, &session.cwd)
+        && let Ok(part) = acp_part_for_path(&path)
+        && part.get("type").and_then(|value| value.as_str()) == Some("image")
+    {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let mut shared = session.lock_shared();
+        stage_named_part(&mut shared, part, name);
         return;
     }
     session.lock_shared().insert_str(text);
