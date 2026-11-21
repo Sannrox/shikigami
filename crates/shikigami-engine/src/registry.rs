@@ -898,6 +898,7 @@ fn event_name(event: &HarnessEvent) -> &'static str {
         HarnessEvent::TodosUpdated { .. } => "todos_updated",
         HarnessEvent::HandoffBrief { .. } => "handoff_brief",
         HarnessEvent::SessionMode { .. } => "session_mode",
+        HarnessEvent::ContextAttached { .. } => "context_attached",
         HarnessEvent::VerificationFinished { .. } => "verification_finished",
         HarnessEvent::AskGrant { .. } => "ask_grant",
     }
@@ -945,6 +946,13 @@ fn event_detail(event: &HarnessEvent) -> Option<String> {
             format!("task_chars={} files={}", task.chars().count(), files.len())
         }
         HarnessEvent::SessionMode { mode, model, .. } => format!("mode={mode} model={model}"),
+        HarnessEvent::ContextAttached { context } => format!(
+            "rules={} eager={} catalog={} nested={}",
+            context.rules.len(),
+            context.eager.len(),
+            context.catalog.len(),
+            context.nested
+        ),
         HarnessEvent::VerificationFinished {
             attempt,
             passed,

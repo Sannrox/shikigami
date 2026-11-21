@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::context::AttachedContext;
 
 /// Redacted metadata for an edit tool, attributed to the configured model alias.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +107,10 @@ pub enum HarnessEvent {
         effort: Option<String>,
         #[serde(default)]
         tools: Vec<String>,
+    },
+    /// Standing attachments composed into this run's system prompt (no bodies).
+    ContextAttached {
+        context: AttachedContext,
     },
     /// Assistant text of `turn` as the model produces it, in order. Only
     /// sinks that [`EventSink::wants_text_deltas`] receive it. It is never

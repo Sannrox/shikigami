@@ -146,6 +146,12 @@ The `session/prompt` and `session/load` results carry
 usually keeps the same run, but a rejected plan or a new run after a
 cancellation changes it, so read it from the latest result.
 
+They also carry `_meta.shikigami.context` once a prompt has composed the
+run's standing attachments: `{ "rules": [{ "filename", "bytes", "truncated"? }],
+"eager", "catalog", "nested", "model", "mode"? }`. No file bodies. A host
+restart reports it again after the next prompt. Clients that ignore `_meta`
+are unchanged.
+
 The `session/new` and `session/load` results carry `models`
 (experimental): `{"currentModelId": "...", "availableModels": [{"modelId":
 "...", "name": "..."}]}`. It is absent when the catalog cannot be read.

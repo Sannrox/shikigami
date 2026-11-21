@@ -114,6 +114,9 @@ struct LiveSession {
     /// Ungoverned mutating tool names allowed for the rest of this host session.
     /// In memory only; session/load and a new process start empty.
     ask_grants: HashSet<String>,
+    /// Standing attachments the live run composed (no file bodies). In memory;
+    /// a new process reports them after the next prompt.
+    context: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -451,6 +454,7 @@ impl AcpHost {
             disabled_mcp: HashSet::new(),
             watched_children: HashSet::new(),
             ask_grants: HashSet::new(),
+            context: None,
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -497,6 +501,7 @@ impl AcpHost {
                 disabled_mcp: live.disabled_mcp.clone(),
                 watched_children: live.watched_children.clone(),
                 ask_grants: HashSet::new(),
+                context: live.context.clone(),
             }
         } else {
             let persisted = self
@@ -518,6 +523,7 @@ impl AcpHost {
                 disabled_mcp: HashSet::new(),
                 watched_children: HashSet::new(),
                 ask_grants: HashSet::new(),
+                context: None,
             };
             self.sessions
                 .lock()
@@ -549,6 +555,9 @@ impl AcpHost {
                 }
                 watch_loaded_children(self, &harness, client, session_id, &run_id, &children).await;
             }
+        }
+        if let Some(context) = live.context {
+            result["_meta"]["shikigami"]["context"] = context;
         }
         Ok(result)
     }
@@ -942,6 +951,9 @@ impl AcpHost {
             let usage = after.saturating_sub(before);
             if usage.total() > 0 {
                 result["_meta"]["shikigami"]["usage"] = session_usage_json(usage);
+            }
+            if let Some(context) = self.session_context(&session_id).await {
+                result["_meta"]["shikigami"]["context"] = context;
             }
             Ok(result)
         }
@@ -1458,6 +1470,19 @@ impl AcpHost {
 
     async fn session_run_id(&self, session_id: &str) -> Option<String> {
         self.sessions.lock().await.get(session_id)?.run_id.clone()
+    }
+
+    async fn session_context(&self, session_id: &str) -> Option<Value> {
+        self.sessions.lock().await.get(session_id)?.context.clone()
+    }
+
+    async fn remember_context(&self, session_id: &str, updates: &[Value]) {
+        let Some(context) = updates.iter().rev().find_map(attached_context_json) else {
+            return;
+        };
+        if let Some(live) = self.sessions.lock().await.get_mut(session_id) {
+            live.context = Some(context);
+        }
     }
 
     async fn set_run_id(&self, session_id: &str, run_id: Option<String>) -> Result<(), String> {
@@ -2190,6 +2215,7 @@ async fn run_and_forward(
                 };
                 let (mut updates, event_run_id) =
                     drain_event_batch(session_id, Some(first), events, &mut streamed);
+                host.remember_context(session_id, &updates).await;
                 held.append(&mut updates);
                 if let Some(id) = event_run_id.clone() {
                     seen_run_id = Some(id.clone());
@@ -2230,6 +2256,7 @@ async fn run_and_forward(
         }
     };
     let (mut updates, event_run_id) = drain_updates(session_id, events, &mut streamed);
+    host.remember_context(session_id, &updates).await;
     held.append(&mut updates);
     if let Some(id) = event_run_id.clone() {
         seen_run_id = Some(id.clone());
@@ -2827,6 +2854,12 @@ fn consume_event(
                 "tools": tools
             }
         }),
+        HarnessEvent::ContextAttached { context } => json!({
+            "sessionId": session_id,
+            "update": {
+                "_meta": { "shikigami": { "context": context } }
+            }
+        }),
         _ => return,
     };
     updates.push(update);
@@ -2839,6 +2872,13 @@ const STREAMED_MARK: &str = "_shikigamiStreamed";
 
 fn is_delta(update: &Value) -> bool {
     update["update"][DELTA_MARK] == true
+}
+
+fn attached_context_json(value: &Value) -> Option<Value> {
+    value
+        .pointer("/update/_meta/shikigami/context")
+        .or_else(|| value.pointer("/_meta/shikigami/context"))
+        .cloned()
 }
 
 fn children_snapshot(harness: &Harness, parent_run_id: &str) -> Vec<Value> {
@@ -6446,6 +6486,55 @@ mod tests {
         let loaded = Checkpoint::load(&runs, &run_id).unwrap();
         assert_eq!(loaded.messages.len() as u64, after);
         assert!(loaded.messages[1].content.contains("compacted"));
+    }
+
+    #[tokio::test]
+    async fn session_prompt_meta_lists_attached_context() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join(".shikigami/skills/demo")).unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "prefer tests\n").unwrap();
+        std::fs::write(
+            cwd.join(".shikigami/skills/demo/SKILL.md"),
+            "---\ndescription: demo pack\n---\nbody\n",
+        )
+        .unwrap();
+        let host = scripted_host_with(dir.path(), r#"[{"content":"hello"}]"#, |config| {
+            config.context.skills = vec!["demo".into()];
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let context = &rpc_ok(&prompt)["_meta"]["shikigami"]["context"];
+        assert_eq!(context["rules"][0]["filename"], "AGENTS.md");
+        assert_eq!(context["rules"][0]["bytes"], "prefer tests\n".len() as u64);
+        assert!(context["eager"].as_array().is_none_or(|v| v.is_empty()));
+        assert_eq!(context["catalog"], json!(["demo"]));
+        assert_ne!(context["nested"], true);
+        assert!(
+            context.get("truncated").is_none(),
+            "bodies stay out of _meta: {context}"
+        );
+        let dumped = context.to_string();
+        assert!(!dumped.contains("prefer tests"), "{dumped}");
+        assert!(!dumped.contains("demo pack"), "{dumped}");
     }
 
     #[tokio::test]

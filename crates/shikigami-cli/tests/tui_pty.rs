@@ -619,6 +619,24 @@ fn token_use_shows_in_the_footer_and_usage() {
     assert!(tui.wait_exit().success());
 }
 
+/// #685: `/context` names the project rules file the run attached.
+#[test]
+fn context_names_attached_project_rules() {
+    let dir = temp_dir();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("AGENTS.md"), "prefer tests\n").unwrap();
+    let mut tui = start_tui(&dir, Some(r#"[{"content":"ok"}]"#));
+    let before = tui.output().len();
+    send(&tui, b"hi\r");
+    wait_turn_done(&mut tui, before);
+    send(&tui, b"/context\r");
+    tui.wait_for("the context block", |t| screen(t).contains("AGENTS.md"));
+    tui.wait_for("nested off", |t| screen(t).contains("nested  off"));
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
+
 /// #602: with no model configured the built-in demo answers, and launch says
 /// so before the first prompt; a configured model shows no such line.
 #[test]

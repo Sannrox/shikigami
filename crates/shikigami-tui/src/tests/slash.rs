@@ -73,6 +73,101 @@ async fn slash_run_names_the_session_run() {
     assert!(rows.iter().any(|row| row.contains(&run_id)), "{rows:#?}");
 }
 
+async fn prompt_once(session: &TuiSession, text: &str) {
+    session.spawn_prompt(text.into()).await.unwrap();
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+}
+
+fn run_context(session: &TuiSession) -> String {
+    session.lock_shared().transcript.clear();
+    type_text(session, "/context");
+    assert!(matches!(
+        handle_key(session, enter_key()),
+        KeyResult::Continue
+    ));
+    last_system(session)
+}
+
+/// #685: `/context` names the rules file and catalog skill the run attached.
+#[tokio::test]
+async fn slash_context_lists_attached_rules_and_catalog_skill() {
+    let dir = tempdir().unwrap();
+    let session = start_session_with(&dir, r#"[{"content":"ok"}]"#, |config| {
+        config.context.skills = vec!["demo".into()];
+    })
+    .await;
+    let project = dir.path().join("project");
+    std::fs::write(project.join("AGENTS.md"), "prefer tests\n").unwrap();
+    let skill = project.join(".shikigami/skills/demo");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\ndescription: demo pack\n---\nbody\n",
+    )
+    .unwrap();
+
+    prompt_once(&session, "hello").await;
+    let text = run_context(&session);
+    assert!(text.contains("AGENTS.md"), "{text}");
+    assert!(!text.contains("prefer tests"), "{text}");
+    assert!(text.contains("catalog: demo"), "{text}");
+    assert!(!text.contains("eager:"), "{text}");
+    assert!(text.contains("nested  off"), "{text}");
+    assert!(text.contains("compact  none"), "{text}");
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    let narrow = drawn_rows(&session, 40, 12);
+    assert_screen_rules(&narrow, 40);
+}
+
+/// #685: a run that loaded no rules file says so.
+#[tokio::test]
+async fn slash_context_says_no_project_rules_when_none_loaded() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    type_text(&session, "/context");
+    handle_key(&session, enter_key());
+    assert!(
+        last_system(&session).contains("No attached context yet"),
+        "{}",
+        last_system(&session)
+    );
+
+    prompt_once(&session, "hello").await;
+    let text = run_context(&session);
+    assert!(text.contains("no project rules"), "{text}");
+    assert!(text.contains("skills  none"), "{text}");
+    assert!(text.contains("compact  none"), "{text}");
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+}
+
+/// #685: `/context` reports compact after `/compact` shrinks history.
+#[tokio::test]
+async fn slash_context_reports_compact_after_compact() {
+    let dir = tempdir().unwrap();
+    let session = start_session_with(
+        &dir,
+        r#"[{"content":"a"},{"content":"b"},{"content":"c"},{"content":"d"}]"#,
+        |config| {
+            config.run.compact_keep_tail = 2;
+        },
+    )
+    .await;
+    for prompt in ["one", "two", "three", "four"] {
+        prompt_once(&session, prompt).await;
+    }
+    session.compact().await.unwrap();
+    let compacted = last_system(&session);
+    assert!(compacted.contains("compacted  "), "{compacted}");
+    let text = run_context(&session);
+    assert!(
+        text.contains("compact  ") && !text.contains("compact  none"),
+        "{text}"
+    );
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+}
+
 /// CJK, emoji and one unbroken long line wrap inside the screen.
 #[test]
 fn slash_window_scrolls_to_keep_selection_visible() {
@@ -340,7 +435,7 @@ async fn slash_enter_maps_compact_exit_new_and_unknown() {
             .iter()
             .map(|cmd| cmd.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["compact", "copy"]
+        vec!["compact", "context", "copy"]
     );
     assert!(matches!(
         handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -421,6 +516,7 @@ async fn slash_help_writes_system_block_and_stays_idle() {
     assert!(text.contains("Shift+Enter"), "{text}");
     assert!(text.contains("^c cancel/quit"), "{text}");
     assert!(text.contains("/compact"), "{text}");
+    assert!(text.contains("/context"), "{text}");
     assert!(text.contains("/new"), "{text}");
     assert!(text.contains("/resume"), "{text}");
     assert!(text.contains("/run"), "{text}");
@@ -809,7 +905,10 @@ async fn slash_builtin_abbreviation_wins_over_a_skill() {
     let dir = tempdir().unwrap();
     let session = session_with_skills(&dir, &["co"]).await;
     type_text(&session, "/co");
-    assert_eq!(slash_names(&session), vec!["compact", "copy", "co"]);
+    assert_eq!(
+        slash_names(&session),
+        vec!["compact", "context", "copy", "co"]
+    );
     assert!(matches!(
         handle_key(&session, enter_key()),
         KeyResult::Compact

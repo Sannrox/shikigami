@@ -108,6 +108,7 @@ fn permission_offers_session_allow(params: &Value) -> bool {
 pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
     let update = params.get("update").unwrap_or(params);
     let children = apply_children_meta(shared, update);
+    let context = apply_context_meta(shared, update);
     let kind = update
         .get("sessionUpdate")
         .and_then(|v| v.as_str())
@@ -242,7 +243,7 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
                 shared.dock_scroll = 0;
             }
         }
-        _ if children => {}
+        _ if children || context => {}
         _ => return,
     }
     shared.dirty = true;
@@ -262,9 +263,12 @@ pub(crate) fn chunk_text(update: &Value) -> Option<String> {
 pub(crate) fn apply_load_result(shared: &mut Shared, result: &Value) {
     shared.run_id = run_id_of(result);
     shared.models = SessionModels::of(result);
+    shared.context = None;
+    shared.last_compact = None;
     mark_unanswered_prompts(&mut shared.transcript);
     apply_interruption(shared, result);
     apply_children_meta(shared, result);
+    apply_context_meta(shared, result);
 }
 
 /// After a replay, a prompt followed by another prompt or by nothing failed or
@@ -342,6 +346,15 @@ pub(crate) fn tool_update_detail(update: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Standing attachments from `_meta.shikigami.context`.
+pub(crate) fn apply_context_meta(shared: &mut Shared, value: &Value) -> bool {
+    let Some(context) = value.pointer("/_meta/shikigami/context").cloned() else {
+        return false;
+    };
+    shared.context = Some(context);
+    true
+}
+
 /// Replace the nested-child list from `_meta.shikigami.children`.
 pub(crate) fn apply_children_meta(shared: &mut Shared, value: &Value) -> bool {
     let Some(children) = value
@@ -416,6 +429,7 @@ pub(crate) fn apply_prompt_result(shared: &mut Shared, resp: Option<&Value>) {
         let turn = turn_count(shared);
         shared.usage.record(turn, result);
         apply_children_meta(shared, result);
+        apply_context_meta(shared, result);
     }
     if let Some(reason) = resp
         .and_then(|v| v.pointer("/result/stopReason"))
