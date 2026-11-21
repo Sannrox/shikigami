@@ -1793,4 +1793,118 @@ mod tests {
             "aa aa\n"
         );
     }
+
+    struct NamedExternal {
+        def: ToolDef,
+    }
+
+    #[async_trait::async_trait]
+    impl ExternalTool for NamedExternal {
+        fn definition(&self) -> ToolDef {
+            self.def.clone()
+        }
+        async fn call(&self, _args_json: &str) -> Result<String, ToolError> {
+            Ok(format!("called:{}", self.def.name))
+        }
+    }
+
+    fn mcp_def(name: &str, description: &str) -> ToolDef {
+        ToolDef {
+            name: name.into(),
+            description: description.into(),
+            schema: r#"{"type":"object","properties":{"text":{"type":"string"}}}"#.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_mcp_schemas_hide_until_load() {
+        let dir = tempdir().unwrap();
+        let mut tools = registry(&dir, &["read_file"]);
+        tools.register_external(Arc::new(NamedExternal {
+            def: mcp_def("mcp.demo.echo", "echo one line"),
+        }));
+        tools.register_external(Arc::new(NamedExternal {
+            def: mcp_def("mcp.demo.wide", "wide one line"),
+        }));
+        tools.enable_mcp_lazy_schemas(Vec::<String>::new());
+        let names: Vec<_> = tools.definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"load_mcp_tool".into()), "{names:?}");
+        assert!(!names.contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(!names.contains(&"mcp.demo.wide".into()), "{names:?}");
+        assert!(tools.is_enabled("mcp.demo.echo"));
+        assert!(tools.is_enabled("mcp.demo.wide"));
+
+        let err = tools
+            .execute("mcp.demo.wide", r#"{"text":"nope"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("load_mcp_tool"), "{err}");
+
+        let loaded = tools
+            .execute("load_mcp_tool", r#"{"name":"mcp.demo.echo"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(body) = loaded else {
+            panic!("text");
+        };
+        assert!(body.contains("mcp.demo.echo"), "{body}");
+        assert!(body.contains(r#""type":"object""#), "{body}");
+
+        let names: Vec<_> = tools.definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(!names.contains(&"mcp.demo.wide".into()), "{names:?}");
+        let out = tools
+            .execute("mcp.demo.echo", r#"{"text":"hi"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert_eq!(text, "called:mcp.demo.echo");
+    }
+
+    #[tokio::test]
+    async fn lazy_mcp_always_offered_skips_load() {
+        let dir = tempdir().unwrap();
+        let mut tools = registry(&dir, &["read_file"]);
+        tools.register_external(Arc::new(NamedExternal {
+            def: mcp_def("mcp.demo.echo", "echo one line"),
+        }));
+        tools.register_external(Arc::new(NamedExternal {
+            def: mcp_def("mcp.demo.wide", "wide one line"),
+        }));
+        tools.enable_mcp_lazy_schemas(["mcp.demo.echo".into()]);
+        let names: Vec<_> = tools.definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(!names.contains(&"mcp.demo.wide".into()), "{names:?}");
+        let out = tools
+            .execute("mcp.demo.echo", r#"{"text":"hi"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert_eq!(text, "called:mcp.demo.echo");
+    }
+
+    #[tokio::test]
+    async fn mcp_schemas_are_offered_when_lazy_is_off() {
+        let dir = tempdir().unwrap();
+        let mut tools = registry(&dir, &["read_file"]);
+        tools.register_external(Arc::new(NamedExternal {
+            def: mcp_def("mcp.demo.echo", "echo one line"),
+        }));
+        tools.register_external(Arc::new(NamedExternal {
+            def: mcp_def("mcp.demo.wide", "wide one line"),
+        }));
+        let names: Vec<_> = tools.definitions().into_iter().map(|d| d.name).collect();
+        assert!(!names.contains(&"load_mcp_tool".into()), "{names:?}");
+        assert!(names.contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(names.contains(&"mcp.demo.wide".into()), "{names:?}");
+        let err = tools
+            .execute("load_mcp_tool", r#"{"name":"mcp.demo.echo"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("load_mcp_tool"), "{err}");
+    }
 }

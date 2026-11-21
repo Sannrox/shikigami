@@ -298,6 +298,7 @@ Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`,
 | `enabled` | `[]` | Allow-list; with non-`custom` mode, **intersects** the mode set |
 | `bash_timeout_secs` | `60` | Default bash timeout (capped at 120s) |
 | `respect_ignore` | `true` | `glob`/`grep` honor built-in defaults + `.gitignore` / `.shikigamiignore` |
+| `mcp_lazy_schemas` | `false` | When true, attached MCP tools stay out of the model tool list until `load_mcp_tool` offers them. The system prompt lists each attached `mcp.<server>.<tool>` with a one-line description (200-char cap). Names in a preset's `mcp_tools` (or a site-agent allow-list) stay fully offered. Off by default: every attached schema is sent each turn. |
 
 | Mode | Effective tools (before optional `enabled` intersect) |
 | --- | --- |
@@ -391,7 +392,7 @@ Each entry attaches one MCP server whose tools join the registry as
 | Field | Default | Description |
 | --- | --- | --- |
 | `name` | (required) | Registry prefix |
-| `command` / `args` | `""` / `[]` | Stdio server executable; `mock` registers an offline echo tool |
+| `command` / `args` | `""` / `[]` | Stdio server executable; `mock` registers offline `echo` and `wide` tools |
 | `transport` | `stdio` | `stdio` or `http` |
 | `url` / `token_env` | unset | HTTP endpoint and optional bearer-token env name |
 | `framing` | `content-length` | Stdio request framing: `content-length` (LSP-style headers) or `newline` (MCP stdio specification; `sekai-mcp`, reference servers). Responses are accepted in either framing. |

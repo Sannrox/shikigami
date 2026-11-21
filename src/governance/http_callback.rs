@@ -54,6 +54,7 @@ fn tool_skips_host_authz(name: &str) -> bool {
             | "glob"
             | "grep"
             | "load_skill"
+            | "load_mcp_tool"
             | "report"
             | "escalate"
             | "todo_write"
@@ -196,7 +197,9 @@ impl HttpCallbackGovernance {
     /// Match ToolRegistry expansion: bash enables background helpers; MCP tools
     /// are external registrations authorized by the host callback.
     fn tool_is_authorized(&self, name: &str) -> bool {
-        builtin_is_authorized(&self.enabled_tools, name) || name.starts_with("mcp.")
+        builtin_is_authorized(&self.enabled_tools, name)
+            || name.starts_with("mcp.")
+            || name == "load_mcp_tool"
     }
 }
 

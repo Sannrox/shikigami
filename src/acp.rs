@@ -324,7 +324,10 @@ fn mcp_inventory(config: &crate::config::Config) -> Vec<(String, Vec<String>)> {
     }
     for server in &config.tools.mcp_servers {
         let tools = if server.command == "mock" {
-            vec![format!("mcp.{}.echo", server.name)]
+            vec![
+                format!("mcp.{}.echo", server.name),
+                format!("mcp.{}.wide", server.name),
+            ]
         } else {
             Vec::new()
         };
@@ -5684,7 +5687,7 @@ mod tests {
             rpc_ok(&listed)["servers"],
             json!([
                 {"name": MCP_GATEWAY_NAME, "tools": [], "disabled": false},
-                {"name": "demo", "tools": ["mcp.demo.echo"], "disabled": false}
+                {"name": "demo", "tools": ["mcp.demo.echo", "mcp.demo.wide"], "disabled": false}
             ]),
             "{listed}"
         );
@@ -5798,7 +5801,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             rpc_ok(&listed)["servers"],
-            json!([{"name": "demo", "tools": ["mcp.demo.echo"], "disabled": false}]),
+            json!([{"name": "demo", "tools": ["mcp.demo.echo", "mcp.demo.wide"], "disabled": false}]),
             "{listed}"
         );
         client.updates.lock().await.clear();

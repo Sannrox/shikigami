@@ -336,6 +336,11 @@ pub struct ToolsSettings {
     /// is not registered until both this url and `tools.enabled` name it.
     #[serde(default, skip_serializing_if = "WebSearchSettings::is_unset")]
     pub web_search: WebSearchSettings,
+    /// When true, attached MCP tools stay out of the model tool list until
+    /// `load_mcp_tool` offers them. Names in a preset's `mcp_tools` (or a
+    /// site-agent allow-list) stay fully offered. Off by default.
+    #[serde(default)]
+    pub mcp_lazy_schemas: bool,
 }
 
 /// `[tools.web_search]`: operator HTTP search endpoint for the opt-in builtin.
@@ -560,6 +565,7 @@ impl Default for ToolsSettings {
             mcp_servers: Vec::new(),
             mcp_gateway: None,
             web_search: WebSearchSettings::default(),
+            mcp_lazy_schemas: false,
         }
     }
 }
@@ -2670,6 +2676,13 @@ read_only_paths = ["{}"]
         }
         .authority_summary();
         assert!(workspace_exec.effective_enabled.contains(&"bash".into()));
+    }
+
+    #[test]
+    fn mcp_lazy_schemas_defaults_off_and_parses() {
+        assert!(!ToolsSettings::default().mcp_lazy_schemas);
+        let parsed: ToolsSettings = toml::from_str("mcp_lazy_schemas = true").unwrap();
+        assert!(parsed.mcp_lazy_schemas);
     }
 
     #[test]

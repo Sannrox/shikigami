@@ -5,6 +5,7 @@
 //! tool attachment, governed admission, initial durability, recovery replay,
 //! and pre-run hooks. The Run transaction receives only ready durable state.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -17,7 +18,7 @@ use crate::governance::{GovernanceError, RunHandle};
 use crate::hooks::{self, HookEvent};
 use crate::model::ChatMessage;
 use crate::replay::{ReplayCheckpoint, ReplayExecution};
-use crate::tools::{ToolDef, ToolRegistry};
+use crate::tools::ToolRegistry;
 use crate::workspace::{
     MaterializedWorkspace, SnapshotOutcome, SnapshotPlan, WorkspaceCleanup, WorkspaceSnapshots,
 };
@@ -30,7 +31,6 @@ pub(super) struct PreparedRun {
     pub(super) session: RunSession,
     pub(super) workspace: MaterializedWorkspace,
     pub(super) tools: Arc<ToolRegistry>,
-    pub(super) tool_defs: Vec<ToolDef>,
     pub(super) system_prompt: String,
     pub(super) prompt_id: String,
     pub(super) handle: RunHandle,
@@ -230,7 +230,7 @@ pub(super) async fn prepare(
         }
     }
     let lazy_skills = enabled.iter().any(|tool| tool == "load_skill");
-    let (prompt_id, system_prompt, lazy_skills) = compose_context(
+    let (prompt_id, mut system_prompt, lazy_skills) = compose_context(
         engine,
         &run_id,
         &workspace,
@@ -274,8 +274,26 @@ pub(super) async fn prepare(
                 )));
             }
         }
+        if engine.config.tools.mcp_lazy_schemas {
+            let mut always = HashSet::new();
+            if let Some(preset) = &engine.config.preset {
+                always.extend(preset.mcp_tools.iter().cloned());
+            }
+            if crate::config::is_site_agent_profile(&engine.config.profile.name) {
+                always.extend(
+                    enabled
+                        .iter()
+                        .filter(|name| name.starts_with("mcp."))
+                        .cloned(),
+                );
+            }
+            tools.enable_mcp_lazy_schemas(always);
+            crate::context::append_mcp_tool_catalog(
+                &mut system_prompt,
+                &tools.attached_mcp_catalog(),
+            );
+        }
     }
-    let tool_defs = tools.definitions();
     let tools = Arc::new(tools);
     if let Some(replay) = replay {
         crate::replay::validate_runtime_bindings(
@@ -283,7 +301,7 @@ pub(super) async fn prepare(
             replay,
             &task,
             &system_prompt,
-            &tool_defs,
+            &tools.definitions(),
             &workspace.path,
         )
         .map_err(|error| RunError::Message(error.to_string()))?;
@@ -463,7 +481,6 @@ pub(super) async fn prepare(
         session,
         workspace,
         tools,
-        tool_defs,
         system_prompt,
         prompt_id,
         handle,
@@ -1030,7 +1047,7 @@ mod tests {
 
         assert_eq!(prepared.session.run_id, run_id);
         assert_eq!(prepared.session.messages[0].content, "task");
-        assert!(!prepared.tool_defs.is_empty());
+        assert!(!prepared.tools.definitions().is_empty());
         assert!(!prepared.system_prompt.is_empty());
         let checkpoint = Checkpoint::load(&state.runs_dir(), run_id).unwrap();
         assert_eq!(checkpoint.run_id, run_id);

@@ -456,7 +456,7 @@ async fn mcp_command_lists_disables_and_refuses_the_gateway() {
     };
     session.mcp(&action, name.as_deref()).await;
     assert!(
-        last_system(&session).contains("demo  mcp.demo.echo  disabled"),
+        last_system(&session).contains("demo  mcp.demo.echo mcp.demo.wide  disabled"),
         "{}",
         last_system(&session)
     );

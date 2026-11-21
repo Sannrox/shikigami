@@ -12,7 +12,7 @@ use crate::content::{
 use crate::events::HarnessEvent;
 use crate::governance::RunHandle;
 use crate::model::{ChatMessage, ModelError, ModelTurn, TokenUsage};
-use crate::tools::{ToolDef, ToolRegistry};
+use crate::tools::ToolRegistry;
 
 use super::session::RunSession;
 use super::supervision::check_bounds;
@@ -184,7 +184,6 @@ pub(super) struct DurableModelTurn<'a> {
     timeout: Option<Duration>,
     handle: &'a RunHandle,
     system_prompt: &'a str,
-    tool_defs: &'a [ToolDef],
     tools: Arc<ToolRegistry>,
     staged_turn: Option<ModelTurn>,
     staged_content_turn: Option<ContentModelTurnV1>,
@@ -210,7 +209,6 @@ impl<'a> DurableModelTurn<'a> {
         timeout: Option<Duration>,
         handle: &'a RunHandle,
         system_prompt: &'a str,
-        tool_defs: &'a [ToolDef],
         tools: Arc<ToolRegistry>,
         _governance_checkpoint: Option<&GovernanceCheckpoint>,
         session: &RunSession,
@@ -237,7 +235,6 @@ impl<'a> DurableModelTurn<'a> {
             timeout,
             handle,
             system_prompt,
-            tool_defs,
             tools,
             staged_turn,
             staged_content_turn,
@@ -415,13 +412,14 @@ impl<'a> DurableModelTurn<'a> {
             let (messages, capabilities, resolver) = session
                 .content_context()
                 .ok_or_else(|| RunError::Message("content session is unavailable".into()))?;
+            let tool_defs = self.tools.definitions();
             let (planned, retries) = Outbound::scope(
                 session.spans.turn_outbound(),
                 crate::model::collect_retry_notes(crate::governance::plan_local_content_turn(
                     self.engine.model.as_ref(),
                     self.system_prompt,
                     &messages,
-                    self.tool_defs,
+                    &tool_defs,
                     &capabilities,
                     resolver.as_ref(),
                 )),
@@ -570,12 +568,13 @@ impl<'a> DurableModelTurn<'a> {
         session: &RunSession,
     ) -> Result<(Result<ModelTurn, ModelError>, Vec<String>), RunError> {
         // The model call of this turn carries the turn span.
+        let tool_defs = self.tools.definitions();
         let plan = Outbound::scope(
             session.spans.turn_outbound(),
             crate::model::collect_retry_notes(self.engine.model.next_turn(
                 self.system_prompt,
                 &session.messages,
-                self.tool_defs,
+                &tool_defs,
             )),
         );
         if self.engine.events.wants_text_deltas() {

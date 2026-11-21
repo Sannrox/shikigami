@@ -510,7 +510,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::checkpoint;
-    use crate::config::Config;
+    use crate::config::{AppliedPreset, Config, McpServerSettings, ToolsSettings};
     use crate::events;
     use crate::governance;
     use crate::model::{ModelTurn, ScriptedModel, ToolCall};
@@ -518,6 +518,7 @@ mod tests {
     use crate::tools;
     use crate::workspace;
     use std::process::Command;
+    use std::sync::Mutex;
     use tempfile::tempdir;
 
     #[test]
@@ -3145,6 +3146,231 @@ mod tests {
             "jailed full child must not attach parent MCP servers: {:?}",
             child_cp.messages
         );
+    }
+
+    fn with_demo_mcp(config: &mut Config) {
+        config
+            .tools
+            .mcp_servers
+            .push(McpServerSettings::stdio("demo", "mock", Vec::new()));
+        let mut enabled = ToolsSettings::default_coding_tools();
+        enabled.push("mcp.demo.echo".into());
+        enabled.push("mcp.demo.wide".into());
+        config.tools.enabled = enabled;
+    }
+
+    struct RecordingToolsModel {
+        inner: ScriptedModel,
+        systems: Mutex<Vec<String>>,
+        tool_names: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::model::ModelPort for RecordingToolsModel {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        async fn next_turn(
+            &self,
+            system: &str,
+            messages: &[crate::model::ChatMessage],
+            tools: &[crate::tools::ToolDef],
+        ) -> Result<ModelTurn, crate::model::ModelError> {
+            self.systems.lock().unwrap().push(system.to_string());
+            self.tool_names.lock().unwrap().push(
+                tools
+                    .iter()
+                    .map(|definition| definition.name.clone())
+                    .collect(),
+            );
+            self.inner.next_turn(system, messages, tools).await
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_mcp_schemas_load_on_demand_in_a_scripted_run() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        with_demo_mcp(&mut config);
+        config.tools.mcp_lazy_schemas = true;
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.wide",
+                        "args_json": "{\"text\":\"nope\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "load_mcp_tool",
+                        "args_json": "{\"name\":\"mcp.demo.echo\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.echo",
+                        "args_json": "{\"text\":\"hi\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "loaded",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let inner = ScriptedModel::from_config(&config).unwrap();
+        let model = Arc::new(RecordingToolsModel {
+            inner,
+            systems: Mutex::new(Vec::new()),
+            tool_names: Mutex::new(Vec::new()),
+        });
+        let mut eng = engine(&dir, config);
+        let model_for_assert = Arc::clone(&model);
+        eng.model = model as Arc<dyn crate::model::ModelPort>;
+        let mut req = RunRequest::new("lazy mcp");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert!(done.success, "{}", done.summary);
+        let checkpoint = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(
+            checkpoint.messages.iter().any(|message| {
+                message.content.contains("mcp.demo.wide")
+                    && message.content.contains("load_mcp_tool")
+            }),
+            "{:?}",
+            checkpoint.messages
+        );
+        assert!(
+            checkpoint
+                .messages
+                .iter()
+                .any(|message| message.content.contains("echo:hi")),
+            "{:?}",
+            checkpoint.messages
+        );
+        let systems = model_for_assert.systems.lock().unwrap();
+        assert!(
+            systems[0].contains("`mcp.demo.echo`") && systems[0].contains("`mcp.demo.wide`"),
+            "{}",
+            systems[0]
+        );
+        let names = model_for_assert.tool_names.lock().unwrap();
+        assert!(names[0].contains(&"load_mcp_tool".into()), "{names:?}");
+        assert!(!names[0].contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(!names[0].contains(&"mcp.demo.wide".into()), "{names:?}");
+        assert!(names[2].contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(!names[2].contains(&"mcp.demo.wide".into()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn eager_mcp_schemas_offer_both_tools_on_turn_one() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        with_demo_mcp(&mut config);
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.wide",
+                        "args_json": "{\"text\":\"hi\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "eager",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let inner = ScriptedModel::from_config(&config).unwrap();
+        let model = Arc::new(RecordingToolsModel {
+            inner,
+            systems: Mutex::new(Vec::new()),
+            tool_names: Mutex::new(Vec::new()),
+        });
+        let mut eng = engine(&dir, config);
+        let model_for_assert = Arc::clone(&model);
+        eng.model = model as Arc<dyn crate::model::ModelPort>;
+        let mut req = RunRequest::new("eager mcp");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert!(done.success, "{}", done.summary);
+        let names = model_for_assert.tool_names.lock().unwrap();
+        assert!(!names[0].contains(&"load_mcp_tool".into()), "{names:?}");
+        assert!(names[0].contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(names[0].contains(&"mcp.demo.wide".into()), "{names:?}");
+        let checkpoint = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        assert!(
+            checkpoint
+                .messages
+                .iter()
+                .any(|message| message.content.contains("wide:hi")),
+            "{:?}",
+            checkpoint.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn preset_mcp_tool_stays_offered_without_load() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        with_demo_mcp(&mut config);
+        config.tools.mcp_lazy_schemas = true;
+        config.preset = Some(AppliedPreset {
+            name: "narrow".into(),
+            id: "test".into(),
+            prompt: String::new(),
+            mcp_tools: vec!["mcp.demo.echo".into()],
+        });
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.echo",
+                        "args_json": "{\"text\":\"hi\"}"
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "preset",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let inner = ScriptedModel::from_config(&config).unwrap();
+        let model = Arc::new(RecordingToolsModel {
+            inner,
+            systems: Mutex::new(Vec::new()),
+            tool_names: Mutex::new(Vec::new()),
+        });
+        let mut eng = engine(&dir, config);
+        let model_for_assert = Arc::clone(&model);
+        eng.model = model as Arc<dyn crate::model::ModelPort>;
+        let mut req = RunRequest::new("preset mcp");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert!(done.success, "{}", done.summary);
+        let names = model_for_assert.tool_names.lock().unwrap();
+        assert!(names[0].contains(&"load_mcp_tool".into()), "{names:?}");
+        assert!(names[0].contains(&"mcp.demo.echo".into()), "{names:?}");
+        assert!(!names[0].contains(&"mcp.demo.wide".into()), "{names:?}");
     }
 
     #[tokio::test]
