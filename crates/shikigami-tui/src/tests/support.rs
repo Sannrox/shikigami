@@ -482,7 +482,7 @@ pub(super) fn set_last_active(session: &TuiSession, mtime: SystemTime) {
         .unwrap();
 }
 
-pub(super) fn open_resume(session: &TuiSession) {
+pub(super) async fn open_resume(session: &TuiSession) {
     type_text(session, "/resume");
     assert!(
         session
@@ -490,10 +490,10 @@ pub(super) fn open_resume(session: &TuiSession) {
             .iter()
             .any(|cmd| cmd.name == "resume")
     );
-    assert!(matches!(
-        handle_key(session, enter_key()),
-        KeyResult::Continue
-    ));
+    match handle_key(session, enter_key()) {
+        KeyResult::ResumePicker => session.open_resume_picker().await,
+        other => panic!("expected resume picker, got {other:?}"),
+    }
 }
 
 /// Two sessions with runs in `project` (older answered "hello", newer

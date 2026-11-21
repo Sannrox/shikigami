@@ -23,6 +23,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `initialize` | client → agent | Speak protocol version 1. Accept client `protocolVersion` 1 or 2 (number or decimal string). Always reply `protocolVersion: 1` with the capability payload below. Other versions are `-32602 unsupported protocolVersion`. Success is not an agreement to speak v2. |
 | `session/new` | client → agent | Create a session id over a workspace `cwd`. Optional `mode` (`low` / `medium` / `high` / `ultra`) freezes the session ([ADR 0016](decisions/0016-session-mode.md)). Omit the field for today's spawn. With no `[model]` configured, the built-in demo's workspace is `demo-workspace` under the state root instead of `cwd`, so the demo never writes into the project. |
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed** |
+| `session/list` | client → agent | Enumerate persisted sessions this host knows. Optional `cwd` (absolute, same as `session/new`) filters to that workspace; omit it for every session in this state root that has a run. Most recently active first. Same filter as resume: omit content sessions whose payloads are gone. One page: omit `nextCursor`; a cursor the host did not issue is `-32602`. Items: `sessionId`, `cwd`, `updatedAt` (last checkpoint write), `title` from the first user prompt, `_meta.shikigami.inUse` / `prompts`. List does not take the exclusive lock. |
 | `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error. A `mode` different from the frozen session mode is `-32602`. Attachment parts (`image`, `audio`, `resource`) pass through under ADR 0006 bounds when the adapter can read them; unsupported types fail closed. Omit attachments for today's text host. |
 | `session/set_model` | client → agent | Experimental: the session model selection in the protocol is not stable yet, and only the TUI depends on it. Later prompts of the session use `modelId`; a running prompt keeps its model. The id must be one the session offers: ungoverned, `[model].model` plus `[model].alternates`; governed, the plane catalog. A plane that does not answer refuses with `-32000` and `data.shikigami.kind = "modelCatalog"`, and the model stays (fail closed); an id not offered is `-32602`. The choice is kept with the session across a host restart. Result `{}`. |
 | `session/mcp` | client → agent | Experimental: TUI `/mcp`. `action` is `list` (default), `disable`, or `enable`. List returns `{servers:[{name, tools, disabled}]}` from settings plus this process's overlay. Disable/enable require `name`, refuse `gateway` and a name that is not attached (`-32602`), and return `{}`. Disable hides that server on later `session/prompt` of this host; it is not written to settings or the session record. A restarted host follows settings again. |
@@ -39,6 +40,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
   "protocolVersion": 1,
   "agentCapabilities": {
     "loadSession": true,
+    "sessionCapabilities": { "list": {} },
     "promptCapabilities": {
       "image": true,
       "audio": true,
@@ -130,7 +132,8 @@ an exclusive OS lock on `acp-sessions/<session>.lock` and hold it until the
 host exits; a crashed host releases it at once. A `session/load` of a session
 another process holds fails with `-32000` and
 `data.shikigami.kind = "sessionInUse"`; start a new session instead. The lock
-file is empty and older hosts ignore it.
+file is empty and older hosts ignore it. `session/list` reports
+`_meta.shikigami.inUse` and does not take or break the lock.
 
 A `session/prompt` that fails because the model failed returns `-32603` with
 `data.shikigami.kind = "model"`; other failures carry no `data`. When the

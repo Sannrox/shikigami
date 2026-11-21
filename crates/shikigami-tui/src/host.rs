@@ -379,6 +379,7 @@ pub(crate) async fn run_terminal(
             KeyResult::SetModel(id) => session.set_model(&id).await,
             KeyResult::Mcp { action, name } => session.mcp(&action, name.as_deref()).await,
             KeyResult::Plan => session.plan().await,
+            KeyResult::ResumePicker => session.open_resume_picker().await,
             KeyResult::Continue => {}
         }
     }
