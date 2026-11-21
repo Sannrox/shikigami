@@ -1029,6 +1029,11 @@ pub struct ContextSettings {
     /// Extra system-prompt section applied when a session mode mapping sets `prompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_prompt: Option<String>,
+    /// Percent of `run.context_window_tokens` standing context may occupy
+    /// (1–100). Consulted only when the window is set. This gate counts 4
+    /// characters as one token (a conservative over-estimate).
+    #[serde(default = "default_standing_max_percent")]
+    pub standing_max_percent: u32,
 }
 
 /// Fixed ACP session-mode names (ADR 0016).
@@ -1083,6 +1088,10 @@ fn default_max_rules_bytes() -> usize {
     32 * 1024
 }
 
+fn default_standing_max_percent() -> u32 {
+    25
+}
+
 impl Default for ContextSettings {
     fn default() -> Self {
         Self {
@@ -1094,6 +1103,7 @@ impl Default for ContextSettings {
             eager_skills: Vec::new(),
             max_skill_bytes: default_max_rules_bytes(),
             session_prompt: None,
+            standing_max_percent: default_standing_max_percent(),
         }
     }
 }
@@ -1472,6 +1482,11 @@ impl Config {
         if !(1..=100).contains(&self.run.compact_at_usage_percent) {
             return Err(ConfigError::Invalid(
                 "run.compact_at_usage_percent must be between 1 and 100".into(),
+            ));
+        }
+        if !(1..=100).contains(&self.context.standing_max_percent) {
+            return Err(ConfigError::Invalid(
+                "context.standing_max_percent must be between 1 and 100".into(),
             ));
         }
         match self.model.adapter.as_str() {
@@ -2468,6 +2483,36 @@ compact_at_usage_percent = 75
         config.validate().unwrap();
         assert_eq!(config.run.context_window_tokens, Some(1000));
         assert_eq!(config.run.compact_at_usage_percent, 75);
+    }
+
+    #[test]
+    fn standing_max_percent_defaults_and_refuses_out_of_range() {
+        let config = Config::default();
+        assert_eq!(config.context.standing_max_percent, 25);
+        config.validate().unwrap();
+
+        let mut percent = Config::default();
+        percent.context.standing_max_percent = 0;
+        let err = percent.validate().unwrap_err();
+        assert!(err.to_string().contains("standing_max_percent"), "{err}");
+        percent.context.standing_max_percent = 101;
+        let err = percent.validate().unwrap_err();
+        assert!(err.to_string().contains("standing_max_percent"), "{err}");
+
+        let dir = tempdir().unwrap();
+        let path = Config::path_in(dir.path());
+        fs::write(
+            &path,
+            r#"
+version = 1
+[context]
+standing_max_percent = 10
+"#,
+        )
+        .unwrap();
+        let (config, _) = Config::resolve(&path).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.context.standing_max_percent, 10);
     }
 
     #[test]

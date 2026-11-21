@@ -308,7 +308,7 @@ async fn run() -> anyhow::Result<()> {
             };
             let doctor_ok = report.ok && model_catalog_error.is_none();
             if json {
-                let mut output = report.to_json_value();
+                let mut output = harness.doctor_json(&report);
                 if let Some(models) = available_models {
                     output["available_models"] = serde_json::to_value(models)?;
                     output["default_model"] = serde_json::json!(harness.effective_model_name());

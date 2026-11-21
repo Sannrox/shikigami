@@ -438,8 +438,9 @@ credential, and HTTP `[[tools.mcp_servers]]` entries fail validation. See
 | `skills` | `[]` | Skill directory names (`<root>/<id>/SKILL.md`). The prompt lists them; the agent loads a body with `load_skill`. Without that tool, bodies go into the system prompt. |
 | `eager_skills` | `[]` | Ids from `skills` whose bodies go into the system prompt at run start |
 | `max_skill_bytes` | `32768` | Per-skill size cap |
+| `standing_max_percent` | `25` | When `run.context_window_tokens` is set, refuse to start a run whose standing prompt (project rules + eager skill bodies + lazy catalog lines + JSON of offered tool schemas) exceeds this percent of the window. This gate counts 4 characters ≈ 1 token (a conservative over-estimate). Unset window: `doctor` still reports bytes and does not refuse. `doctor` always reports the breakdown; overflow is `standing.over` on doctor and a start error on `run`. |
 
-Rules and skills are **untrusted text** given to the model (not executed). Ancestor rules files are prompt-only: tools stay jailed to the workspace. Disable rules with `load_project_rules = false`. Leave `skills` empty for no packs.
+Rules and skills are **untrusted text** given to the model (not executed). Ancestor rules files are prompt-only: tools stay jailed to the workspace. Disable rules with `load_project_rules = false`. Leave `skills` empty for no packs. `doctor` prints the standing breakdown (rules, eager skills, tool-schema bytes, sum). Operators who set a small window and large eager skills see a start error that names what overflowed.
 
 ### `[run]`
 
@@ -716,6 +717,8 @@ operator override; it is applied before adapter construction.
 | `events_detail` | string | Events health detail |
 | `model` | string | Model adapter id |
 | `lines` | string[] | Human diagnostic lines |
+| `standing_bytes` | number | Additive. Sum of standing prompt bytes (rules + eager skills + catalog lines + offered tool-schema JSON). |
+| `standing` | object | Additive. Breakdown: `bytes`, `rules` (`filename`, `bytes`), `eager` (`id`, `bytes`), `catalog` (`id`, `bytes`), `tool_schema_bytes`. MCP schemas are resolved at run start, so doctor counts builtins (plus `load_skill` / `load_mcp_tool` when those tools would be offered). |
 
 Breaking renames/removals of these fields require a `schema_version` bump and
 a breaking release note. Additional fields may appear without a bump.

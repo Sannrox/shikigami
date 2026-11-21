@@ -1116,7 +1116,7 @@ async fn compaction_without_a_summary_drops_and_says_why() {
 
 #[tokio::test]
 async fn fill_compact_runs_when_last_turn_input_tokens_cross_the_window() {
-    let (ok, events) = usage_compact_run(Some(800), Some(1000), None, true).await;
+    let (ok, events) = usage_compact_run(Some(6400), Some(8000), None, true).await;
     assert!(ok, "run failed: {events:?}");
     assert!(
         compacted_history_event(&events),
@@ -1127,9 +1127,9 @@ async fn fill_compact_runs_when_last_turn_input_tokens_cross_the_window() {
 #[tokio::test]
 async fn fill_compact_skips_without_a_due_last_turn() {
     for (tokens, window, why) in [
-        (Some(100), Some(1000), "below the fill percent"),
+        (Some(100), Some(8000), "below the fill percent"),
         (Some(800), None, "without a window"),
-        (None, Some(1000), "from missing usage"),
+        (None, Some(8000), "from missing usage"),
     ] {
         let (ok, events) = usage_compact_run(tokens, window, None, false).await;
         assert!(ok, "{why}: run failed: {events:?}");
@@ -1142,7 +1142,7 @@ async fn fill_compact_skips_without_a_due_last_turn() {
 
 #[tokio::test]
 async fn count_compact_still_runs_when_fill_window_is_set_but_usage_is_low() {
-    let (ok, events) = usage_compact_run(Some(100), Some(1000), Some(4), true).await;
+    let (ok, events) = usage_compact_run(Some(100), Some(8000), Some(4), true).await;
     assert!(ok, "run failed: {events:?}");
     assert!(
         compacted_history_event(&events),
@@ -1512,4 +1512,66 @@ async fn report_data_reaches_the_result_and_run_record_and_non_objects_are_refus
         .load(&result.run_id)
         .unwrap();
     assert_eq!(record.data.map(serde_json::Value::Object), Some(expected));
+}
+
+fn standing_run_config(workspace: &Path, skill_body: &str, window: Option<u64>) -> Config {
+    let skill = workspace.join(".shikigami/skills/demo");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), skill_body).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(100)).unwrap();
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"tool_calls":[{"name":"report","args_json":"{\"summary\":\"ok\",\"success\":true}"}]}]"#
+            .into(),
+    );
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "inplace".into();
+    config.workspace.root = workspace.to_string_lossy().into();
+    config.tools.enabled = vec!["report".into()];
+    config.context.skills = vec!["demo".into()];
+    config.context.eager_skills = vec!["demo".into()];
+    config.context.standing_max_percent = 25;
+    config.run.context_window_tokens = window;
+    config
+}
+
+#[tokio::test]
+async fn standing_under_the_window_fraction_starts() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config = standing_run_config(&workspace, &"b".repeat(200), Some(1000));
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let result = harness.run(RunRequest::new("demo")).await.unwrap();
+    assert!(result.success, "{}", result.summary);
+}
+
+#[tokio::test]
+async fn standing_over_the_window_fraction_refuses_and_names_the_skill() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config = standing_run_config(&workspace, &"x".repeat(2000), Some(1000));
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let error = harness
+        .run(RunRequest::new("demo"))
+        .await
+        .expect_err("2000-byte eager skill must refuse");
+    let text = error.to_string();
+    assert!(text.contains("eager skill `demo`"), "{text}");
+    assert!(text.contains("standing_max_percent=25"), "{text}");
+    assert!(text.contains("context_window_tokens=1000"), "{text}");
+}
+
+#[tokio::test]
+async fn standing_gate_is_inert_when_the_window_is_unset() {
+    let dir = tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config = standing_run_config(&workspace, &"x".repeat(2000), None);
+    let harness = Harness::from_config(config, StateRoot::new(dir.path().join("state"))).unwrap();
+    let result = harness.run(RunRequest::new("demo")).await.unwrap();
+    assert!(result.success, "{}", result.summary);
 }
