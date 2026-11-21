@@ -619,6 +619,35 @@ fn token_use_shows_in_the_footer_and_usage() {
     assert!(tui.wait_exit().success());
 }
 
+/// #686: `/plan` on an idle session names the plan write path.
+#[test]
+fn plan_names_the_write_jail() {
+    let dir = temp_dir();
+    let mut tui = start_tui(&dir, Some(r#"[{"content":"ok"}]"#));
+    send(&tui, b"/plan\r");
+    tui.wait_for("the plan jail line", |t| {
+        screen(t).contains(".shikigami/plan.md")
+    });
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
+
+/// #686: `/plan` after a run that started without the jail is refused.
+#[test]
+fn plan_refuses_after_a_run() {
+    let dir = temp_dir();
+    let mut tui = start_tui(&dir, Some(r#"[{"content":"ok"}]"#));
+    let before = tui.output().len();
+    send(&tui, b"hi\r");
+    wait_turn_done(&mut tui, before);
+    send(&tui, b"/plan\r");
+    tui.wait_for("the refuse line", |t| {
+        screen(t).contains("already ran without the jail")
+    });
+    send(&tui, b"\x03");
+    assert!(tui.wait_exit().success());
+}
+
 /// #685: `/context` names the project rules file the run attached.
 #[test]
 fn context_names_attached_project_rules() {

@@ -937,4 +937,6 @@ pub(crate) enum KeyResult {
         action: String,
         name: Option<String>,
     },
+    /// `/plan`: flag the next prompt of this session for plan write-jail.
+    Plan,
 }

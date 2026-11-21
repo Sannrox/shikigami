@@ -117,6 +117,9 @@ struct LiveSession {
     /// Standing attachments the live run composed (no file bodies). In memory;
     /// a new process reports them after the next prompt.
     context: Option<Value>,
+    /// Next first prompt of this host session uses plan write-jail. In memory
+    /// only; a started run keeps the flag on its checkpoint.
+    plan_jail: bool,
 }
 
 #[derive(Clone)]
@@ -386,6 +389,7 @@ impl AcpHost {
             "session/compact" => Box::pin(self.session_compact(&params)).await,
             "session/set_model" => Box::pin(self.session_set_model(&params)).await,
             "session/mcp" => Box::pin(self.session_mcp(&params)).await,
+            "session/plan" => Box::pin(self.session_plan(&params)).await,
             other => Err(rpc_error(-32601, format!("Method not found: {other}"))),
         };
         Some(match result {
@@ -455,6 +459,7 @@ impl AcpHost {
             watched_children: HashSet::new(),
             ask_grants: HashSet::new(),
             context: None,
+            plan_jail: false,
         };
         self.persist(&session_id, &live)
             .map_err(|e| rpc_error(-32603, e))?;
@@ -502,6 +507,7 @@ impl AcpHost {
                 watched_children: live.watched_children.clone(),
                 ask_grants: HashSet::new(),
                 context: live.context.clone(),
+                plan_jail: live.plan_jail,
             }
         } else {
             let persisted = self
@@ -524,6 +530,7 @@ impl AcpHost {
                 watched_children: HashSet::new(),
                 ask_grants: HashSet::new(),
                 context: None,
+                plan_jail: false,
             };
             self.sessions
                 .lock()
@@ -701,6 +708,58 @@ impl AcpHost {
         }
     }
 
+    /// `session/plan`: the next first prompt of this session uses plan
+    /// write-jail. A run that already started without the jail is refused.
+    /// The flag is in memory until that prompt; the run's checkpoint carries
+    /// it after. Settings `run.plan_jail` stay unchanged.
+    async fn session_plan(&self, params: &Value) -> Result<Value, Value> {
+        self.require_init()?;
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| rpc_error(-32602, "session/plan requires sessionId"))?;
+        let (cwd, run_id, mode, model, already, in_flight) = {
+            let sessions = self.sessions.lock().await;
+            let live = sessions
+                .get(session_id)
+                .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            (
+                live.cwd.clone(),
+                live.run_id.clone(),
+                live.mode.clone(),
+                live.model.clone(),
+                live.plan_jail,
+                live.cancel.is_some(),
+            )
+        };
+        if in_flight {
+            return Err(rpc_error(-32000, "prompt already in flight"));
+        }
+        if let Some(run_id) = run_id {
+            let harness = self
+                .harness_for_cwd(&cwd, mode.as_deref(), model.as_deref())
+                .map_err(|e| rpc_error(-32603, e))?;
+            let checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
+                .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
+            if checkpoint.plan_jail {
+                return Ok(json!({ "planJail": true, "already": true }));
+            }
+            return Err(rpc_error(
+                -32602,
+                "This session already ran without the jail. Start a new session to plan.",
+            ));
+        }
+        if already {
+            return Ok(json!({ "planJail": true, "already": true }));
+        }
+        let mut sessions = self.sessions.lock().await;
+        let live = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+        live.plan_jail = true;
+        Ok(json!({ "planJail": true }))
+    }
+
     async fn session_compact(&self, params: &Value) -> Result<Value, Value> {
         self.require_init()?;
         let session_id = params
@@ -808,6 +867,7 @@ impl AcpHost {
             existing_content,
             disabled_mcp,
             ask_grants,
+            plan_jail,
         ) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
@@ -863,6 +923,7 @@ impl AcpHost {
                 live.content.clone(),
                 live.disabled_mcp.clone(),
                 live.ask_grants.clone(),
+                live.plan_jail,
             )
         };
 
@@ -929,6 +990,7 @@ impl AcpHost {
                 request.keep_workspace = true;
                 request.session_wait = true;
                 request.cancel = Some(cancel_rx);
+                request.plan_jail = plan_jail;
                 PromptDrive::Text(request)
             };
             drive.grant_session_asks(ask_grants.iter().cloned());
@@ -7656,6 +7718,127 @@ mod tests {
             std::fs::read_to_string(cwd.join("ok.txt")).unwrap(),
             "yes\n"
         );
+    }
+
+    fn session_plan_rpc(session_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "session/plan",
+            "params": { "sessionId": session_id }
+        })
+    }
+
+    fn plan_jail_turns() -> String {
+        let write = |path: &str, content: &str| {
+            json!({
+                "tool_calls": [{
+                    "name": "write_file",
+                    "args_json": json!({"path": path, "content": content}).to_string()
+                }]
+            })
+        };
+        let report = json!({
+            "tool_calls": [{
+                "name": "report",
+                "args_json": json!({"summary": "planned", "success": true}).to_string()
+            }]
+        });
+        json!([
+            write("other.txt", "no\n"),
+            write(crate::tools::PLAN_JAIL_PATH, "# do it\n"),
+            report,
+            write("ok.txt", "yes\n"),
+            {"content": "executed"}
+        ])
+        .to_string()
+    }
+
+    /// #686: `session/plan` jails the next prompt without flipping settings.
+    #[tokio::test]
+    async fn session_plan_jails_the_next_prompt_without_settings() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), &plan_jail_turns());
+        assert!(
+            !host.harness.config.run.plan_jail,
+            "default sessions stay unjailed"
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+
+        let flagged = host
+            .handle(session_plan_rpc(&session_id), &client)
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&flagged), &json!({ "planJail": true }), "{flagged}");
+        let again = host
+            .handle(session_plan_rpc(&session_id), &client)
+            .await
+            .unwrap();
+        assert_eq!(
+            rpc_ok(&again),
+            &json!({ "planJail": true, "already": true }),
+            "{again}"
+        );
+        assert!(!host.harness.config.run.plan_jail);
+
+        let prompt = prompt(
+            &host,
+            &client,
+            &session_id,
+            json!([{"type":"text","text":"draft"}]),
+        )
+        .await;
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt}");
+        assert!(!cwd.join("other.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(cwd.join(crate::tools::PLAN_JAIL_PATH)).unwrap(),
+            "# do it\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
+        assert!(!host.harness.config.run.plan_jail);
+    }
+
+    /// #686: a session that already ran without the jail cannot enter it.
+    #[tokio::test]
+    async fn session_plan_refuses_a_run_that_already_started() {
+        let dir = tempdir().unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let first = prompt(
+            &host,
+            &client,
+            &session_id,
+            json!([{"type":"text","text":"hello"}]),
+        )
+        .await;
+        assert_eq!(rpc_ok(&first)["stopReason"], "end_turn", "{first}");
+
+        let refused = host
+            .handle(session_plan_rpc(&session_id), &client)
+            .await
+            .unwrap();
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("already ran without the jail"),
+            "{refused}"
+        );
+        assert!(!message.contains("plan_jail"), "{refused}");
     }
 
     struct HangIfRequestedClient;

@@ -168,6 +168,99 @@ async fn slash_context_reports_compact_after_compact() {
     assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
 }
 
+async fn run_plan(session: &TuiSession) -> String {
+    session.lock_shared().transcript.clear();
+    type_text(session, "/plan");
+    assert!(matches!(handle_key(session, enter_key()), KeyResult::Plan));
+    session.plan().await;
+    last_system(session)
+}
+
+/// #686: `/plan` on an idle session flags the next prompt for plan write-jail.
+#[tokio::test]
+async fn slash_plan_flags_an_idle_session() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    let text = run_plan(&session).await;
+    assert!(text.contains(".shikigami/plan.md"), "{text}");
+    assert!(!text.contains("plan_jail"), "{text}");
+    let again = run_plan(&session).await;
+    assert!(again.contains("already in plan write-jail"), "{again}");
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+    assert_screen_rules(&drawn_rows(&session, 40, 12), 40);
+}
+
+/// #686: `/plan` after a run that started without the jail is refused.
+#[tokio::test]
+async fn slash_plan_refuses_after_a_run_without_the_jail() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    prompt_once(&session, "hello").await;
+    let text = run_plan(&session).await;
+    assert!(text.contains("already ran without the jail"), "{text}");
+    assert!(!text.contains("plan_jail"), "{text}");
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+}
+
+/// #686: `/plan` then a prompt writes only the plan path until Accept.
+#[tokio::test]
+async fn slash_plan_then_prompt_parks_as_plan_and_accept_writes() {
+    let dir = tempdir().unwrap();
+    let write = |path: &str, content: &str| {
+        json!({
+            "tool_calls": [{
+                "name": "write_file",
+                "args_json": json!({"path": path, "content": content}).to_string()
+            }]
+        })
+    };
+    let script = json!([
+        write("other.txt", "no\n"),
+        write(".shikigami/plan.md", "# do it\n"),
+        {"tool_calls":[{"name":"report","args_json": json!({"summary":"planned","success":true}).to_string()}]},
+        write("ok.txt", "yes\n"),
+        {"content": "executed"}
+    ])
+    .to_string();
+    let session = start_session(&dir, &script).await;
+    let cwd = dir.path().join("project");
+    let text = run_plan(&session).await;
+    assert!(text.contains(".shikigami/plan.md"), "{text}");
+
+    session
+        .spawn_prompt("draft the change".into())
+        .await
+        .unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    let overlay = session.overlay_text().expect("plan overlay");
+    assert!(overlay.contains("y allow"), "overlay={overlay}");
+    assert!(
+        !overlay.contains("a allow for session"),
+        "plan review has no session allow: {overlay}"
+    );
+    assert!(!cwd.join("other.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".shikigami/plan.md")).unwrap(),
+        "# do it\n"
+    );
+    session.answer_permission(true);
+    wait_until(|| {
+        session
+            .overlay_text()
+            .is_some_and(|text| text.contains("write_file") || text.contains("ok.txt"))
+    })
+    .await;
+    session.answer_permission(true);
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("ok.txt")).unwrap(),
+        "yes\n"
+    );
+    assert!(!cwd.join("other.txt").exists());
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+}
+
 /// CJK, emoji and one unbroken long line wrap inside the screen.
 #[test]
 fn slash_window_scrolls_to_keep_selection_visible() {
@@ -517,6 +610,7 @@ async fn slash_help_writes_system_block_and_stays_idle() {
     assert!(text.contains("^c cancel/quit"), "{text}");
     assert!(text.contains("/compact"), "{text}");
     assert!(text.contains("/context"), "{text}");
+    assert!(text.contains("/plan"), "{text}");
     assert!(text.contains("/new"), "{text}");
     assert!(text.contains("/resume"), "{text}");
     assert!(text.contains("/run"), "{text}");
