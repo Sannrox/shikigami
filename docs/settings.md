@@ -216,6 +216,7 @@ today's spawn.
 | `adapter` | `"directory"` | `directory` \| `inplace` (`directory-inplace`) \| `git-worktree` |
 | `root` | `"."` | Parent/repo root for materialization; for `inplace`, the workspace path itself |
 | `branch_prefix` | `"shikigami/"` | Branch prefix for git-worktree |
+| `include` | `[]` | Repo-relative files (POSIX paths, not directories) copied from `root` into a new `git-worktree` after `git worktree add`. Missing names are skipped. A path that escapes the repo, is a symlink, or exceeds 1 MiB fails closed and the worktree is removed. Inplace and `directory` ignore the list. Host-owned: a clone cannot change what is copied. |
 | `snapshot` | `false` | After first materialize, copy workspace to `state/runs/<id>/snapshots/initial` and keep that copy across resume. Resume never creates the directory. Directory walks and file copies do not follow symbolic links. Not supported with `inplace`. This is the only original-input proof `replay-export` accepts. |
 
 For `inplace`, the harness **state** root must sit **outside** `workspace.root`.
