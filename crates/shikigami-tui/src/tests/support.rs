@@ -166,6 +166,18 @@ pub(super) fn buffer_row(buf: &ratatui::buffer::Buffer, y: u16) -> String {
 }
 
 pub(super) fn row_is_dim(buf: &ratatui::buffer::Buffer, y: u16) -> bool {
+    row_has_modifier(buf, y, ratatui::style::Modifier::DIM)
+}
+
+pub(super) fn row_is_reversed(buf: &ratatui::buffer::Buffer, y: u16) -> bool {
+    row_has_modifier(buf, y, ratatui::style::Modifier::REVERSED)
+}
+
+fn row_has_modifier(
+    buf: &ratatui::buffer::Buffer,
+    y: u16,
+    modifier: ratatui::style::Modifier,
+) -> bool {
     let mut saw = false;
     for x in 0..buf.area().width {
         let Some(cell) = buf.cell((x, y)) else {
@@ -174,7 +186,7 @@ pub(super) fn row_is_dim(buf: &ratatui::buffer::Buffer, y: u16) -> bool {
         if cell.symbol().trim().is_empty() {
             continue;
         }
-        if !cell.modifier.contains(ratatui::style::Modifier::DIM) {
+        if !cell.modifier.contains(modifier) {
             return false;
         }
         saw = true;
@@ -237,11 +249,31 @@ pub(super) fn wheel(kind: MouseEventKind, column: u16, row: u16) -> Event {
 }
 
 pub(super) fn click(column: u16, row: u16) -> Event {
+    mouse(MouseEventKind::Down(MouseButton::Left), column, row, false)
+}
+
+pub(super) fn shift_click(column: u16, row: u16) -> Event {
+    mouse(MouseEventKind::Down(MouseButton::Left), column, row, true)
+}
+
+pub(super) fn drag(column: u16, row: u16) -> Event {
+    mouse(MouseEventKind::Drag(MouseButton::Left), column, row, false)
+}
+
+pub(super) fn release(column: u16, row: u16) -> Event {
+    mouse(MouseEventKind::Up(MouseButton::Left), column, row, false)
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16, shift: bool) -> Event {
     Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
+        kind,
         column,
         row,
-        modifiers: KeyModifiers::NONE,
+        modifiers: if shift {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        },
     })
 }
 

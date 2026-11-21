@@ -99,7 +99,9 @@ impl TuiSession {
     pub(crate) fn copy_last_assistant(&self) {
         let text = {
             let shared = self.lock_shared();
-            last_assistant(&shared.transcript).map(str::to_string)
+            shared
+                .selected_visible_text()
+                .or_else(|| last_assistant(&shared.transcript).map(str::to_string))
         };
         let Some(text) = text else {
             let mut shared = self.lock_shared();
@@ -426,6 +428,8 @@ impl TuiSession {
         shared.run_id = None;
         shared.usage = Usage::default();
         shared.selected_tool = None;
+        shared.text_selection = None;
+        shared.visible_rows.clear();
         shared.nested_children.clear();
         shared.context = None;
         shared.last_compact = None;
@@ -601,7 +605,7 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("help", "keys and slash commands"),
     ("compact", "shrink conversation history"),
     ("context", "attached rules, skills, compact"),
-    ("copy", "copy last assistant"),
+    ("copy", "copy selection or last assistant"),
     ("attach", "add prompt file"),
     ("exit", "quit"),
     ("quit", "quit"),

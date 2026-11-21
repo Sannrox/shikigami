@@ -38,8 +38,43 @@ pub(crate) fn handle_mouse(session: &TuiSession, mouse: MouseEvent) {
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             let mut shared = session.lock_shared();
+            let Some(rel) = crate::render::transcript_row_at(&shared, mouse.column, mouse.row)
+            else {
+                return;
+            };
+            let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+            if shift {
+                if let Some(sel) = shared.text_selection.as_mut() {
+                    sel.end = rel;
+                } else {
+                    shared.text_selection = Some(crate::session::TextSelection {
+                        start: rel,
+                        end: rel,
+                    });
+                }
+                shared.dirty = true;
+                return;
+            }
+            shared.text_selection = Some(crate::session::TextSelection {
+                start: rel,
+                end: rel,
+            });
+            shared.dirty = true;
             if let Some(id) = crate::render::tool_at_point(&shared, mouse.column, mouse.row) {
                 shared.select_tool(id);
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let mut shared = session.lock_shared();
+            let Some(rel) = crate::render::transcript_row_at(&shared, mouse.column, mouse.row)
+            else {
+                return;
+            };
+            if let Some(sel) = shared.text_selection.as_mut()
+                && sel.end != rel
+            {
+                sel.end = rel;
+                shared.dirty = true;
             }
         }
         MouseEventKind::ScrollUp => session.lock_shared().wheel(-1, mouse.column, mouse.row),
@@ -369,7 +404,7 @@ pub(crate) fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             } else if shared.show_plan {
                 shared.show_plan = false;
                 shared.dirty = true;
-            } else {
+            } else if !shared.clear_text_selection() {
                 shared.drop_queue();
             }
         }

@@ -2,14 +2,17 @@
 
 use ratatui::Frame;
 use ratatui::prelude::{Constraint, Layout, Position, Rect, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use serde_json::Value;
 use std::time::{Duration, SystemTime};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::look::{Action, KeyMap, Palette};
-use crate::session::{PendingPermission, Plan, Shared, ToolLine, TranscriptLine, TuiSession};
+use crate::session::{
+    PendingPermission, Plan, Shared, TextSelection, ToolLine, TranscriptLine, TuiSession,
+};
 use crate::slash::{
     inflight_nested_children, mention_visible, nested_child_row, nested_children_visible,
     running_marker_row, running_marker_visible, slash_row_text, slash_visible, slash_window,
@@ -646,6 +649,15 @@ fn visual_tool_ids(transcript: &[TranscriptLine], width: u16) -> Vec<Option<Stri
     ids
 }
 
+/// View-relative transcript row for a click, if the point is in the pane.
+pub(crate) fn transcript_row_at(shared: &Shared, column: u16, row: u16) -> Option<u16> {
+    let view = shared.transcript_area;
+    if view.width == 0 || view.height == 0 || !rect_contains(view, column, row) {
+        return None;
+    }
+    Some(row - view.y)
+}
+
 /// Tool whose drawn row contains `(column, row)`, if the click is in the transcript.
 pub(crate) fn tool_at_point(shared: &Shared, column: u16, row: u16) -> Option<String> {
     let view = shared.transcript_area;
@@ -782,6 +794,7 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
             .scroll((y, x)),
         view,
     );
+    shared.visible_rows = highlight_and_capture(frame, view, shared.text_selection);
 
     if slash_h > 0 {
         let slash_area = chunks[idx];
@@ -899,6 +912,46 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
         chunks[idx],
     );
     shared.dirty = false;
+}
+
+fn highlight_and_capture(
+    frame: &mut Frame,
+    view: Rect,
+    selection: Option<TextSelection>,
+) -> Vec<String> {
+    if view.width == 0 || view.height == 0 {
+        return Vec::new();
+    }
+    let buf = frame.buffer_mut();
+    if let Some(sel) = selection {
+        let (lo, hi) = sel.range();
+        let last = view.height.saturating_sub(1);
+        let lo = lo.min(last);
+        let hi = hi.min(last);
+        for rel in lo..=hi {
+            let y = view.y.saturating_add(rel);
+            for x in view.x..view.x.saturating_add(view.width) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.modifier.insert(Modifier::REVERSED);
+                    cell.modifier.insert(Modifier::DIM);
+                }
+            }
+        }
+    }
+    (0..view.height)
+        .map(|i| {
+            let y = view.y.saturating_add(i);
+            let mut row = String::new();
+            let mut x = view.x;
+            let end = view.x.saturating_add(view.width);
+            while x < end {
+                let symbol = buf.cell((x, y)).map_or(" ", |cell| cell.symbol());
+                row.push_str(symbol);
+                x = x.saturating_add(UnicodeWidthStr::width(symbol).max(1) as u16);
+            }
+            row.trim_end().to_string()
+        })
+        .collect()
 }
 
 pub(crate) fn wrapped_rows(text: &str, width: u16) -> u16 {
