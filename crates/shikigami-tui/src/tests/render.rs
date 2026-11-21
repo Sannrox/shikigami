@@ -76,6 +76,68 @@ async fn footer_shows_model_and_turn_not_session_id() {
     assert!(!rows.join("\n").contains(short));
 }
 
+/// #698: last-turn `input_tokens` as a percent of `[run] context_window_tokens`.
+#[tokio::test]
+async fn footer_shows_last_turn_fill_percent_when_window_is_set() {
+    let dir = tempdir().unwrap();
+    let mut session = start_session_with(
+        &dir,
+        r#"[{"content":"ok","usage":{"input_tokens":124000,"output_tokens":10}}]"#,
+        |config| {
+            // Large enough that standing context does not refuse the run.
+            config.run.context_window_tokens = Some(200_000);
+        },
+    )
+    .await;
+    session.model = "claude-sonnet-5-5".into();
+    session.spawn_prompt("hi".into()).await.unwrap();
+    let _ = session.wait_prompt().await;
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    let footer = rows.last().expect("footer");
+    assert!(footer.contains("124k tok"), "{footer}");
+    assert!(footer.contains("62%"), "{footer}");
+    assert_eq!(
+        footer,
+        "  done  claude-sonnet-5-5  turn 1  124k tok  62%  ^c quit  pgup/pgdn/wheel"
+    );
+    let narrow = drawn_rows(&session, 40, 12);
+    assert_screen_rules(&narrow, 40);
+}
+
+/// #698: no window, or a last turn with no usage, keeps the token part only.
+#[tokio::test]
+async fn footer_omits_fill_percent_without_window_or_last_turn_usage() {
+    let dir = tempdir().unwrap();
+    let mut counted = start_session(
+        &dir,
+        r#"[{"content":"ok","usage":{"input_tokens":620,"output_tokens":10}}]"#,
+    )
+    .await;
+    counted.model = "claude-sonnet-5-5".into();
+    counted.spawn_prompt("hi".into()).await.unwrap();
+    let _ = counted.wait_prompt().await;
+    let counted_footer = drawn_rows(&counted, 80, 24);
+    assert_screen_rules(&counted_footer, 80);
+    let counted_line = counted_footer.last().expect("footer");
+    assert!(counted_line.contains("630 tok"), "{counted_line}");
+    assert!(!counted_line.contains('%'), "{counted_line}");
+
+    let unknown_dir = tempdir().unwrap();
+    let mut unknown = start_session_with(&unknown_dir, r#"[{"content":"ok"}]"#, |config| {
+        config.run.context_window_tokens = Some(200_000);
+    })
+    .await;
+    unknown.model = "claude-sonnet-5-5".into();
+    unknown.spawn_prompt("hi".into()).await.unwrap();
+    let _ = unknown.wait_prompt().await;
+    let unknown_footer = drawn_rows(&unknown, 80, 24);
+    assert_screen_rules(&unknown_footer, 80);
+    let unknown_line = unknown_footer.last().expect("footer");
+    assert!(unknown_line.contains("? tok"), "{unknown_line}");
+    assert!(!unknown_line.contains('%'), "{unknown_line}");
+}
+
 /// #603: a rebound key performs the action, the old key no longer does,
 /// and the footer and help name the new key.
 #[test]

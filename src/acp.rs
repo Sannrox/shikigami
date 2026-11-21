@@ -1471,6 +1471,11 @@ impl AcpHost {
         self.harness.effective_model_name()
     }
 
+    /// `[run] context_window_tokens`, when the operator set one.
+    pub fn context_window_tokens(&self) -> Option<u64> {
+        self.harness.config.run.context_window_tokens
+    }
+
     pub fn demo_workspace(&self) -> Option<PathBuf> {
         let model = &self.harness.config.model;
         (model.adapter == "scripted" && model.script_json.is_none())
