@@ -318,6 +318,11 @@ pub struct ToolsSettings {
     pub mode: PermissionMode,
     #[serde(default = "default_bash_timeout")]
     pub bash_timeout_secs: u64,
+    /// Byte cap for bash combined stdout/stderr and MCP tool text before they
+    /// become model tool messages. Truncation uses `…[truncated]`. Clamped to
+    /// 2 MiB (the bash memory bound). `web_fetch` keeps its own 256 KiB cap.
+    #[serde(default = "default_model_output_max_bytes")]
+    pub model_output_max_bytes: usize,
     /// When true (default), `glob`/`grep` honor built-in defaults plus
     /// workspace `.gitignore` and `.shikigamiignore`. `read_file` of an
     /// explicit path is never blocked by ignore rules.
@@ -551,6 +556,10 @@ fn default_bash_timeout() -> u64 {
     60
 }
 
+fn default_model_output_max_bytes() -> usize {
+    65_536
+}
+
 fn default_respect_ignore() -> bool {
     true
 }
@@ -561,6 +570,7 @@ impl Default for ToolsSettings {
             enabled: Vec::new(),
             mode: PermissionMode::Custom,
             bash_timeout_secs: default_bash_timeout(),
+            model_output_max_bytes: default_model_output_max_bytes(),
             respect_ignore: default_respect_ignore(),
             mcp_servers: Vec::new(),
             mcp_gateway: None,
@@ -2683,6 +2693,13 @@ read_only_paths = ["{}"]
         assert!(!ToolsSettings::default().mcp_lazy_schemas);
         let parsed: ToolsSettings = toml::from_str("mcp_lazy_schemas = true").unwrap();
         assert!(parsed.mcp_lazy_schemas);
+    }
+
+    #[test]
+    fn model_output_max_bytes_defaults_and_parses() {
+        assert_eq!(ToolsSettings::default().model_output_max_bytes, 65_536);
+        let parsed: ToolsSettings = toml::from_str("model_output_max_bytes = 1024").unwrap();
+        assert_eq!(parsed.model_output_max_bytes, 1024);
     }
 
     #[test]
