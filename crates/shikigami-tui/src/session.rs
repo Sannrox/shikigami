@@ -160,6 +160,10 @@ pub(crate) struct Shared {
     pub(crate) usage: Usage,
     /// Nested children the host last reported; the dim slot above the composer.
     pub(crate) nested_children: Vec<NestedChild>,
+    /// Standing attachments the host last reported for this run; `/context`.
+    pub(crate) context: Option<Value>,
+    /// Last `/compact` that shrank history; `/context` shows the counts.
+    pub(crate) last_compact: Option<(u64, u64)>,
     /// Last drawn overlay height (slash list, nested children, or running).
     pub(crate) overlay_h: u16,
 }
@@ -200,6 +204,8 @@ impl Shared {
             statusline: None,
             usage: Usage::default(),
             nested_children: Vec::new(),
+            context: None,
+            last_compact: None,
             overlay_h: 0,
         }
     }

@@ -327,6 +327,13 @@ impl TuiSession {
                 shared.dirty = true;
                 KeyResult::Continue
             }
+            "context" => {
+                let mut shared = self.lock_shared();
+                let line = context_text(&shared);
+                shared.transcript.push(TranscriptLine::System(line));
+                shared.dirty = true;
+                KeyResult::Continue
+            }
             "copy" => {
                 self.copy_last_assistant();
                 KeyResult::Continue
@@ -384,6 +391,7 @@ impl TuiSession {
             .unwrap_or(before);
         let mut shared = self.lock_shared();
         if after < before {
+            shared.last_compact = Some((before, after));
             shared.transcript.push(TranscriptLine::System(format!(
                 "compacted  {before} → {after}"
             )));
@@ -410,6 +418,8 @@ impl TuiSession {
         shared.run_id = None;
         shared.usage = Usage::default();
         shared.nested_children.clear();
+        shared.context = None;
+        shared.last_compact = None;
         shared.status = "ready".into();
         shared.scroll_back = 0;
         shared.dock_scroll = 0;
@@ -563,6 +573,7 @@ impl TuiSession {
 pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("help", "keys and slash commands"),
     ("compact", "shrink conversation history"),
+    ("context", "attached rules, skills, compact"),
     ("copy", "copy last assistant"),
     ("attach", "add prompt file"),
     ("exit", "quit"),
@@ -585,9 +596,98 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /new  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Interrupt)
     )
+}
+
+/// `/context`: standing attachments the live run composed, not a second scan.
+pub(crate) fn context_text(shared: &Shared) -> String {
+    let Some(context) = shared.context.as_ref() else {
+        return "No attached context yet. Send a prompt to load it.".into();
+    };
+    let mut lines = Vec::new();
+    let rules = context
+        .get("rules")
+        .and_then(Value::as_array)
+        .filter(|rules| !rules.is_empty());
+    match rules {
+        Some(rules) => {
+            for rule in rules {
+                let name = rule
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .unwrap_or("file");
+                let bytes = rule.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+                let truncated = rule
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut line = format!("project rules  {name}  {bytes} B");
+                if truncated {
+                    line.push_str(" truncated");
+                }
+                lines.push(line);
+            }
+        }
+        None => lines.push("no project rules".into()),
+    }
+    let eager = string_list(context.get("eager"));
+    let catalog = string_list(context.get("catalog"));
+    lines.push(match (eager.as_slice(), catalog.as_slice()) {
+        ([], []) => "skills  none".into(),
+        (eager, []) => format!("skills  eager: {}", eager.join(", ")),
+        ([], catalog) => format!("skills  catalog: {}", catalog.join(", ")),
+        (eager, catalog) => format!(
+            "skills  eager: {}  catalog: {}",
+            eager.join(", "),
+            catalog.join(", ")
+        ),
+    });
+    lines.push(match shared.last_compact {
+        Some((before, after)) => format!("compact  {before} → {after}"),
+        None if shared
+            .transcript
+            .iter()
+            .any(|line| matches!(line, TranscriptLine::System(text) if text == crate::protocol::COMPACTED)) =>
+        {
+            "compact  compacted".into()
+        }
+        None => "compact  none".into(),
+    });
+    lines.push(
+        if context.get("nested").and_then(Value::as_bool) == Some(true) {
+            "nested  on".into()
+        } else {
+            "nested  off".into()
+        },
+    );
+    if let Some(mode) = context
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+    {
+        lines.push(format!("mode  {mode}"));
+    }
+    if let Some(model) = context
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .or_else(|| shared.models.as_ref().map(|models| models.current.clone()))
+    {
+        lines.push(format!("model  {model}"));
+    }
+    lines.join("\n")
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(str::to_string))
+        .collect()
 }
 
 /// Static busy marker in the slash-list slot above the composer.

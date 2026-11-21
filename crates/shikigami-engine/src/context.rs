@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::ContextSettings;
 
 const MAX_DEFAULT: usize = 32 * 1024;
@@ -244,6 +246,66 @@ pub struct SkillContext {
     pub eager: Vec<SkillPack>,
     /// Packs the model loads on demand with `load_skill`.
     pub catalog: Vec<SkillSummary>,
+}
+
+/// One project rules file the run actually attached (no body).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedRule {
+    pub filename: String,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+/// Standing attachments composed into this run's system prompt.
+///
+/// Metadata only: filenames, sizes, skill ids, nested tools, model/mode.
+/// File bodies stay in the prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedContext {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<AttachedRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eager: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catalog: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+}
+
+impl AttachedContext {
+    /// Snapshot what `compose_system_prompt` attached, without the bodies.
+    pub fn from_parts(
+        rules: &[ProjectRules],
+        skills: &SkillContext,
+        nested: bool,
+        mode: Option<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            rules: rules
+                .iter()
+                .map(|rule| AttachedRule {
+                    filename: rule.filename.clone(),
+                    bytes: rule.body.len() as u64,
+                    truncated: rule.truncated,
+                })
+                .collect(),
+            eager: skills.eager.iter().map(|pack| pack.id.clone()).collect(),
+            catalog: skills
+                .catalog
+                .iter()
+                .map(|skill| skill.id.clone())
+                .collect(),
+            nested,
+            mode: mode.filter(|name| !name.is_empty()),
+            model: model.into(),
+        }
+    }
 }
 
 const MAX_DESCRIPTION_CHARS: usize = 200;
@@ -664,6 +726,39 @@ mod tests {
         let composed = compose_system_prompt("BASE", &[], &packs);
         assert!(composed.contains("Skill `demo`"));
         assert!(composed.contains("tests first"));
+    }
+
+    #[test]
+    fn attached_context_omits_bodies_and_splits_eager_from_catalog() {
+        let rules = vec![ProjectRules {
+            filename: "AGENTS.md".into(),
+            body: "prefer tests\n".into(),
+            digest: "abc".into(),
+            truncated: false,
+        }];
+        let skills = SkillContext {
+            eager: vec![SkillPack {
+                id: "always".into(),
+                body: "secret body".into(),
+                digest: "def".into(),
+                truncated: true,
+            }],
+            catalog: vec![SkillSummary {
+                id: "demo".into(),
+                description: "demo pack".into(),
+            }],
+        };
+        let attached = AttachedContext::from_parts(&rules, &skills, false, None, "auto");
+        assert_eq!(attached.rules[0].filename, "AGENTS.md");
+        assert_eq!(attached.rules[0].bytes, "prefer tests\n".len() as u64);
+        assert!(!attached.rules[0].truncated);
+        assert_eq!(attached.eager, vec!["always"]);
+        assert_eq!(attached.catalog, vec!["demo"]);
+        assert!(!attached.nested);
+        assert_eq!(attached.model, "auto");
+        let json = serde_json::to_string(&attached).unwrap();
+        assert!(!json.contains("secret body"), "{json}");
+        assert!(!json.contains("prefer tests"), "{json}");
     }
 
     #[test]

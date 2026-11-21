@@ -746,12 +746,10 @@ fn compose_context(
 ) -> (String, String, bool) {
     let prompt_id = crate::prompts::versioned_id(&crate::prompts::DEFAULT_PROMPT);
     let rules = crate::context::load_project_rules(&workspace.path, &engine.config.context);
-    let crate::context::SkillContext {
-        eager: skills,
-        catalog,
-    } = crate::context::skill_context(&workspace.path, &engine.config.context, lazy_skills);
-    let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, &rules, &skills);
-    crate::context::append_skill_catalog(&mut prompt, &catalog);
+    let skills =
+        crate::context::skill_context(&workspace.path, &engine.config.context, lazy_skills);
+    let mut prompt = crate::context::compose_system_prompt(SYSTEM_PROMPT, &rules, &skills.eager);
+    crate::context::append_skill_catalog(&mut prompt, &skills.catalog);
     let finder_role = (engine.config.profile.name == SECURITY_FINDER_PROFILE)
         .then_some(engine.config.security_finder.role.as_deref())
         .flatten()
@@ -843,7 +841,7 @@ fn compose_context(
             },
         );
     }
-    for skill in skills {
+    for skill in &skills.eager {
         engine.emit(
             run_id,
             HarnessEvent::Message {
@@ -852,6 +850,18 @@ fn compose_context(
             },
         );
     }
+    engine.emit(
+        run_id,
+        HarnessEvent::ContextAttached {
+            context: crate::context::AttachedContext::from_parts(
+                &rules,
+                &skills,
+                nested_tools,
+                engine.config.session.selected.clone(),
+                crate::model::effective_model_name(&engine.config),
+            ),
+        },
+    );
     if let Some(role) = finder_role {
         engine.emit(
             run_id,
@@ -877,7 +887,7 @@ fn compose_context(
             text: format!("workspace {}", workspace.path.display()),
         },
     );
-    (prompt_id, prompt, !catalog.is_empty())
+    (prompt_id, prompt, !skills.catalog.is_empty())
 }
 
 async fn persist_initial_state(

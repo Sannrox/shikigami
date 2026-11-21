@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::context::AttachedContext;
 
 /// Redacted metadata for an edit tool, attributed to the configured model alias.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,6 +137,10 @@ pub enum HarnessEvent {
         name: String,
         /// `session` today; one-shot allow stays on `resume_ask`.
         scope: String,
+    },
+    /// Standing attachments composed into this run's system prompt (no bodies).
+    ContextAttached {
+        context: AttachedContext,
     },
 }
 
