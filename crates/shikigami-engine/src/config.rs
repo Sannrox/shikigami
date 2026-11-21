@@ -247,6 +247,10 @@ pub struct WorkspaceSettings {
     pub root: String,
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
+    /// Repo-relative files copied into a `git-worktree` after `git worktree add`.
+    /// Inplace and directory adapters ignore the list. Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
     /// Copy workspace to state after materialize for later restore.
     #[serde(default)]
     pub snapshot: bool,
@@ -273,6 +277,7 @@ impl Default for WorkspaceSettings {
             adapter: default_workspace_adapter(),
             root: default_workspace_root(),
             branch_prefix: default_branch_prefix(),
+            include: Vec::new(),
             snapshot: false,
             isolate_artifacts: false,
         }
@@ -1862,6 +1867,27 @@ pub fn redact_secrets_in_line(line: &str, config: &Config) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn workspace_include_defaults_empty_and_parses() {
+        assert!(WorkspaceSettings::default().include.is_empty());
+        let parsed: WorkspaceSettings = toml::from_str(
+            r#"
+adapter = "git-worktree"
+include = [".env", "secrets/key"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.include,
+            vec![".env".to_string(), "secrets/key".to_string()]
+        );
+        let docs = include_str!("../../../docs/settings.md");
+        assert!(
+            docs.contains("| `include` |"),
+            "docs/settings.md [workspace] table must name include"
+        );
+    }
 
     #[test]
     fn retired_plane_client_settings_fail_at_resolve() {

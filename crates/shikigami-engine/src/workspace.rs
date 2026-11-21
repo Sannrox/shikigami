@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -495,7 +495,6 @@ fn read_dir_nofollow(dir_fd: i32) -> Result<Vec<DirentNofollow>, WorkspaceError>
     Ok(entries)
 }
 
-#[cfg(any(test, not(unix)))]
 fn copy_file_nofollow(from: &Path, to: &Path) -> Result<(), WorkspaceError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -697,6 +696,7 @@ pub fn from_config(config: &Config) -> Result<Box<dyn WorkspacePort>, WorkspaceE
         "git-worktree" => Ok(Box::new(GitWorktreeWorkspace {
             repo: PathBuf::from(&config.workspace.root),
             branch_prefix: config.workspace.branch_prefix.clone(),
+            include: config.workspace.include.clone(),
         })),
         other => Err(WorkspaceError::Unknown(other.into())),
     }
@@ -821,9 +821,134 @@ impl WorkspacePort for DirectoryWorkspace {
     }
 }
 
+const INCLUDE_MAX_BYTES: u64 = 1024 * 1024;
+
 struct GitWorktreeWorkspace {
     repo: PathBuf,
     branch_prefix: String,
+    include: Vec<String>,
+}
+
+fn include_err(entry: &str, reason: &str) -> WorkspaceError {
+    WorkspaceError::Git(format!("include `{entry}` {reason}"))
+}
+
+/// Relative POSIX file path: `foo/.env`. Rejects absolute, `..`, `.`, and `\`.
+fn parse_include_rel(entry: &str) -> Result<&Path, WorkspaceError> {
+    if entry.is_empty() || entry.starts_with('/') || entry.contains('\\') || entry.contains('\0') {
+        return Err(include_err(entry, "is not a repo-relative file"));
+    }
+    let path = Path::new(entry);
+    if path.is_absolute() {
+        return Err(include_err(entry, "is not a repo-relative file"));
+    }
+    let mut parts = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => parts += 1,
+            _ => return Err(include_err(entry, "is not a repo-relative file")),
+        }
+    }
+    if parts == 0 {
+        return Err(include_err(entry, "is not a repo-relative file"));
+    }
+    Ok(path)
+}
+
+enum IncludeCopy {
+    Copied,
+    Missing,
+}
+
+fn copy_one_include(repo: &Path, dest: &Path, entry: &str) -> Result<IncludeCopy, WorkspaceError> {
+    let rel = parse_include_rel(entry)?;
+    let mut src_dir = repo.to_path_buf();
+    let mut dest_dir = dest.to_path_buf();
+    let names: Vec<_> = rel.iter().collect();
+    for (index, name) in names.iter().enumerate() {
+        let src = src_dir.join(name);
+        let last = index + 1 == names.len();
+        let metadata = match std::fs::symlink_metadata(&src) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(IncludeCopy::Missing);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(include_err(entry, "is a symlink"));
+        }
+        if last {
+            if !metadata.is_file() {
+                return Err(include_err(entry, "is not a regular file"));
+            }
+            if metadata.len() > INCLUDE_MAX_BYTES {
+                return Err(include_err(entry, "exceeds 1 MiB"));
+            }
+            let dst = dest_dir.join(name);
+            match std::fs::symlink_metadata(&dst) {
+                Ok(existing) if existing.file_type().is_symlink() => {
+                    return Err(include_err(entry, "destination is a symlink"));
+                }
+                Ok(existing) if existing.is_file() => return Ok(IncludeCopy::Copied),
+                Ok(_) => return Err(include_err(entry, "destination is not a regular file")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            copy_file_nofollow(&src, &dst)?;
+            return Ok(IncludeCopy::Copied);
+        }
+        if !metadata.is_dir() {
+            return Err(include_err(entry, "is not a regular file"));
+        }
+        src_dir = src;
+        let next_dest = dest_dir.join(name);
+        match std::fs::symlink_metadata(&next_dest) {
+            Ok(existing) if existing.file_type().is_symlink() => {
+                return Err(include_err(entry, "destination is a symlink"));
+            }
+            Ok(existing) if existing.is_dir() => {}
+            Ok(_) => return Err(include_err(entry, "destination is not a regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::fs::create_dir(&next_dest)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        dest_dir = next_dest;
+    }
+    Err(include_err(entry, "is not a regular file"))
+}
+
+fn copy_workspace_includes(
+    repo: &Path,
+    dest: &Path,
+    include: &[String],
+) -> Result<(), WorkspaceError> {
+    for entry in include {
+        copy_one_include(repo, dest, entry)?;
+    }
+    Ok(())
+}
+
+fn include_health_suffix(repo: &Path, include: &[String]) -> String {
+    if include.is_empty() {
+        return String::new();
+    }
+    let mut missing = Vec::new();
+    for entry in include {
+        match parse_include_rel(entry) {
+            Err(_) => missing.push(entry.as_str()),
+            Ok(rel) => match std::fs::symlink_metadata(repo.join(rel)) {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+                _ => missing.push(entry.as_str()),
+            },
+        }
+    }
+    if missing.is_empty() {
+        format!(" include={}", include.len())
+    } else {
+        format!(" include={} missing={}", include.len(), missing.join(","))
+    }
 }
 
 impl WorkspacePort for GitWorktreeWorkspace {
@@ -842,10 +967,14 @@ impl WorkspacePort for GitWorktreeWorkspace {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
+        let include = include_health_suffix(&self.repo, &self.include);
         if git_ok {
-            format!("repo={} ok", self.repo.display())
+            format!("repo={} ok{include}", self.repo.display())
         } else {
-            format!("repo={} (not a git work tree yet)", self.repo.display())
+            format!(
+                "repo={} (not a git work tree yet){include}",
+                self.repo.display()
+            )
         }
     }
 
@@ -884,11 +1013,19 @@ impl WorkspacePort for GitWorktreeWorkspace {
             }
         }
         let path = std::fs::canonicalize(&path)?;
-        Ok(MaterializedWorkspace {
+        let ws = MaterializedWorkspace {
             path,
             adapter: "git-worktree".into(),
-            cleanup: WorkspaceCleanup::RemoveGitWorktree { repo, branch },
-        })
+            cleanup: WorkspaceCleanup::RemoveGitWorktree {
+                repo: repo.clone(),
+                branch,
+            },
+        };
+        if let Err(error) = copy_workspace_includes(&repo, &ws.path, &self.include) {
+            let _ = apply_cleanup(&ws);
+            return Err(error);
+        }
+        Ok(ws)
     }
 
     fn cleanup(&self, ws: &MaterializedWorkspace) -> Result<(), WorkspaceError> {
@@ -1251,5 +1388,207 @@ mod git_worktree_tests {
             "git worktree add must not run repository hooks"
         );
         apply_cleanup(&ws).unwrap();
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success(),
+            "{args:?}"
+        );
+    }
+
+    fn init_git_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).unwrap();
+        git(repo, &["init", "--quiet", "-b", "main"]);
+        git(repo, &["config", "user.email", "test@example.invalid"]);
+        git(repo, &["config", "user.name", "Test"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn a() {}\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "--quiet", "-m", "init"]);
+    }
+
+    fn worktree_paths(repo: &Path) -> Vec<String> {
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn git_worktree_port(repo: &Path, include: &[&str]) -> Box<dyn WorkspacePort> {
+        let mut config = Config::default();
+        config.workspace.adapter = "git-worktree".into();
+        config.workspace.root = repo.to_string_lossy().into();
+        config.workspace.include = include.iter().map(|entry| (*entry).to_string()).collect();
+        from_config(&config).unwrap()
+    }
+
+    #[test]
+    fn materialize_copies_listed_gitignored_file() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "--quiet", "-m", "ignore"]);
+        std::fs::write(repo.join(".env"), "SECRET=1\n").unwrap();
+
+        let port = git_worktree_port(&repo, &[".env"]);
+        let runs = dir.path().join("runs");
+        let ws = port.materialize("include-copy", &runs).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ws.path.join(".env")).unwrap(),
+            "SECRET=1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.path.join("src/a.rs")).unwrap(),
+            "fn a() {}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".env")).unwrap(),
+            "SECRET=1\n"
+        );
+        apply_cleanup(&ws).unwrap();
+    }
+
+    #[test]
+    fn materialize_copies_nested_include_into_new_parent() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        std::fs::create_dir(repo.join("local")).unwrap();
+        std::fs::write(repo.join("local/.env"), "SECRET=1\n").unwrap();
+
+        let port = git_worktree_port(&repo, &["local/.env"]);
+        let runs = dir.path().join("runs");
+        let ws = port.materialize("include-nested", &runs).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ws.path.join("local/.env")).unwrap(),
+            "SECRET=1\n"
+        );
+        apply_cleanup(&ws).unwrap();
+    }
+
+    #[test]
+    fn materialize_skips_missing_include() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let port = git_worktree_port(&repo, &["missing.env"]);
+        let runs = dir.path().join("runs");
+        let ws = port.materialize("include-missing", &runs).unwrap();
+        assert!(!ws.path.join("missing.env").exists());
+        assert!(ws.path.join("src/a.rs").is_file());
+        assert!(
+            port.health_detail().contains("missing=missing.env"),
+            "{}",
+            port.health_detail()
+        );
+        apply_cleanup(&ws).unwrap();
+    }
+
+    #[test]
+    fn materialize_refuses_escaping_include_and_cleans_up() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let port = git_worktree_port(&repo, &["../outside"]);
+        let runs = dir.path().join("runs");
+        let err = port.materialize("include-escape", &runs).unwrap_err();
+        assert!(err.to_string().contains("include `../outside`"), "{err}");
+        let trees = worktree_paths(&repo);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_refuses_destination_directory_symlink_and_cleans_up() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink("../outside", repo.join("secrets")).unwrap();
+        git(&repo, &["add", "secrets"]);
+        git(&repo, &["commit", "--quiet", "-m", "symlink dir"]);
+        std::fs::remove_file(repo.join("secrets")).unwrap();
+        std::fs::create_dir(repo.join("secrets")).unwrap();
+        std::fs::write(repo.join("secrets/key"), "SECRET=1\n").unwrap();
+
+        let port = git_worktree_port(&repo, &["secrets/key"]);
+        let runs = dir.path().join("runs");
+        let err = port
+            .materialize("include-dest-dir-symlink", &runs)
+            .unwrap_err();
+        assert!(err.to_string().contains("include `secrets/key`"), "{err}");
+        assert!(!outside.join("key").exists());
+        let trees = worktree_paths(&repo);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_refuses_symlink_include_and_cleans_up() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "nope\n").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join(".env")).unwrap();
+        let port = git_worktree_port(&repo, &[".env"]);
+        let runs = dir.path().join("runs");
+        let err = port.materialize("include-symlink", &runs).unwrap_err();
+        assert!(err.to_string().contains("include `.env`"), "{err}");
+        let trees = worktree_paths(&repo);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+    }
+
+    #[test]
+    fn materialize_refuses_oversize_include_and_cleans_up() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        std::fs::write(
+            repo.join(".env"),
+            vec![b'x'; (INCLUDE_MAX_BYTES as usize) + 1],
+        )
+        .unwrap();
+        let port = git_worktree_port(&repo, &[".env"]);
+        let runs = dir.path().join("runs");
+        let err = port.materialize("include-oversize", &runs).unwrap_err();
+        assert!(err.to_string().contains("exceeds 1 MiB"), "{err}");
+        let trees = worktree_paths(&repo);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+    }
+
+    #[test]
+    fn inplace_ignores_include_list() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = Config::default();
+        config.workspace.adapter = "inplace".into();
+        config.workspace.root = root.to_string_lossy().into();
+        config.workspace.include = vec!["../outside".into()];
+        let port = from_config(&config).unwrap();
+        let runs = dir.path().join("state").join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let ws = port.materialize("inplace-include", &runs).unwrap();
+        assert_eq!(ws.path, std::fs::canonicalize(&root).unwrap());
+        assert_eq!(ws.cleanup, WorkspaceCleanup::None);
     }
 }
