@@ -798,6 +798,80 @@ async fn unattended_park_reaps_background_jobs() {
     }
 }
 
+#[tokio::test]
+async fn compact_keep_tail_bytes_keeps_a_fitting_suffix() {
+    use shikigami::ChannelSink;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.tools.mode = PermissionMode::WorkspaceExec;
+    config.model.adapter = "scripted".into();
+    let blob = "a".repeat(8000);
+    let write = serde_json::json!({ "path": "big.txt", "content": blob }).to_string();
+    let cat = serde_json::json!({ "command": "cat big.txt" }).to_string();
+    let report = serde_json::json!({ "summary": "truncated tail", "success": true }).to_string();
+    config.model.script_json = Some(
+        serde_json::json!([
+            { "tool_calls": [{ "name": "write_file", "args_json": write }] },
+            { "tool_calls": [{ "name": "bash", "args_json": cat.clone() }] },
+            { "tool_calls": [{ "name": "bash", "args_json": cat.clone() }] },
+            { "tool_calls": [{ "name": "bash", "args_json": cat.clone() }] },
+            { "tool_calls": [{ "name": "bash", "args_json": cat.clone() }] },
+            { "tool_calls": [{ "name": "bash", "args_json": cat }] },
+            { "tool_calls": [{ "name": "report", "args_json": report }] }
+        ])
+        .to_string(),
+    );
+    config.events.adapter = "none".into();
+    config.run.compact_after_messages = Some(4);
+    config.run.compact_keep_tail = 8;
+    config.run.compact_keep_tail_bytes = 4096;
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let runs = harness.state.runs_dir();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("bound compact tail");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success, "run failed: {result:?}");
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        compacted_history_event(&events),
+        "compact did not run: {events:?}"
+    );
+    let checkpoint = shikigami::checkpoint::Checkpoint::load(&runs, &result.run_id).unwrap();
+    assert_eq!(checkpoint.messages[0].role, "user");
+    let marker = checkpoint
+        .messages
+        .iter()
+        .position(|message| message.content.contains("[context compacted:"))
+        .expect("compact marker");
+    let tail = &checkpoint.messages[marker + 1..];
+    let large_tools = tail
+        .iter()
+        .filter(|message| message.role == "tool" && message.content.len() > 4096)
+        .count();
+    // Count-only keep-8 would retain four 8 KiB cats at the cut, then later turns.
+    // The byte cap keeps one exchange at the cut; one more cat may follow.
+    assert!(
+        large_tools <= 2,
+        "byte cap should drop extra large cats, kept {large_tools}: {tail:?}"
+    );
+    if let Some(tool_idx) = tail.iter().position(|message| message.role == "tool") {
+        assert!(
+            tool_idx > 0 && !tail[tool_idx - 1].tool_calls.is_empty(),
+            "tool result without assistant call: {tail:?}"
+        );
+    }
+}
+
 /// Run a scripted local run that compacts after four messages and return its events.
 async fn compacting_run(script: serde_json::Value) -> Vec<shikigami::HarnessEvent> {
     use shikigami::ChannelSink;
