@@ -699,7 +699,15 @@ impl TuiSession {
     /// `--continue`: load the most recently active session for `cwd`. When
     /// there is none, or it fails to load, start a new one and say so.
     pub(crate) async fn continue_latest(&self, cwd: &Path) -> Result<String, String> {
-        let Some(latest) = self.host.sessions_for_cwd(cwd).into_iter().next() else {
+        let latest = match self.list_sessions(Some(cwd)).await {
+            Ok(sessions) => sessions.into_iter().next(),
+            Err(_) => {
+                let id = self.create_session(cwd).await?;
+                self.push_system(CONTINUE_FAILED);
+                return Ok(id);
+            }
+        };
+        let Some(latest) = latest else {
             let id = self.create_session(cwd).await?;
             self.push_system(NOTHING_TO_CONTINUE);
             return Ok(id);
@@ -734,6 +742,19 @@ impl TuiSession {
                 Ok(id)
             }
         }
+    }
+
+    /// `session/list` for this cwd, or every session in the state root.
+    pub(crate) async fn list_sessions(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<SessionSummary>, String> {
+        let mut params = json!({});
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd.display().to_string());
+        }
+        let result = self.call("session/list", params).await?;
+        SessionSummary::from_list(&result)
     }
 
     pub(crate) fn push_system(&self, text: &str) {
@@ -946,4 +967,6 @@ pub(crate) enum KeyResult {
     },
     /// `/plan`: flag the next prompt of this session for plan write-jail.
     Plan,
+    /// `/resume`: list this cwd's sessions via `session/list`, then pick.
+    ResumePicker,
 }

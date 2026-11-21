@@ -1197,7 +1197,7 @@ async fn slash_new_clears_transcript_and_changes_session() {
 async fn resume_lists_age_turns_and_first_prompt() {
     let dir = tempdir().unwrap();
     let (session, older, newer) = two_cwd_sessions(&dir).await;
-    open_resume(&session);
+    open_resume(&session).await;
     let ids: Vec<String> = session
         .lock_shared()
         .resume
@@ -1234,7 +1234,7 @@ async fn resume_enter_loads_older_session() {
     let dir = tempdir().unwrap();
     let (session, older, newer) = two_cwd_sessions(&dir).await;
     assert_eq!(session.session_id(), newer);
-    open_resume(&session);
+    open_resume(&session).await;
     handle_key(&session, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     match handle_key(&session, enter_key()) {
         KeyResult::LoadSession(id) => {
@@ -1267,7 +1267,7 @@ async fn a_session_held_by_another_window_is_not_taken_over() {
     assert_ne!(second.session_id(), held);
     assert_eq!(second.transcript_text(), CONTINUE_IN_USE);
 
-    open_resume(&second);
+    open_resume(&second).await;
     let rows: Vec<String> = second
         .overlay_cmds()
         .iter()
@@ -1290,7 +1290,7 @@ async fn a_session_held_by_another_window_is_not_taken_over() {
 async fn resume_esc_keeps_current_session() {
     let dir = tempdir().unwrap();
     let (session, _, newer) = two_cwd_sessions(&dir).await;
-    open_resume(&session);
+    open_resume(&session).await;
     assert!(session.lock_shared().resume.is_some());
     assert!(matches!(
         handle_key(&session, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -1323,7 +1323,7 @@ async fn resume_empty_list_is_a_system_line() {
     let dir = tempdir().unwrap();
     let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
     std::fs::remove_dir_all(dir.path().join("state/acp-sessions")).unwrap();
-    open_resume(&session);
+    open_resume(&session).await;
     assert!(session.lock_shared().resume.is_none());
     assert!(session.overlay_cmds().is_empty());
     let text = session.transcript_text();

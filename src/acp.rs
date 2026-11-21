@@ -91,6 +91,76 @@ pub struct SessionSummary {
     pub in_use: bool,
 }
 
+struct SessionListRow {
+    cwd: String,
+    summary: SessionSummary,
+}
+
+impl SessionSummary {
+    fn to_list_item(&self, cwd: &str) -> Value {
+        let mut item = json!({
+            "sessionId": self.session_id,
+            "cwd": cwd,
+            "updatedAt": rfc3339_utc(self.last_active),
+            "_meta": {
+                "shikigami": {
+                    "inUse": self.in_use,
+                    "prompts": self.prompts,
+                }
+            }
+        });
+        if let Some(title) = self.first_prompt.as_deref().filter(|text| !text.is_empty()) {
+            item["title"] = json!(title);
+        }
+        item
+    }
+
+    /// Parse a `session/list` result into summaries (most recently active first).
+    pub fn from_list(result: &Value) -> Result<Vec<Self>, String> {
+        let items = result
+            .get("sessions")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "session/list did not return sessions".to_string())?;
+        items
+            .iter()
+            .map(|item| {
+                Self::from_list_item(item)
+                    .ok_or_else(|| "session/list item missing fields".to_string())
+            })
+            .collect()
+    }
+
+    fn from_list_item(item: &Value) -> Option<Self> {
+        let session_id = item.get("sessionId")?.as_str()?.to_string();
+        let last_active = item
+            .get("updatedAt")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_utc)?;
+        let first_prompt = item
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        let meta = item.pointer("/_meta/shikigami");
+        let in_use = meta
+            .and_then(|value| value.get("inUse"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let prompts = meta
+            .and_then(|value| value.get("prompts"))
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or(usize::from(first_prompt.is_some()));
+        Some(Self {
+            session_id,
+            last_active,
+            prompts,
+            first_prompt,
+            in_use,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct LiveSession {
     cwd: PathBuf,
@@ -387,6 +457,7 @@ impl AcpHost {
         let result = match method {
             "initialize" => self.initialize(&params),
             "session/new" => Box::pin(self.session_new(&params)).await,
+            "session/list" => self.session_list(&params),
             "session/load" => Box::pin(self.session_load(&params, client)).await,
             "session/prompt" => Box::pin(self.session_prompt(&params, client)).await,
             "session/compact" => Box::pin(self.session_compact(&params)).await,
@@ -420,6 +491,7 @@ impl AcpHost {
             "protocolVersion": PROTOCOL_VERSION,
             "agentCapabilities": {
                 "loadSession": true,
+                "sessionCapabilities": { "list": {} },
                 "promptCapabilities": prompt_capabilities(self.harness.model_port())
             },
             "agentInfo": {
@@ -476,6 +548,36 @@ impl AcpHost {
             result["models"] = models;
         }
         Ok(result)
+    }
+
+    /// `session/list`: persisted sessions this host knows, most recently
+    /// active first. Optional `cwd` filters to that workspace. One page.
+    fn session_list(&self, params: &Value) -> Result<Value, Value> {
+        self.require_init()?;
+        if let Some(cursor) = params.get("cursor")
+            && !cursor.is_null()
+        {
+            return Err(rpc_error(-32602, "session/list cursor is not valid"));
+        }
+        let cwd = match params.get("cwd") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let path = value
+                    .as_str()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+                    .ok_or_else(|| {
+                        rpc_error(-32602, "session/list cwd must be an absolute path")
+                    })?;
+                Some(path)
+            }
+        };
+        let sessions: Vec<Value> = self
+            .collect_sessions(cwd.as_deref())
+            .into_iter()
+            .map(|row| row.summary.to_list_item(&row.cwd))
+            .collect();
+        Ok(json!({ "sessions": sessions }))
     }
 
     async fn session_load(&self, params: &Value, client: &dyn AcpClient) -> Result<Value, Value> {
@@ -1442,13 +1544,21 @@ impl AcpHost {
 
     /// Persisted sessions for `cwd` that have a run, most recently active
     /// first. Omits content runs whose payloads are no longer available.
-    /// The TUI uses it for `--continue` and the `/resume` picker.
     pub fn sessions_for_cwd(&self, cwd: &Path) -> Vec<SessionSummary> {
+        self.collect_sessions(Some(cwd))
+            .into_iter()
+            .map(|row| row.summary)
+            .collect()
+    }
+
+    /// Sessions that have a run, most recently active first. `cwd` filters
+    /// to that workspace; omit it for every session in this state root.
+    fn collect_sessions(&self, cwd: Option<&Path>) -> Vec<SessionListRow> {
         let dir = self.sessions_dir();
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
-        // The synchronous picker must not block the async session driver.
+        // Listing is synchronous; do not wait on the async session driver.
         let live_content_ids: HashSet<_> = self
             .sessions
             .try_lock()
@@ -1472,7 +1582,9 @@ impl AcpHost {
             let Ok(persisted) = serde_json::from_slice::<PersistedSession>(&bytes) else {
                 continue;
             };
-            if !same_cwd(Path::new(&persisted.cwd), cwd) {
+            if let Some(cwd) = cwd
+                && !same_cwd(Path::new(&persisted.cwd), cwd)
+            {
                 continue;
             }
             let Some(run_id) = persisted.run_id.as_deref() else {
@@ -1501,18 +1613,22 @@ impl AcpHost {
                         .starts_with(crate::run::COMPACTION_MARKER_PREFIX)
             });
             let first_prompt = prompts.next().map(|message| message.content.clone());
-            found.push(SessionSummary {
-                in_use: self.held_elsewhere(&persisted.session_id),
-                session_id: persisted.session_id,
-                last_active,
-                prompts: usize::from(first_prompt.is_some()) + prompts.count(),
-                first_prompt,
+            found.push(SessionListRow {
+                cwd: persisted.cwd,
+                summary: SessionSummary {
+                    in_use: self.held_elsewhere(&persisted.session_id),
+                    session_id: persisted.session_id,
+                    last_active,
+                    prompts: usize::from(first_prompt.is_some()) + prompts.count(),
+                    first_prompt,
+                },
             });
         }
         found.sort_by(|a, b| {
-            b.last_active
-                .cmp(&a.last_active)
-                .then_with(|| a.session_id.cmp(&b.session_id))
+            b.summary
+                .last_active
+                .cmp(&a.summary.last_active)
+                .then_with(|| a.summary.session_id.cmp(&b.summary.session_id))
         });
         found
     }
@@ -3720,6 +3836,88 @@ fn same_cwd(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// UTC `YYYY-MM-DDTHH:MM:SSZ` for `session/list` `updatedAt`.
+fn rfc3339_utc(when: SystemTime) -> String {
+    let secs = when
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut days = secs / 86_400;
+    let tod = secs % 86_400;
+    let hour = tod / 3600;
+    let min = (tod % 3600) / 60;
+    let sec = tod % 60;
+    let mut year = 1970i32;
+    loop {
+        let length = u64::from(days_in_year(year));
+        if days < length {
+            break;
+        }
+        days -= length;
+        year += 1;
+    }
+    let months = days_in_months(year);
+    let mut month = 1u32;
+    for &length in &months {
+        if days < length {
+            break;
+        }
+        days -= length;
+        month += 1;
+    }
+    format!(
+        "{year:04}-{month:02}-{:02}T{hour:02}:{min:02}:{sec:02}Z",
+        days + 1
+    )
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<SystemTime> {
+    let value = value
+        .strip_suffix('Z')
+        .or_else(|| value.strip_suffix("+00:00"))?;
+    let (date, time) = value.split_once('T')?;
+    let mut date = date.split('-');
+    let year: i32 = date.next()?.parse().ok()?;
+    let month: u32 = date.next()?.parse().ok()?;
+    let day: u32 = date.next()?.parse().ok()?;
+    if date.next().is_some() || year < 1970 || !(1..=12).contains(&month) {
+        return None;
+    }
+    let time = time.split(['.', '+']).next()?;
+    let mut time = time.split(':');
+    let hour: u32 = time.next()?.parse().ok()?;
+    let min: u32 = time.next()?.parse().ok()?;
+    let sec: u32 = time.next()?.parse().ok()?;
+    if time.next().is_some() || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    let months = days_in_months(year);
+    let dim = months[(month as usize) - 1];
+    if day == 0 || u64::from(day) > dim {
+        return None;
+    }
+    let mut days = 0u64;
+    for y in 1970..year {
+        days += u64::from(days_in_year(y));
+    }
+    days += months.iter().take((month as usize) - 1).sum::<u64>();
+    days += u64::from(day - 1);
+    Some(UNIX_EPOCH + Duration::from_secs(days * 86_400 + u64::from(hour * 3600 + min * 60 + sec)))
+}
+
+fn days_in_year(year: i32) -> u32 {
+    if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+        366
+    } else {
+        365
+    }
+}
+
+fn days_in_months(year: i32) -> [u64; 12] {
+    let feb = if days_in_year(year) == 366 { 29 } else { 28 };
+    [31, feb, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+}
+
 /// Serve ACP on process stdio until EOF. Newline-delimited JSON-RPC.
 pub async fn run_stdio(harness: Harness) -> Result<(), String> {
     run_stdio_until(harness, std::future::pending()).await
@@ -4350,6 +4548,10 @@ mod tests {
     ) {
         assert_eq!(result["protocolVersion"], 1);
         assert_eq!(result["agentCapabilities"]["loadSession"], true);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["list"],
+            json!({})
+        );
         assert_eq!(
             result["agentCapabilities"]["promptCapabilities"]["image"],
             image
@@ -5905,6 +6107,24 @@ mod tests {
         }
     }
 
+    async fn list_sessions(host: &AcpHost, client: &dyn AcpClient, cwd: Option<&Path>) -> Value {
+        let mut params = json!({});
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd);
+        }
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "session/list",
+                "params": params
+            }),
+            client,
+        )
+        .await
+        .unwrap()
+    }
+
     /// `initialize` a fresh (restarted) host, then `session/load`.
     async fn load(host: &AcpHost, client: &dyn AcpClient, session_id: &str, cwd: &Path) -> Value {
         host.handle(
@@ -6041,6 +6261,126 @@ mod tests {
         drop(holder);
         let loaded = load_after_restart(&second, &client, &session_id, &cwd).await;
         assert_eq!(rpc_ok(&loaded)["sessionId"], session_id.as_str());
+    }
+
+    /// #696: `session/list` is the discovery method; it does not take the lock.
+    #[tokio::test]
+    async fn session_list_filters_by_cwd_and_reports_in_use() {
+        let dir = tempdir().unwrap();
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let cwd = dir.path().join("project");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let holder = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        let session_id = init_and_new(&holder, &client, &cwd).await;
+        let reply = prompt(
+            &holder,
+            &client,
+            &session_id,
+            json!([{"type":"text","text":"fix the login test"}]),
+        )
+        .await;
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
+        let elsewhere = init_and_new(&holder, &client, &other).await;
+        let reply = prompt(
+            &holder,
+            &client,
+            &elsewhere,
+            json!([{"type":"text","text":"elsewhere"}]),
+        )
+        .await;
+        assert_eq!(rpc_ok(&reply)["stopReason"], "end_turn", "{reply}");
+
+        let listed = list_sessions(&holder, &client, Some(&cwd)).await;
+        let sessions = rpc_ok(&listed)["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1, "{listed}");
+        assert_eq!(sessions[0]["sessionId"], session_id.as_str());
+        assert_eq!(sessions[0]["cwd"], cwd.to_string_lossy().as_ref());
+        assert_eq!(sessions[0]["title"], "fix the login test");
+        assert_eq!(sessions[0]["_meta"]["shikigami"]["inUse"], false);
+        assert!(sessions[0]["updatedAt"].as_str().unwrap().ends_with('Z'));
+        assert!(rpc_ok(&listed).get("nextCursor").is_none());
+
+        let all = list_sessions(&holder, &client, None).await;
+        let ids: Vec<_> = rpc_ok(&all)["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["sessionId"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains(&session_id), "{all}");
+        assert!(ids.contains(&elsewhere), "{all}");
+
+        let second = scripted_host(dir.path(), r#"[{"content":"ok"}]"#);
+        second
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": 1, "capabilities": {} }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let from_second = list_sessions(&second, &client, Some(&cwd)).await;
+        assert_eq!(
+            rpc_ok(&from_second)["sessions"][0]["_meta"]["shikigami"]["inUse"],
+            true,
+            "{from_second}"
+        );
+        let refused = load(&second, &client, &session_id, &cwd).await;
+        assert_eq!(
+            refused["error"]["data"]["shikigami"]["kind"], "sessionInUse",
+            "{refused}"
+        );
+
+        let bad_cursor = holder
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "session/list",
+                    "params": { "cursor": "not-issued" }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_cursor["error"]["code"], -32602, "{bad_cursor}");
+        let relative = holder
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 22,
+                    "method": "session/list",
+                    "params": { "cwd": "relative" }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(relative["error"]["code"], -32602, "{relative}");
+    }
+
+    #[test]
+    fn rfc3339_utc_round_trips_known_instants() {
+        let cases = [
+            (0, "1970-01-01T00:00:00Z"),
+            (86_400, "1970-01-02T00:00:00Z"),
+            (1_000_000_000, "2001-09-09T01:46:40Z"),
+            (1_704_067_200, "2024-01-01T00:00:00Z"),
+        ];
+        for (secs, expected) in cases {
+            let when = UNIX_EPOCH + Duration::from_secs(secs);
+            assert_eq!(rfc3339_utc(when), expected, "{secs}");
+            assert_eq!(parse_rfc3339_utc(expected), Some(when), "{expected}");
+        }
     }
 
     #[tokio::test]

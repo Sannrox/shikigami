@@ -202,8 +202,17 @@ impl TuiSession {
         true
     }
 
-    pub(crate) fn open_resume_picker(&self) -> KeyResult {
-        let sessions = self.host.sessions_for_cwd(&self.cwd);
+    pub(crate) async fn open_resume_picker(&self) {
+        let sessions = match self.list_sessions(Some(&self.cwd)).await {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                let mut shared = self.lock_shared();
+                shared.transcript.push(TranscriptLine::System(err));
+                shared.resume = None;
+                shared.dirty = true;
+                return;
+            }
+        };
         let mut shared = self.lock_shared();
         if sessions.is_empty() {
             shared
@@ -215,7 +224,6 @@ impl TuiSession {
             shared.slash_selected = 0;
         }
         shared.dirty = true;
-        KeyResult::Continue
     }
 
     /// Classifies a composer line without running it or writing the transcript.
@@ -343,7 +351,7 @@ impl TuiSession {
             "plan" => KeyResult::Plan,
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
-            "resume" => self.open_resume_picker(),
+            "resume" => KeyResult::ResumePicker,
             other => {
                 // A catalog skill is `/<id>`; `/skill:<id>` is the alias.
                 let id = other.strip_prefix(SKILL_PREFIX).unwrap_or(other);
