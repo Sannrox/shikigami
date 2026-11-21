@@ -2,7 +2,8 @@ use super::support::*;
 use crate::look::KeyMap;
 use crate::protocol::{apply_load_result, apply_prompt_result};
 use crate::render::{
-    ago, composer_height, follow_pad, permission_fields, prompt_block, scroll_offset, status_line,
+    ago, composer_height, follow_pad, format_tool, permission_fields, prompt_block, scroll_offset,
+    status_line,
 };
 use crate::session::*;
 use crate::slash::*;
@@ -725,7 +726,9 @@ async fn untrusted_output_controls_are_inert_on_redraw() {
                 id: "tool".into(),
                 title: payload.into(),
                 status: "completed".into(),
+                summary: String::new(),
                 detail: payload.into(),
+                args: json!({}),
                 expanded: true,
             }),
         ];
@@ -762,9 +765,110 @@ async fn collapsed_tool_stays_one_line_for_multiline_result() {
     notify_multiline_tool(&session).await;
     let text = session.transcript_text();
     assert_eq!(tool_line_count(&text), 1, "{text}");
-    assert!(text.contains("first line of stdout"), "{text}");
+    assert_eq!(text, "· bash  cat notes  ok");
     assert!(!text.contains("later-unique-line"), "{text}");
     assert!(!drawn_text(&session).contains("later-unique-line"));
+}
+
+fn sample_tool(status: &str) -> ToolLine {
+    ToolLine {
+        id: "t1".into(),
+        title: "write_file".into(),
+        status: status.into(),
+        summary: "a.txt".into(),
+        detail: "wrote a.txt".into(),
+        args: json!({"path": "a.txt"}),
+        expanded: false,
+    }
+}
+
+#[test]
+fn collapsed_tool_line_shows_ok_fail_ask() {
+    assert_eq!(
+        format_tool(&sample_tool("completed")),
+        "· write_file  a.txt  ok"
+    );
+    assert_eq!(
+        format_tool(&sample_tool("failed")),
+        "· write_file  a.txt  fail"
+    );
+    assert_eq!(
+        format_tool(&sample_tool("pending")),
+        "· write_file  a.txt  ask"
+    );
+    assert_eq!(
+        format_tool(&sample_tool("cancelled")),
+        "· write_file  a.txt  cancelled"
+    );
+    assert_eq!(
+        format_tool(&sample_tool("not run")),
+        "· write_file  a.txt  not run"
+    );
+    assert_eq!(
+        format_tool(&sample_tool("result unknown")),
+        "· write_file  a.txt  result unknown"
+    );
+}
+
+#[test]
+fn expanded_edit_shows_bounded_old_new_snippet() {
+    let old = (0..15)
+        .map(|i| format!("old-line-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let new = (0..15)
+        .map(|i| format!("new-line-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut tool = ToolLine {
+        id: "e1".into(),
+        title: "edit".into(),
+        status: "completed".into(),
+        summary: "notes.rs".into(),
+        detail: "updated notes.rs".into(),
+        args: json!({
+            "path": "notes.rs",
+            "old": old,
+            "new": new,
+            "content": "FULL_FILE_SHOULD_NOT_APPEAR"
+        }),
+        expanded: true,
+    };
+    let text = format_tool(&tool);
+    assert!(text.starts_with("· edit  notes.rs  ok\n"), "{text}");
+    assert!(text.contains("· - old-line-0"), "{text}");
+    assert!(
+        text.contains("· + new-line-0") || text.contains("new-line-0"),
+        "{text}"
+    );
+    assert!(text.contains("· updated notes.rs"), "{text}");
+    assert!(!text.contains("FULL_FILE_SHOULD_NOT_APPEAR"), "{text}");
+    assert!(
+        tool_line_count(&text) <= 22,
+        "header plus 20 snippet lines plus result: {text}"
+    );
+    assert!(
+        !text.contains("old-line-14") || !text.contains("new-line-14"),
+        "{text}"
+    );
+    tool.expanded = false;
+    let collapsed = format_tool(&tool);
+    assert_eq!(collapsed, "· edit  notes.rs  ok");
+    assert!(!collapsed.contains("old-line-0"), "{collapsed}");
+}
+
+#[test]
+fn report_has_no_outcome_word() {
+    let tool = ToolLine {
+        id: "r1".into(),
+        title: "report".into(),
+        status: "completed".into(),
+        summary: "all written".into(),
+        detail: "all written".into(),
+        args: json!({"summary": "all written", "success": true}),
+        expanded: false,
+    };
+    assert_eq!(format_tool(&tool), "· report  all written");
 }
 
 #[test]

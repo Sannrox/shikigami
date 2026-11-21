@@ -425,6 +425,7 @@ impl TuiSession {
         shared.pending_parts.clear();
         shared.run_id = None;
         shared.usage = Usage::default();
+        shared.selected_tool = None;
         shared.nested_children.clear();
         shared.context = None;
         shared.last_compact = None;
@@ -537,6 +538,7 @@ impl TuiSession {
                 let mut shared = self.lock_shared();
                 apply_load_result(&mut shared, &result);
                 shared.usage = Usage::default();
+                shared.selected_tool = None;
                 shared.status = "ready".into();
                 shared.dirty = true;
             }

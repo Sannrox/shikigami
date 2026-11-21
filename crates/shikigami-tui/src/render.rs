@@ -9,7 +9,6 @@ use std::time::{Duration, SystemTime};
 use unicode_width::UnicodeWidthChar;
 
 use crate::look::{Action, KeyMap, Palette};
-use crate::protocol::{TOOL_CANCELLED, TOOL_IN_DOUBT, TOOL_NOT_RUN};
 use crate::session::{PendingPermission, Plan, Shared, ToolLine, TranscriptLine, TuiSession};
 use crate::slash::{
     inflight_nested_children, mention_visible, nested_child_row, nested_children_visible,
@@ -26,30 +25,139 @@ pub(crate) fn line_text(line: &TranscriptLine) -> String {
     })
 }
 
-pub(crate) fn format_tool(tool: &ToolLine) -> String {
-    let rest = if tool.detail.is_empty() {
-        tool.status.as_str()
-    } else {
-        tool.detail.as_str()
-    };
-    let outcome = matches!(
-        tool.status.as_str(),
-        "failed" | TOOL_NOT_RUN | TOOL_IN_DOUBT | TOOL_CANCELLED
-    ) && !tool.detail.is_empty();
-    let suffix = if outcome {
-        format!("  {}", tool.status)
-    } else {
-        String::new()
-    };
-    // A turn's final answer comes as a `report` call: show it whole, wrapped.
-    if !tool.expanded && tool.title != "report" {
-        let one = truncate_one_line(rest, 80);
-        return format!("· {}  {one}{suffix}", tool.title);
+/// ACP status as the collapsed-row word. Replay words stay as they are.
+pub(crate) fn tool_outcome(status: &str) -> &str {
+    match status {
+        "completed" => "ok",
+        "failed" => "fail",
+        "pending" => "ask",
+        other => other,
     }
-    let mut lines = rest.lines();
-    let first = lines.next().unwrap_or("");
-    let mut out = format!("· {}  {first}{suffix}", tool.title);
-    for line in lines {
+}
+
+const EDIT_DIFF_LINES: usize = 20;
+
+fn arg_text(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| obj.get(*key).and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn push_hunk(lines: &mut Vec<String>, old: &str, new: &str) {
+    for line in old.lines() {
+        lines.push(format!("- {line}"));
+    }
+    for line in new.lines() {
+        lines.push(format!("+ {line}"));
+    }
+}
+
+/// Short old/new (or patch) snippet from args already on the tool line.
+fn edit_snippet(title: &str, args: &Value) -> Option<String> {
+    let mut lines = Vec::new();
+    match title {
+        "edit" => {
+            let obj = args.as_object()?;
+            let old = arg_text(obj, &["old", "old_string"])?;
+            let new = arg_text(obj, &["new", "new_string"])?;
+            push_hunk(&mut lines, &old, &new);
+        }
+        "multi_edit" => {
+            for edit in args.get("edits")?.as_array()? {
+                let Some(obj) = edit.as_object() else {
+                    continue;
+                };
+                let old = arg_text(obj, &["old", "old_string"]).unwrap_or_default();
+                let new = arg_text(obj, &["new", "new_string"]).unwrap_or_default();
+                push_hunk(&mut lines, &old, &new);
+            }
+        }
+        "apply_patch" => {
+            for patch in args.get("patches")?.as_array()? {
+                if let Some(path) = patch.get("path").and_then(Value::as_str) {
+                    lines.push(path.to_string());
+                }
+                let Some(hunks) = patch.get("hunks").and_then(Value::as_array) else {
+                    continue;
+                };
+                for hunk in hunks {
+                    let Some(obj) = hunk.as_object() else {
+                        continue;
+                    };
+                    let old = arg_text(obj, &["old", "old_string"]).unwrap_or_default();
+                    let new = arg_text(obj, &["new", "new_string"]).unwrap_or_default();
+                    push_hunk(&mut lines, &old, &new);
+                }
+            }
+        }
+        _ => return None,
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.truncate(EDIT_DIFF_LINES);
+    Some(lines.join("\n"))
+}
+
+fn tool_one_line(tool: &ToolLine) -> String {
+    if tool.summary.is_empty() {
+        truncate_one_line(&tool.detail, 80)
+    } else {
+        truncate_one_line(&tool.summary, 80)
+    }
+}
+
+fn tool_header(tool: &ToolLine) -> String {
+    let word = tool_outcome(&tool.status);
+    let suffix = if word.is_empty() {
+        String::new()
+    } else {
+        format!("  {word}")
+    };
+    let one = tool_one_line(tool);
+    if one.is_empty() {
+        format!("· {}{suffix}", tool.title)
+    } else {
+        format!("· {}  {one}{suffix}", tool.title)
+    }
+}
+
+fn tool_expand_body(tool: &ToolLine) -> String {
+    match edit_snippet(&tool.title, &tool.args) {
+        Some(diff) if tool.detail.is_empty() || tool.detail == tool.summary => diff,
+        Some(diff) => format!("{diff}\n{}", tool.detail),
+        None if tool.detail.is_empty() || tool.detail == tool.summary => String::new(),
+        None => tool.detail.clone(),
+    }
+}
+
+pub(crate) fn format_tool(tool: &ToolLine) -> String {
+    // A turn's final answer comes as a `report` call: show it whole, wrapped.
+    if tool.title == "report" {
+        let rest = if tool.detail.is_empty() {
+            tool.summary.as_str()
+        } else {
+            tool.detail.as_str()
+        };
+        let mut lines = rest.lines();
+        let first = lines.next().unwrap_or("");
+        let mut out = format!("· {}  {first}", tool.title);
+        for line in lines {
+            out.push('\n');
+            out.push_str("· ");
+            out.push_str(line);
+        }
+        return out;
+    }
+    let mut out = tool_header(tool);
+    if !tool.expanded {
+        return out;
+    }
+    let one = tool_one_line(tool);
+    for line in tool_expand_body(tool).lines() {
+        if line == one {
+            continue;
+        }
         out.push('\n');
         out.push_str("· ");
         out.push_str(line);
@@ -498,15 +606,71 @@ pub(crate) fn prompt_block(input: &str, cursor: usize, width: u16) -> (Vec<Strin
     (lines, x, y)
 }
 
-pub(crate) fn styled_lines(line: &TranscriptLine, palette: &Palette) -> Vec<Line<'static>> {
-    let style = match line {
-        TranscriptLine::Assistant(_) => palette.text,
-        _ => palette.muted,
+pub(crate) fn styled_lines(
+    line: &TranscriptLine,
+    palette: &Palette,
+    selected: bool,
+) -> Vec<Line<'static>> {
+    let style = if selected {
+        palette.selected
+    } else {
+        match line {
+            TranscriptLine::Assistant(_) => palette.text,
+            _ => palette.muted,
+        }
     };
     line_text(line)
         .lines()
         .map(|row| Line::from(Span::styled(row.to_string(), style)))
         .collect()
+}
+
+fn visual_tool_ids(transcript: &[TranscriptLine], width: u16) -> Vec<Option<String>> {
+    let mut ids = Vec::new();
+    let mut last: Option<u8> = None;
+    for line in transcript {
+        let kind = line_kind(line);
+        if last.is_some_and(|prev| prev != kind) {
+            ids.push(None);
+        }
+        let id = match line {
+            TranscriptLine::Tool(tool) => Some(tool.id.clone()),
+            _ => None,
+        };
+        let n = wrapped_rows(&line_text(line), width).max(1);
+        for _ in 0..n {
+            ids.push(id.clone());
+        }
+        last = Some(kind);
+    }
+    ids
+}
+
+/// Tool whose drawn row contains `(column, row)`, if the click is in the transcript.
+pub(crate) fn tool_at_point(shared: &Shared, column: u16, row: u16) -> Option<String> {
+    let view = shared.transcript_area;
+    if view.width == 0 || view.height == 0 || !rect_contains(view, column, row) {
+        return None;
+    }
+    let body = spaced_rows(&shared.transcript).join("\n");
+    let content_rows = if body.is_empty() {
+        0
+    } else {
+        wrapped_rows(&body, view.width.max(1))
+    };
+    let pad = follow_pad(content_rows, view.height, shared.scroll_back);
+    let (follow_y, _) = scroll_offset(&body, view);
+    let scroll_back = shared.scroll_back.min(follow_y);
+    let y = if pad > 0 {
+        0
+    } else {
+        follow_y.saturating_sub(scroll_back)
+    };
+    let ids = visual_tool_ids(&shared.transcript, view.width.max(1));
+    let mut rows: Vec<Option<String>> = vec![None; pad as usize];
+    rows.extend(ids);
+    let idx = y as usize + (row - view.y) as usize;
+    rows.get(idx).cloned().flatten()
 }
 
 pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
@@ -576,6 +740,7 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
     let body = rows.join("\n");
     let mut idx = 0usize;
     let view = chunks[idx];
+    shared.transcript_area = view;
     idx += 1;
     let content_rows = if body.is_empty() {
         0
@@ -587,13 +752,18 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
     for _ in 0..pad {
         lines.push(Line::default());
     }
+    let selected_id = shared.selected_tool.clone();
     let mut last: Option<u8> = None;
     for line in &shared.transcript {
         let kind = line_kind(line);
         if last.is_some_and(|prev| prev != kind) {
             lines.push(Line::default());
         }
-        lines.extend(styled_lines(line, palette));
+        let selected = matches!(
+            line,
+            TranscriptLine::Tool(tool) if selected_id.as_deref() == Some(tool.id.as_str())
+        );
+        lines.extend(styled_lines(line, palette, selected));
         last = Some(kind);
     }
     shared.transcript_h = view.height;

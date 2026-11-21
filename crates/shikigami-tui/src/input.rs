@@ -4,7 +4,9 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::look::Action;
 use crate::session::{KeyResult, SESSION_IN_USE, TranscriptLine, TuiSession};
@@ -33,12 +35,17 @@ pub(crate) fn handle_event(session: &TuiSession, ev: Event) -> KeyResult {
 }
 
 pub(crate) fn handle_mouse(session: &TuiSession, mouse: MouseEvent) {
-    let dir = match mouse.kind {
-        MouseEventKind::ScrollUp => -1,
-        MouseEventKind::ScrollDown => 1,
-        _ => return,
-    };
-    session.lock_shared().wheel(dir, mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let mut shared = session.lock_shared();
+            if let Some(id) = crate::render::tool_at_point(&shared, mouse.column, mouse.row) {
+                shared.select_tool(id);
+            }
+        }
+        MouseEventKind::ScrollUp => session.lock_shared().wheel(-1, mouse.column, mouse.row),
+        MouseEventKind::ScrollDown => session.lock_shared().wheel(1, mouse.column, mouse.row),
+        _ => {}
+    }
 }
 
 pub(crate) fn typing_event(ev: &Event) -> bool {
@@ -151,7 +158,7 @@ pub(crate) fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
             return KeyResult::Continue;
         }
         Some(Action::ToggleTool) => {
-            session.lock_shared().toggle_last_tool();
+            session.lock_shared().toggle_selected_tool();
             return KeyResult::Continue;
         }
         Some(Action::Copy) => {

@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::Terminal;
 use serde_json::{Value, json};
 use shikigami::acp::{AcpClient, AcpHost};
@@ -234,12 +236,76 @@ pub(super) fn wheel(kind: MouseEventKind, column: u16, row: u16) -> Event {
     })
 }
 
+pub(super) fn click(column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
 pub(super) fn ctrl_char(ch: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
 }
 
 pub(super) fn ctrl_o() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+}
+
+pub(super) async fn notify_tool(
+    session: &TuiSession,
+    id: &str,
+    title: &str,
+    status: &str,
+    raw_input: Value,
+    result: Option<&str>,
+) {
+    session
+        .client
+        .notify(
+            "session/update",
+            json!({
+                "sessionId": session.session_id(),
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": id,
+                    "title": title,
+                    "status": "pending",
+                    "rawInput": raw_input
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    if status == "pending" && result.is_none() {
+        return;
+    }
+    let mut update = json!({
+        "sessionId": session.session_id(),
+        "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            "status": status
+        }
+    });
+    if let Some(text) = result {
+        update["update"]["content"] = json!([{
+            "type": "content",
+            "content": { "type": "text", "text": text }
+        }]);
+    }
+    session
+        .client
+        .notify("session/update", update)
+        .await
+        .unwrap();
+}
+
+pub(super) fn tool_row_y(rows: &[String], needle: &str) -> u16 {
+    rows.iter()
+        .position(|row| row.contains(needle))
+        .unwrap_or_else(|| panic!("missing tool row {needle:?} in\n{}", rows.join("\n"))) as u16
 }
 
 pub(super) async fn notify_multiline_tool(session: &TuiSession) {
