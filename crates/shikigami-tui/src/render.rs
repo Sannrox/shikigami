@@ -840,7 +840,7 @@ pub(crate) fn draw(frame: &mut Frame, session: &TuiSession) {
     } else if running_row {
         let overlay = chunks[idx];
         idx += 1;
-        let text = truncate_display(&running_marker_row(), overlay.width as usize);
+        let text = truncate_display(&running_marker_row(&shared), overlay.width as usize);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(text, palette.muted))),
             overlay,

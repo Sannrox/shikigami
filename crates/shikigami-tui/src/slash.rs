@@ -391,15 +391,33 @@ impl TuiSession {
     }
 
     pub(crate) async fn compact(&self) -> Result<(), String> {
+        {
+            let mut shared = self.lock_shared();
+            if shared.busy {
+                return Err("prompt already in flight".into());
+            }
+            shared.busy = true;
+            shared.status = crate::protocol::COMPACTING_STATUS.into();
+            shared.dirty = true;
+        }
         let result = self
             .call("session/compact", json!({ "sessionId": self.session_id() }))
-            .await?;
+            .await;
+        let mut shared = self.lock_shared();
+        shared.busy = false;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                shared.status = "error".into();
+                shared.dirty = true;
+                return Err(err);
+            }
+        };
         let before = result.get("before").and_then(|v| v.as_u64()).unwrap_or(0);
         let after = result
             .get("after")
             .and_then(|v| v.as_u64())
             .unwrap_or(before);
-        let mut shared = self.lock_shared();
         if after < before {
             shared.last_compact = Some((before, after));
             shared.transcript.push(TranscriptLine::System(format!(
@@ -905,8 +923,13 @@ pub(crate) fn running_marker_visible(shared: &Shared) -> bool {
     shared.busy && !shared.dock_open() && inflight_nested_children(shared).is_empty()
 }
 
-pub(crate) fn running_marker_row() -> String {
-    format!("  {RUNNING_MARKER}")
+pub(crate) fn running_marker_row(shared: &Shared) -> String {
+    let word = if shared.status == crate::protocol::COMPACTING_STATUS {
+        crate::protocol::COMPACTING_STATUS
+    } else {
+        RUNNING_MARKER
+    };
+    format!("  {word}")
 }
 
 /// Nested children that still belong in the dim slot (`running` / `parked`).

@@ -15,6 +15,9 @@ use crate::session::{
 /// Replayed where compaction cut earlier messages from the run's history.
 pub(crate) const COMPACTED: &str = "Earlier messages were compacted.";
 
+/// Footer and running-slot word while compact runs.
+pub(crate) const COMPACTING_STATUS: &str = "compacting";
+
 /// Replayed under a prompt that got no answer (failed or cancelled first).
 pub(crate) const NO_ANSWER: &str = "This prompt got no answer.";
 
@@ -109,6 +112,7 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
     let update = params.get("update").unwrap_or(params);
     let children = apply_children_meta(shared, update);
     let context = apply_context_meta(shared, update);
+    let compacting = apply_compacting_meta(shared, update);
     let kind = update
         .get("sessionUpdate")
         .and_then(|v| v.as_str())
@@ -122,6 +126,13 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
                 shared
                     .transcript
                     .push(TranscriptLine::System(COMPACTED.into()));
+                if shared.status == COMPACTING_STATUS {
+                    shared.status = if shared.busy {
+                        "running".into()
+                    } else {
+                        "ready".into()
+                    };
+                }
             } else if let Some(text) = chunk_text(update) {
                 // A replayed prompt is one chunk with its own id: one line each,
                 // so a prompt that got no answer stays apart from the next.
@@ -253,7 +264,7 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
                 shared.dock_scroll = 0;
             }
         }
-        _ if children || context => {}
+        _ if children || context || compacting => {}
         _ => return,
     }
     shared.dirty = true;
@@ -354,6 +365,18 @@ pub(crate) fn tool_update_detail(update: &Value) -> Option<String> {
         .or_else(|| update.pointer("/content/0/text"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// `_meta.shikigami.compacting` puts the running slot on `compacting`.
+pub(crate) fn apply_compacting_meta(shared: &mut Shared, value: &Value) -> bool {
+    if !value
+        .pointer("/_meta/shikigami/compacting")
+        .is_some_and(|v| v == true)
+    {
+        return false;
+    }
+    shared.status = COMPACTING_STATUS.into();
+    true
 }
 
 /// Standing attachments from `_meta.shikigami.context`.

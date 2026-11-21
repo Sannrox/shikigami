@@ -608,7 +608,7 @@ field changes meaning or goes away; new fields may appear in the same version.
 | `session_id` | ACP session shown in this window |
 | `cwd` | Working directory the session belongs to |
 | `model` | Model name, or `demo` / `scripted` |
-| `status` | Footer status word: `ready`, `running`, `ask`, `error`, ... |
+| `status` | Footer status word: `ready`, `running`, `compacting`, `ask`, `error`, ... |
 | `turn` | Prompts sent in this session |
 | `run_id` | The session's run, or `null` until the first prompt finishes |
 
