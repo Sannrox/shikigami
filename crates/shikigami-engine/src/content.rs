@@ -367,6 +367,9 @@ pub struct ContentRunRequestV1 {
     /// Host-initiated skill pack loaded as a `load_skill` tool result before
     /// the first model turn of this attempt. Same field as [`crate::run::RunRequest`].
     pub load_skill: Option<String>,
+    /// Caller's W3C trace context; the run's spans join that trace. Same field
+    /// as [`crate::run::RunRequest`]: used only when the run starts.
+    pub trace_context: Option<crate::tracing_export::TraceContext>,
 }
 
 impl ContentRunRequestV1 {
@@ -395,6 +398,7 @@ impl ContentRunRequestV1 {
             resume_plan: None,
             resume_answer: None,
             load_skill: None,
+            trace_context: None,
         }
     }
 
@@ -510,6 +514,7 @@ impl ContentProcessRequestV1 {
             resume_plan: None,
             resume_answer: None,
             load_skill: None,
+            trace_context: None,
         })
     }
 }

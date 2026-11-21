@@ -34,6 +34,7 @@ use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
     compact_messages_bounded,
 };
+use crate::tracing_export::{TraceContext, TraceSource};
 use crate::workspace::{self, MaterializedWorkspace, WorkspaceCleanup};
 
 /// ACP protocol version this host speaks. `initialize` accepts client offers
@@ -1174,6 +1175,7 @@ impl AcpHost {
         let mut parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
         let mut load_skill = prompt_load_skill(params)?;
         let steer = prompt_steer(params)?;
+        let trace_context = prompt_trace_context(params);
         if let Some((name, args)) = {
             let sessions = self.sessions.lock().await;
             let live = sessions
@@ -1315,6 +1317,7 @@ impl AcpHost {
                 request.session_wait = true;
                 request.cancel = Some(cancel_rx);
                 request.load_skill = load_skill.clone();
+                request.trace_context = trace_context.clone();
                 PromptDrive::Content(request)
             } else if let Some(run_id) = resume_run_id.clone() {
                 match resume_prompt_drive(
@@ -1341,6 +1344,7 @@ impl AcpHost {
                 request.cancel = Some(cancel_rx);
                 request.plan_jail = plan_jail;
                 request.set_load_skill(load_skill.clone());
+                request.trace_context = trace_context;
                 PromptDrive::Text(request)
             };
             drive.grant_session_asks(ask_grants.iter().cloned());
@@ -3934,6 +3938,27 @@ fn session_worktree_flag(params: &Value) -> Result<bool, Value> {
             -32602,
             "session/new _meta.shikigami.worktree must be a boolean",
         )
+    })
+}
+
+/// ACP-reserved `_meta.traceparent` / `_meta.tracestate` on `session/prompt`.
+/// A missing or non-string value is today's self-started trace. Malformed
+/// W3C values still reach the engine, which never fails the prompt.
+fn prompt_trace_context(params: &Value) -> Option<TraceContext> {
+    let traceparent = params
+        .pointer("/_meta/traceparent")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let tracestate = params
+        .pointer("/_meta/tracestate")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(TraceContext {
+        traceparent,
+        tracestate,
+        source: TraceSource::Acp,
     })
 }
 
@@ -7832,6 +7857,193 @@ mod tests {
         let updates = replay.updates.lock().await.clone();
         let advertised = command_update(&updates).expect("available_commands_update after load");
         assert!(advertised_names(advertised).contains(&"compact".into()));
+    }
+
+    const ACP_CALLER_TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const ACP_CALLER_SPAN: &str = "00f067aa0ba902b7";
+
+    fn tracing_scripted_host(dir: &Path, script: &str, spans_path: &Path) -> AcpHost {
+        scripted_host_with(dir, script, |config| {
+            config.tracing.enabled = true;
+            config.tracing.exporter = "otlp".into();
+            config.tracing.endpoint = Some(spans_path.to_string_lossy().into());
+        })
+    }
+
+    fn exported_spans(exported: &str) -> Vec<Value> {
+        exported
+            .lines()
+            .flat_map(|line| {
+                let payload: Value = serde_json::from_str(line).unwrap();
+                payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            })
+            .collect()
+    }
+
+    fn span_attr<'a>(span: &'a Value, key: &str) -> Option<&'a str> {
+        span["attributes"].as_array()?.iter().find_map(|attribute| {
+            (attribute["key"].as_str() == Some(key))
+                .then(|| attribute["value"]["stringValue"].as_str())
+                .flatten()
+        })
+    }
+
+    async fn prompt_with_meta(
+        host: &AcpHost,
+        client: &RecordingClient,
+        cwd: &Path,
+        meta: Option<Value>,
+        prompt: Vec<Value>,
+    ) -> Value {
+        let session_id = init_and_new(host, client, cwd).await;
+        let mut params = json!({
+            "sessionId": session_id,
+            "prompt": prompt,
+        });
+        if let Some(meta) = meta {
+            params["_meta"] = meta;
+        }
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "session/prompt",
+                "params": params,
+            }),
+            client,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_prompt_joins_meta_traceparent_or_self_starts() {
+        struct Case {
+            name: &'static str,
+            meta: Option<Value>,
+            joins: bool,
+        }
+        let caller = format!("00-{ACP_CALLER_TRACE}-{ACP_CALLER_SPAN}-01");
+        for case in [
+            Case {
+                name: "valid",
+                meta: Some(json!({
+                    "traceparent": caller,
+                    "tracestate": "vendor=opaque",
+                })),
+                joins: true,
+            },
+            Case {
+                name: "missing",
+                meta: None,
+                joins: false,
+            },
+            Case {
+                name: "malformed",
+                meta: Some(json!({ "traceparent": "not-a-traceparent" })),
+                joins: false,
+            },
+            Case {
+                name: "non-string",
+                meta: Some(json!({ "traceparent": 1 })),
+                joins: false,
+            },
+        ] {
+            let dir = tempdir().unwrap();
+            let spans_path = dir.path().join("spans.jsonl");
+            let cwd = dir.path().join("project");
+            std::fs::create_dir_all(&cwd).unwrap();
+            let host = tracing_scripted_host(dir.path(), r#"[{"content":"hello"}]"#, &spans_path);
+            let client = RecordingClient {
+                updates: Mutex::new(Vec::new()),
+                permission: PermissionOutcome::Allow,
+            };
+            let prompt = prompt_with_meta(
+                &host,
+                &client,
+                &cwd,
+                case.meta,
+                vec![json!({"type":"text","text":"hi"})],
+            )
+            .await;
+            assert_eq!(
+                rpc_ok(&prompt)["stopReason"],
+                "end_turn",
+                "{} prompt failed: {prompt}",
+                case.name
+            );
+            let exported = std::fs::read_to_string(&spans_path).unwrap();
+            let run = exported_spans(&exported)
+                .into_iter()
+                .find(|span| span["name"] == "run")
+                .unwrap_or_else(|| panic!("{} missing run span: {exported}", case.name));
+            if case.joins {
+                assert_eq!(run["traceId"], ACP_CALLER_TRACE, "{}", case.name);
+                assert_eq!(run["parentSpanId"], ACP_CALLER_SPAN, "{}", case.name);
+                assert_eq!(
+                    span_attr(&run, "parent.source"),
+                    Some("acp"),
+                    "{}",
+                    case.name
+                );
+                assert!(
+                    !exported.contains("vendor=opaque"),
+                    "tracestate is never an attribute: {exported}"
+                );
+            } else {
+                assert_ne!(run["traceId"], ACP_CALLER_TRACE, "{}", case.name);
+                assert_eq!(run["parentSpanId"], "", "{}", case.name);
+                assert_eq!(
+                    span_attr(&run, "parent.source"),
+                    Some("none"),
+                    "{}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_prompt_with_attachments_joins_meta_traceparent() {
+        let dir = tempdir().unwrap();
+        let spans_path = dir.path().join("spans.jsonl");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = tracing_scripted_host(dir.path(), r#"[{"content":"saw-image"}]"#, &spans_path);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let png = b"\x89PNG ACP-TRACE-IMAGE";
+        let prompt = prompt_with_meta(
+            &host,
+            &client,
+            &cwd,
+            Some(json!({
+                "traceparent": format!("00-{ACP_CALLER_TRACE}-{ACP_CALLER_SPAN}-01"),
+            })),
+            vec![
+                json!({"type":"text","text":"inspect"}),
+                json!({
+                    "type":"image",
+                    "mimeType":"image/png",
+                    "data": encode_base64(png)
+                }),
+            ],
+        )
+        .await;
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt}");
+        let exported = std::fs::read_to_string(&spans_path).unwrap();
+        let run = exported_spans(&exported)
+            .into_iter()
+            .find(|span| span["name"] == "run")
+            .unwrap_or_else(|| panic!("missing run span: {exported}"));
+        assert_eq!(run["traceId"], ACP_CALLER_TRACE, "{exported}");
+        assert_eq!(run["parentSpanId"], ACP_CALLER_SPAN, "{exported}");
+        assert_eq!(span_attr(&run, "parent.source"), Some("acp"), "{exported}");
     }
 
     #[tokio::test]

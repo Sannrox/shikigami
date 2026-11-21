@@ -144,6 +144,7 @@ impl<'a> RunSupervision<'a> {
             resume_plan,
             resume_answer,
             load_skill,
+            trace_context,
         } = request;
         let run_request = RunRequest {
             job_credential: None,
@@ -165,7 +166,7 @@ impl<'a> RunSupervision<'a> {
             parent_run_id: None,
             nested_profile: None,
             assigned_run_id: None,
-            trace_context: None,
+            trace_context,
             ask_session_grants,
             load_skill,
         };
