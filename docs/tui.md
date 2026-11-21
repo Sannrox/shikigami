@@ -87,8 +87,12 @@ use, and keys; long errors go to the transcript). The session's run id is one
 `/run` away. Token use is the sum of what each prompt reported (`14.2k tok`);
 a turn whose model reported none, or one replayed from before this window, is
 unknown, so the total shows as `? tok` or a lower bound such as `≥1.2k tok`,
-never as zero. `/usage` lists in and out tokens per turn with the total, and
-cached / cache-write counts when the host reported them. No
+never as zero. When `[run] context_window_tokens` is set and the last turn
+reported `input_tokens`, the default footer adds that fill as a percent of
+the window next to the count (`14.2k tok  62%`). A last turn with no usage
+adds no percent. `/usage` lists in and out tokens per turn with the total, and
+cached / cache-write counts when the host reported them; with a window set it
+adds one line for last-turn fill. No
 money is shown.
 The state word is plain: `ready`, `running`, `ask`, `done` after a finished
 turn, `cancelled`, `turn limit`, `length limit`, `refused`, or `error`; protocol

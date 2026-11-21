@@ -61,20 +61,35 @@ impl Usage {
         (sum, complete)
     }
 
+    /// Last-turn prompt tokens as a percent of `window`, floored and capped
+    /// at 100. Missing window, a zero window, or a last turn with no usage:
+    /// `None`.
+    fn fill_percent(&self, turns: usize, window: Option<u64>) -> Option<u32> {
+        let window = window.filter(|w| *w > 0)?;
+        let input = self.turns.get(&turns)?.input;
+        let percent = u128::from(input).saturating_mul(100) / u128::from(window);
+        u32::try_from(percent.min(100)).ok()
+    }
+
     /// Footer part for a session with `turns` turns: `14.2k tok`, `≥1.2k tok`
     /// when some turns are unknown, `? tok` when all are; `None` before the
-    /// first turn.
-    pub(crate) fn footer(&self, turns: usize) -> Option<String> {
+    /// first turn. When `window` is set and the last turn reported usage,
+    /// appends that turn's fill (`14.2k tok  62%`).
+    pub(crate) fn footer(&self, turns: usize, window: Option<u64>) -> Option<String> {
         if turns == 0 {
             return None;
         }
         let (sum, complete) = self.total(turns);
         let all = sum.input + sum.output;
-        Some(match (all, complete) {
+        let mut text = match (all, complete) {
             (_, true) => format!("{} tok", compact(all)),
             (0, false) => "? tok".into(),
             (_, false) => format!("≥{} tok", compact(all)),
-        })
+        };
+        if let Some(percent) = self.fill_percent(turns, window) {
+            text.push_str(&format!("  {percent}%"));
+        }
+        Some(text)
     }
 
     fn shows_cache(&self) -> bool {
@@ -95,8 +110,9 @@ impl Usage {
         if any { compact(n) } else { "?".into() }
     }
 
-    /// The `/usage` table: one row per turn, then the total.
-    pub(crate) fn table(&self, turns: usize) -> String {
+    /// The `/usage` table: one row per turn, then the total. When `window` is
+    /// set and the last turn reported usage, one extra line names that fill.
+    pub(crate) fn table(&self, turns: usize, window: Option<u64>) -> String {
         if turns == 0 {
             return "No token use yet. Send a prompt first.".into();
         }
@@ -140,7 +156,12 @@ impl Usage {
             &self.cache_total(|t| t.created),
         );
         if !complete {
-            out.push_str("? means the model did not report usage for that turn.");
+            out.push_str("? means the model did not report usage for that turn.\n");
+        }
+        if let Some(percent) = self.fill_percent(turns, window) {
+            out.push_str(&format!(
+                "Last turn filled {percent}% of the context window."
+            ));
         }
         out.trim_end().to_string()
     }
@@ -199,8 +220,8 @@ mod tests {
         let mut usage = Usage::default();
         usage.record(1, &reported(3_900, 410));
         usage.record(2, &reported(8_500, 1_390));
-        assert_eq!(usage.footer(2).as_deref(), Some("14.2k tok"));
-        let table = usage.table(2);
+        assert_eq!(usage.footer(2, None).as_deref(), Some("14.2k tok"));
+        let table = usage.table(2, None);
         assert!(rows(&table).contains(&vec!["1", "3.9k", "410"]), "{table}");
         assert!(
             rows(&table).contains(&vec!["total", "12.4k", "1.8k"]),
@@ -212,13 +233,13 @@ mod tests {
     #[test]
     fn unknown_turns_show_as_unknown_not_zero() {
         let mut usage = Usage::default();
-        assert_eq!(usage.footer(0), None);
+        assert_eq!(usage.footer(0, None), None);
         usage.record(1, &json!({ "stopReason": "end_turn" }));
-        assert_eq!(usage.footer(1).as_deref(), Some("? tok"));
-        assert!(rows(&usage.table(1)).contains(&vec!["total", "?", "?"]));
+        assert_eq!(usage.footer(1, None).as_deref(), Some("? tok"));
+        assert!(rows(&usage.table(1, None)).contains(&vec!["total", "?", "?"]));
         usage.record(2, &reported(1_200, 300));
-        assert_eq!(usage.footer(2).as_deref(), Some("≥1.5k tok"));
-        let table = usage.table(2);
+        assert_eq!(usage.footer(2, None).as_deref(), Some("≥1.5k tok"));
+        let table = usage.table(2, None);
         assert!(rows(&table).contains(&vec!["1", "?", "?"]), "{table}");
         assert!(
             rows(&table).contains(&vec!["total", "≥1.2k", "≥300"]),
@@ -232,7 +253,7 @@ mod tests {
         let mut usage = Usage::default();
         usage.record(1, &reported_cache(1_200, 300, 900, 40));
         usage.record(2, &reported(800, 40));
-        let table = usage.table(2);
+        let table = usage.table(2, None);
         assert!(
             rows(&table).contains(&vec!["turn", "in", "out", "cached", "wrote"]),
             "{table}"
@@ -251,11 +272,42 @@ mod tests {
         );
         let mut plain = Usage::default();
         plain.record(1, &reported(1_200, 340));
-        let table = plain.table(1);
+        let table = plain.table(1, None);
         assert!(
             rows(&table).contains(&vec!["total", "1.2k", "340"]),
             "{table}"
         );
         assert!(!table.contains("cached"), "{table}");
+    }
+
+    #[test]
+    fn last_turn_fill_is_a_percent_of_the_window() {
+        let mut usage = Usage::default();
+        usage.record(1, &reported(620, 10));
+        assert_eq!(usage.footer(1, Some(1000)).as_deref(), Some("630 tok  62%"));
+        assert_eq!(usage.footer(1, None).as_deref(), Some("630 tok"));
+        let table = usage.table(1, Some(1000));
+        assert!(
+            table.contains("Last turn filled 62% of the context window."),
+            "{table}"
+        );
+        assert!(!usage.table(1, None).contains('%'));
+        usage.record(1, &reported(1_001, 1));
+        assert_eq!(usage.footer(1, Some(1000)).as_deref(), Some("1k tok  100%"));
+    }
+
+    #[test]
+    fn missing_last_turn_usage_adds_no_percent() {
+        let mut usage = Usage::default();
+        usage.record(1, &json!({ "stopReason": "end_turn" }));
+        assert_eq!(usage.footer(1, Some(1000)).as_deref(), Some("? tok"));
+        assert!(!usage.table(1, Some(1000)).contains('%'));
+        usage.record(2, &reported(1_200, 300));
+        assert_eq!(
+            usage.footer(2, Some(1000)).as_deref(),
+            Some("≥1.5k tok  100%")
+        );
+        usage.record(3, &json!({ "stopReason": "end_turn" }));
+        assert_eq!(usage.footer(3, Some(1000)).as_deref(), Some("≥1.5k tok"));
     }
 }

@@ -212,7 +212,10 @@ pub(crate) fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u1
             parts.push(format!("turn {turns}"));
         }
     }
-    if let Some(tokens) = shared.usage.footer(turn_count(shared)) {
+    if let Some(tokens) = shared
+        .usage
+        .footer(turn_count(shared), shared.context_window_tokens)
+    {
         parts.push(tokens);
     }
     if shared.permission.is_some() {

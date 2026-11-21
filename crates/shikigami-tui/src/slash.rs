@@ -330,7 +330,9 @@ impl TuiSession {
             }
             "usage" => {
                 let mut shared = self.lock_shared();
-                let table = shared.usage.table(turn_count(&shared));
+                let table = shared
+                    .usage
+                    .table(turn_count(&shared), shared.context_window_tokens);
                 shared.transcript.push(TranscriptLine::System(table));
                 shared.dirty = true;
                 KeyResult::Continue

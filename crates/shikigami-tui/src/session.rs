@@ -158,6 +158,8 @@ pub(crate) struct Shared {
     pub(crate) statusline: Option<String>,
     /// Token use the host reported per turn; the footer and `/usage` show it.
     pub(crate) usage: Usage,
+    /// `[run] context_window_tokens` from the host; the footer percent uses it.
+    pub(crate) context_window_tokens: Option<u64>,
     /// Nested children the host last reported; the dim slot above the composer.
     pub(crate) nested_children: Vec<NestedChild>,
     /// Standing attachments the host last reported for this run; `/context`.
@@ -203,6 +205,7 @@ impl Shared {
             models: None,
             statusline: None,
             usage: Usage::default(),
+            context_window_tokens: None,
             nested_children: Vec::new(),
             context: None,
             last_compact: None,
@@ -652,11 +655,14 @@ impl TuiSession {
             cwd.canonicalize().map_err(|e| e.to_string())?
         };
         let default_model_id = host.configured_model();
+        let context_window_tokens = host.context_window_tokens();
         let session_id = Arc::new(Mutex::new(String::new()));
+        let mut shared = Shared::new();
+        shared.context_window_tokens = context_window_tokens;
         let session = Self {
             host,
             client: TuiClient {
-                shared: Arc::new(Mutex::new(Shared::new())),
+                shared: Arc::new(Mutex::new(shared)),
                 session_id: Arc::clone(&session_id),
             },
             session_id,
