@@ -364,6 +364,9 @@ pub struct ContentRunRequestV1 {
     pub resume_plan: Option<PlanDecision>,
     /// Operator answer when resuming a parked run (from `escalate`).
     pub resume_answer: Option<String>,
+    /// Host-initiated skill pack loaded as a `load_skill` tool result before
+    /// the first model turn of this attempt. Same field as [`crate::run::RunRequest`].
+    pub load_skill: Option<String>,
 }
 
 impl ContentRunRequestV1 {
@@ -391,6 +394,7 @@ impl ContentRunRequestV1 {
             ask_session_grants: std::collections::BTreeSet::new(),
             resume_plan: None,
             resume_answer: None,
+            load_skill: None,
         }
     }
 
@@ -505,6 +509,7 @@ impl ContentProcessRequestV1 {
             ask_session_grants: std::collections::BTreeSet::new(),
             resume_plan: None,
             resume_answer: None,
+            load_skill: None,
         })
     }
 }

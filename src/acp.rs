@@ -863,6 +863,7 @@ impl AcpHost {
             .ok_or_else(|| rpc_error(-32602, "session/prompt requires sessionId"))?
             .to_string();
         let parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
+        let load_skill = prompt_load_skill(params)?;
         let requested_mode = optional_mode(params)?;
         let (
             cwd,
@@ -975,6 +976,7 @@ impl AcpHost {
                 request.keep_workspace = true;
                 request.session_wait = true;
                 request.cancel = Some(cancel_rx);
+                request.load_skill = load_skill.clone();
                 PromptDrive::Content(request)
             } else if let Some(run_id) = resume_run_id.clone() {
                 match resume_prompt_drive(
@@ -988,7 +990,10 @@ impl AcpHost {
                 )
                 .await?
                 {
-                    ResumeOutcome::Drive(drive) => *drive,
+                    ResumeOutcome::Drive(mut drive) => {
+                        drive.set_load_skill(load_skill.clone());
+                        *drive
+                    }
                     ResumeOutcome::Done(value) => return Ok(value),
                 }
             } else {
@@ -997,6 +1002,7 @@ impl AcpHost {
                 request.session_wait = true;
                 request.cancel = Some(cancel_rx);
                 request.plan_jail = plan_jail;
+                request.set_load_skill(load_skill.clone());
                 PromptDrive::Text(request)
             };
             drive.grant_session_asks(ask_grants.iter().cloned());
@@ -2041,6 +2047,7 @@ impl PromptDrive {
                 request.resume_ask = None;
                 request.resume_plan = None;
                 request.resume_answer = None;
+                request.set_load_skill(None);
             }
             Self::Content(request) => {
                 request.keep_workspace = true;
@@ -2050,6 +2057,7 @@ impl PromptDrive {
                 request.resume_ask = None;
                 request.resume_plan = None;
                 request.resume_answer = None;
+                request.load_skill = None;
             }
         }
     }
@@ -2067,6 +2075,21 @@ impl PromptDrive {
             match self {
                 Self::Text(request) => request.grant_session_ask(name),
                 Self::Content(request) => request.grant_session_ask(name),
+            }
+        }
+    }
+
+    fn set_load_skill(&mut self, id: Option<String>) {
+        match self {
+            Self::Text(request) => {
+                if request.resume_prompt.is_some() {
+                    request.set_load_skill(id);
+                }
+            }
+            Self::Content(request) => {
+                if request.resume_prompt.is_some() {
+                    request.load_skill = id;
+                }
             }
         }
     }
@@ -3294,6 +3317,28 @@ impl ParsedPrompt {
             tool_calls: Vec::new(),
         }])
     }
+}
+
+/// Evolving ACP `_meta.shikigami.loadSkill`: a skill id the host loads as
+/// `load_skill` before the model turn. Absent or JSON null is no load.
+fn prompt_load_skill(params: &Value) -> Result<Option<String>, Value> {
+    let Some(value) = params.pointer("/_meta/shikigami/loadSkill") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| Ok(Some(id.to_string())))
+        .unwrap_or_else(|| {
+            Err(rpc_error(
+                -32602,
+                "session/prompt _meta.shikigami.loadSkill must be a skill id",
+            ))
+        })
 }
 
 fn parse_prompt(prompt: &Value) -> Result<ParsedPrompt, Value> {
@@ -6603,6 +6648,107 @@ mod tests {
         let dumped = context.to_string();
         assert!(!dumped.contains("prefer tests"), "{dumped}");
         assert!(!dumped.contains("demo pack"), "{dumped}");
+    }
+
+    #[tokio::test]
+    async fn session_prompt_load_skill_meta_injects_tool_result() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join(".agents/skills/demo")).unwrap();
+        std::fs::write(
+            cwd.join(".agents/skills/demo/SKILL.md"),
+            "UNIQUE-ACP-SKILL-BODY\n",
+        )
+        .unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[{"requires_context":["UNIQUE-ACP-SKILL-BODY","extra"],"content":"loaded"}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"extra"}],
+                        "_meta": { "shikigami": { "loadSkill": "demo" } }
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn", "{prompt}");
+        let run_id = rpc_ok(&prompt)["_meta"]["shikigami"]["runId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let loaded = Checkpoint::load(&dir.path().join("state/runs"), &run_id).unwrap();
+        let user = loaded
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("user message");
+        assert_eq!(user.content, "extra");
+        assert!(!user.content.contains("UNIQUE-ACP-SKILL-BODY"));
+        let tool = loaded
+            .messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .expect("load_skill result");
+        assert!(tool.content.contains("UNIQUE-ACP-SKILL-BODY"), "{tool:?}");
+        assert!(tool.content.contains("# Skill `demo`"), "{tool:?}");
+        let updates = client.updates.lock().await.clone();
+        assert!(
+            updates.iter().any(|update| {
+                update.pointer("/update/title").and_then(Value::as_str) == Some("load_skill")
+            }),
+            "{updates:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_load_skill_unknown_fails_closed() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"unused"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"extra"}],
+                        "_meta": { "shikigami": { "loadSkill": "missing" } }
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt["error"]["code"], -32603, "{prompt}");
+        assert!(
+            prompt["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no skill `missing`"),
+            "{prompt}"
+        );
     }
 
     #[tokio::test]

@@ -130,6 +130,10 @@ pub struct RunRequest {
     /// Ungoverned mutating tool names that skip ask=park for this attempt.
     /// Session hosts fill this from live memory; it is not checkpointed.
     pub ask_session_grants: BTreeSet<String>,
+    /// Host-initiated skill pack loaded as a `load_skill` tool result before
+    /// the first model turn of this attempt. ACP `_meta.shikigami.loadSkill`
+    /// and the TUI slash set this; unattended `run` leaves it unset.
+    pub load_skill: Option<String>,
 }
 
 /// Session-host decision for an ask=park mutating tool.
@@ -191,6 +195,7 @@ impl RunRequest {
             job_credential: None,
             trace_context: None,
             ask_session_grants: BTreeSet::new(),
+            load_skill: None,
         }
     }
 
@@ -200,6 +205,11 @@ impl RunRequest {
         if crate::tools::mutates_workspace(&name) {
             self.ask_session_grants.insert(name);
         }
+    }
+
+    /// Host-initiated `load_skill` for this attempt. Empty ids are ignored.
+    pub fn set_load_skill(&mut self, id: Option<String>) {
+        self.load_skill = id.filter(|id| !id.is_empty());
     }
 }
 
@@ -680,6 +690,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await
@@ -724,6 +735,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await
@@ -781,6 +793,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await
@@ -855,6 +868,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await
@@ -979,6 +993,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await
@@ -1068,6 +1083,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await
@@ -1172,6 +1188,7 @@ mod tests {
                 parent_run_id: None,
                 nested_profile: None,
                 assigned_run_id: None,
+                load_skill: None,
                 ask_session_grants: BTreeSet::new(),
             })
             .await

@@ -348,23 +348,20 @@ impl TuiSession {
                 // A catalog skill is `/<id>`; `/skill:<id>` is the alias.
                 let id = other.strip_prefix(SKILL_PREFIX).unwrap_or(other);
                 match shikigami::context::load_skill(&self.cwd, self.host.context_settings(), id) {
-                    Some(pack) => {
+                    Some(_) => {
                         let display = if args.is_empty() {
                             format!("/{other}")
                         } else {
                             format!("/{other} {args}")
                         };
-                        let send = if args.is_empty() {
-                            pack.body
-                        } else {
-                            format!("{}\n\n{args}", pack.body)
-                        };
+                        let send = skill_prompt_send(id, args);
                         let pending = std::mem::take(&mut self.lock_shared().pending_parts);
                         let parts = prompt_parts(&send, pending);
                         KeyResult::Prompt {
                             display: prompt_display(&display, &parts),
                             send,
                             parts,
+                            load_skill: Some(id.to_string()),
                         }
                     }
                     None => {
@@ -615,7 +612,7 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> loads a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Interrupt)
     )
 }
@@ -731,6 +728,15 @@ pub(crate) fn cap_bytes(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// User text for a slash-invoked skill: args, or a one-line follow when empty.
+pub(crate) fn skill_prompt_send(id: &str, args: &str) -> String {
+    if args.is_empty() {
+        format!("follow skill `{id}`")
+    } else {
+        args.to_string()
+    }
 }
 
 pub(crate) fn prompt_parts(text: &str, pending: Vec<Value>) -> Vec<Value> {

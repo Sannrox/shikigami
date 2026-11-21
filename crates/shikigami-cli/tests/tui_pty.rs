@@ -891,9 +891,10 @@ fn at_mention_picks_a_workspace_file() {
     assert!(tui.wait_exit().success());
 }
 
-/// #650: a skill pack is a slash command by its id. `/demo extra` sends the
-/// pack body with `extra`, the list offers `demo`, `/skill:demo` still works,
-/// and a pack named like a built-in does not shadow it.
+/// #650 / #694: a skill pack is a slash command by its id. `/demo extra`
+/// shows that line, loads the pack as `load_skill` (body stays out of the
+/// user prompt), the list offers `demo`, `/skill:demo` still works, and a
+/// pack named like a built-in does not shadow it.
 #[test]
 fn skill_pack_runs_as_its_own_slash_command() {
     let dir = temp_dir();

@@ -347,8 +347,12 @@ pub(crate) async fn run_terminal(
                 display,
                 send,
                 parts,
+                load_skill,
             } => {
-                if let Err(err) = session.spawn_prompt_with(display, send, parts).await {
+                if let Err(err) = session
+                    .spawn_prompt_with(display, send, parts, load_skill)
+                    .await
+                {
                     let mut shared = session.lock_shared();
                     shared.transcript.push(TranscriptLine::System(err));
                     shared.status = "error".into();
