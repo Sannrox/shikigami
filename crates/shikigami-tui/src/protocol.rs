@@ -162,11 +162,13 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("pending")
                 .to_string();
-            let detail = update
-                .get("rawInput")
-                .map(compact_value)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_default();
+            let args = update.get("rawInput").cloned().unwrap_or(json!({}));
+            let summary = compact_value(&args);
+            let detail = if summary.is_empty() {
+                String::new()
+            } else {
+                summary.clone()
+            };
             // A call shown at its permission ask starts again once allowed: same line.
             if let Some(TranscriptLine::Tool(tool)) = shared
                 .transcript
@@ -176,7 +178,13 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
             {
                 tool.title = title;
                 tool.status = status;
-                if !detail.is_empty() {
+                if args != json!({}) {
+                    tool.args = args;
+                }
+                if !summary.is_empty() {
+                    tool.summary = summary;
+                }
+                if !detail.is_empty() && tool.detail.is_empty() {
                     tool.detail = detail;
                 }
             } else {
@@ -184,7 +192,9 @@ pub(crate) fn apply_update(shared: &mut Shared, params: &Value) {
                     id,
                     title,
                     status,
+                    summary,
                     detail,
+                    args,
                     expanded: false,
                 }));
             }

@@ -549,6 +549,11 @@ fn session_allow_key_skips_the_next_write() {
         contains(&t.output()[before..], b"wrote-both")
     });
     wait_turn_done(&mut tui, before);
+    let shown = screen(&tui);
+    assert!(
+        shown.contains("write_file  a.txt  ok") && shown.contains("write_file  b.txt  ok"),
+        "{shown}"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join("project/a.txt")).unwrap(),
         "a\n"

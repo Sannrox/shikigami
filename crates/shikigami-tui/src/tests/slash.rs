@@ -482,7 +482,10 @@ async fn mcp_disable_hides_the_tool_until_a_new_host() {
     let stop = session.wait_prompt().await;
     apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
     let first = session.transcript_text();
-    assert!(first.contains("echo:hi"), "{first}");
+    assert!(
+        first.contains("mcp.demo.echo") && first.contains("  ok") && first.contains("first"),
+        "{first}"
+    );
 
     let KeyResult::Mcp { action, name } = run(&session, "/mcp disable demo") else {
         panic!("expected disable");
@@ -494,10 +497,7 @@ async fn mcp_disable_hides_the_tool_until_a_new_host() {
     apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
     let second = session.transcript_text();
     assert!(
-        second.contains("mcp.demo.echo")
-            && (second.contains("not enabled")
-                || second.contains("unknown")
-                || second.contains("denies")),
+        second.contains("mcp.demo.echo") && second.contains("  fail"),
         "{second}"
     );
     assert!(!second.contains("echo:hi"), "{second}");

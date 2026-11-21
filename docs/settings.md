@@ -559,7 +559,7 @@ Enter, Tab, and Backspace.
 | `interrupt` | `ctrl+c` | Cancel the running prompt, or quit when idle |
 | `quit` | `ctrl+d` | Quit when idle |
 | `toggle_plan` | `ctrl+p` | Show or hide the plan |
-| `toggle_tool` | `ctrl+o` | Expand or collapse the last tool line |
+| `toggle_tool` | `ctrl+o` | Expand or collapse the selected tool line |
 | `copy` | `ctrl+y` | Copy the last answer (OSC 52) |
 | `scroll_line_up` | `ctrl+k` | Scroll the transcript one row up |
 | `scroll_line_down` | `ctrl+j` | Scroll the transcript one row down |

@@ -771,6 +771,120 @@ async fn ctrl_o_without_tools_is_a_noop() {
     assert!(!session.lock_shared().dirty);
 }
 
+/// #699: each collapsed tool keeps its outcome; Ctrl+O expands the selected
+/// row (last until a click); edit expand is a short old/new snippet.
+#[tokio::test]
+async fn tool_rows_show_outcome_and_selected_expand() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    notify_tool(
+        &session,
+        "w1",
+        "write_file",
+        "completed",
+        json!({"path": "a.txt", "content": "FULL_FILE_A"}),
+        Some("wrote a.txt"),
+    )
+    .await;
+    notify_tool(
+        &session,
+        "w2",
+        "write_file",
+        "failed",
+        json!({"path": "b.txt", "content": "FULL_FILE_B"}),
+        Some("denied"),
+    )
+    .await;
+    notify_tool(
+        &session,
+        "e1",
+        "edit",
+        "completed",
+        json!({
+            "path": "notes.rs",
+            "old": "alpha",
+            "new": "beta",
+            "content": "FULL_FILE_EDIT"
+        }),
+        Some("updated notes.rs"),
+    )
+    .await;
+
+    let text = session.transcript_text();
+    assert!(text.contains("· write_file  a.txt  ok"), "{text}");
+    assert!(text.contains("· write_file  b.txt  fail"), "{text}");
+    assert!(text.contains("· edit  notes.rs  ok"), "{text}");
+    assert!(!text.contains("FULL_FILE"), "{text}");
+    assert!(!text.contains("alpha"), "{text}");
+    assert_eq!(tool_line_count(&text), 3, "{text}");
+
+    assert!(matches!(
+        handle_key(&session, ctrl_o()),
+        KeyResult::Continue
+    ));
+    let expanded = session.transcript_text();
+    assert!(expanded.contains("· - alpha"), "{expanded}");
+    assert!(expanded.contains("· + beta"), "{expanded}");
+    assert!(expanded.contains("· updated notes.rs"), "{expanded}");
+    assert!(!expanded.contains("FULL_FILE_EDIT"), "{expanded}");
+    for line in expanded.lines() {
+        assert!(line.starts_with('·'), "{expanded}");
+    }
+    {
+        let shared = session.lock_shared();
+        let tools: Vec<_> = shared
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                TranscriptLine::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .collect();
+        assert!(!tools[0].expanded, "first write stays collapsed");
+        assert!(!tools[1].expanded, "failed write stays collapsed");
+        assert!(tools[2].expanded, "Ctrl+O expands the last tool");
+    }
+
+    assert!(matches!(
+        handle_key(&session, ctrl_o()),
+        KeyResult::Continue
+    ));
+    let rows = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&rows, 80);
+    let y = tool_row_y(&rows, "write_file  a.txt  ok");
+    assert!(matches!(
+        handle_event(&session, click(2, y)),
+        KeyResult::Continue
+    ));
+    assert_eq!(session.lock_shared().selected_tool.as_deref(), Some("w1"));
+    assert!(matches!(
+        handle_key(&session, ctrl_o()),
+        KeyResult::Continue
+    ));
+    {
+        let shared = session.lock_shared();
+        let tools: Vec<_> = shared
+            .transcript
+            .iter()
+            .filter_map(|line| match line {
+                TranscriptLine::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            tools[0].expanded,
+            "click then Ctrl+O expands the first tool"
+        );
+        assert!(!tools[1].expanded);
+        assert!(!tools[2].expanded, "the last tool stays collapsed");
+    }
+    let after = session.transcript_text();
+    assert!(after.contains("· wrote a.txt"), "{after}");
+    assert!(!after.contains("· - alpha"), "{after}");
+    assert!(after.contains("· write_file  b.txt  fail"), "{after}");
+    assert!(after.contains("· edit  notes.rs  ok"), "{after}");
+}
+
 #[tokio::test]
 async fn asking_still_pages_transcript() {
     let dir = tempdir().unwrap();

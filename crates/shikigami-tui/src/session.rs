@@ -62,8 +62,13 @@ pub(crate) struct ToolLine {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) status: String,
-    /// Full rawInput summary or result text. Collapse is `expanded`, not a wipe.
+    /// Collapsed path or one-line from `rawInput`; kept after the result arrives.
+    pub(crate) summary: String,
+    /// Full result text (or the summary until a result arrives). Collapse is
+    /// `expanded`, not a wipe.
     pub(crate) detail: String,
+    /// `rawInput` as received; edit expand reads old/new from here.
+    pub(crate) args: Value,
     pub(crate) expanded: bool,
 }
 
@@ -168,6 +173,10 @@ pub(crate) struct Shared {
     pub(crate) last_compact: Option<(u64, u64)>,
     /// Last drawn overlay height (slash list, nested children, or running).
     pub(crate) overlay_h: u16,
+    /// Tool id Ctrl+O toggles; `None` means the last tool.
+    pub(crate) selected_tool: Option<String>,
+    /// Last drawn transcript pane; mouse clicks hit-test against it.
+    pub(crate) transcript_area: Rect,
 }
 
 impl Shared {
@@ -210,6 +219,8 @@ impl Shared {
             context: None,
             last_compact: None,
             overlay_h: 0,
+            selected_tool: None,
+            transcript_area: Rect::default(),
         }
     }
 
@@ -514,13 +525,44 @@ impl Shared {
         }
     }
 
-    /// Last tool only. No-op when the transcript has no tools.
-    pub(crate) fn toggle_last_tool(&mut self) {
+    fn last_tool_id(&self) -> Option<&str> {
+        self.transcript.iter().rev().find_map(|line| match line {
+            TranscriptLine::Tool(tool) => Some(tool.id.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Tool Ctrl+O toggles: a clicked row, else the last tool.
+    pub(crate) fn selected_tool_id(&self) -> Option<&str> {
+        if let Some(id) = self.selected_tool.as_deref()
+            && self
+                .transcript
+                .iter()
+                .any(|line| matches!(line, TranscriptLine::Tool(tool) if tool.id == id))
+        {
+            return Some(id);
+        }
+        self.last_tool_id()
+    }
+
+    pub(crate) fn select_tool(&mut self, id: String) {
+        if self.selected_tool.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.selected_tool = Some(id);
+        self.dirty = true;
+    }
+
+    /// Selected tool, or the last tool when none was clicked. No-op with no tools.
+    pub(crate) fn toggle_selected_tool(&mut self) {
+        let Some(id) = self.selected_tool_id().map(str::to_string) else {
+            return;
+        };
         let Some(TranscriptLine::Tool(tool)) = self
             .transcript
             .iter_mut()
             .rev()
-            .find(|line| matches!(line, TranscriptLine::Tool(_)))
+            .find(|line| matches!(line, TranscriptLine::Tool(t) if t.id == id))
         else {
             return;
         };
