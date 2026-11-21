@@ -108,10 +108,6 @@ pub enum HarnessEvent {
         #[serde(default)]
         tools: Vec<String>,
     },
-    /// Standing attachments composed into this run's system prompt (no bodies).
-    ContextAttached {
-        context: AttachedContext,
-    },
     /// Assistant text of `turn` as the model produces it, in order. Only
     /// sinks that [`EventSink::wants_text_deltas`] receive it. It is never
     /// durable: the completed turn is recorded once, as before.
@@ -141,6 +137,10 @@ pub enum HarnessEvent {
         name: String,
         /// `session` today; one-shot allow stays on `resume_ask`.
         scope: String,
+    },
+    /// Standing attachments composed into this run's system prompt (no bodies).
+    ContextAttached {
+        context: AttachedContext,
     },
 }
 
