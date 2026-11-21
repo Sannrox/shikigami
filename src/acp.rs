@@ -456,7 +456,7 @@ impl AcpHost {
         // Linux debug worker (2MiB) can host session/prompt with MCP tools.
         let result = match method {
             "initialize" => self.initialize(&params),
-            "session/new" => Box::pin(self.session_new(&params)).await,
+            "session/new" => Box::pin(self.session_new(&params, client)).await,
             "session/list" => self.session_list(&params),
             "session/load" => Box::pin(self.session_load(&params, client)).await,
             "session/prompt" => Box::pin(self.session_prompt(&params, client)).await,
@@ -502,7 +502,7 @@ impl AcpHost {
         }))
     }
 
-    async fn session_new(&self, params: &Value) -> Result<Value, Value> {
+    async fn session_new(&self, params: &Value, client: &dyn AcpClient) -> Result<Value, Value> {
         self.require_init()?;
         let cwd = params
             .get("cwd")
@@ -540,7 +540,13 @@ impl AcpHost {
             .map_err(|e| rpc_error(-32603, e))?;
         let models = self.session_models(&live).await;
         self.sessions.lock().await.insert(session_id.clone(), live);
-        let mut result = json!({ "sessionId": session_id });
+        let commands = self
+            .advertise_available_commands(&session_id, &cwd, client)
+            .await?;
+        let mut result = json!({
+            "sessionId": session_id,
+            "availableCommands": commands,
+        });
         if let Some(mode) = mode {
             result["mode"] = json!(mode);
         }
@@ -671,7 +677,76 @@ impl AcpHost {
         if let Some(context) = live.context {
             result["_meta"]["shikigami"]["context"] = context;
         }
+        let commands = self
+            .advertise_available_commands(session_id, &live.cwd, client)
+            .await?;
+        result["availableCommands"] = json!(commands);
         Ok(result)
+    }
+
+    /// Advertise invocable slash names as a replacement `available_commands_update`.
+    async fn advertise_available_commands(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        client: &dyn AcpClient,
+    ) -> Result<Vec<Value>, Value> {
+        let commands = available_commands_json(cwd, &self.harness.config.context);
+        send_updates(
+            client,
+            vec![json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": commands
+                }
+            })],
+        )
+        .await?;
+        Ok(commands)
+    }
+
+    /// `/compact` on `session/prompt`: same cut as `session/compact`, no model turn.
+    async fn session_prompt_compact(&self, session_id: &str) -> Result<Value, Value> {
+        let compact = self
+            .session_compact(&json!({ "sessionId": session_id }))
+            .await?;
+        let mut result = json!({ "stopReason": "end_turn" });
+        if let Some(before) = compact.get("before") {
+            result["before"] = before.clone();
+        }
+        if let Some(after) = compact.get("after") {
+            result["after"] = after.clone();
+        }
+        if let Some(run_id) = self.session_run_id(session_id).await {
+            result["_meta"]["shikigami"]["runId"] = json!(run_id);
+        }
+        Ok(result)
+    }
+
+    /// `/model` on `session/prompt`: empty lists the session catalog; a name is
+    /// `session/set_model`.
+    async fn session_prompt_model(&self, session_id: &str, args: &str) -> Result<Value, Value> {
+        if args.is_empty() {
+            let live = self
+                .sessions
+                .lock()
+                .await
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            let mut result = json!({ "stopReason": "end_turn" });
+            if let Some(models) = self.session_models(&live).await {
+                result["models"] = models;
+            }
+            return Ok(result);
+        }
+        self.session_set_model(&json!({
+            "sessionId": session_id,
+            "modelId": args
+        }))
+        .await?;
+        Ok(json!({ "stopReason": "end_turn" }))
     }
 
     /// The session's model catalog in ACP's (experimental) session model
@@ -964,8 +1039,37 @@ impl AcpHost {
             .and_then(|v| v.as_str())
             .ok_or_else(|| rpc_error(-32602, "session/prompt requires sessionId"))?
             .to_string();
-        let parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
-        let load_skill = prompt_load_skill(params)?;
+        let mut parsed = parse_prompt(params.get("prompt").unwrap_or(&Value::Null))?;
+        let mut load_skill = prompt_load_skill(params)?;
+        if let Some((name, args)) = {
+            let sessions = self.sessions.lock().await;
+            let live = sessions
+                .get(&session_id)
+                .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            let advertised = available_command_names(&live.cwd, &self.harness.config.context);
+            let first = first_prompt_text(params.get("prompt").unwrap_or(&Value::Null));
+            first.and_then(|text| slash_invocation(text, &advertised))
+        } {
+            match name.as_str() {
+                "compact" => return self.session_prompt_compact(&session_id).await,
+                "model" => return self.session_prompt_model(&session_id, &args).await,
+                other => {
+                    let id = other
+                        .strip_prefix(SKILL_SLASH_PREFIX)
+                        .unwrap_or(other)
+                        .to_string();
+                    let first = first_prompt_text(params.get("prompt").unwrap_or(&Value::Null))
+                        .unwrap_or("");
+                    let send = skill_prompt_text(&id, &args);
+                    if parsed.text.starts_with(first) {
+                        parsed.text = format!("{}{}", send, &parsed.text[first.len()..]);
+                    } else {
+                        parsed.text = send;
+                    }
+                    load_skill = Some(id);
+                }
+            }
+        }
         let requested_mode = optional_mode(params)?;
         let (
             cwd,
@@ -3432,6 +3536,101 @@ impl ParsedPrompt {
             tool_call_id: String::new(),
             tool_calls: Vec::new(),
         }])
+    }
+}
+
+/// Host-advertised slash names. TUI-only chrome (`help`, `copy`, `attach`,
+/// `exit`, `quit`, `new`, `resume`, `run`, `usage`, plus `context` / `plan` /
+/// `mcp`) stays off the wire.
+const ADVERTISED_SLASH: &[(&str, &str, Option<&str>)] = &[
+    ("compact", "shrink conversation history", None),
+    ("model", "list or switch models", Some("model id")),
+];
+
+/// TUI built-in names: a skill pack with one of these ids is advertised as
+/// `skill:<id>`, matching TUI `BUILTIN_COMMANDS`.
+const SLASH_COLLISION_NAMES: &[&str] = &[
+    "help", "compact", "context", "copy", "attach", "exit", "quit", "new", "plan", "run", "usage",
+    "model", "mcp", "resume",
+];
+
+const SKILL_SLASH_PREFIX: &str = "skill:";
+
+fn skill_slash_name(id: &str) -> String {
+    if SLASH_COLLISION_NAMES.contains(&id) || id.starts_with(SKILL_SLASH_PREFIX) {
+        format!("{SKILL_SLASH_PREFIX}{id}")
+    } else {
+        id.to_string()
+    }
+}
+
+fn available_commands_json(cwd: &Path, settings: &crate::config::ContextSettings) -> Vec<Value> {
+    let mut commands: Vec<Value> = ADVERTISED_SLASH
+        .iter()
+        .map(|(name, description, hint)| {
+            let mut command = json!({ "name": name, "description": description });
+            if let Some(hint) = hint {
+                command["input"] = json!({ "hint": hint });
+            }
+            command
+        })
+        .collect();
+    for id in crate::context::list_skill_ids(cwd, settings) {
+        commands.push(json!({
+            "name": skill_slash_name(&id),
+            "description": "load skill pack",
+            "input": { "hint": "args" }
+        }));
+    }
+    commands
+}
+
+fn available_command_names(
+    cwd: &Path,
+    settings: &crate::config::ContextSettings,
+) -> HashSet<String> {
+    available_commands_json(cwd, settings)
+        .iter()
+        .filter_map(|command| {
+            command
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn first_prompt_text(prompt: &Value) -> Option<&str> {
+    prompt.as_array()?.iter().find_map(|part| {
+        if part.get("type").and_then(Value::as_str) != Some("text") {
+            return None;
+        }
+        part.get("text").and_then(Value::as_str)
+    })
+}
+
+/// First text part `/name` then whitespace or end, when `name` was advertised.
+/// `//text` is not a command.
+fn slash_invocation(first_text: &str, advertised: &HashSet<String>) -> Option<(String, String)> {
+    let trimmed = first_text.trim();
+    if !trimmed.starts_with('/') || trimmed.starts_with("//") {
+        return None;
+    }
+    let rest = trimmed[1..].trim();
+    let (name, args) = match rest.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, args.trim()),
+        None => (rest, ""),
+    };
+    advertised
+        .contains(name)
+        .then(|| (name.to_string(), args.to_string()))
+}
+
+fn skill_prompt_text(id: &str, args: &str) -> String {
+    if args.is_empty() {
+        format!("follow skill `{id}`")
+    } else {
+        args.to_string()
     }
 }
 
@@ -6939,6 +7138,267 @@ mod tests {
         let loaded = Checkpoint::load(&runs, &run_id).unwrap();
         assert_eq!(loaded.messages.len() as u64, after);
         assert!(loaded.messages[1].content.contains("compacted"));
+    }
+
+    fn advertised_names(update: &Value) -> Vec<String> {
+        update["update"]["availableCommands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|command| command["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn command_update(updates: &[Value]) -> Option<&Value> {
+        updates
+            .iter()
+            .find(|update| update["update"]["sessionUpdate"] == "available_commands_update")
+    }
+
+    #[test]
+    fn slash_invocation_matches_advertised_name_then_args() {
+        let advertised = HashSet::from(["compact".into(), "model".into(), "demo".into()]);
+        assert_eq!(
+            slash_invocation("/compact", &advertised),
+            Some(("compact".into(), String::new()))
+        );
+        assert_eq!(
+            slash_invocation("  /model gpt-4  ", &advertised),
+            Some(("model".into(), "gpt-4".into()))
+        );
+        assert_eq!(
+            slash_invocation("/demo extra words", &advertised),
+            Some(("demo".into(), "extra words".into()))
+        );
+        assert!(slash_invocation("//compact", &advertised).is_none());
+        assert!(slash_invocation("/not-a-command", &advertised).is_none());
+        assert!(slash_invocation("compact", &advertised).is_none());
+    }
+
+    #[tokio::test]
+    async fn session_prompt_handles_advertised_slash_commands() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join(".agents/skills/demo")).unwrap();
+        std::fs::write(
+            cwd.join(".agents/skills/demo/SKILL.md"),
+            "UNIQUE-ACP-SKILL-BODY\n",
+        )
+        .unwrap();
+        let host = scripted_host(
+            dir.path(),
+            r#"[{"content":"ordinary"},{"requires_context":["UNIQUE-ACP-SKILL-BODY","extra"],"content":"loaded"}]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let updates = client.updates.lock().await.clone();
+        let advertised = command_update(&updates).expect("available_commands_update after new");
+        let names = advertised_names(advertised);
+        assert!(names.contains(&"compact".into()), "{names:?}");
+        assert!(names.contains(&"model".into()), "{names:?}");
+        assert!(names.contains(&"demo".into()), "{names:?}");
+        for tui_only in [
+            "help", "copy", "attach", "exit", "quit", "new", "resume", "run", "usage",
+        ] {
+            assert!(!names.iter().any(|name| name == tui_only), "{names:?}");
+        }
+
+        client.updates.lock().await.clear();
+        let seed = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"/not-a-command"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&seed)["stopReason"], "end_turn", "{seed}");
+        let run_id = rpc_ok(&seed)["_meta"]["shikigami"]["runId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let runs = dir.path().join("state/runs");
+        let mut checkpoint = Checkpoint::load(&runs, &run_id).unwrap();
+        let user = checkpoint
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("user message");
+        assert_eq!(user.content, "/not-a-command");
+        checkpoint.messages = (0..20)
+            .map(|i| ChatMessage {
+                role: if i == 0 { "user" } else { "assistant" }.into(),
+                content: format!("m{i}"),
+                tool_call_id: String::new(),
+                tool_calls: vec![],
+            })
+            .collect();
+        checkpoint.save(&runs).unwrap();
+
+        client.updates.lock().await.clear();
+        let compacted = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"/compact"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        let before = rpc_ok(&compacted)["before"].as_u64().unwrap();
+        let after = rpc_ok(&compacted)["after"].as_u64().unwrap();
+        assert_eq!(rpc_ok(&compacted)["stopReason"], "end_turn", "{compacted}");
+        assert_eq!(before, 20);
+        assert!(after < before, "before={before} after={after}");
+        let compact_updates = client.updates.lock().await.clone();
+        assert!(
+            compact_updates
+                .iter()
+                .all(|update| update["update"]["sessionUpdate"] != "agent_message_chunk"),
+            "{compact_updates:?}"
+        );
+        let loaded = Checkpoint::load(&runs, &run_id).unwrap();
+        assert_eq!(loaded.messages.len() as u64, after);
+
+        client.updates.lock().await.clear();
+        let skill = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"/demo extra"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&skill)["stopReason"], "end_turn", "{skill}");
+        let skill_run = rpc_ok(&skill)["_meta"]["shikigami"]["runId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let after_skill = Checkpoint::load(&runs, &skill_run).unwrap();
+        let skill_user = after_skill
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .expect("skill user text");
+        assert_eq!(skill_user.content, "extra");
+        assert!(!skill_user.content.contains("UNIQUE-ACP-SKILL-BODY"));
+        assert!(!skill_user.content.contains("/demo"));
+        let tool = after_skill
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "tool")
+            .expect("load_skill result");
+        assert!(tool.content.contains("UNIQUE-ACP-SKILL-BODY"), "{tool:?}");
+        assert!(tool.content.contains("# Skill `demo`"), "{tool:?}");
+        let skill_updates = client.updates.lock().await.clone();
+        assert!(
+            skill_updates.iter().any(|update| {
+                update.pointer("/update/title").and_then(Value::as_str) == Some("load_skill")
+            }),
+            "{skill_updates:?}"
+        );
+
+        let typed = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "session/compact",
+                    "params": { "sessionId": session_id }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert!(rpc_ok(&typed).get("before").is_some(), "{typed}");
+        assert!(rpc_ok(&typed).get("after").is_some(), "{typed}");
+    }
+
+    #[tokio::test]
+    async fn session_load_advertises_available_commands() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join(".agents/skills/demo")).unwrap();
+        std::fs::write(
+            cwd.join(".agents/skills/demo/SKILL.md"),
+            "---\ndescription: demo pack\n---\nbody\n",
+        )
+        .unwrap();
+        let host = scripted_host(dir.path(), r#"[{"content":"hello"}]"#);
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"hi"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+
+        let replay = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let loaded = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 10,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id, "cwd": cwd, "mcpServers": [] }
+                }),
+                &replay,
+            )
+            .await
+            .unwrap();
+        let names = rpc_ok(&loaded)["availableCommands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|command| command["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"compact"), "{loaded}");
+        assert!(names.contains(&"demo"), "{loaded}");
+        let updates = replay.updates.lock().await.clone();
+        let advertised = command_update(&updates).expect("available_commands_update after load");
+        assert!(advertised_names(advertised).contains(&"compact".into()));
     }
 
     #[tokio::test]
