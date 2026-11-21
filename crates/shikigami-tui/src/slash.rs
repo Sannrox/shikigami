@@ -340,6 +340,7 @@ impl TuiSession {
             }
             "attach" => self.stage_attach(args),
             "compact" => KeyResult::Compact,
+            "plan" => KeyResult::Plan,
             "exit" | "quit" => KeyResult::Quit,
             "new" => KeyResult::NewSession,
             "resume" => self.open_resume_picker(),
@@ -445,6 +446,23 @@ impl TuiSession {
             }
             Ok(_) => "MCP.".into(),
             Err(err) => mcp_error_line(name, &err),
+        };
+        shared.transcript.push(TranscriptLine::System(line));
+        shared.dirty = true;
+    }
+
+    /// `/plan`: flag the next first prompt of this session for plan write-jail.
+    pub(crate) async fn plan(&self) {
+        let result = self
+            .call("session/plan", json!({ "sessionId": self.session_id() }))
+            .await;
+        let mut shared = self.lock_shared();
+        let line = match result {
+            Ok(value) if value.get("already").and_then(Value::as_bool) == Some(true) => {
+                "This session is already in plan write-jail.".into()
+            }
+            Ok(_) => "Next prompt writes only .shikigami/plan.md until you accept the plan.".into(),
+            Err(err) => err,
         };
         shared.transcript.push(TranscriptLine::System(line));
         shared.dirty = true;
@@ -579,6 +597,7 @@ pub(crate) const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("exit", "quit"),
     ("quit", "quit"),
     ("new", "start a new session"),
+    ("plan", "plan write-jail for this session"),
     ("run", "show the run id for runs and export"),
     ("usage", "token use per turn"),
     ("model", "list or switch models"),
@@ -596,7 +615,7 @@ pub(crate) fn is_builtin_command(name: &str) -> bool {
 /// `/help`: keys (with any `[tui.keys]` rebinding) and slash names.
 pub(crate) fn help_text(keys: &KeyMap) -> String {
     format!(
-        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
+        "Enter send  Shift+Enter newline  {} cancel/quit\n/compact  /context  /new  /plan  /resume  /run  /usage  /model  /mcp  /copy  /attach  /exit  /quit  /help\n/<skill> sends a skill pack (/skill:<skill> when a command has its name)",
         keys.label(Action::Interrupt)
     )
 }
