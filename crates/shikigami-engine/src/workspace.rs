@@ -6,6 +6,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use thiserror::Error;
 
@@ -632,6 +633,22 @@ fn git_no_hooks(repo: &Path) -> Command {
     cmd
 }
 
+/// True when `path` is inside a git work tree. Hooks stay disabled.
+pub fn is_git_work_tree(path: &Path) -> bool {
+    git_no_hooks(path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+        })
+        .unwrap_or(false)
+}
+
+fn git_worktree_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 fn git_common_repo(worktree: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .current_dir(worktree)
@@ -842,8 +859,11 @@ impl WorkspacePort for GitWorktreeWorkspace {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Create branch from HEAD and add worktree.
+        // Create branch from HEAD and add worktree. Serialized: `git worktree
+        // add` mutates the parent checkout (nested `worktree=true` and session
+        // trees share this path).
         let repo = std::fs::canonicalize(&self.repo).unwrap_or_else(|_| self.repo.clone());
+        let _lock = git_worktree_lock();
         let status = git_no_hooks(&repo)
             .args(["worktree", "add", "-b", &branch])
             .arg(&path)

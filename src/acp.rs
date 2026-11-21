@@ -34,6 +34,7 @@ use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
     compact_messages_bounded,
 };
+use crate::workspace::{self, MaterializedWorkspace, WorkspaceCleanup};
 
 /// ACP protocol version this host speaks. `initialize` accepts client offers
 /// of 1 or 2 so v2-capable clients can connect, and always replies with this
@@ -70,6 +71,18 @@ struct PersistedSession {
     /// Model chosen with `session/set_model`; absent keeps the configured one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// Isolated git worktree for this session, when the client asked for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<PersistedWorktree>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedWorktree {
+    path: String,
+    repo: String,
+    branch: String,
+    #[serde(default)]
+    removed: bool,
 }
 
 impl PersistedSession {
@@ -190,6 +203,67 @@ struct LiveSession {
     /// Next first prompt of this host session uses plan write-jail. In memory
     /// only; a started run keeps the flag on its checkpoint.
     plan_jail: bool,
+    /// Isolated git worktree this session jails to. `removed` keeps load and
+    /// later prompts fail-closed after `/worktree remove`.
+    worktree: Option<SessionWorktree>,
+}
+
+#[derive(Clone)]
+struct SessionWorktree {
+    path: PathBuf,
+    repo: PathBuf,
+    branch: String,
+    removed: bool,
+}
+
+impl SessionWorktree {
+    fn from_persisted(stored: &PersistedWorktree) -> Self {
+        Self {
+            path: PathBuf::from(&stored.path),
+            repo: PathBuf::from(&stored.repo),
+            branch: stored.branch.clone(),
+            removed: stored.removed,
+        }
+    }
+
+    fn persist(&self) -> PersistedWorktree {
+        PersistedWorktree {
+            path: self.path.display().to_string(),
+            repo: self.repo.display().to_string(),
+            branch: self.branch.clone(),
+            removed: self.removed,
+        }
+    }
+
+    fn cleanup(&self) {
+        let ws = MaterializedWorkspace {
+            path: self.path.clone(),
+            adapter: "git-worktree".into(),
+            cleanup: WorkspaceCleanup::RemoveGitWorktree {
+                repo: self.repo.clone(),
+                branch: self.branch.clone(),
+            },
+        };
+        let _ = workspace::apply_cleanup(&ws);
+    }
+}
+
+impl LiveSession {
+    fn jail_path(&self, demo: Option<PathBuf>) -> PathBuf {
+        if let Some(demo) = demo {
+            return demo;
+        }
+        match &self.worktree {
+            Some(worktree) if !worktree.removed => worktree.path.clone(),
+            _ => self.cwd.clone(),
+        }
+    }
+
+    fn worktree_gone(&self) -> bool {
+        self.worktree
+            .as_ref()
+            .is_some_and(|worktree| worktree.removed)
+    }
 }
 
 #[derive(Clone)]
@@ -518,9 +592,22 @@ impl AcpHost {
                 .apply_session_mode(named)
                 .map_err(|e| rpc_error(-32602, e.to_string()))?;
         }
+        let want_worktree = session_worktree_flag(params)?;
         let session_id = format!("sess-{}", uuid::Uuid::new_v4());
-        self.hold_session(&session_id)
-            .map_err(|e| rpc_error(-32603, e.to_string()))?;
+        let worktree = if want_worktree && self.demo_workspace().is_none() {
+            Some(self.materialize_session_worktree(&session_id, &cwd)?)
+        } else {
+            None
+        };
+        if let Err(error) = self
+            .hold_session(&session_id)
+            .map_err(|e| rpc_error(-32603, e.to_string()))
+        {
+            if let Some(worktree) = &worktree {
+                worktree.cleanup();
+            }
+            return Err(error);
+        }
         let live = LiveSession {
             cwd: cwd.clone(),
             run_id: None,
@@ -535,9 +622,14 @@ impl AcpHost {
             ask_grants: HashSet::new(),
             context: None,
             plan_jail: false,
+            worktree: worktree.clone(),
         };
-        self.persist(&session_id, &live)
-            .map_err(|e| rpc_error(-32603, e))?;
+        if let Err(error) = self.persist(&session_id, &live) {
+            if let Some(worktree) = &worktree {
+                worktree.cleanup();
+            }
+            return Err(rpc_error(-32603, error));
+        }
         let models = self.session_models(&live).await;
         self.sessions.lock().await.insert(session_id.clone(), live);
         let commands = self
@@ -552,6 +644,9 @@ impl AcpHost {
         }
         if let Some(models) = models {
             result["models"] = models;
+        }
+        if let Some(worktree) = worktree {
+            result["_meta"]["shikigami"]["worktree"] = json!({ "branch": worktree.branch });
         }
         Ok(result)
     }
@@ -602,6 +697,12 @@ impl AcpHost {
         let live_session = self.sessions.lock().await.get(session_id).cloned();
         let restored = live_session.is_none();
         let live = if let Some(live) = live_session {
+            if live.worktree_gone() {
+                return Err(rpc_error(
+                    -32602,
+                    "session worktree is gone; start a new session",
+                ));
+            }
             if let Some(stored) = self.sessions.lock().await.get_mut(session_id) {
                 stored.ask_grants.clear();
             }
@@ -619,11 +720,25 @@ impl AcpHost {
                 ask_grants: HashSet::new(),
                 context: live.context.clone(),
                 plan_jail: live.plan_jail,
+                worktree: live.worktree.clone(),
             }
         } else {
             let persisted = self
                 .load_persisted(session_id)
                 .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            let worktree = match persisted.worktree.as_ref() {
+                Some(stored) => {
+                    let worktree = SessionWorktree::from_persisted(stored);
+                    if worktree.removed || !worktree.path.is_dir() {
+                        return Err(rpc_error(
+                            -32602,
+                            "session worktree is gone; start a new session",
+                        ));
+                    }
+                    Some(worktree)
+                }
+                None => None,
+            };
             let content = persisted
                 .run_id
                 .as_deref()
@@ -642,6 +757,7 @@ impl AcpHost {
                 ask_grants: HashSet::new(),
                 context: None,
                 plan_jail: false,
+                worktree,
             };
             self.sessions
                 .lock()
@@ -662,16 +778,17 @@ impl AcpHost {
         if let Some(models) = self.session_models(&live).await {
             result["models"] = models;
         }
-        if let Some(run_id) = live.run_id {
+        if let Some(worktree) = live.worktree.as_ref().filter(|worktree| !worktree.removed) {
+            result["_meta"]["shikigami"]["worktree"] = json!({ "branch": worktree.branch });
+        }
+        if let Some(ref run_id) = live.run_id {
             result["_meta"]["shikigami"]["runId"] = json!(run_id);
-            if let Ok(harness) =
-                self.harness_for_cwd(&live.cwd, live.mode.as_deref(), live.model.as_deref())
-            {
-                let children = children_snapshot(&harness, &run_id);
+            if let Ok(harness) = self.harness_for_live(&live) {
+                let children = children_snapshot(&harness, run_id);
                 if !children.is_empty() {
                     result["_meta"]["shikigami"]["children"] = json!(children);
                 }
-                watch_loaded_children(self, &harness, client, session_id, &run_id, &children).await;
+                watch_loaded_children(self, &harness, client, session_id, run_id, &children).await;
             }
         }
         if let Some(context) = live.context {
@@ -758,9 +875,7 @@ impl AcpHost {
     /// cannot be read, so the client offers no switch.
     async fn session_models(&self, live: &LiveSession) -> Option<Value> {
         let available = self.session_catalog(live).await.ok()?;
-        let harness = self
-            .harness_for_cwd(&live.cwd, live.mode.as_deref(), live.model.as_deref())
-            .ok()?;
+        let harness = self.harness_for_live(live).ok()?;
         let models: Vec<Value> = available
             .iter()
             .map(|m| json!({ "modelId": m.canonical_model, "name": m.canonical_model }))
@@ -774,7 +889,9 @@ impl AcpHost {
     /// Models `live` may switch to. Built without the session's own choice,
     /// so the configured model stays in the list after a switch.
     async fn session_catalog(&self, live: &LiveSession) -> Result<Vec<AvailableModel>, String> {
-        let harness = self.harness_for_cwd(&live.cwd, live.mode.as_deref(), None)?;
+        let mut catalog = live.clone();
+        catalog.model = None;
+        let harness = self.harness_for_live(&catalog)?;
         harness.available_models().await.map_err(|e| e.to_string())
     }
 
@@ -902,26 +1019,31 @@ impl AcpHost {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .ok_or_else(|| rpc_error(-32602, "session/plan requires sessionId"))?;
-        let (cwd, run_id, mode, model, already, in_flight) = {
+        let (run_id, already, in_flight, live) = {
             let sessions = self.sessions.lock().await;
             let live = sessions
                 .get(session_id)
-                .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+                .ok_or_else(|| rpc_error(-32002, "unknown session"))?
+                .clone();
             (
-                live.cwd.clone(),
                 live.run_id.clone(),
-                live.mode.clone(),
-                live.model.clone(),
                 live.plan_jail,
                 live.cancel.is_some(),
+                live,
             )
         };
         if in_flight {
             return Err(rpc_error(-32000, "prompt already in flight"));
         }
+        if live.worktree_gone() {
+            return Err(rpc_error(
+                -32602,
+                "session worktree is gone; start a new session",
+            ));
+        }
         if let Some(run_id) = run_id {
             let harness = self
-                .harness_for_cwd(&cwd, mode.as_deref(), model.as_deref())
+                .harness_for_live(&live)
                 .map_err(|e| rpc_error(-32603, e))?;
             let checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
                 .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -954,7 +1076,7 @@ impl AcpHost {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .ok_or_else(|| rpc_error(-32602, "session/compact requires sessionId"))?;
-        let (cwd, run_id, mode, model) = {
+        let live = {
             let sessions = self.sessions.lock().await;
             let live = sessions
                 .get(session_id)
@@ -962,19 +1084,20 @@ impl AcpHost {
             if live.cancel.is_some() {
                 return Err(rpc_error(-32000, "prompt already in flight"));
             }
-            (
-                live.cwd.clone(),
-                live.run_id.clone(),
-                live.mode.clone(),
-                live.model.clone(),
-            )
+            if live.worktree_gone() {
+                return Err(rpc_error(
+                    -32602,
+                    "session worktree is gone; start a new session",
+                ));
+            }
+            live.clone()
         };
         send_updates(client, vec![compacting_update(session_id)]).await?;
-        let Some(run_id) = run_id else {
+        let Some(run_id) = live.run_id.clone() else {
             return Ok(json!({ "before": 0, "after": 0 }));
         };
         let harness = self
-            .harness_for_cwd(&cwd, mode.as_deref(), model.as_deref())
+            .harness_for_live(&live)
             .map_err(|e| rpc_error(-32603, e))?;
         let mut checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -1008,7 +1131,7 @@ impl AcpHost {
             return Ok(None);
         };
         let harness = self
-            .harness_for_cwd(&live.cwd, live.mode.as_deref(), live.model.as_deref())
+            .harness_for_live(live)
             .map_err(|e| rpc_error(-32603, e))?;
         let checkpoint = Checkpoint::load(&harness.state.runs_dir(), run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
@@ -1081,21 +1204,17 @@ impl AcpHost {
             }
         }
         let requested_mode = optional_mode(params)?;
-        let (
-            cwd,
-            resume_run_id,
-            cancel_rx,
-            mode,
-            model,
-            existing_content,
-            disabled_mcp,
-            ask_grants,
-            plan_jail,
-        ) = {
+        let (resume_run_id, cancel_rx, existing_content, ask_grants, plan_jail, live) = {
             let mut sessions = self.sessions.lock().await;
             let live = sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| rpc_error(-32002, "unknown session"))?;
+            if live.worktree_gone() {
+                return Err(rpc_error(
+                    -32602,
+                    "session worktree is gone; start a new session",
+                ));
+            }
             if live.mode_frozen {
                 match (live.mode.as_deref(), requested_mode.as_deref()) {
                     (Some(frozen), Some(named)) if frozen != named => {
@@ -1144,22 +1263,19 @@ impl AcpHost {
                 ));
             }
             (
-                live.cwd.clone(),
                 live.run_id.clone(),
                 rx,
-                live.mode.clone(),
-                live.model.clone(),
                 live.content.clone(),
-                live.disabled_mcp.clone(),
                 live.ask_grants.clone(),
                 live.plan_jail,
+                live.clone(),
             )
         };
 
         let before = self.session_usage(&session_id).await;
         let outcome = async {
             let harness = self
-                .harness_for_session(&cwd, mode.as_deref(), model.as_deref(), &disabled_mcp)
+                .harness_for_live(&live)
                 .map_err(|e| rpc_error(-32603, e))?;
             let (sink, mut events) = AsyncChannelSink::pair();
             let sink: Arc<dyn EventSink> = Arc::new(sink);
@@ -1498,44 +1614,165 @@ impl AcpHost {
             .then(|| self.harness.state.path().join("demo-workspace"))
     }
 
-    /// The harness one session prompt runs on: `cwd` in place (or the demo
-    /// workspace), the session mode, then the session's chosen `model`.
-    fn harness_for_cwd(
-        &self,
-        cwd: &Path,
-        mode: Option<&str>,
-        model: Option<&str>,
-    ) -> Result<Harness, String> {
-        self.harness_for_session(cwd, mode, model, &HashSet::new())
-    }
-
-    fn harness_for_session(
-        &self,
-        cwd: &Path,
-        mode: Option<&str>,
-        model: Option<&str>,
-        disabled_mcp: &HashSet<String>,
-    ) -> Result<Harness, String> {
+    /// The harness one session prompt runs on: the session worktree, else
+    /// `cwd` in place (or the demo workspace), the session mode, then the
+    /// session's chosen `model`.
+    fn harness_for_live(&self, live: &LiveSession) -> Result<Harness, String> {
         let mut config = self.harness.config.clone();
         config.workspace.adapter = "inplace".into();
-        config.workspace.root = match self.demo_workspace() {
-            Some(demo) => {
-                fs::create_dir_all(&demo).map_err(|e| e.to_string())?;
-                demo.display().to_string()
+        let isolated = live
+            .worktree
+            .as_ref()
+            .is_some_and(|worktree| !worktree.removed);
+        config.workspace.isolate_artifacts = isolated;
+        config.workspace.root = {
+            let jail = live.jail_path(self.demo_workspace());
+            if self.demo_workspace().is_some() {
+                fs::create_dir_all(&jail).map_err(|e| e.to_string())?;
             }
-            None => cwd.display().to_string(),
+            jail.display().to_string()
         };
-        if let Some(mode) = mode {
+        if let Some(mode) = live.mode.as_deref() {
             config.apply_session_mode(mode).map_err(|e| e.to_string())?;
         }
-        if let Some(model) = model {
+        if let Some(model) = live.model.as_deref() {
             config.model.model = model.to_string();
         }
         config
             .tools
             .mcp_servers
-            .retain(|server| !disabled_mcp.contains(&server.name));
+            .retain(|server| !live.disabled_mcp.contains(&server.name));
         Harness::from_config(config, self.harness.state.clone()).map_err(|e| e.to_string())
+    }
+
+    fn materialize_session_worktree(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+    ) -> Result<SessionWorktree, Value> {
+        if !workspace::is_git_work_tree(cwd) {
+            return Err(rpc_error(
+                -32602,
+                "session worktree requires a git checkout",
+            ));
+        }
+        let mut config = self.harness.config.clone();
+        config.workspace.adapter = "git-worktree".into();
+        config.workspace.root = cwd.display().to_string();
+        let port = workspace::from_config(&config)
+            .map_err(|_| rpc_error(-32602, "could not create a session worktree"))?;
+        let ws = port
+            .materialize(session_id, &self.harness.state.runs_dir())
+            .map_err(|_| rpc_error(-32602, "could not create a session worktree"))?;
+        match ws.cleanup {
+            WorkspaceCleanup::RemoveGitWorktree { repo, branch } => Ok(SessionWorktree {
+                path: ws.path,
+                repo,
+                branch,
+                removed: false,
+            }),
+            _ => {
+                let _ = workspace::apply_cleanup(&ws);
+                Err(rpc_error(-32602, "could not create a session worktree"))
+            }
+        }
+    }
+
+    /// Jail path this session's tools write: the worktree, or `cwd` / demo.
+    pub fn session_workspace(&self, session_id: &str) -> Option<PathBuf> {
+        let sessions = self.sessions.try_lock().ok()?;
+        let live = sessions.get(session_id)?;
+        Some(live.jail_path(self.demo_workspace()))
+    }
+
+    /// Branch of an isolated session tree, if this session has one.
+    pub async fn session_worktree_branch(&self, session_id: &str) -> Option<String> {
+        self.sessions.lock().await.get(session_id).and_then(|live| {
+            live.worktree
+                .as_ref()
+                .filter(|worktree| !worktree.removed)
+                .map(|worktree| worktree.branch.clone())
+        })
+    }
+
+    /// Isolate an existing session that has no run yet. Returns the branch.
+    pub async fn ensure_session_worktree(&self, session_id: &str) -> Result<String, String> {
+        let (cwd, run_id, existing) = {
+            let sessions = self.sessions.lock().await;
+            let live = sessions
+                .get(session_id)
+                .ok_or_else(|| "unknown session".to_string())?;
+            if live.worktree_gone() {
+                return Err("session worktree is gone; start a new session".into());
+            }
+            (
+                live.cwd.clone(),
+                live.run_id.clone(),
+                live.worktree
+                    .as_ref()
+                    .filter(|worktree| !worktree.removed)
+                    .map(|worktree| worktree.branch.clone()),
+            )
+        };
+        if let Some(branch) = existing {
+            return Ok(branch);
+        }
+        if run_id.is_some() {
+            return Err(
+                "This session already wrote in the launch folder. /new then /worktree starts an isolated session."
+                    .into(),
+            );
+        }
+        if self.demo_workspace().is_some() {
+            return Err("the built-in demo stays on the demo workspace".into());
+        }
+        let worktree = self
+            .materialize_session_worktree(session_id, &cwd)
+            .map_err(|error| {
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("could not create a session worktree")
+                    .to_string()
+            })?;
+        let branch = worktree.branch.clone();
+        {
+            let mut sessions = self.sessions.lock().await;
+            let Some(live) = sessions.get_mut(session_id) else {
+                worktree.cleanup();
+                return Err("unknown session".into());
+            };
+            live.worktree = Some(worktree);
+            if let Err(error) = self.persist(session_id, live) {
+                if let Some(worktree) = live.worktree.take() {
+                    worktree.cleanup();
+                }
+                return Err(error);
+            }
+        }
+        Ok(branch)
+    }
+
+    /// Remove this session's git worktree. Later prompts and `session/load` fail closed.
+    pub async fn remove_session_worktree(&self, session_id: &str) -> Result<(), String> {
+        let worktree = {
+            let mut sessions = self.sessions.lock().await;
+            let live = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "unknown session".to_string())?;
+            let Some(worktree) = live.worktree.as_mut() else {
+                return Err("This session is not isolated.".into());
+            };
+            if worktree.removed {
+                return Err("session worktree is gone; start a new session".into());
+            }
+            worktree.removed = true;
+            let snapshot = worktree.clone();
+            self.persist(session_id, live)?;
+            snapshot
+        };
+        worktree.cleanup();
+        Ok(())
     }
 
     fn sessions_dir(&self) -> PathBuf {
@@ -1653,6 +1890,7 @@ impl AcpHost {
             mode: live.mode.clone(),
             mode_frozen: live.mode_frozen,
             model: live.model.clone(),
+            worktree: live.worktree.as_ref().map(SessionWorktree::persist),
         };
         std::fs::write(
             path,
@@ -3599,7 +3837,7 @@ const ADVERTISED_SLASH: &[(&str, &str, Option<&str>)] = &[
 /// `skill:<id>`, matching TUI `BUILTIN_COMMANDS`.
 const SLASH_COLLISION_NAMES: &[&str] = &[
     "help", "compact", "context", "copy", "attach", "exit", "quit", "new", "plan", "paste", "run",
-    "usage", "model", "mcp", "resume",
+    "usage", "model", "mcp", "resume", "worktree",
 ];
 
 const SKILL_SLASH_PREFIX: &str = "skill:";
@@ -3680,6 +3918,23 @@ fn skill_prompt_text(id: &str, args: &str) -> String {
     } else {
         args.to_string()
     }
+}
+
+/// Evolving ACP `_meta.shikigami.worktree`: isolate the session with the
+/// existing `git-worktree` adapter. Absent or JSON null is today's inplace.
+fn session_worktree_flag(params: &Value) -> Result<bool, Value> {
+    let Some(value) = params.pointer("/_meta/shikigami/worktree") else {
+        return Ok(false);
+    };
+    if value.is_null() {
+        return Ok(false);
+    }
+    value.as_bool().ok_or_else(|| {
+        rpc_error(
+            -32602,
+            "session/new _meta.shikigami.worktree must be a boolean",
+        )
+    })
 }
 
 /// Evolving ACP `_meta.shikigami.steer`: continue the same run after cancel,
@@ -9481,6 +9736,465 @@ mod tests {
                 .and_then(|u| u["update"]["content"]["text"].as_str()),
             Some("t19"),
             "{overflowed:?}"
+        );
+    }
+
+    fn init_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .args(args)
+                    .current_dir(path)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{args:?}"
+            );
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(path.join("README"), "ok\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "init"]);
+    }
+
+    fn git_worktree_paths(repo: &Path) -> Vec<String> {
+        let output = std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    async fn init_and_new_worktree(
+        host: &AcpHost,
+        client: &dyn AcpClient,
+        cwd: &Path,
+    ) -> (String, Value) {
+        let init = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": 1, "capabilities": {} }
+                }),
+                client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&init)["protocolVersion"], 1);
+        let created = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": cwd,
+                        "mcpServers": [],
+                        "_meta": { "shikigami": { "worktree": true } }
+                    }
+                }),
+                client,
+            )
+            .await
+            .unwrap();
+        (
+            rpc_ok(&created)["sessionId"].as_str().unwrap().to_string(),
+            created,
+        )
+    }
+
+    fn write_ok_script() -> &'static str {
+        r#"[
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+          {"content":"wrote it"}
+        ]"#
+    }
+
+    #[tokio::test]
+    async fn session_new_worktree_writes_only_in_the_tree() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host(dir.path(), write_ok_script());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let (session_id, created) = init_and_new_worktree(&host, &client, &cwd).await;
+        let branch = rpc_ok(&created)["_meta"]["shikigami"]["worktree"]["branch"]
+            .as_str()
+            .expect("worktree branch");
+        assert!(branch.starts_with("shikigami/"), "{branch}");
+        let jail = host.session_workspace(&session_id).expect("jail");
+        assert_ne!(jail, cwd);
+        assert!(
+            git_worktree_paths(&cwd)
+                .iter()
+                .any(|path| Path::new(path) == jail),
+            "git worktree list missing {jail:?}: {:?}",
+            git_worktree_paths(&cwd)
+        );
+
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        assert_eq!(
+            std::fs::read_to_string(jail.join("ok.txt")).unwrap(),
+            "hi\n"
+        );
+        assert!(!cwd.join("ok.txt").exists(), "launch dir stayed clean");
+    }
+
+    #[tokio::test]
+    async fn session_new_without_worktree_still_writes_the_launch_dir() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host(dir.path(), write_ok_script());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let session_id = init_and_new(&host, &client, &cwd).await;
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&prompt)["stopReason"], "end_turn");
+        assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
+    }
+
+    #[tokio::test]
+    async fn session_load_worktree_writes_the_same_tree() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host(dir.path(), write_ok_script());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let (session_id, _) = init_and_new_worktree(&host, &client, &cwd).await;
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": [{"type":"text","text":"write"}]
+                }
+            }),
+            &client,
+        )
+        .await
+        .unwrap();
+        let jail = host.session_workspace(&session_id).expect("jail");
+        let loaded = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&loaded)["sessionId"], session_id);
+        assert!(
+            rpc_ok(&loaded)["_meta"]["shikigami"]["worktree"]["branch"]
+                .as_str()
+                .is_some_and(|branch| branch.starts_with("shikigami/"))
+        );
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": [{"type":"text","text":"write"}]
+                }
+            }),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(jail.join("ok.txt")).unwrap(),
+            "hi\n"
+        );
+        assert!(!cwd.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn session_new_worktree_on_non_git_fails_closed() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let host = scripted_host(dir.path(), write_ok_script());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let created = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "protocolVersion": 1, "capabilities": {} }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc_ok(&created)["protocolVersion"], 1);
+        let refused = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": cwd,
+                        "mcpServers": [],
+                        "_meta": { "shikigami": { "worktree": true } }
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused["error"]["code"], -32602);
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("git checkout"),
+            "{refused}"
+        );
+        assert!(
+            std::fs::read_dir(dir.path().join("state/runs"))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+                == 0,
+            "no leftover worktree dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_worktree_jail_refuses_a_write_outside_the_tree() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host(
+            dir.path(),
+            r#"[
+              {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"../escape.txt\",\"content\":\"no\\n\"}"}]},
+              {"content":"done"}
+            ]"#,
+        );
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let (session_id, _) = init_and_new_worktree(&host, &client, &cwd).await;
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": session_id,
+                    "prompt": [{"type":"text","text":"escape"}]
+                }
+            }),
+            &client,
+        )
+        .await
+        .unwrap();
+        let jail = host.session_workspace(&session_id).expect("jail");
+        assert!(!jail.join("escape.txt").exists());
+        assert!(!cwd.join("escape.txt").exists());
+        assert!(!jail.parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn session_load_fails_after_worktree_remove() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host(dir.path(), write_ok_script());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let (session_id, created) = init_and_new_worktree(&host, &client, &cwd).await;
+        let branch = rpc_ok(&created)["_meta"]["shikigami"]["worktree"]["branch"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let jail = host.session_workspace(&session_id).expect("jail");
+        host.remove_session_worktree(&session_id).await.unwrap();
+        assert!(!jail.is_dir(), "tree removed");
+        assert!(
+            !git_worktree_paths(&cwd)
+                .iter()
+                .any(|path| Path::new(path) == jail),
+            "git worktree list still names the tree"
+        );
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", &branch])
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+            "branch leftover: {}",
+            String::from_utf8_lossy(&branches.stdout)
+        );
+        let loaded = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "session/load",
+                    "params": { "sessionId": session_id }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(loaded["error"]["code"], -32602);
+        let prompt = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{"type":"text","text":"write"}]
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt["error"]["code"], -32602);
+        assert!(!cwd.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn session_new_worktree_non_boolean_fails_closed() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host(dir.path(), write_ok_script());
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        host.handle(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": 1, "capabilities": {} }
+            }),
+            &client,
+        )
+        .await
+        .unwrap();
+        let refused = host
+            .handle(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": cwd,
+                        "mcpServers": [],
+                        "_meta": { "shikigami": { "worktree": "yes" } }
+                    }
+                }),
+                &client,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused["error"]["code"], -32602);
+        assert_eq!(
+            git_worktree_paths(&cwd).len(),
+            1,
+            "no leftover worktree: {:?}",
+            git_worktree_paths(&cwd)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_worktree_is_ignored_for_the_demo() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        init_git_repo(&cwd);
+        let host = scripted_host_with(dir.path(), "[]", |config| {
+            config.model.script_json = None;
+        });
+        let client = RecordingClient {
+            updates: Mutex::new(Vec::new()),
+            permission: PermissionOutcome::Allow,
+        };
+        let (_, created) = init_and_new_worktree(&host, &client, &cwd).await;
+        assert!(
+            rpc_ok(&created)
+                .pointer("/_meta/shikigami/worktree")
+                .is_none(),
+            "{created}"
+        );
+        assert_eq!(
+            git_worktree_paths(&cwd).len(),
+            1,
+            "demo must not add a git worktree: {:?}",
+            git_worktree_paths(&cwd)
         );
     }
 }

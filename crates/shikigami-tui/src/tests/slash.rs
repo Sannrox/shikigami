@@ -657,6 +657,7 @@ async fn slash_help_writes_system_block_and_stays_idle() {
     assert!(text.contains("/plan"), "{text}");
     assert!(text.contains("/new"), "{text}");
     assert!(text.contains("/resume"), "{text}");
+    assert!(text.contains("/worktree"), "{text}");
     assert!(text.contains("/run"), "{text}");
     assert!(text.contains("/copy"), "{text}");
     assert!(text.contains("/attach"), "{text}");
@@ -1554,4 +1555,183 @@ async fn resume_empty_list_is_a_system_line() {
     let text = session.transcript_text();
     assert!(text.contains("no sessions"), "{text}");
     assert!(!session.lock_shared().busy);
+}
+
+fn init_git_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success(),
+            "{args:?}"
+        );
+    };
+    git(&["init", "--quiet", "-b", "main"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(path.join("README"), "ok\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "init"]);
+}
+
+fn git_worktree_paths(repo: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn slash_worktree_isolates_and_remove_drops_the_tree() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    init_git_repo(&cwd);
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start_opts(host, &cwd, false, true)
+        .await
+        .unwrap();
+    assert!(
+        session.transcript_text().contains("Isolated on branch"),
+        "{}",
+        session.transcript_text()
+    );
+    type_text(&session, "/worktree");
+    assert!(matches!(
+        handle_key(&session, enter_key()),
+        KeyResult::Worktree
+    ));
+    session.worktree().await;
+    let status = last_system(&session);
+    assert!(status.contains("Isolated on branch"), "{status}");
+    assert!(
+        status.contains("Writes stay in this session's tree"),
+        "{status}"
+    );
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
+    let jail = session
+        .host
+        .session_workspace(&session.session_id())
+        .expect("jail");
+    assert_ne!(jail, cwd);
+    assert!(
+        git_worktree_paths(&cwd)
+            .iter()
+            .any(|path| std::path::Path::new(path) == jail.as_path()),
+        "git worktree list missing {jail:?}: {:?}",
+        git_worktree_paths(&cwd)
+    );
+
+    type_text(&session, "/worktree remove");
+    assert!(matches!(
+        handle_key(&session, enter_key()),
+        KeyResult::WorktreeRemove
+    ));
+    session.worktree_remove().await;
+    assert!(
+        last_system(&session).contains("Removed the session worktree"),
+        "{}",
+        last_system(&session)
+    );
+    assert!(!jail.is_dir());
+    assert!(
+        !git_worktree_paths(&cwd)
+            .iter()
+            .any(|path| std::path::Path::new(path) == jail.as_path())
+    );
+}
+
+#[tokio::test]
+async fn slash_worktree_after_a_run_is_refused() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    init_git_repo(&cwd);
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("hello".into()).await.unwrap();
+    let stop = session.wait_prompt().await;
+    apply_prompt_result(&mut session.lock_shared(), stop.as_ref());
+    type_text(&session, "/worktree");
+    assert!(matches!(
+        handle_key(&session, enter_key()),
+        KeyResult::Worktree
+    ));
+    session.worktree().await;
+    let line = last_system(&session);
+    assert!(
+        line.contains("already wrote") || line.contains("launch folder"),
+        "{line}"
+    );
+    assert_eq!(
+        git_worktree_paths(&cwd).len(),
+        1,
+        "refused /worktree must not add a tree: {:?}",
+        git_worktree_paths(&cwd)
+    );
+}
+
+#[tokio::test]
+async fn start_worktree_on_non_git_fails_closed() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let err = match TuiSession::start_opts(host, &cwd, false, true).await {
+        Ok(_) => panic!("expected --worktree on a non-git folder to fail"),
+        Err(err) => err,
+    };
+    assert!(err.contains("git checkout"), "{err}");
+}
+
+#[tokio::test]
+async fn session_worktree_survives_host_drop() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    init_git_repo(&cwd);
+    let host = Arc::new(scripted_host(dir.path(), r#"[{"content":"ok"}]"#));
+    let jail = {
+        let session = TuiSession::start_opts(Arc::clone(&host), &cwd, false, true)
+            .await
+            .unwrap();
+        session
+            .host
+            .session_workspace(&session.session_id())
+            .expect("jail")
+    };
+    drop(host);
+    assert!(jail.is_dir(), "quit keeps the tree");
+    assert!(
+        git_worktree_paths(&cwd)
+            .iter()
+            .any(|path| std::path::Path::new(path) == jail.as_path()),
+        "quit must leave the tree registered: {:?}",
+        git_worktree_paths(&cwd)
+    );
+}
+
+#[tokio::test]
+async fn slash_worktree_on_non_git_is_a_system_line() {
+    let dir = tempdir().unwrap();
+    let session = start_session(&dir, r#"[{"content":"ok"}]"#).await;
+    type_text(&session, "/worktree");
+    assert!(matches!(
+        handle_key(&session, enter_key()),
+        KeyResult::Worktree
+    ));
+    session.worktree().await;
+    let line = last_system(&session);
+    assert!(line.contains("git checkout"), "{line}");
+    assert_screen_rules(&drawn_rows(&session, 80, 24), 80);
 }

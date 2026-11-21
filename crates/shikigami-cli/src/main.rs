@@ -193,6 +193,9 @@ enum Command {
         /// Reopen the latest session in this folder instead of starting a new one.
         #[arg(long = "continue")]
         continue_last: bool,
+        /// Isolate this session in a git worktree so the launch folder stays clean.
+        #[arg(long)]
+        worktree: bool,
     },
     /// Export a run transcript as JSONL from local checkpoint state.
     Export {
@@ -753,7 +756,10 @@ async fn run() -> anyhow::Result<()> {
                 std::process::exit(code);
             }
         }
-        Command::Tui { continue_last } => {
+        Command::Tui {
+            continue_last,
+            worktree,
+        } => {
             // The TUI edits `cwd` in place: refuse a state root inside it
             // before resolving the harness writes anything there.
             shikigami::workspace::refuse_state_inside(&cwd, state.path())?;
@@ -764,12 +770,9 @@ async fn run() -> anyhow::Result<()> {
                 model,
                 cli.preset.as_deref(),
             )?;
-            let result = if continue_last {
-                shikigami_tui::run_continuing(harness).await
-            } else {
-                shikigami_tui::run(harness).await
-            };
-            result.map_err(|e| anyhow::anyhow!(e))?;
+            shikigami_tui::run_opts(harness, continue_last, worktree)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
         Command::Export { run_id, output } => {
             let harness = Harness::resolve_with_preset(
