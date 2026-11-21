@@ -66,6 +66,7 @@ trace id, and its `run` span takes the caller's span as parent.
 | Library | `RunRequest.trace_context` | `request` |
 | CLI | `TRACEPARENT` / `TRACESTATE` environment | `env` |
 | `serve` | `traceparent` / `tracestate` headers on `POST /runs`; a context in the JSON body is ignored | `header` |
+| ACP | `_meta.traceparent` / `tracestate` on `session/prompt`; a resume keeps the original parent | `acp` |
 | none | No context given | `none` |
 
 Plane intake passes no context: the claim carries none.
@@ -118,7 +119,7 @@ conventions where one exists, and use a `shikigami.` prefix where none does:
 | `shikigami.termination` | How the run ended: `completed`, `failed`, `parked`, … (run span) |
 | `shikigami.job.id` | Background job id (`job-<n>`) (job spans) |
 | `process.exit.code` | Process exit code when the job was observed to exit (job spans). Omitted if the job was still running when the run ended |
-| `parent.source` | Where the caller trace context came from: `request`, `env`, `header`, or `none` (run span) |
+| `parent.source` | Where the caller trace context came from: `request`, `env`, `header`, `acp`, or `none` (run span) |
 
 Resource attributes are `service.name=shikigami` and `service.version`.
 No other keys are exported. A defense-in-depth filter drops unknown keys at

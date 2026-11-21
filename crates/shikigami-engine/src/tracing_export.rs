@@ -108,6 +108,8 @@ pub enum TraceSource {
     Env,
     /// `POST /runs` read the `traceparent` header.
     Header,
+    /// ACP `session/prompt` read `_meta.traceparent`.
+    Acp,
 }
 
 impl TraceSource {
@@ -116,6 +118,7 @@ impl TraceSource {
             Self::Request => "request",
             Self::Env => "env",
             Self::Header => "header",
+            Self::Acp => "acp",
         }
     }
 }
