@@ -1,4 +1,4 @@
-//! Filesystem tools: read/write/edit/patch/glob/grep and path resolve.
+//! Filesystem tools: read/write/delete/edit/patch/glob/grep and path resolve.
 
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader};
@@ -35,6 +35,11 @@ pub(crate) struct ReadFileArgs {
 pub(crate) struct WriteArgs {
     pub(crate) path: PathBuf,
     pub(crate) content: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeleteFileArgs {
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -488,6 +493,25 @@ impl ToolExecutor {
         }
         let path = self.resolve_write(path)?;
         std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Unlink one regular workspace file. Directories, missing paths,
+    /// symlinks, and jail escapes fail closed.
+    pub(crate) fn delete_file(&self, relative: &Path) -> Result<(), ToolError> {
+        if is_unsafe_relative_path(relative) {
+            return Err(ToolError::UnsafePath(relative.to_path_buf()));
+        }
+        let joined = self.workspace.join(relative);
+        let meta = std::fs::symlink_metadata(&joined)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(ToolError::NotRegular(relative.to_path_buf()));
+        }
+        let canon = std::fs::canonicalize(&joined)?;
+        if !canon.starts_with(&self.workspace) {
+            return Err(ToolError::PathEscape(relative.to_path_buf()));
+        }
+        std::fs::remove_file(canon)?;
         Ok(())
     }
 

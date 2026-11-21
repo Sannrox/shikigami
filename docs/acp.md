@@ -77,7 +77,7 @@ no extra ACP method. `wait=false` tool results, later `session/update`s,
 A later prompt on an outstanding ask/escalate park restores the permission
 wait; an unreadable checkpoint fails closed instead of starting a new run.
 
-Ungoverned mutating tools (`write_file`, `edit`, `multi_edit`, `apply_patch`,
+Ungoverned mutating tools (`write_file`, `delete_file`, `edit`, `multi_edit`, `apply_patch`,
 `bash`, `bash_background`) **ask=park** with the same tool identity as approval
 park. The permission options are `allow` (`allow_once`), `allow_session`
 (`allow_always`), and `deny` (`reject_once`). `allow_session` records that tool

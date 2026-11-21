@@ -119,7 +119,7 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 
 | Builtin | Role |
 | --- | --- |
-| `read_file` / `write_file` / `edit` / `multi_edit` / `apply_patch` | Workspace-jailed file ops. `read_file` takes optional 1-indexed `start_line`/`end_line`; an unranged read of a large file returns a 400-line / 32 KiB slice plus the total line count |
+| `read_file` / `write_file` / `delete_file` / `edit` / `multi_edit` / `apply_patch` | Workspace-jailed file ops. `read_file` takes optional 1-indexed `start_line`/`end_line`; an unranged read of a large file returns a 400-line / 32 KiB slice plus the total line count. `delete_file` unlinks one regular file (directories, missing paths, and jail escapes fail) |
 | `glob` / `grep` | Workspace-jailed search (capped matches / output) |
 | `todo_write` | Run-scoped checklist |
 | `handoff` | Brief event for a fresh session (`task` required); does not start a session or child run |

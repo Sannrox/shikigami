@@ -282,7 +282,7 @@ pub enum PermissionMode {
     Custom,
     /// Read/search only (+ `load_skill`, `todo_write`, `handoff`, report, escalate).
     Read,
-    /// Read + write/edit (no bash).
+    /// Read + write/edit/delete (no bash).
     Workspace,
     /// Workspace + bash.
     WorkspaceExec,
@@ -570,6 +570,7 @@ impl ToolsSettings {
         vec![
             "read_file".into(),
             "write_file".into(),
+            "delete_file".into(),
             "edit".into(),
             "multi_edit".into(),
             "apply_patch".into(),
@@ -2443,6 +2444,7 @@ compact_at_usage_percent = 75
         assert!(e.contains(&"read_file".into()));
         assert!(e.contains(&"grep".into()));
         assert!(!e.contains(&"write_file".into()));
+        assert!(!e.contains(&"delete_file".into()));
         assert!(!e.contains(&"bash".into()));
     }
 
@@ -2646,6 +2648,7 @@ read_only_paths = ["{}"]
         .authority_summary();
         assert!(read.effective_enabled.contains(&"read_file".into()));
         assert!(!read.effective_enabled.contains(&"write_file".into()));
+        assert!(!read.effective_enabled.contains(&"delete_file".into()));
 
         let workspace = ToolsSettings {
             mode: PermissionMode::Workspace,

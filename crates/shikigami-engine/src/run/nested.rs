@@ -1064,6 +1064,7 @@ mod tests {
         ));
         assert!(!session_ask_park("child_status", r#"{"run_id":"x"}"#));
         assert!(session_ask_park("write_file", r#"{"path":"ok.txt"}"#));
+        assert!(session_ask_park("delete_file", r#"{"path":"ok.txt"}"#));
     }
 
     #[test]
