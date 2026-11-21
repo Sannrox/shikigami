@@ -137,24 +137,16 @@ fn read_os_text() -> ClipboardPayload {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let mut saw_helper = false;
         for (cmd, args) in [
             ("wl-paste", &["--no-newline", "--type", "text/plain"][..]),
             ("xclip", &["-selection", "clipboard", "-o"][..]),
         ] {
             match run_helper(cmd, args, MAX_ATTACH_BYTES + 1) {
                 Err(HelperErr::NotFound) => {}
-                other => {
-                    saw_helper = true;
-                    return text_from_helper(other);
-                }
+                other => return text_from_helper(other),
             }
         }
-        if saw_helper {
-            ClipboardPayload::Empty
-        } else {
-            ClipboardPayload::MissingHelper
-        }
+        ClipboardPayload::MissingHelper
     }
 }
 
@@ -288,6 +280,7 @@ fn run_helper(command: &str, args: &[&str], cap: u64) -> Result<Vec<u8>, HelperE
 }
 
 /// `osascript` prints `«data PNGf<hex>»` for a PNG clipboard.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn decode_osascript_png(stdout: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(stdout).ok()?.trim();
     if text.is_empty() {
@@ -301,6 +294,7 @@ pub(crate) fn decode_osascript_png(stdout: &[u8]) -> Option<Vec<u8>> {
     decode_hex(&hex)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
     if hex.is_empty() || !hex.len().is_multiple_of(2) {
         return None;
@@ -315,6 +309,7 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn from_hex(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
