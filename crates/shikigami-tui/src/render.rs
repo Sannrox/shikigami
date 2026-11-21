@@ -312,6 +312,17 @@ pub(crate) fn turn_count(shared: &Shared) -> usize {
 pub(crate) fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u16) -> String {
     let interrupt = keys.label(Action::Interrupt);
     let mut parts = vec![shared.status.clone()];
+    if let Some(steering) = shared.steering.as_ref() {
+        parts.push(format!(
+            "steer  {}",
+            truncate_one_line(&steering.display, 32)
+        ));
+    } else if let Some(queued) = shared.queued.as_ref() {
+        parts.push(format!(
+            "queued  {}",
+            truncate_one_line(&queued.display, 32)
+        ));
+    }
     if let Some(custom) = shared.statusline.as_deref() {
         parts.push(truncate_one_line(custom, 48));
     } else {
@@ -333,6 +344,7 @@ pub(crate) fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u1
         parts.push("esc cancel".into());
     } else if shared.busy {
         parts.push(format!("{interrupt} cancel"));
+        parts.push(format!("{} steer", keys.label(Action::Steer)));
     } else if shared.resume.is_some() {
         parts.push("esc".into());
         parts.push(format!("{interrupt} quit"));
@@ -345,12 +357,6 @@ pub(crate) fn status_line(model: &str, keys: &KeyMap, shared: &Shared, width: u1
     }
     if shared.plan.is_some() {
         parts.push(format!("{} plan", keys.label(Action::TogglePlan)));
-    }
-    if let Some(queued) = shared.queued.as_ref() {
-        parts.push(format!(
-            "queued  {}",
-            truncate_one_line(&queued.display, 32)
-        ));
     }
     if shared
         .transcript

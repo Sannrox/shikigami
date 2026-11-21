@@ -15,6 +15,8 @@ use shikigami::config::TuiSettings;
 pub(crate) enum Action {
     /// Cancel the running prompt, or quit when idle.
     Interrupt,
+    /// Cancel the in-flight model request and continue the same run.
+    Steer,
     Quit,
     TogglePlan,
     ToggleTool,
@@ -26,44 +28,51 @@ pub(crate) enum Action {
     ClearInput,
 }
 
-/// Every action with its settings name and default `ctrl+<letter>` key.
-const ACTIONS: [(Action, &str, char); 10] = [
-    (Action::Interrupt, "interrupt", 'c'),
-    (Action::Quit, "quit", 'd'),
-    (Action::TogglePlan, "toggle_plan", 'p'),
-    (Action::ToggleTool, "toggle_tool", 'o'),
-    (Action::Copy, "copy", 'y'),
-    (Action::ScrollLineUp, "scroll_line_up", 'k'),
-    (Action::ScrollLineDown, "scroll_line_down", 'j'),
-    (Action::LineStart, "line_start", 'a'),
-    (Action::LineEnd, "line_end", 'e'),
-    (Action::ClearInput, "clear_input", 'u'),
+/// Every action with its settings name and default chord.
+const ACTIONS: [(Action, &str, Chord); 11] = [
+    (Action::Interrupt, "interrupt", Chord::Ctrl('c')),
+    (Action::Steer, "steer", Chord::AltEnter),
+    (Action::Quit, "quit", Chord::Ctrl('d')),
+    (Action::TogglePlan, "toggle_plan", Chord::Ctrl('p')),
+    (Action::ToggleTool, "toggle_tool", Chord::Ctrl('o')),
+    (Action::Copy, "copy", Chord::Ctrl('y')),
+    (Action::ScrollLineUp, "scroll_line_up", Chord::Ctrl('k')),
+    (Action::ScrollLineDown, "scroll_line_down", Chord::Ctrl('j')),
+    (Action::LineStart, "line_start", Chord::Ctrl('a')),
+    (Action::LineEnd, "line_end", Chord::Ctrl('e')),
+    (Action::ClearInput, "clear_input", Chord::Ctrl('u')),
 ];
 
-/// A modifier plus a lowercase ASCII letter.
+const CHORD_HINT: &str = "use ctrl+<letter>, alt+<letter>, or alt+enter";
+
+/// A modifier plus a lowercase ASCII letter, or Alt+Enter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Chord {
     Ctrl(char),
     Alt(char),
+    AltEnter,
 }
 
 impl Chord {
     fn parse(text: &str) -> Result<Self, String> {
         let lower = text.trim().to_ascii_lowercase();
+        if lower == "alt+enter" {
+            return Ok(Chord::AltEnter);
+        }
         let (make, rest): (fn(char) -> Chord, &str) =
             if let Some(rest) = lower.strip_prefix("ctrl+") {
                 (Chord::Ctrl, rest)
             } else if let Some(rest) = lower.strip_prefix("alt+") {
                 (Chord::Alt, rest)
             } else {
-                return Err("use ctrl+<letter> or alt+<letter>".into());
+                return Err(CHORD_HINT.into());
             };
         let mut chars = rest.chars();
         let (Some(letter), None) = (chars.next(), chars.next()) else {
-            return Err("use ctrl+<letter> or alt+<letter>".into());
+            return Err(CHORD_HINT.into());
         };
         if !letter.is_ascii_lowercase() {
-            return Err("use ctrl+<letter> or alt+<letter>".into());
+            return Err(CHORD_HINT.into());
         }
         let chord = make(letter);
         // Terminals send these as Enter, Tab, and Backspace.
@@ -78,7 +87,9 @@ impl Chord {
     fn of(key: &KeyEvent) -> Option<Self> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
+            KeyCode::Enter if alt && !ctrl && !shift => Some(Chord::AltEnter),
             // Ctrl+J is LF; terminals report it as Ctrl+Enter or a bare '\n'.
             KeyCode::Enter if ctrl => Some(Chord::Ctrl('j')),
             KeyCode::Char('\n') => Some(Chord::Ctrl('j')),
@@ -88,11 +99,12 @@ impl Chord {
         }
     }
 
-    /// Short form for the footer and help: `^c`, `alt+c`.
+    /// Short form for the footer and help: `^c`, `alt+c`, `alt+enter`.
     fn label(self) -> String {
         match self {
             Chord::Ctrl(ch) => format!("^{ch}"),
             Chord::Alt(ch) => format!("alt+{ch}"),
+            Chord::AltEnter => "alt+enter".into(),
         }
     }
 }
@@ -106,7 +118,7 @@ pub(crate) struct KeyMap {
 impl Default for KeyMap {
     fn default() -> Self {
         Self {
-            bindings: ACTIONS.map(|(action, _, letter)| (action, Chord::Ctrl(letter))),
+            bindings: ACTIONS.map(|(action, _, chord)| (action, chord)),
         }
     }
 }
@@ -258,6 +270,13 @@ mod tests {
         assert_eq!(map.action(&ctrl('p')), None);
         assert_eq!(map.label(Action::TogglePlan), "alt+g");
         assert_eq!(map.action(&ctrl('c')), Some(Action::Interrupt));
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(map.action(&alt_enter), Some(Action::Steer));
+        assert_eq!(map.label(Action::Steer), "alt+enter");
+        let rebound = keys(&[("steer", "alt+s")]).unwrap();
+        let alt_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
+        assert_eq!(rebound.action(&alt_s), Some(Action::Steer));
+        assert_eq!(rebound.action(&alt_enter), None);
     }
 
     #[test]

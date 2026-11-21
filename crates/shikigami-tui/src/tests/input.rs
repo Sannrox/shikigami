@@ -373,6 +373,259 @@ async fn cancel_drops_queued_follow_up_without_sending() {
     assert!(!session.transcript_text().contains("you  follow up"));
 }
 
+fn alt_enter() -> KeyEvent {
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
+}
+
+#[tokio::test]
+async fn alt_enter_while_busy_steers_draft_not_queue() {
+    let dir = tempdir().unwrap();
+    let session = start_session(
+        &dir,
+        r#"[{"chunks":["slow"],"chunk_delay_ms":200,"content":"slow"}]"#,
+    )
+    .await;
+    session.spawn_prompt("write".into()).await.unwrap();
+    type_text(&session, "use a different name");
+    assert!(matches!(
+        handle_key(&session, alt_enter()),
+        KeyResult::Continue
+    ));
+    assert_eq!(session.lock_shared().input, "");
+    assert!(queued_display(&session).is_none());
+    let footer = status_line(
+        &session.model,
+        &session.look.keys,
+        &session.lock_shared(),
+        80,
+    );
+    assert!(
+        session
+            .lock_shared()
+            .steering
+            .as_ref()
+            .map(|q| q.send.as_str())
+            == Some("use a different name")
+    );
+    assert!(footer.contains("steer  use a different"), "{footer}");
+    assert!(!footer.contains("queued"), "{footer}");
+    let wide = drawn_rows(&session, 80, 24);
+    assert_screen_rules(&wide, 80);
+    assert!(
+        wide.iter()
+            .any(|row| row.contains("steer  use a different")),
+        "{wide:#?}"
+    );
+    let narrow = drawn_rows(&session, 40, 12);
+    assert_screen_rules(&narrow, 40);
+    assert!(
+        narrow.iter().any(|row| row.contains("steer")),
+        "{narrow:#?}"
+    );
+    let stop = session.wait_prompt().await;
+    assert_eq!(
+        stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("cancelled"))
+    );
+    session.drain_queued_prompt(stop.as_ref()).await.unwrap();
+    let steered = session.wait_prompt().await;
+    assert_eq!(
+        steered
+            .as_ref()
+            .and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("end_turn"))
+    );
+    assert_eq!(
+        user_prompts(&session),
+        vec!["write".to_string(), "use a different name".to_string()]
+    );
+    assert!(
+        steered
+            .as_ref()
+            .and_then(|v| v.pointer("/result/_meta/shikigami/steer"))
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn steer_uses_queued_text_when_composer_is_empty() {
+    let dir = tempdir().unwrap();
+    let session = start_session(
+        &dir,
+        r#"[{"chunks":["slow"],"chunk_delay_ms":200,"content":"slow"}]"#,
+    )
+    .await;
+    spawn_then_queue(&session, "use a different name").await;
+    assert_eq!(
+        queued_display(&session).as_deref(),
+        Some("use a different name")
+    );
+    assert!(matches!(
+        handle_key(&session, alt_enter()),
+        KeyResult::Continue
+    ));
+    assert!(queued_display(&session).is_none());
+    let footer = status_line(
+        &session.model,
+        &session.look.keys,
+        &session.lock_shared(),
+        80,
+    );
+    assert!(footer.contains("steer  use a different"), "{footer}");
+    let stop = session.wait_prompt().await;
+    session.drain_queued_prompt(stop.as_ref()).await.unwrap();
+    let _ = session.wait_prompt().await;
+    assert_eq!(
+        user_prompts(&session),
+        vec!["write".to_string(), "use a different name".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn cancel_drops_steering_without_sending() {
+    let dir = tempdir().unwrap();
+    let session = start_session(
+        &dir,
+        r#"[{"chunks":["slow"],"chunk_delay_ms":200,"content":"slow"}]"#,
+    )
+    .await;
+    session.spawn_prompt("write".into()).await.unwrap();
+    type_text(&session, "use a different name");
+    assert!(matches!(
+        handle_key(&session, alt_enter()),
+        KeyResult::Continue
+    ));
+    assert!(session.lock_shared().steering.is_some());
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(matches!(handle_key(&session, ctrl_c), KeyResult::Continue));
+    assert!(session.lock_shared().steering.is_none());
+    let stop = session.wait_prompt().await;
+    session.drain_queued_prompt(stop.as_ref()).await.unwrap();
+    assert!(session.lock_shared().steering.is_none());
+    assert_eq!(user_prompts(&session), vec!["write".to_string()]);
+    assert!(
+        !session
+            .transcript_text()
+            .contains("you  use a different name")
+    );
+}
+
+#[tokio::test]
+async fn empty_steer_is_a_noop() {
+    let dir = tempdir().unwrap();
+    let session = start_session(
+        &dir,
+        r#"[{"chunks":["slow"],"chunk_delay_ms":200,"content":"slow"}]"#,
+    )
+    .await;
+    session.spawn_prompt("write".into()).await.unwrap();
+    assert!(matches!(
+        handle_key(&session, alt_enter()),
+        KeyResult::Continue
+    ));
+    assert!(session.lock_shared().busy);
+    assert!(session.lock_shared().steering.is_none());
+    let stop = session.wait_prompt().await;
+    assert_eq!(
+        stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("end_turn"))
+    );
+}
+
+#[tokio::test]
+async fn steer_while_ask_is_open_leaves_the_draft() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(
+        dir.path(),
+        r#"[
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+          {"content":"wrote it"}
+        ]"#,
+    ));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("write".into()).await.unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    {
+        let mut shared = session.lock_shared();
+        shared.input = "wait".into();
+        shared.cursor = 4;
+    }
+    assert!(matches!(
+        handle_key(&session, alt_enter()),
+        KeyResult::Continue
+    ));
+    assert_eq!(session.lock_shared().input, "wait");
+    assert!(session.lock_shared().steering.is_none());
+    assert!(session.overlay_text().is_some());
+    session.answer_permission(true);
+    let stop = session.wait_prompt().await;
+    assert_eq!(
+        stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("end_turn"))
+    );
+    assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
+}
+
+#[tokio::test]
+async fn steer_after_write_keeps_the_file_and_same_run() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let host = Arc::new(scripted_host(
+        dir.path(),
+        r#"[
+          {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"ok.txt\",\"content\":\"hi\\n\"}"}]},
+          {"chunks":["aaaa","bbbb","cccc","dddd"],"chunk_delay_ms":40,"content":"long reply"}
+        ]"#,
+    ));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    session.spawn_prompt("write".into()).await.unwrap();
+    wait_until(|| session.overlay_text().is_some()).await;
+    session.answer_permission(true);
+    wait_until(|| cwd.join("ok.txt").exists()).await;
+    wait_until(|| session.transcript_text().contains("aaaa")).await;
+    let run_id = session.lock_shared().run_id.clone();
+    type_text(&session, "use a different name");
+    assert!(matches!(
+        handle_key(&session, alt_enter()),
+        KeyResult::Continue
+    ));
+    let stop = session.wait_prompt().await;
+    assert_eq!(
+        stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("cancelled"))
+    );
+    session.drain_queued_prompt(stop.as_ref()).await.unwrap();
+    let steered = session.wait_prompt().await;
+    assert_eq!(
+        steered
+            .as_ref()
+            .and_then(|v| v.pointer("/result/stopReason")),
+        Some(&json!("end_turn")),
+        "{steered:?}"
+    );
+    assert_eq!(std::fs::read_to_string(cwd.join("ok.txt")).unwrap(), "hi\n");
+    let text = session.transcript_text();
+    assert!(
+        text.contains("ok.txt") || text.contains("write_file"),
+        "{text}"
+    );
+    assert!(text.contains("use a different name"), "{text}");
+    let steered_run = steered
+        .as_ref()
+        .and_then(|v| v.pointer("/result/_meta/shikigami/runId"))
+        .and_then(|v| v.as_str());
+    let first_run = run_id.as_deref().or_else(|| {
+        stop.as_ref()
+            .and_then(|v| v.pointer("/result/_meta/shikigami/runId"))
+            .and_then(|v| v.as_str())
+    });
+    assert_eq!(steered_run, first_run);
+    assert!(steered_run.is_some(), "{steered:?}");
+}
+
 #[tokio::test]
 async fn slash_while_busy_is_a_character_not_a_list() {
     let dir = tempdir().unwrap();
