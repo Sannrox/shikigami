@@ -1,4 +1,4 @@
-use shikigami::{Config, Harness, RunRequest, StateRoot};
+use shikigami::{Config, Harness, PermissionMode, RunRequest, StateRoot};
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -315,6 +315,69 @@ async fn bash_tool_events_cannot_emit_configured_harness_credentials() {
     assert!(
         !format!("{events:?}").contains(token_value),
         "synthetic credential appeared in event stream"
+    );
+}
+
+#[tokio::test]
+async fn workspace_mode_delete_file_unlinks_written_path() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "none".into();
+    config.model.adapter = "scripted".into();
+    config.tools.mode = PermissionMode::Workspace;
+    config.events.adapter = "none".into();
+    config.workspace.root = dir.path().join("ws").to_string_lossy().into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"write_file","args_json":"{\"path\":\"gone.txt\",\"content\":\"x\"}"}]},
+        {"tool_calls":[{"name":"delete_file","args_json":"{\"path\":\"gone.txt\"}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"deleted\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let mut request = RunRequest::new("delete written");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success);
+    assert!(
+        !result.workspace.join("gone.txt").exists(),
+        "delete_file must unlink the written path"
+    );
+}
+
+#[tokio::test]
+async fn read_mode_does_not_enable_delete_file() {
+    let dir = tempdir().unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("keep.txt"), "keep").unwrap();
+    let mut config = Config::default();
+    config.governance.adapter = "none".into();
+    config.model.adapter = "scripted".into();
+    config.tools.mode = PermissionMode::Read;
+    config.events.adapter = "none".into();
+    config.workspace.adapter = "inplace".into();
+    config.workspace.root = workspace.to_string_lossy().into();
+    config.model.script_json = Some(
+        r#"[
+        {"tool_calls":[{"name":"delete_file","args_json":"{\"path\":\"keep.txt\"}"}]},
+        {"tool_calls":[{"name":"report","args_json":"{\"summary\":\"read only\",\"success\":true}"}]}
+    ]"#
+        .into(),
+    );
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let mut request = RunRequest::new("read delete");
+    request.keep_workspace = true;
+    let result = harness.run(request).await.unwrap();
+    assert!(result.success);
+    assert_eq!(
+        std::fs::read_to_string(result.workspace.join("keep.txt")).unwrap(),
+        "keep"
     );
 }
 

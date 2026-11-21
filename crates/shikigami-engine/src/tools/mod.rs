@@ -860,6 +860,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_file_unlinks_regular_file_and_refuses_dirs_missing_and_escape() {
+        let dir = tempdir().unwrap();
+        let tools = registry(&dir, &["write_file", "delete_file"]);
+        tools
+            .execute("write_file", r#"{"path":"gone.txt","content":"x"}"#)
+            .await
+            .unwrap();
+        let out = tools
+            .execute("delete_file", r#"{"path":"gone.txt"}"#)
+            .await
+            .unwrap();
+        assert_eq!(out, ToolOutput::Text("file deleted".into()));
+        assert!(!dir.path().join("gone.txt").exists());
+
+        let missing = tools
+            .execute("delete_file", r#"{"path":"gone.txt"}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, ToolError::Io(_)), "{missing}");
+
+        std::fs::create_dir(dir.path().join("keep")).unwrap();
+        let directory = tools
+            .execute("delete_file", r#"{"path":"keep"}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(directory, ToolError::NotRegular(_)), "{directory}");
+        assert!(dir.path().join("keep").is_dir());
+
+        let escape = tools
+            .execute("delete_file", r#"{"path":"../secret"}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(escape, ToolError::UnsafePath(_)), "{escape}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_file_refuses_symlink_without_following() {
+        let dir = tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "keep\n").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.path().join("link.txt")).unwrap();
+        let tools = registry(&dir, &["delete_file"]);
+        let err = tools
+            .execute("delete_file", r#"{"path":"link.txt"}"#)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::NotRegular(_)), "{err}");
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep\n");
+        assert!(dir.path().join("link.txt").exists());
+    }
+
+    #[tokio::test]
     async fn read_file_small_file_returns_exact_bytes() {
         let dir = tempdir().unwrap();
         let tools = registry(&dir, &["read_file"]);

@@ -12,8 +12,8 @@ use super::bash::MAX_BASH_OUTPUT_BYTES;
 use super::catalog::builtin_catalog;
 use super::environment::ToolEnvironment;
 use super::fs::{
-    ApplyPatchArgs, EditArgs, GlobArgs, GrepArgs, MAX_APPLY_PATCH_BYTES, MAX_SEARCH_MATCHES,
-    MultiEditArgs, ReadFileArgs, WriteArgs,
+    ApplyPatchArgs, DeleteFileArgs, EditArgs, GlobArgs, GrepArgs, MAX_APPLY_PATCH_BYTES,
+    MAX_SEARCH_MATCHES, MultiEditArgs, ReadFileArgs, WriteArgs,
 };
 use super::job_credential::JobCredentialHandle;
 use super::path::load_ignore_patterns;
@@ -123,6 +123,11 @@ impl ToolExecutor {
                 let args: WriteArgs = parse(name, args_json)?;
                 self.write_file(&args.path, &args.content)?;
                 Ok(ToolOutput::Text("file written".into()))
+            }
+            "delete_file" => {
+                let args: DeleteFileArgs = parse(name, args_json)?;
+                self.delete_file(&args.path)?;
+                Ok(ToolOutput::Text("file deleted".into()))
             }
             "edit" => {
                 let args: EditArgs = parse(name, args_json)?;

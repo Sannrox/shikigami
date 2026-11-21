@@ -121,9 +121,9 @@ create run id
   → emit local events / optional identity-only spans / exit
 ```
 
-Default tools (when allow-list empty): `read_file`, `write_file`, `edit`,
-`multi_edit`, `apply_patch`, `glob`, `grep`, `todo_write`, `handoff`, `report`,
-`escalate`. **`bash` is opt-in** via settings for safety.
+Default tools (when allow-list empty): `read_file`, `write_file`, `delete_file`,
+`edit`, `multi_edit`, `apply_patch`, `glob`, `grep`, `todo_write`, `handoff`,
+`report`, `escalate`. **`bash` is opt-in** via settings for safety.
 
 ## Module map
 

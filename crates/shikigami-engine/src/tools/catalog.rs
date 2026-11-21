@@ -34,7 +34,13 @@ fn def(name: &str, description: &str, schema: &str) -> ToolDef {
 pub fn mutates_workspace(name: &str) -> bool {
     matches!(
         name,
-        "write_file" | "edit" | "multi_edit" | "apply_patch" | "bash" | "bash_background"
+        "write_file"
+            | "delete_file"
+            | "edit"
+            | "multi_edit"
+            | "apply_patch"
+            | "bash"
+            | "bash_background"
     )
 }
 
@@ -315,6 +321,11 @@ pub fn builtin_catalog() -> Vec<ToolDef> {
             r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}"#,
         ),
         def(
+            "delete_file",
+            "Unlink one regular file relative to the workspace root. Directories, missing paths, and jail escapes fail.",
+            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+        ),
+        def(
             "edit",
             &format!(
                 "Replace one unique occurrence of old with new in a file. LF fragments work on consistently CRLF files; writes preserve CRLF. Mixed line endings stay exact. {NORMALIZED_EDIT_MATCHING}"
@@ -507,6 +518,11 @@ mod tests {
             r#"{"path":"../.shikigami/plan.md","content":"x"}"#
         ));
         assert!(!plan_jail_allows("bash", r#"{"command":"echo hi"}"#));
+        assert!(!plan_jail_allows(
+            "delete_file",
+            &format!(r#"{{"path":"{PLAN_JAIL_PATH}"}}"#)
+        ));
+        assert!(!plan_jail_allows("delete_file", r#"{"path":"ok.txt"}"#));
         assert!(plan_jail_allows("read_file", r#"{"path":"ok.txt"}"#));
         assert!(plan_jail_allows(
             "apply_patch",
@@ -552,6 +568,17 @@ mod tests {
     fn handoff_is_serial_denied_replay_and_plan_jail_allowed() {
         use crate::config::{PermissionMode, ToolsSettings};
 
+        assert!(
+            ToolsSettings::default_coding_tools()
+                .iter()
+                .any(|name| name == "delete_file")
+        );
+        assert!(
+            !ToolsSettings::tools_for_mode(PermissionMode::Read)
+                .iter()
+                .any(|name| name == "delete_file")
+        );
+        assert!(mutates_workspace("delete_file"));
         assert!(
             ToolsSettings::default_coding_tools()
                 .iter()

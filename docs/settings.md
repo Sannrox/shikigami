@@ -301,7 +301,7 @@ Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`,
 
 | Mode | Effective tools (before optional `enabled` intersect) |
 | --- | --- |
-| `custom` | `enabled` if set, else coding default (writes/search, `load_skill`, **no** bash) |
+| `custom` | `enabled` if set, else coding default (writes/delete/search, `load_skill`, **no** bash) |
 | `read` | `read_file`, `glob`, `grep`, `load_skill`, `todo_write`, `handoff`, `report`, `escalate` |
 | `workspace` | coding default (no bash) |
 | `workspace_exec` | coding default + `bash` (also exposes `bash_background` / `bash_job_status` / `bash_job_logs`) |
@@ -326,6 +326,10 @@ additional ambient variables are untrusted or sensitive. A configurable child
 environment policy would change the public Rust settings shape and is deferred
 to a future major-version API/schema decision. Environment filtering does not
 provide filesystem, PID, or network isolation.
+
+Coding default includes `delete_file` (unlink one regular workspace file;
+directories, missing paths, and jail escapes fail). It is the pair of
+`write_file` and is **not** in `read` mode.
 
 Coding default includes `todo_write` (run-scoped checklist; max 32 items).
 It is **not** a plane work-unit API and does not replace `escalate`/park.
