@@ -872,6 +872,88 @@ async fn compact_keep_tail_bytes_keeps_a_fitting_suffix() {
     }
 }
 
+#[tokio::test]
+async fn compact_reload_note_names_dropped_skill_and_load_works_again() {
+    use shikigami::ChannelSink;
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let skills_root = dir.path().join("skills");
+    let pack = skills_root.join("demo");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(pack.join("SKILL.md"), "DEMO_BODY unique procedure\n").unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    let write = serde_json::json!({ "path": "a.txt", "content": "x" }).to_string();
+    let load = serde_json::json!({ "id": "demo" }).to_string();
+    let report = serde_json::json!({ "summary": "reloaded", "success": true }).to_string();
+    config.model.script_json = Some(
+        serde_json::json!([
+            { "tool_calls": [{ "name": "load_skill", "args_json": load.clone() }] },
+            { "tool_calls": [{ "name": "write_file", "args_json": write.clone() }] },
+            { "tool_calls": [{ "name": "write_file", "args_json": write }] },
+            { "tool_calls": [{ "name": "load_skill", "args_json": load }] },
+            { "tool_calls": [{ "name": "report", "args_json": report }] }
+        ])
+        .to_string(),
+    );
+    config.context.skills_root = Some(skills_root.to_string_lossy().into());
+    config.context.skills = vec!["demo".into()];
+    config.events.adapter = "none".into();
+    config.run.compact_after_messages = Some(4);
+    config.run.compact_keep_tail = 2;
+    config.workspace.root = ws.to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let runs = harness.state.runs_dir();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("use a skill");
+    request.keep_workspace = true;
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success, "run failed: {result:?}");
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        compacted_history_event(&events),
+        "compact did not run: {events:?}"
+    );
+    let checkpoint = shikigami::checkpoint::Checkpoint::load(&runs, &result.run_id).unwrap();
+    let marker = checkpoint
+        .messages
+        .iter()
+        .find(|message| message.content.contains("[context compacted:"))
+        .expect("compact marker");
+    assert!(
+        marker.content.contains("`demo`") && marker.content.contains("`load_skill`"),
+        "{}",
+        marker.content
+    );
+    let marker_at = checkpoint
+        .messages
+        .iter()
+        .position(|message| message.content.contains("[context compacted:"))
+        .unwrap();
+    assert!(
+        !checkpoint.messages[..marker_at]
+            .iter()
+            .any(|message| message.content.contains("DEMO_BODY")),
+        "dropped body still in prompt: {:?}",
+        checkpoint.messages
+    );
+    assert!(
+        checkpoint.messages[marker_at + 1..]
+            .iter()
+            .any(|message| message.role == "tool" && message.content.contains("DEMO_BODY")),
+        "reload did not restore the body: {:?}",
+        checkpoint.messages
+    );
+}
+
 /// Run a scripted local run that compacts after four messages and return its events.
 async fn compacting_run(script: serde_json::Value) -> Vec<shikigami::HarnessEvent> {
     use shikigami::ChannelSink;

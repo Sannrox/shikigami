@@ -47,7 +47,8 @@ pub fn compact_messages_bounded(
     keep_tail_bytes: usize,
 ) -> Option<(usize, usize)> {
     let tail_start = compaction_tail_start(messages, threshold, keep_tail, keep_tail_bytes)?;
-    let marker = dropped_marker(tail_start - 1);
+    let skill_ids = dropped_load_skill_ids(&messages[1..tail_start]);
+    let marker = dropped_marker(tail_start - 1, &skill_ids);
     Some(replace_compacted_span(messages, tail_start, marker))
 }
 
@@ -126,17 +127,99 @@ fn replace_compacted_span(
 /// note, not as something the user typed.
 pub const COMPACTION_MARKER_PREFIX: &str = "[context compacted:";
 
-fn dropped_marker(dropped: usize) -> ChatMessage {
-    user_message(format!(
-        "[context compacted: {dropped} earlier messages omitted; continue the original task]"
+fn dropped_marker(dropped: usize, skill_ids: &[String]) -> ChatMessage {
+    user_message(with_skill_reload_note(
+        format!(
+            "[context compacted: {dropped} earlier messages omitted; continue the original task]"
+        ),
+        skill_ids,
     ))
 }
 
-fn summary_marker(summarized: usize, through_turn: u32, summary: &str) -> ChatMessage {
+fn summary_marker(
+    summarized: usize,
+    through_turn: u32,
+    summary: &str,
+    skill_ids: &[String],
+) -> ChatMessage {
     user_message(format!(
-        "[context compacted: {summarized} earlier messages through turn {through_turn} summarized; \
-         the run checkpoint keeps the full record. Continue the original task.]\n\n{summary}"
+        "{}\n\n{summary}",
+        with_skill_reload_note(
+            format!(
+                "[context compacted: {summarized} earlier messages through turn {through_turn} summarized; \
+                 the run checkpoint keeps the full record. Continue the original task.]"
+            ),
+            skill_ids,
+        )
     ))
+}
+
+/// Ids whose `load_skill` bodies sit in a compacted span, from the heading
+/// the loader writes (`# Skill \`id\``) or a prior compact reminder. Order
+/// is first-seen.
+fn dropped_load_skill_ids(span: &[ChatMessage]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for message in span {
+        if is_tool_result(message) {
+            if let Some(id) = skill_id_from_load_result(&message.content) {
+                push_unique(&mut ids, id);
+            }
+            continue;
+        }
+        for id in skill_ids_from_reload_note(&message.content) {
+            push_unique(&mut ids, id);
+        }
+    }
+    ids
+}
+
+fn push_unique(ids: &mut Vec<String>, id: String) {
+    if !ids.iter().any(|seen| seen == &id) {
+        ids.push(id);
+    }
+}
+
+fn skill_id_from_load_result(content: &str) -> Option<String> {
+    let rest = content.strip_prefix("# Skill `")?;
+    let id = rest.split('`').next()?.to_owned();
+    (!id.is_empty()).then_some(id)
+}
+
+fn skill_ids_from_reload_note(content: &str) -> Vec<String> {
+    let Some(line) = content
+        .lines()
+        .find(|line| line.starts_with("Skill bodies for ") && line.contains(" were dropped."))
+    else {
+        return Vec::new();
+    };
+    let Some(listed) = line
+        .strip_prefix("Skill bodies for ")
+        .and_then(|rest| rest.split(" were dropped.").next())
+    else {
+        return Vec::new();
+    };
+    listed
+        .split(", ")
+        .filter_map(|part| {
+            let id = part.strip_prefix('`')?.strip_suffix('`')?;
+            (!id.is_empty()).then(|| id.to_owned())
+        })
+        .collect()
+}
+
+fn with_skill_reload_note(mut marker: String, skill_ids: &[String]) -> String {
+    if skill_ids.is_empty() {
+        return marker;
+    }
+    let listed = skill_ids
+        .iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    marker.push_str(&format!(
+        "\nSkill bodies for {listed} were dropped. The catalog is still in the system prompt; call `load_skill` for any id whose body is still needed."
+    ));
+    marker
 }
 
 fn user_message(content: String) -> ChatMessage {
@@ -334,6 +417,7 @@ impl<'a> DurableModelTurn<'a> {
         tail_start: usize,
     ) -> Result<(), RunError> {
         let span = &session.messages[1..tail_start];
+        let skill_ids = dropped_load_skill_ids(span);
         let summary = self.summarize_span(session, span).await?;
         let summarized = tail_start - 1;
         let event = match summary {
@@ -345,7 +429,7 @@ impl<'a> DurableModelTurn<'a> {
                 let through_turn = session
                     .turns
                     .saturating_sub(u32::try_from(tail_turns).unwrap_or(u32::MAX));
-                let marker = summary_marker(summarized, through_turn, &summary);
+                let marker = summary_marker(summarized, through_turn, &summary, &skill_ids);
                 let (before, after) =
                     replace_compacted_span(&mut session.messages, tail_start, marker);
                 HarnessEvent::ContextSummarized {
@@ -358,7 +442,7 @@ impl<'a> DurableModelTurn<'a> {
                 let (before, after) = replace_compacted_span(
                     &mut session.messages,
                     tail_start,
-                    dropped_marker(summarized),
+                    dropped_marker(summarized, &skill_ids),
                 );
                 HarnessEvent::ContextCompacted { before, after }
             }
@@ -1218,5 +1302,80 @@ mod tests {
         let tail = compact_tail(&msgs);
         assert_eq!(tail.len(), 8, "{tail:?}");
         assert!(tail_bytes(tail, 0) <= 4096);
+    }
+
+    fn load_skill_exchange(id: &str, body: &str) -> [ChatMessage; 2] {
+        [
+            ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: format!("load-{id}"),
+                    name: "load_skill".into(),
+                    args_json: format!(r#"{{"id":"{id}"}}"#),
+                }],
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: format!("# Skill `{id}`\n\n{body}"),
+                tool_call_id: format!("load-{id}"),
+                tool_calls: vec![],
+            },
+        ]
+    }
+
+    #[test]
+    fn compact_messages_notes_dropped_load_skill_ids() {
+        let mut msgs = vec![chat("user", "task")];
+        msgs.extend(load_skill_exchange("demo", "DEMO_BODY"));
+        for i in 0..6 {
+            msgs.push(chat("assistant", format!("pad{i}")));
+        }
+        compact_messages(&mut msgs, 0, 2).unwrap();
+        let marker = &msgs[1].content;
+        assert!(marker.contains("`demo`"), "{marker}");
+        assert!(marker.contains("`load_skill`"), "{marker}");
+        assert!(
+            !msgs
+                .iter()
+                .any(|message| message.content.contains("DEMO_BODY"))
+        );
+    }
+
+    #[test]
+    fn compact_messages_omits_skill_note_when_load_stays_in_tail() {
+        let mut msgs = vec![chat("user", "task")];
+        for i in 0..6 {
+            msgs.push(chat("assistant", format!("pad{i}")));
+        }
+        msgs.extend(load_skill_exchange("demo", "DEMO_BODY"));
+        compact_messages(&mut msgs, 0, 2).unwrap();
+        let marker = &msgs[1].content;
+        assert!(marker.contains("compacted"), "{marker}");
+        assert!(!marker.contains("load_skill"), "{marker}");
+        assert!(!marker.contains("`demo`"), "{marker}");
+        assert!(
+            msgs.iter()
+                .any(|message| message.content.contains("DEMO_BODY"))
+        );
+    }
+
+    #[test]
+    fn compact_messages_carries_dropped_skill_ids_on_later_cuts() {
+        let mut msgs = vec![chat("user", "task")];
+        msgs.extend(load_skill_exchange("demo", "DEMO_BODY"));
+        for i in 0..6 {
+            msgs.push(chat("assistant", format!("pad{i}")));
+        }
+        compact_messages(&mut msgs, 0, 2).unwrap();
+        assert!(msgs[1].content.contains("`demo`"), "{}", msgs[1].content);
+        for i in 6..12 {
+            msgs.push(chat("assistant", format!("pad{i}")));
+        }
+        compact_messages(&mut msgs, 0, 2).unwrap();
+        let marker = &msgs[1].content;
+        assert!(marker.contains("`demo`"), "{marker}");
+        assert!(marker.contains("`load_skill`"), "{marker}");
     }
 }
