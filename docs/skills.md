@@ -26,8 +26,9 @@ max_skill_bytes = 32768
 `skills` is the allow-list. The run prompt lists each pack's id and one-line
 description: the `description:` field of YAML front matter, else the first
 non-empty line. The agent calls `load_skill` with an id to read the body,
-which arrives as a tool result that compaction can later cut. Only ids in
-`skills` load.
+which arrives as a tool result that compaction can later cut. When compact
+drops a loaded body, the compact marker names the id and reminds the model
+to call `load_skill` again. Only ids in `skills` load.
 
 Packs also listed in `eager_skills` go into the system prompt whole, from
 the first turn. Use it for a procedure that must always be present.
