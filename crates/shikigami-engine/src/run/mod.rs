@@ -3373,6 +3373,90 @@ mod tests {
         assert!(!names[0].contains(&"mcp.demo.wide".into()), "{names:?}");
     }
 
+    fn tool_texts(checkpoint: &Checkpoint) -> Vec<&str> {
+        checkpoint
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .map(|message| message.content.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn bash_and_mcp_results_are_truncated_in_history() {
+        let dir = tempdir().unwrap();
+        let mut config = base_config(&dir);
+        with_demo_mcp(&mut config);
+        config.tools.enabled.push("bash".into());
+        let blob = "a".repeat(200 * 1024);
+        let write = serde_json::json!({ "path": "big.txt", "content": blob }).to_string();
+        let cat = serde_json::json!({ "command": "cat big.txt" }).to_string();
+        let echo = serde_json::json!({ "text": blob }).to_string();
+        config.model.script_json = Some(
+            serde_json::json!([
+                {
+                    "tool_calls": [{
+                        "name": "write_file",
+                        "args_json": write
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "bash",
+                        "args_json": cat
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "mcp.demo.echo",
+                        "args_json": echo
+                    }]
+                },
+                {
+                    "tool_calls": [{
+                        "name": "report",
+                        "args_json": serde_json::json!({
+                            "summary": "truncated",
+                            "success": true
+                        }).to_string()
+                    }]
+                }
+            ])
+            .to_string(),
+        );
+        let eng = engine(&dir, config);
+        let mut req = RunRequest::new("truncate tools");
+        req.keep_workspace = true;
+        let done = eng.run(req).await.unwrap();
+        assert!(done.success, "{}", done.summary);
+        let checkpoint = Checkpoint::load(&eng.state_runs, &done.run_id).unwrap();
+        let texts = tool_texts(&checkpoint);
+        let bash = texts
+            .iter()
+            .find(|text| {
+                text.contains(crate::tools::MODEL_OUTPUT_TRUNCATION_MARKER) && text.starts_with('a')
+            })
+            .expect("truncated bash");
+        assert!(
+            bash.len() <= crate::tools::DEFAULT_MODEL_OUTPUT_MAX_BYTES,
+            "{}",
+            bash.len()
+        );
+        let mcp = texts
+            .iter()
+            .find(|text| text.starts_with("echo:"))
+            .expect("truncated mcp");
+        assert!(
+            mcp.contains(crate::tools::MODEL_OUTPUT_TRUNCATION_MARKER),
+            "{mcp}"
+        );
+        assert!(
+            mcp.len() <= crate::tools::DEFAULT_MODEL_OUTPUT_MAX_BYTES,
+            "{}",
+            mcp.len()
+        );
+    }
+
     #[tokio::test]
     async fn nested_child_resume_does_not_reenable_nested_tools() {
         let dir = tempdir().unwrap();

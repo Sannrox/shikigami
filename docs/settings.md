@@ -297,6 +297,7 @@ Harness-owned HTTP clients only (`http` model, MCP HTTP, `web_fetch`,
 | `mode` | `custom` | `custom` \| `read` \| `workspace` \| `workspace_exec` |
 | `enabled` | `[]` | Allow-list; with non-`custom` mode, **intersects** the mode set |
 | `bash_timeout_secs` | `60` | Default bash timeout (capped at 120s) |
+| `model_output_max_bytes` | `65536` | Cap for bash combined stdout/stderr and MCP tool text before they become model tool messages. Oversize results keep a prefix plus `…[truncated]` and stay `ok`. Clamped to 2 MiB (the bash memory bound). `web_fetch` keeps its own 256 KiB cap. |
 | `respect_ignore` | `true` | `glob`/`grep` honor built-in defaults + `.gitignore` / `.shikigamiignore` |
 | `mcp_lazy_schemas` | `false` | When true, attached MCP tools stay out of the model tool list until `load_mcp_tool` offers them. The system prompt lists each attached `mcp.<server>.<tool>` with a one-line description (200-char cap). Names in a preset's `mcp_tools` (or a site-agent allow-list) stay fully offered. Off by default: every attached schema is sent each turn. |
 

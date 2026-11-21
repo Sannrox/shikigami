@@ -50,6 +50,34 @@ use thiserror::Error;
 
 use fs::MAX_FILE_BYTES;
 
+/// Marker appended when bash or MCP text is cut for the model prompt.
+pub(crate) const MODEL_OUTPUT_TRUNCATION_MARKER: &str = "\n…[truncated]";
+/// Default `[tools] model_output_max_bytes`.
+pub(crate) const DEFAULT_MODEL_OUTPUT_MAX_BYTES: usize = 65_536;
+
+pub(crate) fn capped_model_output_max_bytes(raw: usize) -> usize {
+    raw.clamp(
+        MODEL_OUTPUT_TRUNCATION_MARKER.len(),
+        bash::MAX_BASH_OUTPUT_BYTES,
+    )
+}
+
+/// Cut `text` to `max_bytes` including [`MODEL_OUTPUT_TRUNCATION_MARKER`].
+pub(crate) fn truncate_model_output(text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let marker = MODEL_OUTPUT_TRUNCATION_MARKER;
+    let mut budget = max_bytes.saturating_sub(marker.len());
+    while budget > 0 && !text.is_char_boundary(budget) {
+        budget -= 1;
+    }
+    let mut out = text;
+    out.truncate(budget);
+    out.push_str(marker);
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutput {
     Text(String),
@@ -1906,5 +1934,160 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("load_mcp_tool"), "{err}");
+    }
+
+    #[test]
+    fn truncate_model_output_keeps_char_boundary_and_marker() {
+        let text = "é".repeat(40);
+        let cut = truncate_model_output(text, 20);
+        assert!(cut.contains(MODEL_OUTPUT_TRUNCATION_MARKER), "{cut}");
+        assert!(cut.len() <= 20, "{}", cut.len());
+        assert!(cut.is_char_boundary(cut.len() - MODEL_OUTPUT_TRUNCATION_MARKER.len()));
+    }
+
+    #[test]
+    fn capped_model_output_max_bytes_floors_at_marker_and_caps_at_bash_memory() {
+        assert_eq!(
+            capped_model_output_max_bytes(0),
+            MODEL_OUTPUT_TRUNCATION_MARKER.len()
+        );
+        assert_eq!(
+            capped_model_output_max_bytes(10_000_000),
+            super::bash::MAX_BASH_OUTPUT_BYTES
+        );
+        assert_eq!(capped_model_output_max_bytes(65_536), 65_536);
+    }
+
+    #[tokio::test]
+    async fn bash_success_output_is_truncated_for_the_model() {
+        let dir = tempdir().unwrap();
+        let big = "a".repeat(200 * 1024);
+        std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+        let tools = registry(&dir, &["bash"]);
+        let out = tools
+            .execute("bash", r#"{"command":"cat big.txt"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert!(text.contains(MODEL_OUTPUT_TRUNCATION_MARKER), "{text}");
+        assert!(
+            text.len() <= DEFAULT_MODEL_OUTPUT_MAX_BYTES,
+            "{}",
+            text.len()
+        );
+        assert!(text.starts_with('a'), "{text}");
+    }
+
+    #[tokio::test]
+    async fn bash_failed_output_is_truncated_for_the_model() {
+        let dir = tempdir().unwrap();
+        let big = "b".repeat(200 * 1024);
+        std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+        let tools = registry(&dir, &["bash"]);
+        let err = tools
+            .execute("bash", r#"{"command":"cat big.txt; exit 1"}"#)
+            .await
+            .unwrap_err();
+        let ToolError::BashFailed { output, .. } = err else {
+            panic!("{err}");
+        };
+        assert!(output.contains(MODEL_OUTPUT_TRUNCATION_MARKER), "{output}");
+        assert!(
+            output.len() <= DEFAULT_MODEL_OUTPUT_MAX_BYTES,
+            "{}",
+            output.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_output_max_bytes_override_caps_bash() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("big.txt"), "a".repeat(8 * 1024)).unwrap();
+        let mut config = crate::config::Config::default();
+        config.tools.mode = crate::config::PermissionMode::WorkspaceExec;
+        config.tools.model_output_max_bytes = 1024;
+        let tools = ToolRegistry::from_config(dir.path(), &config).unwrap();
+        let out = tools
+            .execute("bash", r#"{"command":"cat big.txt"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert!(text.contains(MODEL_OUTPUT_TRUNCATION_MARKER), "{text}");
+        assert!(text.len() <= 1024, "{}", text.len());
+    }
+
+    struct FixedExternal {
+        def: ToolDef,
+        body: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ExternalTool for FixedExternal {
+        fn definition(&self) -> ToolDef {
+            self.def.clone()
+        }
+        async fn call(&self, _args_json: &str) -> Result<String, ToolError> {
+            Ok(self.body.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_text_is_truncated_for_the_model() {
+        let dir = tempdir().unwrap();
+        let mut tools = registry(&dir, &["read_file"]);
+        tools.register_external(Arc::new(FixedExternal {
+            def: mcp_def("mcp.demo.echo", "echo"),
+            body: "a".repeat(200 * 1024),
+        }));
+        let out = tools
+            .execute("mcp.demo.echo", r#"{"text":"ignored"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert!(text.contains(MODEL_OUTPUT_TRUNCATION_MARKER), "{text}");
+        assert!(
+            text.len() <= DEFAULT_MODEL_OUTPUT_MAX_BYTES,
+            "{}",
+            text.len()
+        );
+        assert!(text.starts_with('a'), "{text}");
+    }
+
+    #[tokio::test]
+    async fn web_fetch_body_is_not_capped_by_model_output_max_bytes() {
+        use crate::config::EgressMode;
+
+        let dir = tempdir().unwrap();
+        let net = NetworkSettings {
+            egress: EgressMode::Unrestricted,
+            ..Default::default()
+        };
+        let mut tools =
+            ToolRegistry::with_builtins(dir.path(), vec!["web_fetch".into()], 30, net).unwrap();
+        let body = "f".repeat(200 * 1024);
+        tools.set_web_fetcher(Arc::new(MockWebFetcher {
+            status: 200,
+            body: body.clone(),
+        }));
+        let out = tools
+            .execute("web_fetch", r#"{"url":"https://example.com/doc"}"#)
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = out else {
+            panic!("text");
+        };
+        assert!(text.contains(&body), "web_fetch lost the 200 KiB body");
+        assert!(
+            text.len() > DEFAULT_MODEL_OUTPUT_MAX_BYTES,
+            "{}",
+            text.len()
+        );
+        assert!(!text.contains(MODEL_OUTPUT_TRUNCATION_MARKER), "{text}");
     }
 }

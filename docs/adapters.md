@@ -125,7 +125,7 @@ Tools are not selected by a free-form adapter id. The run loop uses a
 | `handoff` | Brief event for a fresh session (`task` required); does not start a session or child run |
 | `web_fetch` | Opt-in HTTP(S) GET; not in the coding default |
 | `web_search` | Opt-in HTTP POST search; not registered until `[tools.web_search].url` is set |
-| `bash` | Opt-in shell in workspace (timeout-bounded) |
+| `bash` | Opt-in shell in workspace (timeout-bounded). Combined stdout/stderr is truncated to `[tools] model_output_max_bytes` (default 64 KiB) with `…[truncated]` before it enters the prompt; 2 MiB remains a memory bound |
 | `bash_background` / `bash_job_status` / `bash_job_logs` | Implicit when `bash` is enabled. `bash_job_status` polls once, or waits with optional `timeout_ms` (same cap as foreground bash) |
 | `report` / `escalate` | Finish or park; exclusive batch. `report` takes `summary`, `success`, and an optional `data` JSON object for a structured answer |
 
@@ -137,6 +137,7 @@ jailed builtin dispatch. Lower-level `with_builtins*` constructors remain
 available for focused adapters and tests. Dynamic native plugins remain out of
 scope. Configured MCP servers register as `mcp.<name>.<tool>` into the same
 registry without changing the turn loop; skills load as prompt context.
+MCP tool text is truncated to `[tools] model_output_max_bytes` the same way as bash.
 
 Runs still call `authorize_tool` before `execute` for consequential tools.
 Session hosts park on ask (`ask=park`) for mutating tools

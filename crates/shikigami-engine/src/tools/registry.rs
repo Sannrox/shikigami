@@ -53,6 +53,8 @@ pub struct ToolRegistry {
     skills: Option<SkillLoader>,
     /// Set when `[tools] mcp_lazy_schemas` is on; enables `load_mcp_tool`.
     mcp_lazy: Option<McpLazy>,
+    /// Model-facing cap for bash combined output and MCP tool text.
+    model_output_max_bytes: usize,
 }
 
 /// `load_skill` state: the allow-list plus which packs this run has loaded.
@@ -101,6 +103,8 @@ impl ToolRegistry {
             None,
         )?;
         registry.web_search = config.tools.web_search.clone();
+        registry.model_output_max_bytes =
+            super::capped_model_output_max_bytes(config.tools.model_output_max_bytes);
         Ok(registry)
     }
 
@@ -123,6 +127,8 @@ impl ToolRegistry {
             job,
         )?;
         registry.web_search = config.tools.web_search.clone();
+        registry.model_output_max_bytes =
+            super::capped_model_output_max_bytes(config.tools.model_output_max_bytes);
         Ok(registry)
     }
 
@@ -203,6 +209,7 @@ impl ToolRegistry {
             bg_jobs: Arc::new(Mutex::new(BackgroundJobs::new())),
             skills: None,
             mcp_lazy: None,
+            model_output_max_bytes: super::DEFAULT_MODEL_OUTPUT_MAX_BYTES,
         })
     }
 
@@ -438,7 +445,7 @@ impl ToolRegistry {
             }
             let (text, resource_uris) = t.call_linked(args_json).await?;
             return Ok(ExecutedTool {
-                output: ToolOutput::Text(text),
+                output: ToolOutput::Text(self.truncate_model_output(text)),
                 edit_outcome: None,
                 resource_uris,
             });
@@ -506,7 +513,38 @@ impl ToolRegistry {
                 resource_uris: Vec::new(),
             });
         }
-        self.executor.execute(name, args_json).await
+        let executed = self.executor.execute(name, args_json).await;
+        if name == "bash" {
+            self.truncate_bash_result(executed)
+        } else {
+            executed
+        }
+    }
+
+    fn truncate_model_output(&self, text: String) -> String {
+        super::truncate_model_output(text, self.model_output_max_bytes)
+    }
+
+    fn truncate_bash_result(
+        &self,
+        executed: Result<ExecutedTool, ToolError>,
+    ) -> Result<ExecutedTool, ToolError> {
+        match executed {
+            Ok(ExecutedTool {
+                output: ToolOutput::Text(text),
+                edit_outcome,
+                resource_uris,
+            }) => Ok(ExecutedTool {
+                output: ToolOutput::Text(self.truncate_model_output(text)),
+                edit_outcome,
+                resource_uris,
+            }),
+            Err(ToolError::BashFailed { status, output }) => Err(ToolError::BashFailed {
+                status,
+                output: self.truncate_model_output(output),
+            }),
+            other => other,
+        }
     }
 
     async fn bash_background(&self, args_json: &str) -> Result<String, ToolError> {
