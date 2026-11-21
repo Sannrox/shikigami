@@ -18,17 +18,35 @@ use super::session::RunSession;
 use super::supervision::check_bounds;
 use super::{Engine, RunError, RunRequest};
 
+/// Default `[run] compact_keep_tail_bytes`.
+pub(crate) const DEFAULT_COMPACT_KEEP_TAIL_BYTES: usize = 32_768;
+
 /// Compact middle of the message list when over `threshold`, dropping it
-/// behind a marker. Keeps the first message (task) and the last `keep_tail`
-/// messages. If the tail would start on a tool result, it expands to the
-/// assistant that issued those calls so providers still see a complete
-/// exchange. Returns `(before, after)` when compaction ran.
+/// behind a marker. Keeps the first message (task) and a complete
+/// tool-exchange suffix of the last `keep_tail` messages that fits
+/// [`DEFAULT_COMPACT_KEEP_TAIL_BYTES`]. The last exchange is kept even when
+/// it exceeds the cap. Returns `(before, after)` when compaction ran.
 pub fn compact_messages(
     messages: &mut Vec<ChatMessage>,
     threshold: usize,
     keep_tail: usize,
 ) -> Option<(usize, usize)> {
-    let tail_start = compaction_tail_start(messages, threshold, keep_tail)?;
+    compact_messages_bounded(
+        messages,
+        threshold,
+        keep_tail,
+        DEFAULT_COMPACT_KEEP_TAIL_BYTES,
+    )
+}
+
+/// Same cut as [`compact_messages`] with an explicit byte cap on the verbatim tail.
+pub fn compact_messages_bounded(
+    messages: &mut Vec<ChatMessage>,
+    threshold: usize,
+    keep_tail: usize,
+    keep_tail_bytes: usize,
+) -> Option<(usize, usize)> {
+    let tail_start = compaction_tail_start(messages, threshold, keep_tail, keep_tail_bytes)?;
     let marker = dropped_marker(tail_start - 1);
     Some(replace_compacted_span(messages, tail_start, marker))
 }
@@ -39,13 +57,56 @@ fn compaction_tail_start(
     messages: &[ChatMessage],
     threshold: usize,
     keep_tail: usize,
+    keep_tail_bytes: usize,
 ) -> Option<usize> {
     let before = messages.len();
     if before <= threshold || before <= keep_tail + 1 {
         return None;
     }
-    let tail_start = tool_exchange_tail_start(messages, before.saturating_sub(keep_tail).max(1));
+    let count_start = tool_exchange_tail_start(messages, before.saturating_sub(keep_tail).max(1));
+    let floor = tool_exchange_tail_start(messages, before.saturating_sub(2).max(1));
+    let mut tail_start = count_start;
+    while tail_start < floor && tail_bytes(messages, tail_start) > keep_tail_bytes {
+        let next = next_exchange_start(messages, tail_start);
+        tail_start = if next > floor || next == tail_start {
+            floor
+        } else {
+            next
+        };
+    }
     (tail_start > 1).then_some(tail_start)
+}
+
+fn message_history_bytes(message: &ChatMessage) -> usize {
+    message.role.len()
+        + message.content.len()
+        + message.tool_call_id.len()
+        + message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.len() + call.name.len() + call.args_json.len())
+            .sum::<usize>()
+}
+
+fn tail_bytes(messages: &[ChatMessage], tail_start: usize) -> usize {
+    messages[tail_start..]
+        .iter()
+        .map(message_history_bytes)
+        .sum()
+}
+
+fn next_exchange_start(messages: &[ChatMessage], start: usize) -> usize {
+    if start >= messages.len() {
+        return start;
+    }
+    if assistant_has_tool_calls(&messages[start]) {
+        let mut index = start + 1;
+        while index < messages.len() && is_tool_result(&messages[index]) {
+            index += 1;
+        }
+        return index;
+    }
+    start + 1
 }
 
 /// Replace the compacted span with `marker`; returns `(before, after)`.
@@ -384,7 +445,10 @@ impl<'a> DurableModelTurn<'a> {
             && let Some(threshold) = self.compact_threshold()
         {
             let keep = self.engine.config.run.compact_keep_tail.max(2) as usize;
-            if let Some(tail_start) = compaction_tail_start(&session.messages, threshold, keep) {
+            let keep_bytes = self.engine.config.run.compact_keep_tail_bytes;
+            if let Some(tail_start) =
+                compaction_tail_start(&session.messages, threshold, keep, keep_bytes)
+            {
                 self.compact(session, tail_start).await?;
             }
         }
@@ -553,7 +617,10 @@ impl<'a> DurableModelTurn<'a> {
                 Err(error) if self.should_retry_context_length(&error, overflow_retried) => {
                     overflow_retried = true;
                     let keep = self.engine.config.run.compact_keep_tail.max(2) as usize;
-                    let Some(tail_start) = compaction_tail_start(&session.messages, 0, keep) else {
+                    let keep_bytes = self.engine.config.run.compact_keep_tail_bytes;
+                    let Some(tail_start) =
+                        compaction_tail_start(&session.messages, 0, keep, keep_bytes)
+                    else {
                         return Err(error.into());
                     };
                     self.compact(session, tail_start).await?;
@@ -1074,5 +1141,82 @@ mod tests {
             "tail must keep the assistant call with its tool result: {msgs:?}"
         );
         assert_eq!(msgs[tool_idx - 1].tool_calls[0].id, "c1");
+    }
+
+    fn chat(role: &str, content: impl Into<String>) -> ChatMessage {
+        ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            tool_call_id: String::new(),
+            tool_calls: vec![],
+        }
+    }
+
+    fn compact_tail(messages: &[ChatMessage]) -> &[ChatMessage] {
+        &messages[2..]
+    }
+
+    #[test]
+    fn compact_tail_byte_cap_shrinks_count_tail() {
+        let mut msgs: Vec<ChatMessage> = (0..12)
+            .map(|i| {
+                chat(
+                    if i == 0 { "user" } else { "assistant" },
+                    format!("m{i:02}{}", "a".repeat(2000)),
+                )
+            })
+            .collect();
+        compact_messages_bounded(&mut msgs, 0, 8, 4096).unwrap();
+        assert!(msgs[0].content.starts_with("m00"));
+        assert!(msgs[1].content.contains("compacted"));
+        let tail = compact_tail(&msgs);
+        assert!(
+            tail_bytes(tail, 0) <= 4096,
+            "tail {} bytes: {tail:?}",
+            tail_bytes(tail, 0)
+        );
+        assert!(tail.len() >= 2, "{}", tail.len());
+        assert!(tail.last().unwrap().content.starts_with("m11"));
+    }
+
+    #[test]
+    fn compact_tail_byte_cap_keeps_last_exchange_when_over_cap() {
+        let mut msgs = vec![chat("user", "task")];
+        for i in 1..10 {
+            msgs.push(chat("assistant", format!("pad{i}")));
+        }
+        msgs.push(ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                args_json: "{}".into(),
+            }],
+        });
+        msgs.push(ChatMessage {
+            role: "tool".into(),
+            content: "b".repeat(5000),
+            tool_call_id: "c1".into(),
+            tool_calls: vec![],
+        });
+        compact_messages_bounded(&mut msgs, 0, 8, 4096).unwrap();
+        let tail = compact_tail(&msgs);
+        assert_eq!(tail.len(), 2, "{tail:?}");
+        assert!(!tail[0].tool_calls.is_empty());
+        assert_eq!(tail[1].role, "tool");
+        assert!(tail_bytes(tail, 0) > 4096);
+    }
+
+    #[test]
+    fn compact_tail_byte_cap_leaves_tiny_count_tail() {
+        let mut msgs: Vec<ChatMessage> = (0..20)
+            .map(|i| chat(if i == 0 { "user" } else { "assistant" }, format!("m{i}")))
+            .collect();
+        compact_messages_bounded(&mut msgs, 10, 8, 4096).unwrap();
+        let tail = compact_tail(&msgs);
+        assert_eq!(tail.len(), 8, "{tail:?}");
+        assert!(tail_bytes(tail, 0) <= 4096);
     }
 }

@@ -32,7 +32,7 @@ use crate::mcp::framing;
 use crate::model::{ChatMessage, ModelError, ModelPort, TokenUsage};
 use crate::run::{
     AskDecision, ParkInfo, ParkKind, PlanDecision, RunError, RunRequest, RunTermination,
-    compact_messages,
+    compact_messages_bounded,
 };
 
 /// ACP protocol version this host speaks. `initialize` accepts client offers
@@ -793,9 +793,12 @@ impl AcpHost {
         let mut checkpoint = Checkpoint::load(&harness.state.runs_dir(), &run_id)
             .map_err(|_| rpc_error(-32603, "session run checkpoint is unreadable"))?;
         let keep = harness.config.run.compact_keep_tail.max(2) as usize;
+        let keep_bytes = harness.config.run.compact_keep_tail_bytes;
         // Content sidecar stays on the 32-part contract; this cut is ChatMessage history.
         let before = checkpoint.messages.len();
-        let after = if let Some((_, after)) = compact_messages(&mut checkpoint.messages, 0, keep) {
+        let after = if let Some((_, after)) =
+            compact_messages_bounded(&mut checkpoint.messages, 0, keep, keep_bytes)
+        {
             checkpoint
                 .save(&harness.state.runs_dir())
                 .map_err(|e| rpc_error(-32603, e.to_string()))?;

@@ -681,9 +681,15 @@ pub struct RunSettings {
     /// default: it only runs after a context-length failure.
     #[serde(default = "default_true")]
     pub compact_on_context_length: bool,
-    /// Messages to retain after the initial user task when compacting (default 8).
+    /// Messages the host tries to keep after the initial user task when
+    /// compacting (default 8). [`Self::compact_keep_tail_bytes`] may shrink it.
     #[serde(default = "default_compact_keep_tail")]
     pub compact_keep_tail: u32,
+    /// Byte cap for that verbatim tail (default 32768). Count and bytes both
+    /// apply: the tail is a complete tool-exchange suffix of `compact_keep_tail`
+    /// that fits. The last exchange is kept even when it exceeds the cap.
+    #[serde(default = "default_compact_keep_tail_bytes")]
+    pub compact_keep_tail_bytes: usize,
     /// Operator-declared context window in tokens. Unset keeps fill-based
     /// compact off. Compared to the last completed turn's reported
     /// `input_tokens` using [`Self::compact_at_usage_percent`].
@@ -796,6 +802,10 @@ fn default_compact_keep_tail() -> u32 {
     8
 }
 
+fn default_compact_keep_tail_bytes() -> usize {
+    32_768
+}
+
 fn default_compact_at_usage_percent() -> u32 {
     80
 }
@@ -809,6 +819,7 @@ impl Default for RunSettings {
             compact_after_messages: None,
             compact_on_context_length: default_true(),
             compact_keep_tail: default_compact_keep_tail(),
+            compact_keep_tail_bytes: default_compact_keep_tail_bytes(),
             context_window_tokens: None,
             compact_at_usage_percent: default_compact_at_usage_percent(),
             plan_jail: false,
@@ -2430,6 +2441,13 @@ compact_on_context_length = false
         let (config, _) = Config::resolve(&path).unwrap();
         config.validate().unwrap();
         assert!(!config.run.compact_on_context_length);
+    }
+
+    #[test]
+    fn compact_keep_tail_bytes_defaults_and_parses() {
+        assert_eq!(RunSettings::default().compact_keep_tail_bytes, 32_768);
+        let parsed: RunSettings = toml::from_str("compact_keep_tail_bytes = 4096").unwrap();
+        assert_eq!(parsed.compact_keep_tail_bytes, 4096);
     }
 
     #[test]
