@@ -576,6 +576,92 @@ async fn load_skill_attributes_each_pack_once_at_load() {
 }
 
 #[tokio::test]
+async fn host_load_skill_injects_tool_result_not_user_text() {
+    use shikigami::{ChannelSink, HarnessEvent};
+    use std::sync::Arc;
+
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let skills_root = dir.path().join("skills");
+    let pack = skills_root.join("demo");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(pack.join("SKILL.md"), "UNIQUE-HOST-SKILL-BODY\n").unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(
+        r#"[{"requires_context":["UNIQUE-HOST-SKILL-BODY","extra"],"content":"loaded"}]"#.into(),
+    );
+    config.context.skills_root = Some(skills_root.to_string_lossy().into());
+    config.events.adapter = "none".into();
+    config.workspace.root = ws.to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let (sink, rx) = ChannelSink::pair();
+    let mut request = RunRequest::new("extra");
+    request.keep_workspace = true;
+    request.set_load_skill(Some("demo".into()));
+    let result = harness
+        .run_with_events(request, Some(Arc::new(sink)))
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.summary);
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events.iter().any(
+            |event| matches!(event, HarnessEvent::ToolStart { name, .. } if name == "load_skill")
+        ),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::Message { text, .. } if text.starts_with("skill demo digest=")
+        )),
+        "{events:?}"
+    );
+    let checkpoint =
+        shikigami::checkpoint::Checkpoint::load(&harness.state.runs_dir(), &result.run_id).unwrap();
+    let user = checkpoint
+        .messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("user message");
+    assert_eq!(user.content, "extra");
+    assert!(!user.content.contains("UNIQUE-HOST-SKILL-BODY"));
+    let tool = checkpoint
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .expect("load_skill result");
+    assert!(tool.content.contains("UNIQUE-HOST-SKILL-BODY"), "{tool:?}");
+}
+
+#[tokio::test]
+async fn host_load_skill_unknown_id_fails_closed() {
+    let dir = tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let state = StateRoot::new(dir.path().join("state"));
+    let mut config = Config::default();
+    config.governance.adapter = "local".into();
+    config.model.adapter = "scripted".into();
+    config.model.script_json = Some(r#"[{"content":"unused"}]"#.into());
+    config.events.adapter = "none".into();
+    config.workspace.root = ws.to_string_lossy().into();
+
+    let harness = Harness::from_config(config, state).unwrap();
+    let mut request = RunRequest::new("extra");
+    request.keep_workspace = true;
+    request.set_load_skill(Some("missing".into()));
+    let err = harness.run(request).await.unwrap_err();
+    assert!(err.to_string().contains("no skill `missing`"), "{err}");
+}
+
+#[tokio::test]
 async fn listed_project_rules_all_attach_on_a_scripted_run() {
     use shikigami::{ChannelSink, HarnessEvent};
     use std::sync::Arc;

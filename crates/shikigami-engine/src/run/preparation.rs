@@ -485,6 +485,7 @@ pub(super) async fn prepare(
                 .await?;
         }
     }
+    inject_host_load_skill(engine, request, &mut session, tools.as_ref()).await?;
     let handle = engine
         .governance
         .begin_run_with_checkpoint(
@@ -932,6 +933,58 @@ fn compose_context(
         },
     );
     (prompt_id, prompt, !skills.catalog.is_empty())
+}
+
+/// Attach a host-chosen skill as a `load_skill` exchange before persist.
+/// Fresh runs and prompt-wait follow-ups only; ask/plan/escalate resumes skip
+/// so a later park of the same attempt does not load twice.
+async fn inject_host_load_skill(
+    engine: &Engine,
+    request: &RunRequest,
+    session: &mut RunSession,
+    tools: &ToolRegistry,
+) -> Result<(), RunError> {
+    let Some(id) = request.load_skill.as_deref().filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    if request.resume_run_id.is_some() && request.resume_prompt.is_none() {
+        return Ok(());
+    }
+    let pack = crate::context::load_skill(&session.workspace, &engine.config.context, id)
+        .ok_or_else(|| RunError::Message(format!("load_skill: no skill `{id}`")))?;
+    let result = format!("# Skill `{}`\n\n{}", pack.id, pack.body);
+    let args_json = serde_json::json!({ "id": pack.id }).to_string();
+    let call_id = session.append_host_load_skill(&pack).await?;
+    engine.emit(
+        &session.run_id,
+        HarnessEvent::ToolStart {
+            name: "load_skill".into(),
+            args_json,
+            run_id: session.run_id.clone(),
+            turn: session.turns,
+            call_id: call_id.clone(),
+        },
+    );
+    engine.emit(
+        &session.run_id,
+        HarnessEvent::ToolEnd {
+            name: "load_skill".into(),
+            ok: true,
+            detail: result,
+            run_id: session.run_id.clone(),
+            turn: session.turns,
+            call_id,
+        },
+    );
+    tools.mark_skill_seen(&pack.id);
+    engine.emit(
+        &session.run_id,
+        HarnessEvent::Message {
+            level: "info".into(),
+            text: format!("skill {} digest={}", pack.id, pack.digest),
+        },
+    );
+    Ok(())
 }
 
 async fn persist_initial_state(

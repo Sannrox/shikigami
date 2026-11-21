@@ -143,6 +143,7 @@ impl<'a> RunSupervision<'a> {
             ask_session_grants,
             resume_plan,
             resume_answer,
+            load_skill,
         } = request;
         let run_request = RunRequest {
             job_credential: None,
@@ -166,6 +167,7 @@ impl<'a> RunSupervision<'a> {
             assigned_run_id: None,
             trace_context: None,
             ask_session_grants,
+            load_skill,
         };
         self.execute_inner(
             run_request,

@@ -241,6 +241,59 @@ async fn mixed_content_and_tool_text_round_trip_without_payload_projections() {
 }
 
 #[tokio::test]
+async fn host_load_skill_stores_body_in_content_sidecar() {
+    let directory = tempdir().unwrap();
+    let skills_root = directory.path().join("skills");
+    fs::create_dir_all(skills_root.join("demo")).unwrap();
+    fs::write(
+        skills_root.join("demo/SKILL.md"),
+        "UNIQUE-CONTENT-SKILL-BODY\n",
+    )
+    .unwrap();
+    let state = StateRoot::new(directory.path().join("state"));
+    let resolver = Arc::new(MemoryResolver::new());
+    let messages = vec![ContentMessageV1 {
+        role: "user".into(),
+        parts: vec![resolver.insert("text-1", ContentPartKind::Text, "text/plain", b"extra")],
+        tool_call_id: String::new(),
+        tool_calls: Vec::new(),
+    }];
+    let mut config = local_config(
+        &directory,
+        r#"[{"tool_calls":[{"id":"report-1","name":"report","args_json":"{\"summary\":\"loaded\",\"success\":true}"}]}]"#,
+    );
+    config.context.skills_root = Some(skills_root.to_string_lossy().into());
+    let harness = Harness::from_config(config, state.clone()).unwrap();
+    let mut request = ContentRunRequestV1::new("extra", messages, resolver.clone());
+    request.keep_workspace = true;
+    request.load_skill = Some("demo".into());
+    let result = harness.run_content(request).await.unwrap();
+    assert!(result.run.success, "{}", result.run.summary);
+
+    let checkpoint = Checkpoint::load(&state.runs_dir(), &result.run.run_id).unwrap();
+    assert!(
+        checkpoint
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("UNIQUE-CONTENT-SKILL-BODY")),
+        "{:?}",
+        checkpoint.messages
+    );
+    let tool = result
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .expect("load_skill content record");
+    let resolved = resolver.resolve(&tool.parts[0]).await.unwrap();
+    let text = match resolved {
+        ResolvedContent::Text(text) => text,
+        ResolvedContent::Bytes(bytes) => String::from_utf8(bytes.to_vec()).unwrap(),
+    };
+    assert!(text.contains("UNIQUE-CONTENT-SKILL-BODY"), "{text}");
+    assert!(text.contains("# Skill `demo`"), "{text}");
+}
+
+#[tokio::test]
 async fn invalid_reference_and_digest_drift_fail_before_model_execution() {
     let directory = tempdir().unwrap();
     let state = StateRoot::new(directory.path().join("state"));

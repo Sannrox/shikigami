@@ -153,6 +153,12 @@ run's standing attachments: `{ "rules": [{ "filename", "bytes", "truncated"? }],
 restart reports it again after the next prompt. Clients that ignore `_meta`
 are unchanged.
 
+`session/prompt` may carry `_meta.shikigami.loadSkill` (a skill id). The host
+loads that pack as `load_skill` before the model turn: the user prompt stays
+the text parts; the pack body is a tool result with `skill <id> digest=…`
+attribution. Unknown or unlisted ids fail closed (`-32603`). Clients that
+omit `_meta` are unchanged. The TUI slash sets this field.
+
 The `session/new` and `session/load` results carry `models`
 (experimental): `{"currentModelId": "...", "availableModels": [{"modelId":
 "...", "name": "..."}]}`. It is absent when the catalog cannot be read.

@@ -55,12 +55,15 @@ surface; there is no plugin loader
 ([ADR 0018](decisions/0018-skills-mcp-extension.md)).
 
 `shikigami tui` offers each pack from `skills_root` and `.agents/skills` as a
-slash command by its id: `/name [args]` sends the pack body, then any args, as
-the prompt. Built-in commands win a name collision; a pack named like one
-(`help`, `new`, ...) is listed and reached as `/skill:name`, and `/skill:name`
-keeps working for every pack. Configured `context.skills` is an allow-list;
-when it is empty the TUI lists packs that exist on disk. Configured ids still
-reach the run as above.
+slash command by its id: `/name [args]` shows that line in the transcript and
+asks the host to `load_skill` the pack. The user prompt is the args, or a
+one-line follow instruction when args are empty. The pack body arrives as
+the same `load_skill` tool result a model call would, with digest attribution.
+Built-in commands win a name collision; a pack named like one (`help`, `new`,
+...) is listed and reached as `/skill:name`, and `/skill:name` keeps working
+for every pack. Configured `context.skills` is an allow-list; when it is empty
+the TUI lists packs that exist on disk. An unlisted or missing id is an
+unknown-skill system line and the draft stays.
 
 ## Context boundaries
 

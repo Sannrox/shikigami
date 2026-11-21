@@ -784,7 +784,8 @@ impl TuiSession {
 
     #[cfg(test)]
     pub(crate) async fn spawn_prompt(&self, text: String) -> Result<(), String> {
-        self.spawn_prompt_with(text.clone(), text, Vec::new()).await
+        self.spawn_prompt_with(text.clone(), text, Vec::new(), None)
+            .await
     }
 
     pub(crate) async fn spawn_prompt_with(
@@ -792,6 +793,7 @@ impl TuiSession {
         display: String,
         send: String,
         parts: Vec<Value>,
+        load_skill: Option<String>,
     ) -> Result<(), String> {
         {
             let mut shared = self.lock_shared();
@@ -815,14 +817,18 @@ impl TuiSession {
             Value::Array(parts)
         };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut params = json!({
+            "sessionId": session_id,
+            "prompt": prompt
+        });
+        if let Some(skill) = load_skill {
+            params["_meta"]["shikigami"]["loadSkill"] = json!(skill);
+        }
         let msg = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "session/prompt",
-            "params": {
-                "sessionId": session_id,
-                "prompt": prompt
-            }
+            "params": params
         });
         let host = Arc::clone(&self.host);
         let client = self.client.clone();
@@ -867,7 +873,7 @@ impl TuiSession {
                 display,
                 send,
                 parts,
-            }) => self.spawn_prompt_with(display, send, parts).await,
+            }) => self.spawn_prompt_with(display, send, parts, None).await,
             None => Ok(()),
         }
     }
@@ -926,6 +932,7 @@ pub(crate) enum KeyResult {
         display: String,
         send: String,
         parts: Vec<Value>,
+        load_skill: Option<String>,
     },
     Compact,
     NewSession,

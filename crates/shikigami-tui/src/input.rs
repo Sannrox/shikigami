@@ -344,6 +344,7 @@ pub(crate) fn handle_key(session: &TuiSession, key: KeyEvent) -> KeyResult {
                     display: prompt_display(trimmed, &parts),
                     send: trimmed.to_string(),
                     parts,
+                    load_skill: None,
                 };
             }
         }

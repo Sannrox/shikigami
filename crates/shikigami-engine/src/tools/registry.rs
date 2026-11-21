@@ -306,6 +306,17 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Remember a host-initiated load so a later `load_skill` of the same id
+    /// does not emit a second digest.
+    pub fn mark_skill_seen(&self, id: &str) {
+        let Some(skills) = &self.skills else {
+            return;
+        };
+        if let Ok(mut loaded) = skills.loaded.lock() {
+            loaded.seen.insert(id.to_string());
+        }
+    }
+
     /// Drain attribution lines for packs loaded since the last call. Each
     /// pack yields one line, at its first load in this run.
     pub fn take_skill_loads(&self) -> Vec<String> {

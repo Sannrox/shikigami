@@ -658,14 +658,16 @@ async fn slash_attach_sends_acp_image_part() {
             display,
             send,
             parts,
+            load_skill,
         } => {
             assert_eq!(send, "inspect");
+            assert!(load_skill.is_none());
             assert!(display.contains("image/png"), "{display}");
             assert!(!display.contains("UNIQUE-TUI-401-IMAGE"), "{display}");
             assert_eq!(parts[0]["type"], "text");
             assert_eq!(parts[1]["type"], "image");
             session
-                .spawn_prompt_with(display, send, parts)
+                .spawn_prompt_with(display, send, parts, load_skill)
                 .await
                 .unwrap();
             let stop = session.wait_prompt().await;
@@ -906,9 +908,15 @@ async fn slash_enter_runs_highlighted_skill_from_prefix() {
     type_text(&session, "/de");
     assert_eq!(slash_names(&session), vec!["demo"]);
     match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-        KeyResult::Prompt { display, send, .. } => {
+        KeyResult::Prompt {
+            display,
+            send,
+            load_skill,
+            ..
+        } => {
             assert_eq!(display, "/demo");
-            assert!(send.contains("prefer tests first"), "{send}");
+            assert_eq!(send, "follow skill `demo`");
+            assert_eq!(load_skill.as_deref(), Some("demo"));
         }
         other => panic!("expected highlighted skill prompt, got {other:?}"),
     }
@@ -936,9 +944,11 @@ async fn slash_skill_name_sends_pack_without_prefix() {
             display,
             send,
             parts,
+            load_skill,
         } => {
             assert_eq!(display, "/demo extra");
-            assert_eq!(send, "demo pack body\n\n\nextra");
+            assert_eq!(send, "extra");
+            assert_eq!(load_skill.as_deref(), Some("demo"));
             assert_eq!(parts.len(), 1);
         }
         other => panic!("expected skill prompt, got {other:?}"),
@@ -947,9 +957,15 @@ async fn slash_skill_name_sends_pack_without_prefix() {
 
     type_text(&session, "/skill:demo");
     match handle_key(&session, enter_key()) {
-        KeyResult::Prompt { display, send, .. } => {
+        KeyResult::Prompt {
+            display,
+            send,
+            load_skill,
+            ..
+        } => {
             assert_eq!(display, "/skill:demo");
-            assert!(send.starts_with("demo pack body"), "{send}");
+            assert_eq!(send, "follow skill `demo`");
+            assert_eq!(load_skill.as_deref(), Some("demo"));
         }
         other => panic!("expected alias skill prompt, got {other:?}"),
     }
@@ -983,9 +999,15 @@ async fn slash_builtin_wins_over_a_skill_with_its_name() {
 
     type_text(&session, "/skill:help more");
     match handle_key(&session, enter_key()) {
-        KeyResult::Prompt { display, send, .. } => {
+        KeyResult::Prompt {
+            display,
+            send,
+            load_skill,
+            ..
+        } => {
             assert_eq!(display, "/skill:help more");
-            assert_eq!(send, "help pack body\n\n\nmore");
+            assert_eq!(send, "more");
+            assert_eq!(load_skill.as_deref(), Some("help"));
         }
         other => panic!("expected colliding skill via alias, got {other:?}"),
     }
@@ -1016,7 +1038,7 @@ async fn slash_builtin_abbreviation_wins_over_a_skill() {
 }
 
 #[tokio::test]
-async fn slash_skill_sends_pack_body() {
+async fn slash_skill_sends_short_prompt() {
     let dir = tempdir().unwrap();
     let cwd = dir.path().join("project");
     let skill_dir = cwd.join(".shikigami/skills/demo");
@@ -1026,10 +1048,16 @@ async fn slash_skill_sends_pack_body() {
     let session = TuiSession::start(host, &cwd, false).await.unwrap();
     type_text(&session, "/skill:demo extra");
     match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-        KeyResult::Prompt { display, send, .. } => {
+        KeyResult::Prompt {
+            display,
+            send,
+            load_skill,
+            ..
+        } => {
             assert_eq!(display, "/skill:demo extra");
-            assert!(send.contains("prefer tests first"), "{send}");
-            assert!(send.contains("extra"), "{send}");
+            assert_eq!(send, "extra");
+            assert!(!send.contains("prefer tests first"), "{send}");
+            assert_eq!(load_skill.as_deref(), Some("demo"));
         }
         other => panic!("expected skill prompt, got {other:?}"),
     }
@@ -1057,10 +1085,13 @@ async fn slash_skill_includes_staged_attachments() {
             display,
             send,
             parts,
+            load_skill,
         } => {
             assert!(display.contains("/skill:demo"), "{display}");
             assert!(display.contains("image/png"), "{display}");
-            assert!(send.contains("prefer tests first"), "{send}");
+            assert_eq!(send, "follow skill `demo`");
+            assert!(!send.contains("prefer tests first"), "{send}");
+            assert_eq!(load_skill.as_deref(), Some("demo"));
             assert_eq!(parts[0]["type"], "text");
             assert_eq!(parts[1]["type"], "image");
             assert_eq!(parts[1]["mimeType"], "image/png");
@@ -1074,6 +1105,52 @@ async fn slash_skill_includes_staged_attachments() {
 }
 
 #[tokio::test]
+async fn slash_skill_host_loads_pack_as_tool_result() {
+    let dir = tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    let skill_dir = cwd.join(".agents/skills/demo");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "UNIQUE-SKILL-BODY\n").unwrap();
+    let host = Arc::new(scripted_host(
+        dir.path(),
+        r#"[{"requires_context":["UNIQUE-SKILL-BODY","extra"],"content":"skill-reply"}]"#,
+    ));
+    let session = TuiSession::start(host, &cwd, false).await.unwrap();
+    type_text(&session, "/demo extra");
+    match handle_key(&session, enter_key()) {
+        KeyResult::Prompt {
+            display,
+            send,
+            parts,
+            load_skill,
+        } => {
+            assert_eq!(display, "/demo extra");
+            assert_eq!(send, "extra");
+            session
+                .spawn_prompt_with(display, send, parts, load_skill)
+                .await
+                .unwrap();
+            let stop = session.wait_prompt().await;
+            assert_eq!(
+                stop.as_ref().and_then(|v| v.pointer("/result/stopReason")),
+                Some(&json!("end_turn"))
+            );
+        }
+        other => panic!("expected skill prompt, got {other:?}"),
+    }
+    let text = session.transcript_text();
+    assert!(text.contains("you  /demo extra"), "{text}");
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("you  ") && line.contains("UNIQUE-SKILL-BODY")),
+        "{text}"
+    );
+    assert!(text.contains("load_skill"), "{text}");
+    assert!(text.contains("skill-reply"), "{text}");
+}
+
+#[tokio::test]
 async fn slash_skill_loads_agents_skills() {
     let dir = tempdir().unwrap();
     let cwd = dir.path().join("project");
@@ -1084,9 +1161,16 @@ async fn slash_skill_loads_agents_skills() {
     let session = TuiSession::start(host, &cwd, false).await.unwrap();
     type_text(&session, "/skill:verify-change");
     match handle_key(&session, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-        KeyResult::Prompt { display, send, .. } => {
+        KeyResult::Prompt {
+            display,
+            send,
+            load_skill,
+            ..
+        } => {
             assert_eq!(display, "/skill:verify-change");
-            assert!(send.contains("run make validate"), "{send}");
+            assert_eq!(send, "follow skill `verify-change`");
+            assert!(!send.contains("run make validate"), "{send}");
+            assert_eq!(load_skill.as_deref(), Some("verify-change"));
         }
         other => panic!("expected agents skill prompt, got {other:?}"),
     }

@@ -15,8 +15,9 @@ use crate::content::{
     ContentTerminalCheckpoint, load_sidecar, resolve_accepted, resolve_terminal_summary,
     save_sidecar, store_text, tool_arguments_pointer, validate_descriptor, validate_messages,
 };
+use crate::context::SkillPack;
 use crate::governance::GovernancePort;
-use crate::model::{ChatMessage, TokenUsage};
+use crate::model::{ChatMessage, TokenUsage, ToolCall};
 use crate::replay::{ReplayCheckpoint, ReplayTerminalCheckpoint};
 use crate::tools::ToolRegistry;
 use crate::tracing_export::RunSpanTrace;
@@ -669,6 +670,85 @@ impl RunSession {
             parts: vec![descriptor],
             tool_call_id,
             tool_calls: Vec::new(),
+        });
+        validate_messages(&content.messages, &content.capabilities).map_err(content_run_error)?;
+        Ok(())
+    }
+
+    /// Host-initiated `load_skill`: same ChatMessage exchange as a model tool
+    /// call, without requiring `load_skill` in the offered catalog.
+    pub async fn append_host_load_skill(&mut self, pack: &SkillPack) -> Result<String, RunError> {
+        let call_id = format!("host-load-{}", pack.id);
+        let args_json = serde_json::json!({ "id": pack.id }).to_string();
+        let result = format!("# Skill `{}`\n\n{}", pack.id, pack.body);
+        let content_session = self.content.is_some();
+        self.messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: String::new(),
+            tool_calls: vec![ToolCall {
+                id: call_id.clone(),
+                name: "load_skill".into(),
+                args_json: args_json.clone(),
+            }],
+        });
+        self.messages.push(ChatMessage {
+            role: "tool".into(),
+            // Content sessions keep the body in the sidecar, matching tool_batch.
+            content: if content_session {
+                String::new()
+            } else {
+                result.clone()
+            },
+            tool_call_id: call_id.clone(),
+            tool_calls: vec![],
+        });
+        if content_session {
+            self.append_content_assistant_tool_call(call_id.clone(), args_json)
+                .await?;
+            self.append_content_tool_text(call_id.clone(), result)
+                .await?;
+        }
+        Ok(call_id)
+    }
+
+    async fn append_content_assistant_tool_call(
+        &mut self,
+        call_id: String,
+        args_json: String,
+    ) -> Result<(), RunError> {
+        let content = self
+            .content
+            .as_mut()
+            .ok_or_else(|| RunError::Message("content session is unavailable".into()))?;
+        let mut used_ids = content
+            .messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .map(|descriptor| descriptor.part_id.clone())
+            .collect::<HashSet<_>>();
+        let part_id = reserve_part_id(
+            &mut used_ids,
+            format!("shikigami-host-load-{}-arguments", content.messages.len()),
+        );
+        let descriptor = store_text(
+            content.resolver.as_ref(),
+            part_id.clone(),
+            args_json,
+            "model-tool-arguments",
+            format!("host-load-{}", content.messages.len()),
+        )
+        .await
+        .map_err(content_run_error)?;
+        content.messages.push(ContentMessageV1 {
+            role: "assistant".into(),
+            parts: vec![descriptor],
+            tool_call_id: String::new(),
+            tool_calls: vec![ToolCall {
+                id: call_id,
+                name: "load_skill".into(),
+                args_json: tool_arguments_pointer(&part_id),
+            }],
         });
         validate_messages(&content.messages, &content.capabilities).map_err(content_run_error)?;
         Ok(())
