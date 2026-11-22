@@ -135,7 +135,7 @@ need no setting change.
 ### Gateway mode
 
 `[tools.mcp_gateway]` (off when unset) routes every remote MCP tool call
-through one governed gateway:
+through one HTTP MCP proxy:
 
 ```toml
 [tools.mcp_gateway]
@@ -162,9 +162,8 @@ timeout_secs = 30   # optional
 | No response within `timeout_secs` | Failed tool call `deadline_exceeded`; the remote side may still have completed — reconcile through the server's receipt surface before retrying |
 | Deadline expires while the request is still being written (server stopped reading stdin) | That call fails `deadline_exceeded`; every later call on the attachment fails `stdin desynchronized` and the server is killed, so a partial frame is never completed by the next request |
 
-Denials, conflicts, and deadlines therefore reach governance reports and
-`ToolEnd` events as failures, never as a successful call whose text happens to
-describe an error.
+Denials, conflicts, and deadlines therefore reach `ToolEnd` events as
+failures, never as a successful call whose text happens to describe an error.
 
 ### Client security
 
