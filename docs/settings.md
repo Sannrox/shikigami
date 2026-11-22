@@ -163,7 +163,9 @@ not streamed, so a retry never joins two partial answers.
 
 #### `[model.fallback]`
 
-Opt-in governed local-model fallback ([ADR 0007](decisions/0007-governed-local-fallback.md)).
+Optional local-model fallback after admission
+([ADR 0007](decisions/0007-governed-local-fallback.md);
+superseded by [ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md)).
 Denied by default. Presence of a model artifact is not authorization.
 
 | Field | Default | Description |
@@ -461,7 +463,7 @@ Rules and skills are **untrusted text** given to the model (not executed). Ances
 | `compact_at_usage_percent` | `80` | Percent of `context_window_tokens` that last-turn `input_tokens` must reach to compact (1–100). Consulted only when the window is set. |
 | `timeout_secs` | unset | Optional overall wall-clock limit (checked at turn boundaries) |
 | `plan_jail` | `false` | Restrict mutating tools to `.shikigami/plan.md` until a parked plan is accepted. `report` parks `ParkKind::Plan` with the plan digest. Resume with `RunRequest.resume_plan` / `--plan-accept` / `--plan-reject`. Only Accept clears the jail; Reject completes failed and keeps it. `doctor` names the mode when selected. |
-| `nested` | `false` | Enable `child_run` / `child_status`. A child is a first-class Run with a typed profile (`explore` read-only, `plan` write-jail, `full` parent authority). Default shares the parent workspace (ACP/TUI inplace included); `worktree=true` isolates with `git-worktree` outside the parent jail (harvest is the child summary; successful isolated trees are cleaned up with `git worktree remove`, including after `--resume` of a parked plan child, unless the resume sets `keep_workspace`). Plan-jail parents may start shared-workspace children; `worktree=true` is denied because materialize mutates the parent git checkout. `full`/`plan` children inherit the parent jail (writes stay on `.shikigami/plan.md`); `explore` is read-only. Explore and plan-jailed children do not attach parent MCP servers. Children run unattended to a summary (they do not inherit `session_wait`). Session hosts ask=park before `full`/`plan` `child_run` and before any `worktree=true`. Git worktree add/remove runs with hooks disabled. Children do not inherit nested tools, including on resume, so only one nesting level is implemented (`nested_max_depth` > 1 is reserved). A parked parent restores nested tools on `--resume`. Unattended park cancels `wait=false` children and waits until their registry rows are terminal (in-flight tools drop on cancel). Session hosts leave them running until the parent completes. Parent complete keeps a shared workspace while a recorded child is still parked or running. `local`/`none` authorize the tool names; `http-callback` and `sekai-chisei` keep host/plane allow-lists. `doctor` names the mode when selected. |
+| `nested` | `false` | Enable `child_run` / `child_status`. A child is a first-class Run with a typed profile (`explore` read-only, `plan` write-jail, `full` parent authority). Default shares the parent workspace (ACP/TUI inplace included); `worktree=true` isolates with `git-worktree` outside the parent jail (harvest is the child summary; successful isolated trees are cleaned up with `git worktree remove`, including after `--resume` of a parked plan child, unless the resume sets `keep_workspace`). Plan-jail parents may start shared-workspace children; `worktree=true` is denied because materialize mutates the parent git checkout. `full`/`plan` children inherit the parent jail (writes stay on `.shikigami/plan.md`); `explore` is read-only. Explore and plan-jailed children do not attach parent MCP servers. Children run unattended to a summary (they do not inherit `session_wait`). Session hosts ask=park before `full`/`plan` `child_run` and before any `worktree=true`. Git worktree add/remove runs with hooks disabled. Children do not inherit nested tools, including on resume, so only one nesting level is implemented (`nested_max_depth` > 1 is reserved). A parked parent restores nested tools on `--resume`. Unattended park cancels `wait=false` children and waits until their registry rows are terminal (in-flight tools drop on cancel). Session hosts leave them running until the parent completes. Parent complete keeps a shared workspace while a recorded child is still parked or running. `local`/`none` authorize the tool names; `http-callback` / `host-authz` keep the host allow-list. `doctor` names the mode when selected. |
 | `nested_max_depth` | `1` | Maximum nested depth (root is 0). Must be greater than zero. |
 | `max_stop_repairs` | `3` | Refused completions a `stop` hook allows before the run ends failed ([hooks.md](hooks.md#stop-verify-before-success)) |
 | `nested_max_children` | `4` | Maximum children one parent may start. Must be greater than zero. Depth and fan-out caps fail closed. Isolated `wait=false` `child_run`s in one turn start concurrently up to this cap. |
@@ -628,7 +630,7 @@ field changes meaning or goes away; new fields may appear in the same version.
 | `SHIKIGAMI_CONFIG` | Path to settings file |
 | `SHIKIGAMI_PROFILE` | Profile name |
 | `SHIKIGAMI_GOVERNANCE_ADAPTER` | Governance adapter id |
-| `SHIKIGAMI_CONTROL_PLANE` | Maps to `governance.endpoint` (http-callback URL) |
+| `SHIKIGAMI_CONTROL_PLANE` | http-callback `governance.endpoint` URL (historical env name; not a plane client) |
 | `SHIKIGAMI_GOVERNANCE_NAMESPACE` | Override `governance.namespace` |
 | `SHIKIGAMI_MODEL_ADAPTER` | Model adapter id |
 | `SHIKIGAMI_MODEL` | Override the configured model name; HTTP `auto` maps to `gpt-4.1-mini` |

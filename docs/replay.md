@@ -3,7 +3,7 @@
 Run replay executes one new isolated attempt and compares it with retained
 evidence. It is an additive library API with a thin CLI host
 (`shikigami replay`); it does not change checkpoint resume, transcript export,
-serve intake, MCP, or plane-claim behavior.
+serve intake, or MCP behavior.
 
 Use replay when a host needs to answer: “Given the same bound task, prompt,
 model, tools, policy context, and inputs, which ordered model, tool, and
@@ -192,4 +192,4 @@ without a live service.
 - [Embedding](embedding.md) — additive `Harness` API
 - [Identity](identity.md) — source, replay, and resume identities
 - [Runs](runs.md) — local state and cleanup
-- [Governed path](governed-path.md) — external governance authority
+- [ADR 0024](decisions/0024-local-guest-rusui-plane-caller.md) — local guest; rusui is the plane caller

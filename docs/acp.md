@@ -25,7 +25,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/load` | client → agent | Restore a known session and replay conversation via `session/update` before responding; **unknown ids fail closed**. A worktree session reopens that tree; a removed or missing tree is `-32602`. |
 | `session/list` | client → agent | Enumerate persisted sessions this host knows. Optional `cwd` (absolute, same as `session/new`) filters to that workspace; omit it for every session in this state root that has a run. Most recently active first. Same filter as resume: omit content sessions whose payloads are gone. One page: omit `nextCursor`; a cursor the host did not issue is `-32602`. Items: `sessionId`, `cwd`, `updatedAt` (last checkpoint write), `title` from the first user prompt, `_meta.shikigami.inUse` / `prompts`. List does not take the exclusive lock. |
 | `session/prompt` | client → agent | Drive one prompt until `end_turn` / cancel / error. When the first text part is `/<advertised-name>` (name then whitespace or end), the host handles that command and does not send the text to the model: `/compact` is `session/compact`, `/model` lists the session catalog and `/model <id>` is `session/set_model`, `/<skill-id>` is `load_skill` plus a short user prompt (the args, or a one-line follow). `//text` is not a command. An unknown `/foo` is an ordinary prompt. A `mode` different from the frozen session mode is `-32602`. Attachment parts (`image`, `audio`, `resource`) pass through under ADR 0006 bounds when the adapter can read them; unsupported types fail closed. Omit attachments for today's text host. Optional `_meta.traceparent` (and `_meta.tracestate`) continues the caller's W3C trace for the run that prompt starts; missing or malformed values leave today's self-started trace and the prompt still succeeds. A resume keeps the trace the run started with. |
-| `session/set_model` | client → agent | Experimental: the session model selection in the protocol is not stable yet, and only the TUI depends on it. Later prompts of the session use `modelId`; a running prompt keeps its model. The id must be one the session offers: ungoverned, `[model].model` plus `[model].alternates`; governed, the plane catalog. A plane that does not answer refuses with `-32000` and `data.shikigami.kind = "modelCatalog"`, and the model stays (fail closed); an id not offered is `-32602`. The choice is kept with the session across a host restart. Result `{}`. |
+| `session/set_model` | client → agent | Experimental: the session model selection in the protocol is not stable yet, and only the TUI depends on it. Later prompts of the session use `modelId`; a running prompt keeps its model. The id must be one the session offers: `[model].model` plus `[model].alternates`. A catalog that cannot be built refuses with `-32000` and `data.shikigami.kind = "modelCatalog"`, and the model stays (fail closed); an id not offered is `-32602`. The choice is kept with the session across a host restart. Result `{}`. |
 | `session/mcp` | client → agent | Experimental: TUI `/mcp`. `action` is `list` (default), `disable`, or `enable`. List returns `{servers:[{name, tools, disabled}]}` from settings plus this process's overlay. Disable/enable require `name`, refuse `gateway` and a name that is not attached (`-32602`), and return `{}`. Disable hides that server on later `session/prompt` of this host; it is not written to settings or the session record. A restarted host follows settings again. |
 | `session/plan` | client → agent | Experimental: TUI `/plan`. Flags the next first `session/prompt` of this host session for plan write-jail. Result `{planJail: true}`; `{planJail: true, already: true}` when the session is already jailed. A run that already started without the jail is `-32602`. Idle only (`-32000` while a prompt is in flight). The flag is in memory until that first prompt; it is not written to settings or the session record. A jailed run's checkpoint carries the jail after that. Settings `run.plan_jail` stay unchanged. |
 | `session/compact` | client → agent | Shrink the live run's middle history (same cut as auto-compact). Idle only. Before the cut, a `session/update` with `_meta.shikigami.compacting = true`. |
@@ -33,7 +33,7 @@ Credentials come from the environment, same as CLI. There is no ACP login.
 | `session/request_permission` | agent → client | Ask=park, plan review, and freeform escalate |
 | `session/cancel` | client → agent | Existing cancel marker |
 
-`initialize` reply (`agentInfo.version` is the crate version). `promptCapabilities` is true only for kinds the selected adapter can read (scripted: image, audio, and embeddedContext; HTTP: image and embeddedContext; plane: all false):
+`initialize` reply (`agentInfo.version` is the crate version). `promptCapabilities` is true only for kinds the selected adapter can read (scripted: image, audio, and embeddedContext; HTTP: image and embeddedContext):
 
 ```json
 {
@@ -92,7 +92,7 @@ parks `report` as `ParkKind::Plan` with the plan text in the permission
 question; Allow accepts execute authority on the same run, Deny rejects,
 completes failed, and keeps the jail. `child_run` `full` / `plan` /
 `worktree=true` parks stay one-shot. Ask parks stay fail-closed. Brokered
-adapters (`http-callback` / plane) do not ask=park. Clients that cannot answer
+adapters (`http-callback` / `host-authz`) do not ask=park. Clients that cannot answer
 `session/request_permission` cannot complete a mutating prompt.
 
 Content parts reuse `run_content` bounds. `session/prompt` concatenates `text`
@@ -205,8 +205,7 @@ model, effort, and tool set are a `session/update` with
 
 ## Proof
 
-Deterministic fake-client tests live in `src/acp.rs`. Live rusui stays ignored,
-like `plane_live`.
+Deterministic fake-client tests live in `src/acp.rs`. Live rusui stays ignored.
 
 Accepted contract: [ADR 0014](decisions/0014-usable-guest-hosts.md).
 
